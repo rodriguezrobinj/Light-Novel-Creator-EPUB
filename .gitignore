@@ -1,0 +1,4 @@
+Novelas PDF/
+*.pdf
+*.epub
+__pycache__/
