@@ -105,6 +105,27 @@ def test_scanned_pdf_is_rejected():
         raise AssertionError("debía lanzar ValueError")
 
 
+def test_write_epub():
+    book = convert.analyze(make_novel())
+    chapters = [(i, plain(book.blocks[i].html)) for i in book.candidates]
+    out = TMP / "novela.epub"
+    convert.write_epub(book, chapters, out)
+    with zipfile.ZipFile(out) as z:
+        first = z.infolist()[0]
+        assert first.filename == "mimetype" and first.compress_type == zipfile.ZIP_STORED
+        assert z.read("mimetype") == b"application/epub+zip"
+        names = z.namelist()
+        assert "OEBPS/nav.xhtml" in names and "OEBPS/cover.jpg" in names
+        sections = sorted(n for n in names if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n))
+        assert len(sections) == 3, sections  # Inicio (ilustración) + 2 capítulos
+        for name in names:
+            if name.endswith((".xhtml", ".opf", ".ncx", ".xml")):
+                ET.fromstring(z.read(name))  # XML bien formado
+        assert "Capitulo 1: Inicio" in z.read("OEBPS/nav.xhtml").decode()
+        assert "<h1>Capitulo 2: Final</h1>" in z.read(sections[2]).decode()
+    assert not Path(f"{out}.tmp").exists()
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

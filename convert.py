@@ -249,3 +249,124 @@ def analyze(pdf_path, progress=None):
 
         meta = doc.metadata or {}
         return Book(meta.get("title") or Path(pdf_path).stem, meta.get("author") or "", cover, blocks, candidates)
+
+
+CSS = """body { margin: 0 4%; line-height: 1.5; }
+h1 { text-align: center; font-size: 1.4em; margin: 2em 0 1em; }
+p { text-indent: 1.5em; margin: 0 0 0.4em; text-align: justify; }
+p.brk { text-indent: 0; text-align: center; margin: 1em 0; }
+div.img { text-align: center; margin: 0; page-break-before: always; page-break-after: always; }
+div.img img { max-width: 100%; max-height: 95vh; }
+"""
+
+CONTAINER = """<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>
+"""
+
+
+def _xhtml(title, body, lang):
+    return ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
+            f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"'
+            f' lang="{lang}" xml:lang="{lang}">\n'
+            f'<head><meta charset="utf-8"/><title>{html.escape(title)}</title>'
+            '<link rel="stylesheet" type="text/css" href="style.css"/></head>\n'
+            f'<body>\n{body}\n</body>\n</html>\n')
+
+
+def write_epub(book, chapters, out_path, lang="es"):
+    """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario."""
+    starts = dict(chapters)
+    sections = []  # [título, es_capítulo, bloques]
+    for k, b in enumerate(book.blocks):
+        if k in starts:
+            sections.append([starts[k], True, []])
+        else:
+            if not sections:
+                sections.append(["Inicio", False, []])
+            sections[-1][2].append(b)
+
+    files, images = {}, {}
+    for n, (title, is_chapter, blocks) in enumerate(sections, 1):
+        parts = [f"<h1>{html.escape(title)}</h1>"] if is_chapter else []
+        for b in blocks:
+            if b.kind == "image":
+                src = f"img/p{b.page:04d}.jpg"
+                images[src] = b.image
+                parts.append(f'<div class="img"><img src="{src}" alt=""/></div>')
+            elif b.kind == "break":
+                parts.append('<p class="brk">* * *</p>')
+            else:
+                parts.append(f"<p>{b.html}</p>")
+        files[f"sec{n:03d}.xhtml"] = _xhtml(title, "\n".join(parts), lang)
+
+    uid = f"urn:uuid:{uuid.uuid4()}"
+    title = html.escape(book.title)
+    creator = f"<dc:creator>{html.escape(book.author)}</dc:creator>\n" if book.author else ""
+    modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    manifest = [
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+        '<item id="css" href="style.css" media-type="text/css"/>',
+        '<item id="cover-image" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/>',
+        '<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>',
+    ]
+    manifest += [f'<item id="s{k}" href="{name}" media-type="application/xhtml+xml"/>' for k, name in enumerate(files)]
+    manifest += [f'<item id="i{k}" href="{src}" media-type="image/jpeg"/>' for k, src in enumerate(images)]
+    spine = ['<itemref idref="cover"/>'] + [f'<itemref idref="s{k}"/>' for k in range(len(files))]
+    manifest_xml, spine_xml = "\n".join(manifest), "\n".join(spine)
+    opf = f"""<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="uid">{uid}</dc:identifier>
+<dc:title>{title}</dc:title>
+{creator}<dc:language>{lang}</dc:language>
+<meta property="dcterms:modified">{modified}</meta>
+<meta name="cover" content="cover-image"/>
+</metadata>
+<manifest>
+{manifest_xml}
+</manifest>
+<spine toc="ncx">
+{spine_xml}
+</spine>
+</package>
+"""
+    entries = [(name, sec[0]) for name, sec in zip(files, sections)]
+    items = "\n".join(f'<li><a href="{name}">{html.escape(t)}</a></li>' for name, t in entries)
+    nav = _xhtml("Índice", f'<nav epub:type="toc" id="toc"><h1>Índice</h1><ol>\n{items}\n</ol></nav>', lang)
+    points = "\n".join(
+        f'<navPoint id="n{k}" playOrder="{k}"><navLabel><text>{html.escape(t)}</text></navLabel>'
+        f'<content src="{name}"/></navPoint>' for k, (name, t) in enumerate(entries, 1))
+    ncx = f"""<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+<head><meta name="dtb:uid" content="{uid}"/></head>
+<docTitle><text>{title}</text></docTitle>
+<navMap>
+{points}
+</navMap>
+</ncx>
+"""
+    cover = _xhtml(book.title, '<div class="img"><img src="cover.jpg" alt="Portada"/></div>', lang)
+
+    tmp = f"{out_path}.tmp"
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            z.writestr("META-INF/container.xml", CONTAINER)
+            z.writestr("OEBPS/content.opf", opf)
+            z.writestr("OEBPS/nav.xhtml", nav)
+            z.writestr("OEBPS/toc.ncx", ncx)
+            z.writestr("OEBPS/style.css", CSS)
+            z.writestr("OEBPS/cover.xhtml", cover)
+            z.writestr("OEBPS/cover.jpg", book.cover)
+            for name, text in files.items():
+                z.writestr(f"OEBPS/{name}", text)
+            for src, data in images.items():
+                z.writestr(f"OEBPS/{src}", data)
+        os.replace(tmp, out_path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
