@@ -20,7 +20,7 @@ def _worker(events, work, args, report):
             result = work(*args)
         events.put(("done", result))
     except Exception as e:
-        events.put(("error", str(e)))
+        events.put(("error", str(e) or type(e).__name__))  # MemoryError() no trae mensaje
 
 
 class App:
@@ -29,8 +29,12 @@ class App:
         self.events = multiprocessing.Queue()  # el proceso de trabajo envía aquí progreso y resultado
         self.done = None                       # qué hacer con el resultado del trabajo en curso
         self.latest = None                     # último progreso (hecho, total) pendiente de pintar
+        self.partial = None                    # EPUB a medio escribir del trabajo en curso
+        self.editor_save = None                # guarda y cierra el cuadro de edición abierto
+        self.view = None                       # última posición del scroll de la lista
         root.title("PDF a EPUB")
         root.geometry("780x560")
+        root.protocol("WM_DELETE_WINDOW", self.close)
 
         top = ttk.Frame(root, padding=8)
         top.pack(fill="x")
@@ -53,10 +57,10 @@ class App:
         for col, text, width in (("inc", "Incluir", 60), ("title", "Capítulo", 560), ("page", "Página", 70)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor="w" if col == "title" else "center", stretch=col == "title")
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
+        self.scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=self.on_scroll)
         self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        self.scroll.pack(side="right", fill="y")
         self.tree.bind("<Button-1>", self.on_click)
         self.tree.bind("<Double-1>", self.on_double_click)
         ttk.Label(root, text="Clic en Incluir: marcar o desmarcar · Doble clic en el título: editar",
@@ -86,7 +90,7 @@ class App:
         self.latest = (done, total)
 
     def poll(self):
-        for _ in range(1000):  # tope: con el proceso enviando sin parar, vaciar la cola no terminaría
+        while True:  # el proceso envía 2 eventos por página: la ventana lee mucho más rápido
             try:
                 event = self.events.get_nowait()
             except queue.Empty:
@@ -108,15 +112,25 @@ class App:
 
     def finish(self, event):
         """Cierra el trabajo en curso: desbloquea la ventana y entrega el resultado o el error."""
-        done, self.done, self.latest = self.done, None, None
+        done, self.done, self.latest, self.partial = self.done, None, None, None
         self.open_btn.state(["!disabled"])
         if self.book:
             self.gen_btn.state(["!disabled"])
         if event[0] == "done":
             done(event[1])
         else:
+            self.progress.configure(value=0)
             self.status.configure(text="Error")
             messagebox.showerror("Error", event[1])
+
+    def close(self):
+        """Al cerrar a mitad de un trabajo, detiene el proceso y borra el EPUB a medio escribir."""
+        if self.done and self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join()
+            if self.partial:
+                Path(self.partial).unlink(missing_ok=True)
+        self.root.destroy()
 
     def open_pdf(self):
         path = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
@@ -147,7 +161,10 @@ class App:
 
     def on_double_click(self, event):
         item = self.tree.identify_row(event.y)
-        if not item or self.tree.identify_column(event.x) != "#2":
+        column = self.tree.identify_column(event.x)
+        if item and column == "#1":  # Tk manda el segundo clic rápido aquí, no a on_click
+            self.on_click(event)
+        if not item or column != "#2":
             return
         x, y, w, h = self.tree.bbox(item, "title")
         entry = ttk.Entry(self.tree)
@@ -157,13 +174,27 @@ class App:
         entry.focus()
 
         def save(_=None):
+            if not entry.winfo_exists():  # ya cerrado por otro camino (scroll, Return, Escape)
+                return
             if entry.get().strip():
                 self.tree.set(item, "title", entry.get().strip())
-            entry.destroy()
+            close()
 
+        def close(_=None):
+            entry.destroy()
+            self.editor_save = None
+
+        self.editor_save = save
         entry.bind("<Return>", save)
         entry.bind("<FocusOut>", save)
-        entry.bind("<Escape>", lambda _: entry.destroy())
+        entry.bind("<Escape>", close)
+
+    def on_scroll(self, first, last):
+        self.scroll.set(first, last)
+        # El cuadro de edición está colocado sobre una fila: si la lista se desplaza, se guarda y se cierra.
+        if self.editor_save and (first, last) != self.view:
+            self.editor_save()
+        self.view = (first, last)
 
     def generate(self):
         out = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[("EPUB", "*.epub")],
@@ -176,6 +207,7 @@ class App:
                     if self.tree.set(item, "inc") == ON]
         self.status.configure(text="Generando EPUB…")
         self.run(convert.write_epub, (self.book, chapters, out), lambda _: self.saved(out))
+        self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
 
     def saved(self, out):
         self.status.configure(text=f"Guardado: {Path(out).name}")

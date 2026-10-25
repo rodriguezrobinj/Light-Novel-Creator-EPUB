@@ -20,7 +20,9 @@ TOC_TITLE = re.compile(r"(contenidos?|[ií]ndice|tabla de contenidos?|contents|t
 DOT_LEADER = re.compile(r"\.{4,}\s*\d+$")
 SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈•·#~◎◯]+")
 END_PUNCT = (".", "!", "?", "…", '"', "'", "»", "”", "’", ":", ")")
-BAD_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿­]")
+SOFT_HYPHEN = "\u00ad"  # guion de partición: solo se ve si cae al final de la línea
+TAGS = re.compile(r"<[^>]+>")
+BAD_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
 
 @dataclass
@@ -63,8 +65,11 @@ def _italic(s):
 def _row(spans):
     spans.sort(key=lambda s: s["origin"][0])
     texts, parts = [], []
-    for prev, s in zip([None] + spans, spans):
+    for k, (prev, s) in enumerate(zip([None] + spans, spans)):
         t = BAD_XML.sub("", s["text"])
+        if k == len(spans) - 1 and t.rstrip().endswith(SOFT_HYPHEN):
+            t = t.rstrip()[:-1] + "-"
+        t = t.replace(SOFT_HYPHEN, "")
         # Espacio solo si hay hueco visible: un cambio de fuente dentro de "<i>hola</i>," no lo lleva.
         if (texts and not texts[-1].endswith(" ") and not t.startswith(" ")
                 and s["bbox"][0] - prev["bbox"][2] > s["size"] * 0.15):
@@ -146,8 +151,10 @@ def _render(page):
 
 
 def _join(a, b):
-    if re.search(r"\w-$", a) and b[:1].islower():
-        return a[:-1] + b
+    """Une dos líneas de un párrafo; una palabra partida con guion se junta aunque haya etiquetas."""
+    if re.search(r"\w-$", TAGS.sub("", a)) and TAGS.sub("", b)[:1].islower():
+        i = a.rindex("-")  # el guion final; detrás solo puede haber etiquetas de cierre
+        return a[:i] + a[i + 1:] + b
     return f"{a} {b}"
 
 
@@ -230,6 +237,9 @@ def analyze(pdf_path, progress=None):
                     short = r.x1 < right - (right - left) * 0.2
                     last_text = r.text
                 prev = r
+
+        if not any(b.kind in ("p", "heading") for b in blocks):
+            raise ValueError("No se encontró texto de la novela en el PDF (¿solo tiene el índice?).")
 
         if blocks and blocks[0].kind == "image" and blocks[0].page == 1:
             cover = blocks.pop(0).image
