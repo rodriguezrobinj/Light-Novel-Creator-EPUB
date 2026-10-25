@@ -61,6 +61,11 @@ def make_novel():
         (72, 100, "pagina siguiente sin problemas.", 11, "cour"),
         (72, 150, "Capitulo 2: Final", 20, "helv"),
         (92, 190, "Fin.", 11, "cour"),
+        (92, 218, "Dijo ", 11, "cour"),          # cursiva pegada a la coma: sin espacio entre ellas
+        (125, 218, "hola", 11, "coit"),
+        (151.4, 218, ", y se fue.", 11, "cour"),
+        (92, 246, "Palabra", 11, "cour"),        # palabras en spans separados por un hueco visible
+        (160, 246, "separada.", 11, "cour"),
     ])
     path = TMP / "novela.pdf"
     doc.save(path)
@@ -87,6 +92,8 @@ def test_analyze():
     parte = [t for t in texts if t.startswith("Parte de mi")]
     assert len(parte) == 1 and parte[0].endswith("pagina siguiente sin problemas."), texts
     assert any("Tom &amp; Jerry &lt;3" in b.html for b in book.blocks)
+    assert any(b.html == "Dijo <i>hola</i>, y se fue." for b in book.blocks), [b.html for b in book.blocks[-3:]]
+    assert "Palabra separada." in texts, texts[-3:]
     assert book.title == "novela" and book.cover[:3] == b"\xff\xd8\xff"
 
 

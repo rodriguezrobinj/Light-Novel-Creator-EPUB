@@ -63,9 +63,11 @@ def _italic(s):
 def _row(spans):
     spans.sort(key=lambda s: s["origin"][0])
     texts, parts = [], []
-    for s in spans:
+    for prev, s in zip([None] + spans, spans):
         t = BAD_XML.sub("", s["text"])
-        if texts and not texts[-1].endswith(" ") and not t.startswith(" "):
+        # Espacio solo si hay hueco visible: un cambio de fuente dentro de "<i>hola</i>," no lo lleva.
+        if (texts and not texts[-1].endswith(" ") and not t.startswith(" ")
+                and s["bbox"][0] - prev["bbox"][2] > s["size"] * 0.15):
             texts.append(" ")
             parts.append(" ")
         texts.append(t)
