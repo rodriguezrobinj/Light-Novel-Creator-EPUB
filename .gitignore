@@ -2,3 +2,4 @@ Novelas PDF/
 *.pdf
 *.epub
 __pycache__/
+.venv/

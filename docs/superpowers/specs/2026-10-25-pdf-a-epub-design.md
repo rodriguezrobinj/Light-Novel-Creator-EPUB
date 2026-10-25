@@ -86,14 +86,21 @@ class Book:
    la página se renderiza completa a JPEG (unos 150 dpi) como bloque `image`. Si el texto
    restante es un título de capítulo, se conserva solo el título y se descartan las
    decoraciones.
-5. **Página de índice del PDF:** una página cuyo primer texto coincide con
-   `contenido|índice|tabla de contenido|contents`, o que tiene tres o más líneas
-   terminadas en puntos y número (`.....  12`), se descarta completa.
-6. **Párrafos:** las líneas consecutivas se unen en un párrafo. Empieza párrafo nuevo si:
-   - la línea tiene sangría respecto al margen izquierdo del texto, o
-   - el salto vertical con la línea anterior supera 1,5 veces el interlineado típico, o
-   - la línea anterior terminó claramente antes del margen derecho.
-   Un párrafo que termina una página sin puntuación final continúa en la siguiente.
+5. **Página de índice del PDF:** una página cuya primera línea es exactamente
+   `Contenido`, `Índice`, `Tabla de contenido` o `Contents` (con o sin `:`), o que tiene
+   tres o más líneas terminadas en puntos y número (`.....  12`), se descarta completa.
+6. **Párrafos:** las líneas se agrupan por línea base (`span["origin"]`), no por la caja
+   del span: en algunas fuentes (Cambria) la caja mide el triple de la línea real, y el
+   texto justificado parte una línea en varios spans. Empieza párrafo nuevo si:
+   - la línea tiene sangría de más de 0,8 veces el tamaño de letra respecto al margen
+     izquierdo de la página, o
+   - el salto vertical con la línea anterior supera 1,3 veces el interlineado más
+     frecuente del libro (medido: 1,43 en World Project, 1,84 en Astral), o
+   - la línea anterior terminó antes del 80 % del ancho del texto.
+   En la primera línea de una página, el párrafo anterior continúa salvo que haya
+   sangría o la línea anterior fuera corta. Si el libro no usa sangría (menos del 5 %
+   de líneas sangradas), además se corta cuando el texto anterior termina en
+   puntuación final.
    Una palabra cortada con guion al final de línea se une.
 7. **Formato:** spans en cursiva se envuelven en `<i>`, en negrita en `<b>`. El texto se
    escapa para XHTML.
@@ -101,11 +108,15 @@ class Book:
    se convierte en bloque `break`.
 9. **Capítulos candidatos:**
    - Si el PDF tiene marcadores (`doc.get_toc()`), se usan los de primer nivel.
-   - Si no, son candidatos las líneas cuya fuente es al menos 1,3 veces el tamaño
-     normal, o las que empiezan con `capítulo|prólogo|epílogo|interludio|historia
-     paralela|palabras de cierre|extra|parte|chapter|prologue|epilogue|afterword`.
-   - Líneas consecutivas de título (título partido en varias líneas) se unen en un
-     solo bloque `heading`.
+   - Si no, es candidata una línea de 120 caracteres o menos que cumpla una de estas
+     condiciones: fuente de al menos 1,3 veces el tamaño normal; o negrita con fuente
+     de al menos 1,1 veces el normal; o negrita y empieza con
+     `capítulo|prólogo|epílogo|interludio|historia paralela|palabras de cierre|extra|parte|chapter|prologue|epilogue|afterword|interlude`.
+     Exigir negrita junto a la palabra clave evita que un párrafo como "Parte de mí…"
+     se tome por capítulo.
+   - Líneas de título consecutivas del mismo tamaño se unen en un solo bloque `heading`.
+   - En una página que solo tiene títulos, se conserva solo el primer grupo: World
+     Project repite el título en otro tamaño sobre la imagen de fondo.
 10. **Metadatos:** título del PDF o, si está vacío, el nombre del archivo; autor del PDF.
 11. **Errores:** PDF cifrado o sin texto en ninguna página lanza `ValueError` con un
     mensaje en español apto para mostrar al usuario.
