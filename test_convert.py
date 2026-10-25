@@ -126,6 +126,33 @@ def test_write_epub():
     assert not Path(f"{out}.tmp").exists()
 
 
+def test_window_poll_returns_while_worker_reports():
+    """La ventana no debe congelarse aunque el hilo de trabajo envíe progreso sin parar."""
+    import threading
+    import time
+    import tkinter as tk
+
+    import app
+
+    root = tk.Tk()
+    root.withdraw()
+    window = app.App(root)
+    deadline = time.time() + 2
+
+    def flood():
+        while time.time() < deadline:
+            window.report(1, 2)
+
+    worker = threading.Thread(target=flood, daemon=True)
+    worker.start()
+    start = time.time()
+    window.poll()
+    elapsed = time.time() - start
+    worker.join()
+    root.destroy()
+    assert elapsed < 0.5, f"poll bloqueó la ventana {elapsed:.1f} s"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
