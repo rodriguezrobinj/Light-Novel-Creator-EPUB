@@ -135,14 +135,17 @@ class Book:
 ## Ventana (`app.py`)
 
 - Botón **Abrir PDF…** (`filedialog.askopenfilename`).
-- El análisis corre en un `threading.Thread`; la barra de progreso y el texto
-  "Analizando página X/Y" se actualizan con `root.after`.
+- El análisis corre en un proceso aparte (`multiprocessing.Process`), no en un hilo:
+  PyMuPDF retiene el GIL hasta 0,3 s por llamada y, en un hilo, cada llamada de Tk
+  espera a recuperarlo (medido: la ventana se trababa 1–6 s; con proceso, 0,02 s).
+  El progreso y el resultado llegan por una `multiprocessing.Queue` que la ventana lee
+  con `root.after`; de cada lectura se pinta solo el último progreso ("Analizando… N %").
 - Campos editables **Título** y **Autor**.
 - `ttk.Treeview` con columnas: incluir (✔/✘), título, página.
   - Clic en la columna incluir alterna la marca.
   - Doble clic en el título abre un campo para editarlo.
 - Botón **Generar EPUB…** (`filedialog.asksaveasfilename`, por defecto misma carpeta y
-  nombre del PDF con `.epub`). La escritura también corre en un hilo.
+  nombre del PDF con `.epub`). La escritura también corre en el proceso aparte.
 - Cualquier excepción se muestra con `messagebox.showerror`.
 
 ## Pruebas

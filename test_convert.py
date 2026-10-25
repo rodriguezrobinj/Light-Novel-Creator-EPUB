@@ -153,6 +153,27 @@ def test_window_poll_returns_while_worker_reports():
     assert elapsed < 0.5, f"poll bloqueó la ventana {elapsed:.1f} s"
 
 
+def test_window_runs_work_in_another_process():
+    """PyMuPDF retiene el GIL: en un hilo traba la ventana, así que el trabajo va en otro proceso."""
+    import os
+    import time
+    import tkinter as tk
+
+    import app
+
+    root = tk.Tk()
+    root.withdraw()
+    window = app.App(root)
+    result = []
+    window.run(os.getpid, (), result.append)
+    deadline = time.time() + 30
+    while not result and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    root.destroy()
+    assert result and result[0] != os.getpid(), result
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

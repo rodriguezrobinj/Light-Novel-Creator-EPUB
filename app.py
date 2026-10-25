@@ -1,7 +1,7 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
 import html
+import multiprocessing
 import queue
-import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -11,11 +11,24 @@ import convert
 ON, OFF = "✔", "✘"
 
 
+def _worker(events, work, args, report):
+    """Corre en otro proceso: PyMuPDF retiene el GIL y, en un hilo, trabaría la ventana."""
+    try:
+        if report:
+            result = work(*args, progress=lambda done, total: events.put(("progress", done, total)))
+        else:
+            result = work(*args)
+        events.put(("done", result))
+    except Exception as e:
+        events.put(("error", str(e)))
+
+
 class App:
     def __init__(self, root):
         self.root, self.book, self.pdf = root, None, None
-        self.events = queue.Queue()  # los hilos de trabajo no tocan tkinter: envían eventos aquí
-        self.latest = None           # último progreso (hecho, total) enviado por el hilo de trabajo
+        self.events = multiprocessing.Queue()  # el proceso de trabajo envía aquí progreso y resultado
+        self.done = None                       # qué hacer con el resultado del trabajo en curso
+        self.latest = None                     # último progreso (hecho, total) pendiente de pintar
         root.title("PDF a EPUB")
         root.geometry("780x560")
 
@@ -59,40 +72,41 @@ class App:
         self.gen_btn.pack(side="right")
         root.after(100, self.poll)
 
-    def run(self, work, done):
-        """Ejecuta work() en un hilo y llama a done(resultado) en el hilo de la ventana."""
+    def run(self, work, args, done, report=False):
+        """Ejecuta work(*args) en otro proceso y llama a done(resultado) en la ventana.
+        Con report=True, work recibe progress=... y la barra avanza."""
         self.open_btn.state(["disabled"])
         self.gen_btn.state(["disabled"])
-
-        def worker():
-            try:
-                self.events.put(("done", done, work()))
-            except Exception as e:
-                self.events.put(("error", e))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self.done = done
+        multiprocessing.Process(target=_worker, args=(self.events, work, args, report), daemon=True).start()
 
     def report(self, done, total):
-        # El progreso no pasa por la cola: cientos de eventos compiten con el hilo de trabajo
-        # por el cerrojo y el GIL y congelan la ventana. Basta con el último valor.
+        # Solo se guarda el último valor: pintar cada evento de progreso cuesta llamadas a Tk.
         self.latest = (done, total)
 
     def poll(self):
+        for _ in range(1000):  # tope: con el proceso enviando sin parar, vaciar la cola no terminaría
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            if event[0] == "progress":
+                self.report(event[1], event[2])
+                continue
+            self.latest = None
+            self.open_btn.state(["!disabled"])
+            if self.book:
+                self.gen_btn.state(["!disabled"])
+            if event[0] == "done":
+                self.done(event[1])
+            else:
+                self.status.configure(text="Error")
+                messagebox.showerror("Error", event[1])
         latest, self.latest = self.latest, None
         if latest:
             done, total = latest
             self.progress.configure(maximum=total, value=done)
             self.status.configure(text=f"Analizando… {done * 100 // total} %")
-        for _ in range(self.events.qsize()):
-            event = self.events.get_nowait()
-            self.open_btn.state(["!disabled"])
-            if self.book:
-                self.gen_btn.state(["!disabled"])
-            if event[0] == "done":
-                event[1](event[2])
-            else:
-                self.status.configure(text="Error")
-                messagebox.showerror("Error", str(event[1]))
         self.root.after(100, self.poll)
 
     def open_pdf(self):
@@ -102,7 +116,7 @@ class App:
         self.pdf, self.book = Path(path), None
         self.file_label.configure(text=self.pdf.name)
         self.tree.delete(*self.tree.get_children())
-        self.run(lambda: convert.analyze(path, progress=self.report), self.show_book)
+        self.run(convert.analyze, (path,), self.show_book, report=True)
 
     def show_book(self, book):
         self.book = book
@@ -152,7 +166,7 @@ class App:
         chapters = [(int(item), self.tree.set(item, "title")) for item in self.tree.get_children()
                     if self.tree.set(item, "inc") == ON]
         self.status.configure(text="Generando EPUB…")
-        self.run(lambda: convert.write_epub(self.book, chapters, out), lambda _: self.saved(out))
+        self.run(convert.write_epub, (self.book, chapters, out), lambda _: self.saved(out))
 
     def saved(self, out):
         self.status.configure(text=f"Guardado: {Path(out).name}")
