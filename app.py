@@ -78,7 +78,8 @@ class App:
         self.open_btn.state(["disabled"])
         self.gen_btn.state(["disabled"])
         self.done = done
-        multiprocessing.Process(target=_worker, args=(self.events, work, args, report), daemon=True).start()
+        self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, args, report), daemon=True)
+        self.proc.start()
 
     def report(self, done, total):
         # Solo se guarda el último valor: pintar cada evento de progreso cuesta llamadas a Tk.
@@ -92,22 +93,30 @@ class App:
                 break
             if event[0] == "progress":
                 self.report(event[1], event[2])
-                continue
-            self.latest = None
-            self.open_btn.state(["!disabled"])
-            if self.book:
-                self.gen_btn.state(["!disabled"])
-            if event[0] == "done":
-                self.done(event[1])
             else:
-                self.status.configure(text="Error")
-                messagebox.showerror("Error", event[1])
+                self.finish(event)
+        # Un proceso que muere sin avisar (fallo de MuPDF, falta de memoria) no envía "error".
+        # Su último evento ya está en la cola antes de que termine, así que se mira después de vaciarla.
+        if self.done and not self.proc.is_alive() and self.events.empty():
+            self.finish(("error", f"El proceso de trabajo terminó inesperadamente (código {self.proc.exitcode})."))
         latest, self.latest = self.latest, None
         if latest:
             done, total = latest
             self.progress.configure(maximum=total, value=done)
             self.status.configure(text=f"Analizando… {done * 100 // total} %")
         self.root.after(100, self.poll)
+
+    def finish(self, event):
+        """Cierra el trabajo en curso: desbloquea la ventana y entrega el resultado o el error."""
+        done, self.done, self.latest = self.done, None, None
+        self.open_btn.state(["!disabled"])
+        if self.book:
+            self.gen_btn.state(["!disabled"])
+        if event[0] == "done":
+            done(event[1])
+        else:
+            self.status.configure(text="Error")
+            messagebox.showerror("Error", event[1])
 
     def open_pdf(self):
         path = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])

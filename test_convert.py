@@ -181,6 +181,34 @@ def test_window_runs_work_in_another_process():
     assert result and result[0] != os.getpid(), result
 
 
+def test_window_reports_worker_crash():
+    """Si el proceso de trabajo muere sin avisar, la ventana muestra el error y se desbloquea."""
+    import os
+    import time
+    import tkinter as tk
+
+    import app
+
+    root = tk.Tk()
+    root.withdraw()
+    window = app.App(root)
+    shown = []
+    original = app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message: shown.append(message)
+    try:
+        window.run(os._exit, (3,), lambda _: None)
+        deadline = time.time() + 30
+        while not shown and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+        unlocked = window.open_btn.instate(["!disabled"])
+    finally:
+        app.messagebox.showerror = original
+        root.destroy()
+    assert shown and "inesperadamente" in shown[0], shown
+    assert unlocked
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
