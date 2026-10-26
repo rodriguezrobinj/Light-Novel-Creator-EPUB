@@ -647,6 +647,116 @@ def test_window_typography_checkbox_reaches_the_epub():
     assert 'Dijo "hola"...' in epub_text(out)
 
 
+def test_heading_keeps_its_rectangle_on_the_page():
+    book = convert.analyze(make_novel())
+    title = book.blocks[book.candidates[0]]  # "Capitulo 1: Inicio" en (72, 100), 20 pt
+    x0, y0, x1, y1 = title.rect
+    assert abs(x0 - 72) < 2 and y0 < 100 < y1 and x1 > 150, title.rect
+
+
+def long_book(paragraphs=80):
+    blocks = [convert.Block("heading", 1, "Cap 1")]
+    blocks += [convert.Block("p", 1, f"Parrafo {n} " + "texto de relleno " * 12) for n in range(paragraphs)]
+    return convert.Book("Libro", "", b"", blocks, [0])
+
+
+def test_window_highlights_detected_title_on_pdf_preview():
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.tree.selection_set(window.tree.get_children()[0])
+    root.update()
+    canvas = window.pdf_view
+    boxes = canvas.find_withtag("title")
+    coords = canvas.coords(boxes[0]) if boxes else []
+    size = (window.pdf_view.image.width(), window.pdf_view.image.height())
+    window.close()
+    assert coords, "sin recuadro sobre el título"
+    assert 0 <= coords[0] < coords[2] <= size[0] and 0 <= coords[1] < coords[3] <= size[1], (coords, size)
+
+
+def test_window_preview_page_navigation():
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(long_book())
+    window.tree.selection_set(window.tree.get_children()[0])
+    root.update()
+    window.pdf_step(1)
+    pdf_caption = window.pdf_caption.cget("text")
+    first = window.epub_caption.cget("text")
+    window.epub_step(1)
+    second = window.epub_caption.cget("text")
+    window.epub_step(-5)  # no baja de la primera
+    back = window.epub_caption.cget("text")
+    window.close()
+    assert "página 2" in pdf_caption, pdf_caption
+    assert "1/" in first and "2/" in second and "1/" in back, (first, second, back)
+
+
+def test_window_list_styles_follow_type():
+    from types import SimpleNamespace
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    item = window.tree.get_children()[0]
+    root.update()
+    x, y, w, h = window.tree.bbox(item, "inc")
+    styles = [window.tree.item(item, "tags")]
+    for _ in range(2):
+        window.on_click(SimpleNamespace(x=x + w // 2, y=y + h // 2))
+        styles.append(window.tree.item(item, "tags"))
+    window.close()
+    assert [tuple(s) for s in styles] == [("chapter",), ("subtitle",), ("cut",)], styles
+
+
+def test_window_device_preview_and_dark_mode():
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(long_book())
+    window.tree.selection_set(window.tree.get_children()[0])
+    root.update()
+    shapes = {}
+    for device in ("Celular", "Tablet"):
+        window.device_var.set(device)
+        window.draw_epub()
+        shapes[device] = window.epub_view.image.height() / window.epub_view.image.width()
+    light = sum(window.epub_view.image.get(2, 2))
+    window.dark_var.set(True)
+    window.draw_epub()
+    dark = sum(window.epub_view.image.get(2, 2))
+    window.close()
+    assert shapes["Celular"] > shapes["Tablet"], shapes  # el celular es más alargado
+    assert light > 600 and dark < 150, (light, dark)
+
+
+def test_window_thumbnail_strip():
+    import time
+
+    root, window = visible_window()
+    window.pdf = make_novel()  # 5 páginas: 2 con ilustración, 3 y 4 con título
+    window.show_book(convert.analyze(window.pdf))
+    deadline = time.time() + 30
+    while len(window.thumbs) < 5 and time.time() < deadline:
+        root.update()
+        time.sleep(0.02)
+    count = len(window.thumbs)
+    marks = {n: window.strip.itemcget(f"b{n}", "outline") for n in (1, 2, 4)}  # páginas 2, 3 y 5
+    window.jump(3)  # página 4: tiene "Capitulo 2: Final"
+    root.update()
+    caption = window.pdf_caption.cget("text")
+    selected = window.tree.set(window.tree.selection()[0], "title") if window.tree.selection() else ""
+    window.close()
+    assert count == 5, count
+    assert marks[1] == app_colors()["image"] and marks[2] == app_colors()["title"] and marks[4] == "", marks
+    assert "página 4" in caption and selected == "Capitulo 2: Final", (caption, selected)
+
+
+def app_colors():
+    import app
+    return app.MARK_COLORS
+
+
 def test_window_double_click_on_include_toggles_twice():
     """Cada clic rota Capítulo → Subtítulo → Quitar → Capítulo. Tk manda el segundo clic rápido
     a <Double-1>: también cuenta."""

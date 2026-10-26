@@ -5,6 +5,7 @@ import os
 import queue
 import tempfile
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -14,8 +15,13 @@ import convert
 
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
 NEXT = {ON: OFF, OFF: CUT, CUT: ON}                 # cada clic pasa al siguiente
+KIND_TAG = {ON: "chapter", OFF: "subtitle", CUT: "cut"}  # estilo de cada fila según su tipo
 PREVIEW_BOX = (400, 560)  # ancho y alto máximos de cada vista previa, en píxeles
-PREVIEW_BLOCKS = 60       # bloques que entran en el EPUB de la vista previa: basta para su primera página
+PREVIEW_CHROME = 190      # alto de leyendas, botones y miniaturas que rodean a las vistas previas
+DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
+THUMB_HEIGHT = 80         # alto de las miniaturas del PDF, en píxeles
+THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe congelaría la ventana
+MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 
 
 def _worker(events, work, args, report):
@@ -41,6 +47,19 @@ class App:
         self.view = None                       # última posición del scroll de la lista
         self.pdf_doc = None                    # PDF abierto para la vista previa
         self.preview_path = os.path.join(tempfile.gettempdir(), f"lnepub-vista-{os.getpid()}.epub")
+        self.pdf_page = 0                      # página del PDF que muestra la vista previa (desde 0)
+        self.highlight = None                  # (página, rectángulo) del título seleccionado
+        self.epub_page, self.epub_pages = 0, 0  # página mostrada y total de la sección en el EPUB
+        self.epub_cut = False                  # la sección seleccionada está en "Quitar"
+        self.thumbs, self.thumb_images = {}, []  # miniaturas: página -> (x, ancho, alto)
+        self.thumb_job, self.thumb_x = 0, 4    # tanda en curso (para cancelarla) y posición siguiente
+        self.device_var = tk.StringVar(value='E-reader 6"')
+        self.dark_var = tk.BooleanVar(value=False)
+        base = tkfont.nametofont("TkDefaultFont")
+        self.fonts = {name: base.copy() for name in ("chapter", "subtitle", "cut")}
+        self.fonts["chapter"].configure(weight="bold")
+        self.fonts["subtitle"].configure(slant="italic")
+        self.fonts["cut"].configure(overstrike=1)
         root.title("PDF a EPUB")
         root.geometry("1300x720")
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -81,8 +100,28 @@ class App:
         middle.pack(fill="both", expand=True)
         self.views = ttk.Frame(middle, padding=(8, 0, 0, 0))
         self.views.pack(side="right", fill="y")
-        self.pdf_caption, self.pdf_view = self.preview_pane(self.views, "PDF")
-        self.epub_caption, self.epub_view = self.preview_pane(self.views, "EPUB")
+        strip_frame = ttk.Frame(self.views)  # miniaturas debajo de las dos vistas previas
+        strip_frame.pack(side="bottom", fill="x", pady=(6, 0))
+        self.strip = tk.Canvas(strip_frame, height=THUMB_HEIGHT + 12, highlightthickness=0)
+        strip_scroll = ttk.Scrollbar(strip_frame, orient="horizontal", command=self.strip.xview)
+        self.strip.configure(xscrollcommand=strip_scroll.set)
+        self.strip.pack(fill="x")
+        strip_scroll.pack(fill="x")
+        pdf_pane = self.preview_pane(self.views, "PDF", self.pdf_step)
+        self.pdf_caption, self.pdf_view = pdf_pane[0], tk.Canvas(pdf_pane[2], highlightthickness=0)
+        self.pdf_view.image = None
+        self.pdf_view.pack()
+        epub_pane = self.preview_pane(self.views, "EPUB", self.epub_step)
+        self.epub_caption = epub_pane[0]
+        self.epub_view = ttk.Label(epub_pane[2], text="Selecciona un título", anchor="center")
+        self.epub_view.image = None  # referencia a la imagen: sin ella, Tk la borra
+        self.epub_view.pack()
+        device = ttk.Combobox(epub_pane[1], textvariable=self.device_var, values=list(DEVICES), width=11,
+                              state="readonly")
+        device.pack(side="left", padx=(8, 4))
+        device.bind("<<ComboboxSelected>>", lambda _: self.draw_epub())
+        ttk.Checkbutton(epub_pane[1], text="Modo oscuro", variable=self.dark_var,
+                        command=self.draw_epub).pack(side="left")
         frame = ttk.Frame(middle)
         frame.pack(side="left", fill="both", expand=True)
         self.tree = ttk.Treeview(frame, columns=("inc", "title", "page"), show="headings", selectmode="browse")
@@ -96,6 +135,9 @@ class App:
         self.tree.bind("<Button-1>", self.on_click)
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<<TreeviewSelect>>", self.update_preview)
+        for tag in KIND_TAG.values():
+            self.tree.tag_configure(tag, font=self.fonts[tag],
+                                    foreground={"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a"}[tag])
         root.after(100, self.poll)
 
     def run(self, work, args, done, report=False):
@@ -152,63 +194,164 @@ class App:
             self.proc.join()
             if self.partial:
                 Path(self.partial).unlink(missing_ok=True)
+        self.thumb_job += 1  # cancela las miniaturas pendientes
         if self.pdf_doc:
             self.pdf_doc.close()
+            self.pdf_doc = None
         Path(self.preview_path).unlink(missing_ok=True)
         self.root.destroy()
 
-    def preview_pane(self, parent, name):
+    def preview_pane(self, parent, name, step):
+        """Columna de una vista previa: leyenda, botones ◀ ▶ y sitio para la imagen.
+        Devuelve (leyenda, fila de botones, marco de la imagen)."""
         pane = ttk.Frame(parent)
         pane.pack(side="left", padx=4, anchor="n")
         caption = ttk.Label(pane, text=name)
         caption.pack()
-        view = ttk.Label(pane, text="Selecciona un título", anchor="center")
-        view.image = None  # referencia a la imagen: sin ella, Tk la borra
-        view.pack()
-        return caption, view
+        controls = ttk.Frame(pane)
+        controls.pack(pady=2)
+        ttk.Button(controls, text="◀", width=3, command=lambda: step(-1)).pack(side="left")
+        ttk.Button(controls, text="▶", width=3, command=lambda: step(1)).pack(side="left")
+        body = ttk.Frame(pane)
+        body.pack()
+        return caption, controls, body
 
-    def show_page(self, view, page):
-        """Dibuja una página (del PDF o del EPUB) ajustada al tamaño de la vista previa."""
+    def render(self, page, dark=False):
+        """Imagen de una página (del PDF o del EPUB) ajustada al alto disponible, y su escala."""
         self.views.update_idletasks()
-        room = self.views.winfo_height() - 30  # alto disponible menos la leyenda
+        room = self.views.winfo_height() - PREVIEW_CHROME
         height = min(PREVIEW_BOX[1], room) if room > 150 else PREVIEW_BOX[1]  # sin dibujar aún: tamaño normal
         zoom = min(PREVIEW_BOX[0] / page.rect.width, height / page.rect.height)
-        view.image = tk.PhotoImage(data=page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("png"))
-        view.configure(image=view.image, text="")
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+        if dark:  # aproximación del modo oscuro de los lectores: invierte también las ilustraciones
+            pix.invert_irect()
+        return tk.PhotoImage(data=pix.tobytes("ppm")), zoom
 
     def update_preview(self, _=None):
-        """Muestra la página del PDF del título seleccionado y cómo quedará en el EPUB."""
+        """Al seleccionar (o cambiar) un título: su página del PDF y su sección en el EPUB."""
         selected = self.tree.selection()
         if not selected or not self.book:
             return
         item = selected[0]
         index = int(item)
-        page = self.book.blocks[index].page
+        block = self.book.blocks[index]
+        self.pdf_page = block.page - 1
+        self.highlight = (self.pdf_page, block.rect) if block.rect else None
+        self.draw_pdf()
+        self.epub_page, self.epub_pages = 0, 0
+        self.epub_cut = self.tree.set(item, "inc") == CUT
+        if not self.epub_cut:
+            # EPUB mínimo con solo esta sección (del título al siguiente): rápido de escribir y de maquetar
+            try:
+                blocks = self.book.blocks
+                end = next((k for k in range(index + 1, len(blocks)) if blocks[k].kind == "heading"), len(blocks))
+                part = convert.Book(self.book.title, "", self.book.cover, blocks[index:end], [])
+                chapter = self.tree.set(item, "inc") == ON
+                convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path,
+                                   typography=self.typography_var.get())
+            except Exception:
+                self.epub_pages = -1  # no se pudo generar
+        self.draw_epub()
+
+    def draw_pdf(self):
+        canvas = self.pdf_view
+        canvas.delete("all")
         try:
-            self.show_page(self.pdf_view, self.pdf_doc[page - 1])
-            self.pdf_caption.configure(text=f"PDF · página {page}")
+            canvas.image, zoom = self.render(self.pdf_doc[self.pdf_page])
         except Exception:
-            self.pdf_view.image = None
-            self.pdf_view.configure(image="", text="Sin vista previa")
-        if self.tree.set(item, "inc") == CUT:
-            self.epub_view.image = None
-            self.epub_view.configure(image="", text="Esta sección no irá en el EPUB")
+            canvas.image = None
+            canvas.configure(width=PREVIEW_BOX[0], height=60)
+            canvas.create_text(PREVIEW_BOX[0] // 2, 30, text="Sin vista previa")
+            return
+        canvas.configure(width=canvas.image.width(), height=canvas.image.height())
+        canvas.create_image(0, 0, anchor="nw", image=canvas.image)
+        if self.highlight and self.highlight[0] == self.pdf_page:  # recuadro sobre la línea tomada como título
+            x0, y0, x1, y1 = (v * zoom for v in self.highlight[1])
+            canvas.create_rectangle(x0 - 3, y0 - 2, x1 + 3, y1 + 2, outline="red", width=2, tags="title")
+        self.pdf_caption.configure(text=f"PDF · página {self.pdf_page + 1}")
+        self.mark_current()
+
+    def draw_epub(self):
+        view = self.epub_view
+        if self.epub_cut or self.epub_pages < 0:
+            view.image = None
+            view.configure(image="", text="Esta sección no irá en el EPUB" if self.epub_cut else "Sin vista previa")
             self.epub_caption.configure(text="EPUB")
             return
-        # EPUB mínimo con solo este trozo (del título al siguiente): rápido de escribir y de maquetar
         try:
-            blocks = self.book.blocks
-            end = next((k for k in range(index + 1, len(blocks)) if blocks[k].kind == "heading"), len(blocks))
-            part = convert.Book(self.book.title, "", self.book.cover, blocks[index:min(end, index + PREVIEW_BLOCKS)], [])
-            chapter = self.tree.set(item, "inc") == ON
-            convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path,
-                               typography=self.typography_var.get())
             with pymupdf.open(self.preview_path) as epub:
-                self.show_page(self.epub_view, epub.load_page((1, 0)))  # el capítulo 0 es la portada
-            self.epub_caption.configure(text="EPUB · así se verá (" + ("capítulo" if chapter else "subtítulo") + ")")
+                width, height = DEVICES[self.device_var.get()]
+                epub.layout(width=width, height=height, fontsize=11)
+                self.epub_pages = epub.chapter_page_count(1)  # el capítulo 0 es la portada
+                self.epub_page = max(0, min(self.epub_page, self.epub_pages - 1))
+                view.image, _ = self.render(epub.load_page((1, self.epub_page)), dark=self.dark_var.get())
         except Exception:
-            self.epub_view.image = None
-            self.epub_view.configure(image="", text="Sin vista previa")
+            view.image = None
+            view.configure(image="", text="Sin vista previa")
+            return
+        view.configure(image=view.image, text="")
+        self.epub_caption.configure(text=f"EPUB · {self.device_var.get()} · {self.epub_page + 1}/{self.epub_pages}")
+
+    def pdf_step(self, delta):
+        if self.pdf_doc:
+            self.pdf_page = max(0, min(self.pdf_page + delta, self.pdf_doc.page_count - 1))
+            self.draw_pdf()
+
+    def epub_step(self, delta):
+        if self.epub_pages > 0:
+            self.epub_page = max(0, min(self.epub_page + delta, self.epub_pages - 1))
+            self.draw_epub()
+
+    def start_thumbs(self):
+        """Empieza a dibujar las miniaturas del PDF, por tandas para no congelar la ventana."""
+        self.thumb_job += 1  # cancela la tanda de un libro anterior
+        self.strip.delete("all")
+        self.thumbs, self.thumb_images, self.thumb_x = {}, [], 4
+        titles = {b.page for b in self.book.blocks if b.kind == "heading"}
+        images = {b.page for b in self.book.blocks if b.kind == "image"}
+        self.root.after(10, self.add_thumbs, self.thumb_job, 0, titles, images)
+
+    def add_thumbs(self, job, start, titles, images):
+        if job != self.thumb_job or not self.pdf_doc:
+            return
+        end = min(start + THUMBS_PER_TICK, self.pdf_doc.page_count)
+        for n in range(start, end):
+            page = self.pdf_doc[n]
+            zoom = THUMB_HEIGHT / page.rect.height
+            image = tk.PhotoImage(data=page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("ppm"))
+            self.thumb_images.append(image)
+            x, w, h = self.thumb_x, image.width(), image.height()
+            self.strip.create_image(x, 6, anchor="nw", image=image, tags=(f"p{n}",))
+            color = MARK_COLORS["title"] if n + 1 in titles else MARK_COLORS["image"] if n + 1 in images else ""
+            self.strip.create_rectangle(x - 2, 4, x + w + 2, 8 + h, outline=color, width=3, tags=(f"b{n}",))
+            self.strip.tag_bind(f"p{n}", "<Button-1>", lambda _, n=n: self.jump(n))
+            self.thumbs[n] = (x, w, h)
+            self.thumb_x += w + 8
+        self.strip.configure(scrollregion=(0, 0, self.thumb_x, THUMB_HEIGHT + 12))
+        self.mark_current()
+        if end < self.pdf_doc.page_count:
+            self.root.after(10, self.add_thumbs, job, end, titles, images)
+
+    def mark_current(self):
+        """Destaca en la tira la miniatura de la página que muestra la vista previa del PDF."""
+        self.strip.delete("current")
+        if self.pdf_page in self.thumbs:
+            x, w, h = self.thumbs[self.pdf_page]
+            self.strip.create_rectangle(x - 4, 2, x + w + 4, 10 + h, outline=MARK_COLORS["current"], width=3,
+                                        tags="current")
+
+    def jump(self, n):
+        """Clic en una miniatura: esa página en la vista previa y, si tiene un título, seleccionarlo."""
+        self.pdf_page = n
+        self.draw_pdf()
+        item = next((i for i in self.tree.get_children() if self.book.blocks[int(i)].page == n + 1), None)
+        if item:
+            self.tree.selection_set(item)
+            self.tree.see(item)
+
+    def set_kind(self, item, kind):
+        self.tree.set(item, "inc", kind)
+        self.tree.item(item, tags=(KIND_TAG[kind],))
 
     def open_pdf(self):
         path = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
@@ -234,7 +377,9 @@ class App:
         for i, block in enumerate(book.blocks):
             if block.kind == "heading":
                 mark = ON if i in chapters else OFF
-                self.tree.insert("", "end", iid=str(i), values=(mark, html.unescape(block.html), block.page))
+                self.tree.insert("", "end", iid=str(i), values=(mark, html.unescape(block.html), block.page),
+                                 tags=(KIND_TAG[mark],))
+        self.start_thumbs()
         self.gen_btn.state(["!disabled"])
         self.progress.configure(value=0)
         found, others = len(chapters), len(self.tree.get_children()) - len(chapters)
@@ -244,7 +389,7 @@ class App:
     def on_click(self, event):
         item = self.tree.identify_row(event.y)
         if item and self.tree.identify_column(event.x) == "#1":
-            self.tree.set(item, "inc", NEXT[self.tree.set(item, "inc")])
+            self.set_kind(item, NEXT[self.tree.set(item, "inc")])
             self.update_preview()
 
     def on_double_click(self, event):

@@ -188,7 +188,17 @@ class Book:
 - `ttk.Treeview` con columnas: tipo, título, página. Lista todos los títulos: los capítulos
   detectados como "Capítulo" y los subtítulos como "Subtítulo". Cada clic en la columna
   tipo rota Capítulo → Subtítulo → Quitar. Un título en "Quitar" no llega al EPUB, y su
-  vista previa del EPUB lo avisa.
+  vista previa del EPUB lo avisa. Estilo por tipo: capítulo en negrita, subtítulo gris en
+  cursiva, quitar gris claro tachado.
+- Vista previa del PDF en un `Canvas`, con un recuadro rojo sobre la línea tomada como título
+  (`Block.rect`, calculado desde línea base y tamaño de letra). Botones ◀ ▶ en cada vista:
+  el PDF recorre todo el documento; el EPUB, la sección completa (del título al siguiente).
+- Vista del EPUB por dispositivo (Celular 300×560, E-reader 6" 420×560, Tablet 560×750 pt,
+  con `doc.layout`) y modo oscuro aproximado invirtiendo la imagen (también las ilustraciones).
+- Tira de miniaturas del PDF bajo las vistas previas: borde azul si la página tiene título,
+  verde si tiene ilustración, naranja la página mostrada. Se dibujan por tandas de 6 para no
+  congelar la ventana (medido: 183 páginas en 1,2 s, la ventana nunca se traba más de 0,11 s).
+  Clic en una miniatura: esa página y, si tiene un título, se selecciona en la lista.
   - Clic en la columna incluir alterna la marca.
   - Doble clic en el título abre un campo para editarlo.
 - Botón **Generar EPUB…** (`filedialog.asksaveasfilename`, por defecto misma carpeta y

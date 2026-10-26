@@ -44,6 +44,7 @@ class Block:
     page: int           # página de origen (empieza en 1)
     html: str = ""
     image: bytes = b""  # JPEG si kind == "image"
+    rect: tuple = ()    # (x0, y0, x1, y1) del título en su página, para resaltarlo en la vista previa
 
 
 @dataclass
@@ -202,6 +203,13 @@ def _key(text):
     return re.sub(r"[\W_]+", "", text.lower())
 
 
+def _rect(rows):
+    """Rectángulo que abarca unas líneas: la caja del span no sirve (Cambria la estira), así que
+    se calcula desde la línea base y el tamaño de letra."""
+    return (min(r.x0 for r in rows), min(r.y - r.size for r in rows),
+            max(r.x1 for r in rows), max(r.y + r.size * 0.3 for r in rows))
+
+
 def _title(rows):
     """Clave del primer título de la página, para comparar páginas."""
     heads = [r for r in rows if r.heading]
@@ -307,7 +315,8 @@ def analyze(pdf_path, progress=None):
             # Portada de capítulo: la ilustración tapa el título (texto oculto) y la página siguiente lo repite.
             # Se emite el título y la ilustración; sin repetición, la imagen es un fondo decorativo y se descarta.
             if covered and len(headings) == len(rows) and i + 1 < n and _title(rows) == _title(pages[i + 1]):
-                blocks.append(Block("heading", num, html.escape(" ".join(r.text for r in _first_group(rows)))))
+                group = _first_group(rows)
+                blocks.append(Block("heading", num, html.escape(" ".join(r.text for r in group)), rect=_rect(group)))
                 blocks.append(Block("image", num, image=_render(page)))
                 para, repeated = None, _title(rows)
                 continue
@@ -332,8 +341,10 @@ def analyze(pdf_path, progress=None):
                     if (prev is not None and prev.heading and abs(prev.size - r.size) < 0.5
                             and r.y - prev.y < 2 * r.size and not r.starts):
                         blocks[-1].html += " " + html.escape(r.text)
+                        a, b = blocks[-1].rect, _rect([r])  # el rectángulo abarca todas sus líneas
+                        blocks[-1].rect = (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
                     else:
-                        blocks.append(Block("heading", num, html.escape(r.text)))
+                        blocks.append(Block("heading", num, html.escape(r.text), rect=_rect([r])))
                     para = None
                 elif SCENE_BREAK.fullmatch(r.text):
                     blocks.append(Block("break", num))
