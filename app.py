@@ -54,10 +54,11 @@ class App:
         meta = ttk.Frame(root, padding=(8, 0))
         meta.pack(fill="x")
         self.title_var, self.author_var = tk.StringVar(), tk.StringVar()
-        ttk.Label(meta, text="Título:").pack(side="left")
-        ttk.Entry(meta, textvariable=self.title_var, width=45).pack(side="left", padx=(4, 12))
-        ttk.Label(meta, text="Autor:").pack(side="left")
-        ttk.Entry(meta, textvariable=self.author_var, width=25).pack(side="left", padx=4)
+        self.series_var, self.volume_var = tk.StringVar(), tk.StringVar()
+        for label, var, width in (("Título:", self.title_var, 45), ("Autor:", self.author_var, 22),
+                                  ("Serie:", self.series_var, 35), ("Vol.:", self.volume_var, 5)):
+            ttk.Label(meta, text=label).pack(side="left")
+            ttk.Entry(meta, textvariable=var, width=width).pack(side="left", padx=(4, 12))
 
         # La barra inferior y la ayuda se empaquetan antes que el centro: pack reparte el espacio en
         # orden, y así el centro (con las vistas previas) es el que encoge en pantallas bajas.
@@ -215,6 +216,8 @@ class App:
         self.pdf_doc = pymupdf.open(self.pdf)
         self.title_var.set(book.title)
         self.author_var.set(book.author)
+        self.series_var.set(book.series)
+        self.volume_var.set(book.volume)
         # Todos los títulos: los capítulos marcados; los subtítulos ("El lado de…") desmarcados, por si
         # alguno debe ser capítulo. Un título desmarcado sale en el EPUB como subtítulo.
         chapters = set(book.candidates)
@@ -279,6 +282,8 @@ class App:
             return
         self.book.title = self.title_var.get().strip() or self.pdf.stem
         self.book.author = self.author_var.get().strip()
+        self.book.series = self.series_var.get().strip()
+        self.book.volume = self.volume_var.get().strip()
         chapters = [(int(item), self.tree.set(item, "title")) for item in self.tree.get_children()
                     if self.tree.set(item, "inc") == ON]
         self.status.configure(text="Generando EPUB…")

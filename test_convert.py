@@ -118,6 +118,50 @@ def test_soft_hyphen_at_line_end_joins_word():
     assert convert._join(first.html, second.html) == "una palabra invisible."
 
 
+def test_series_and_volume_from_file_name():
+    cases = [
+        ("Maryoku Cheat na Majo ni Narimashita - Volumen 01 [WP]", "", ("Maryoku Cheat na Majo ni Narimashita", "1")),
+        ("Nageki no Bourei wa Intai Shitai - Volumen 1", "", ("Nageki no Bourei wa Intai Shitai", "1")),
+        ("Volumen 1 World Project", "Am I Actually the Strongest?", ("Am I Actually the Strongest?", "1")),
+        ("Volumen 7 World Project", "KAGE NO JITSURYOKUSHA NI NARITAKUTE!", ("KAGE NO JITSURYOKUSHA NI NARITAKUTE!", "7")),
+        ("Mi Serie Vol. 2.5", "", ("Mi Serie", "2.5")),
+        ("Otra serie - Tomo 3", "", ("Otra serie", "3")),
+        ("Una novela suelta", "Una novela suelta", ("", "")),
+    ]
+    for stem, meta, expected in cases:
+        assert convert._series_volume(stem, meta) == expected, (stem, convert._series_volume(stem, meta))
+
+
+def test_analyze_titles_volume_after_series():
+    """Si el título del PDF no dice el volumen, el título del libro pasa a "Serie - Volumen N"."""
+    path = TMP / "Mi Serie - Volumen 03 [WP].pdf"
+    make_novel().replace(path)
+    book = convert.analyze(path)
+    assert (book.series, book.volume, book.title) == ("Mi Serie", "3", "Mi Serie - Volumen 3"), (
+        book.series, book.volume, book.title)
+
+
+def test_epub_has_series_metadata():
+    ns = {"o": "http://www.idpf.org/2007/opf"}
+    book = convert.analyze(make_novel())
+    book.series, book.volume = "Mi Serie", "3"
+    out = TMP / "serie.epub"
+    convert.write_epub(book, [], out)
+    with zipfile.ZipFile(out) as z:
+        opf = ET.fromstring(z.read("OEBPS/content.opf"))
+    metas = opf.findall("o:metadata/o:meta", ns)
+    collection = [m for m in metas if m.get("property") == "belongs-to-collection"]
+    assert len(collection) == 1 and collection[0].text == "Mi Serie", [(m.attrib, m.text) for m in metas]
+    refined = {m.get("property"): m.text for m in metas if m.get("refines") == "#" + collection[0].get("id")}
+    assert refined == {"collection-type": "series", "group-position": "3"}, refined
+    calibre = {m.get("name"): m.get("content") for m in metas if m.get("name", "").startswith("calibre:")}
+    assert calibre == {"calibre:series": "Mi Serie", "calibre:series_index": "3"}, calibre
+    book.series = ""
+    convert.write_epub(book, [], out)
+    with zipfile.ZipFile(out) as z:
+        assert b"belongs-to-collection" not in z.read("OEBPS/content.opf")  # sin serie, nada
+
+
 def test_scanned_pdf_is_rejected():
     doc = pymupdf.open()
     p = doc.new_page()
@@ -451,6 +495,38 @@ def test_window_epub_preview_follows_include_mark():
         body = "".join(z.read(n).decode() for n in z.namelist() if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n))
     window.close()
     assert re.search(r"<h2[^>]*>Capitulo 1: Inicio</h2>", body), re.findall(r"<h\d[^>]*>[^<]*</h\d>", body)
+
+
+def test_window_series_fields_reach_the_epub():
+    """La ventana muestra serie y volumen deducidos; lo que el usuario escriba llega al EPUB."""
+    import time
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = TMP / "Mi Serie - Volumen 03.pdf"
+    make_novel().replace(window.pdf)
+    window.show_book(convert.analyze(window.pdf))
+    shown = (window.series_var.get(), window.volume_var.get())
+    window.series_var.set("Serie Corregida")
+    window.volume_var.set("4")
+    out = TMP / "desde-ventana.epub"
+    originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
+    app.messagebox.showinfo = lambda *args: None
+    try:
+        window.generate()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
+        window.close()
+    assert shown == ("Mi Serie", "3"), shown
+    with zipfile.ZipFile(out) as z:
+        opf = z.read("OEBPS/content.opf").decode()
+    assert "Serie Corregida" in opf and 'content="4"' in opf, opf[:400]
 
 
 def test_window_double_click_on_include_toggles_twice():

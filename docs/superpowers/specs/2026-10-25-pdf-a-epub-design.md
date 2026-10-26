@@ -138,6 +138,14 @@ class Book:
    - En una página que solo tiene títulos, se conserva solo el primer grupo: World
      Project repite el título en otro tamaño sobre la imagen de fondo.
 10. **Metadatos:** título del PDF o, si está vacío, el nombre del archivo; autor del PDF.
+    - **Serie y volumen:** del nombre del archivo ("Volumen", "Vol.", "Tomo" o "Volume" y
+      un número, sin ceros a la izquierda). La serie es el texto anterior, sin etiquetas
+      entre corchetes (`[WP]`); si no hay, el título del PDF ("Volumen 1 World Project").
+    - Si hay serie y volumen y el título del PDF no incluye el número, el título pasa a
+      "Serie - Volumen N": algunos lectores no muestran la serie y todos los tomos se
+      llamarían igual.
+    - En el EPUB: `belongs-to-collection` (EPUB 3, con `collection-type` y
+      `group-position`) y `calibre:series` / `calibre:series_index`. Sin serie, nada.
 11. **Errores:** PDF cifrado o sin texto en ninguna página lanza `ValueError` con un
     mensaje en español apto para mostrar al usuario.
 

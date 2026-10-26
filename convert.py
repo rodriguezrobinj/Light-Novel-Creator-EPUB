@@ -53,6 +53,21 @@ class Book:
     cover: bytes        # JPEG
     blocks: list
     candidates: list    # índices en blocks de los títulos de capítulo detectados
+    series: str = ""    # serie a la que pertenece ("" si no se sabe)
+    volume: str = ""    # número de volumen dentro de la serie ("1", "2.5")
+
+
+VOLUME = re.compile(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*0*(\d+(?:[.,]\d+)?)", re.I)
+
+
+def _series_volume(stem, meta_title):
+    """Serie y volumen desde el nombre del archivo ("Serie - Volumen 01 [WP]" -> "Serie", "1").
+    Si el nombre no dice la serie ("Volumen 1 World Project"), se usa el título del PDF."""
+    m = VOLUME.search(stem)
+    if not m:
+        return "", ""
+    series = re.sub(r"\[[^\]]*\]", "", stem[:m.start()]).strip(" -–—_.")
+    return series or meta_title.strip(), m.group(1).replace(",", ".")
 
 
 def _bold(s):
@@ -333,7 +348,13 @@ def analyze(pdf_path, progress=None):
             candidates = [k for k, b in enumerate(blocks) if b.kind == "heading"]
 
         meta = doc.metadata or {}
-        return Book(meta.get("title") or Path(pdf_path).stem, meta.get("author") or "", cover, blocks, candidates)
+        meta_title = meta.get("title") or ""
+        title = meta_title or Path(pdf_path).stem
+        series, volume = _series_volume(Path(pdf_path).stem, meta_title)
+        # Sin el volumen en el título, todos los tomos se llamarían igual en lectores que no muestran la serie
+        if series and volume and not re.search(rf"(?<!\d)0*{re.escape(volume)}(?!\d)", meta_title):
+            title = f"{series} - Volumen {volume}"
+        return Book(title, meta.get("author") or "", cover, blocks, candidates, series, volume)
 
 
 CSS = """body { margin: 0 4%; line-height: 1.5; }
@@ -395,6 +416,14 @@ def write_epub(book, chapters, out_path, lang="es"):
     uid = f"urn:uuid:{uuid.uuid4()}"
     title = html.escape(book.title)
     creator = f"<dc:creator>{html.escape(book.author)}</dc:creator>\n" if book.author else ""
+    if book.series:  # serie en EPUB 3 (belongs-to-collection) y en el formato de Calibre
+        name, number = html.escape(book.series), html.escape(book.volume)
+        creator += (f'<meta property="belongs-to-collection" id="serie">{name}</meta>\n'
+                    '<meta refines="#serie" property="collection-type">series</meta>\n'
+                    f'<meta name="calibre:series" content="{name}"/>\n')
+        if number:
+            creator += (f'<meta refines="#serie" property="group-position">{number}</meta>\n'
+                        f'<meta name="calibre:series_index" content="{number}"/>\n')
     modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     manifest = [
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
