@@ -430,6 +430,34 @@ def test_epub_index_nests_subtitles_under_their_chapter():
     assert f'href="{target}"' in nav
 
 
+def sectioned_book():
+    """Libro mínimo: dos capítulos, el primero con dos subtítulos."""
+    blocks = [("heading", "Cap 1"), ("p", "Uno."), ("heading", "Lado A"), ("p", "Texto A."),
+              ("heading", "Lado B"), ("p", "Texto B."), ("heading", "Cap 2"), ("p", "Dos.")]
+    return convert.Book("Libro", "", b"", [convert.Block(k, 1, h) for k, h in blocks], [0, 6])
+
+
+def epub_text(path):
+    with zipfile.ZipFile(path) as z:
+        return "".join(z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml"))
+
+
+def test_removed_subtitle_leaves_out_only_its_part():
+    out = TMP / "quitar-subtitulo.epub"
+    convert.write_epub(sectioned_book(), [(0, "Cap 1"), (6, "Cap 2")], out, removed=[2])
+    text = epub_text(out)
+    assert "Lado A" not in text and "Texto A." not in text, text
+    assert all(x in text for x in ("Uno.", "Lado B", "Texto B.", "Cap 2", "Dos.")), text
+
+
+def test_removed_chapter_takes_its_subtitles_and_index_entry():
+    out = TMP / "quitar-capitulo.epub"
+    convert.write_epub(sectioned_book(), [(6, "Cap 2")], out, removed=[0])
+    text = epub_text(out)  # incluye nav.xhtml: tampoco debe estar en el índice
+    assert not any(x in text for x in ("Cap 1", "Uno.", "Lado A", "Texto A.", "Lado B", "Texto B.")), text
+    assert "Cap 2" in text and "Dos." in text, text
+
+
 def test_window_lists_all_headings_with_chapters_checked():
     """La lista muestra también los subtítulos, desmarcados, para poder convertirlos en capítulo."""
     import app
@@ -529,8 +557,43 @@ def test_window_series_fields_reach_the_epub():
     assert "Serie Corregida" in opf and 'content="4"' in opf, opf[:400]
 
 
+def test_window_removed_section_preview_and_epub():
+    """Un título en "Quitar": la vista previa lo avisa y la sección no llega al EPUB."""
+    import time
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    item = window.tree.get_children()[0]  # Capitulo 1: Inicio
+    window.tree.selection_set(item)
+    root.update()
+    window.tree.set(item, "inc", app.CUT)
+    window.update_preview()
+    preview = (window.epub_view.cget("text"), window.epub_view.image)
+    out = TMP / "quitado-desde-ventana.epub"
+    originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
+    app.messagebox.showinfo = lambda *args: None
+    try:
+        window.generate()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
+        window.close()
+    assert preview == ("Esta sección no irá en el EPUB", None), preview
+    text = epub_text(out)
+    assert "Capitulo 1: Inicio" not in text and "Primera linea" not in text
+    assert "Capitulo 2: Final" in text
+
+
 def test_window_double_click_on_include_toggles_twice():
-    """Tk manda el segundo clic rápido a <Double-1>: también debe cambiar la marca."""
+    """Cada clic rota Capítulo → Subtítulo → Quitar → Capítulo. Tk manda el segundo clic rápido
+    a <Double-1>: también cuenta."""
     from types import SimpleNamespace
 
     import app
@@ -540,11 +603,12 @@ def test_window_double_click_on_include_toggles_twice():
     root.update()
     x, y, w, h = window.tree.bbox("0", "inc")
     click = SimpleNamespace(x=x + w // 2, y=y + h // 2)
-    window.on_click(click)
-    window.on_double_click(click)
-    state = window.tree.set("0", "inc")
+    states = []
+    for handler in (window.on_click, window.on_double_click, window.on_click):
+        handler(click)
+        states.append(window.tree.set("0", "inc"))
     root.destroy()
-    assert state == app.ON, state
+    assert states == [app.OFF, app.CUT, app.ON], states
 
 
 def test_window_title_editor_closes_on_scroll():

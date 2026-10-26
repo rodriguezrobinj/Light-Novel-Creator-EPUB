@@ -159,6 +159,9 @@ class Book:
 - Un XHTML por capítulo. Los bloques anteriores al primer capítulo van a una sección
   "Inicio". Un título que no es capítulo (desmarcado, o subtítulo detectado) se escribe
   como subtítulo `<h2>`, para que se vea como título y no como texto normal.
+- Secciones quitadas (`removed`: índices de títulos): un capítulo se quita con todo lo que
+  hay hasta el siguiente capítulo que se conserva, subtítulos e ilustraciones incluidos; un
+  subtítulo, hasta el siguiente título. No aparecen ni en el texto ni en el índice.
 - Portada: `cover.jpg` marcada como `cover-image` y una página `cover.xhtml`.
 - CSS mínimo: márgenes, sangría de primera línea, imágenes al 100 % de ancho, separador centrado.
 - Se escribe en un archivo temporal junto al destino y se renombra al terminar. Si falla,
@@ -173,9 +176,10 @@ class Book:
   El progreso y el resultado llegan por una `multiprocessing.Queue` que la ventana lee
   con `root.after`; de cada lectura se pinta solo el último progreso ("Analizando… N %").
 - Campos editables **Título** y **Autor**.
-- `ttk.Treeview` con columnas: incluir (✔/✘), título, página. Lista todos los títulos:
-  los capítulos detectados marcados y los subtítulos desmarcados, para poder convertir
-  un subtítulo en capítulo.
+- `ttk.Treeview` con columnas: tipo, título, página. Lista todos los títulos: los capítulos
+  detectados como "Capítulo" y los subtítulos como "Subtítulo". Cada clic en la columna
+  tipo rota Capítulo → Subtítulo → Quitar. Un título en "Quitar" no llega al EPUB, y su
+  vista previa del EPUB lo avisa.
   - Clic en la columna incluir alterna la marca.
   - Doble clic en el título abre un campo para editarlo.
 - Botón **Generar EPUB…** (`filedialog.asksaveasfilename`, por defecto misma carpeta y

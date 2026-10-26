@@ -382,11 +382,22 @@ def _xhtml(title, body, lang):
             f'<body>\n{body}\n</body>\n</html>\n')
 
 
-def write_epub(book, chapters, out_path, lang="es"):
-    """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario."""
+def write_epub(book, chapters, out_path, lang="es", removed=()):
+    """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
+    removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
+    Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
+    hasta el siguiente título."""
     starts = dict(chapters)
+    skip = set()
+    for k in removed:
+        chapter = k in book.candidates or k in starts
+        end = next((j for j in range(k + 1, len(book.blocks))
+                    if book.blocks[j].kind == "heading" and (j in starts or not chapter)), len(book.blocks))
+        skip.update(range(k, end))
     sections = []  # [título, es_capítulo, [(índice, bloque)]]
     for k, b in enumerate(book.blocks):
+        if k in skip:
+            continue
         if k in starts:
             sections.append([starts[k], True, []])
         else:

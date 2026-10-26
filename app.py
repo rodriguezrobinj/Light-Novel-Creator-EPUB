@@ -12,7 +12,8 @@ import pymupdf
 
 import convert
 
-ON, OFF = "✔", "✘"
+ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
+NEXT = {ON: OFF, OFF: CUT, CUT: ON}                 # cada clic pasa al siguiente
 PREVIEW_BOX = (400, 560)  # ancho y alto máximos de cada vista previa, en píxeles
 PREVIEW_BLOCKS = 60       # bloques que entran en el EPUB de la vista previa: basta para su primera página
 
@@ -70,7 +71,7 @@ class App:
         self.status.pack(side="left", padx=8)
         self.gen_btn = ttk.Button(bottom, text="Generar EPUB…", command=self.generate, state="disabled")
         self.gen_btn.pack(side="right")
-        ttk.Label(root, text="Clic en Incluir: marcar o desmarcar · Doble clic en el título: editar",
+        ttk.Label(root, text="Clic en Tipo: capítulo, subtítulo o quitar · Doble clic en el título: editar",
                   padding=(8, 0)).pack(side="bottom", anchor="w")
 
         middle = ttk.Frame(root, padding=8)
@@ -82,7 +83,7 @@ class App:
         frame = ttk.Frame(middle)
         frame.pack(side="left", fill="both", expand=True)
         self.tree = ttk.Treeview(frame, columns=("inc", "title", "page"), show="headings", selectmode="browse")
-        for col, text, width in (("inc", "Incluir", 60), ("title", "Capítulo", 300), ("page", "Página", 60)):
+        for col, text, width in (("inc", "Tipo", 80), ("title", "Título", 290), ("page", "Página", 60)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor="w" if col == "title" else "center", stretch=col == "title")
         self.scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -186,6 +187,11 @@ class App:
         except Exception:
             self.pdf_view.image = None
             self.pdf_view.configure(image="", text="Sin vista previa")
+        if self.tree.set(item, "inc") == CUT:
+            self.epub_view.image = None
+            self.epub_view.configure(image="", text="Esta sección no irá en el EPUB")
+            self.epub_caption.configure(text="EPUB")
+            return
         # EPUB mínimo con solo este trozo (del título al siguiente): rápido de escribir y de maquetar
         try:
             blocks = self.book.blocks
@@ -234,7 +240,7 @@ class App:
     def on_click(self, event):
         item = self.tree.identify_row(event.y)
         if item and self.tree.identify_column(event.x) == "#1":
-            self.tree.set(item, "inc", OFF if self.tree.set(item, "inc") == ON else ON)
+            self.tree.set(item, "inc", NEXT[self.tree.set(item, "inc")])
             self.update_preview()
 
     def on_double_click(self, event):
@@ -287,7 +293,8 @@ class App:
         chapters = [(int(item), self.tree.set(item, "title")) for item in self.tree.get_children()
                     if self.tree.set(item, "inc") == ON]
         self.status.configure(text="Generando EPUB…")
-        self.run(convert.write_epub, (self.book, chapters, out), lambda _: self.saved(out))
+        removed = [int(item) for item in self.tree.get_children() if self.tree.set(item, "inc") == CUT]
+        self.run(convert.write_epub, (self.book, chapters, out, "es", removed), lambda _: self.saved(out))
         self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
 
     def saved(self, out):
