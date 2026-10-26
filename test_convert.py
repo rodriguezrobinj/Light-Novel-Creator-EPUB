@@ -411,6 +411,24 @@ def test_transparent_image_keeps_its_transparency():
     assert f'href="{names[0][6:]}" media-type="image/png"' in opf, opf
 
 
+def test_mask_wins_over_opaque_alpha():
+    """PyMuPDF a veces entrega la imagen con un canal alfa opaco y la forma en una máscara aparte
+    (el logo de Kage Vol 06): manda la máscara, o el logo sale como un rectángulo negro."""
+    rect = pymupdf.IRect(0, 0, 20, 10)
+    image = pymupdf.Pixmap(pymupdf.csRGB, rect, True)
+    image.clear_with(0)
+    for x in range(20):
+        for y in range(10):
+            image.set_pixel(x, y, (0, 0, 0, 255))  # negro y opaco: la forma no está aquí
+    mask = pymupdf.Pixmap(pymupdf.csGRAY, rect, False)
+    mask.clear_with(0)  # transparente…
+    for x in range(5, 15):
+        mask.set_pixel(x, 5, (255,))  # …salvo una raya: la forma del logo
+    result = convert._with_mask(image, mask)
+    assert result.alpha and result.pixel(0, 0)[3] == 0 and result.pixel(10, 5)[3] == 255, (
+        result.pixel(0, 0), result.pixel(10, 5))
+
+
 def test_write_epub_leaves_out_images_not_kept():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("image", 1, image=JPEG, keep=True),
               convert.Block("image", 1, image=JPEG, keep=False), convert.Block("p", 1, "Texto.")]

@@ -279,14 +279,24 @@ def _images(page):
     return sorted(found.items(), key=lambda item: -item[1])
 
 
+def _with_mask(pix, mask):
+    """Aplica una máscara de transparencia. PyMuPDF a veces entrega la imagen con un canal alfa
+    opaco y la forma en la máscara aparte: ese alfa se descarta y manda la máscara."""
+    if pix.alpha:
+        pix = pymupdf.Pixmap(pix, 0)
+    return pymupdf.Pixmap(pix, mask)
+
+
 def _extract(doc, xref):
     """Imagen incrustada tal como está en el PDF, sin el texto que tenga encima. Con transparencia
     (logos), en PNG para conservarla: sin el canal alfa, un logo negro con la forma en la
     transparencia quedaría como un rectángulo negro. Sin transparencia, en JPEG."""
     pix = pymupdf.Pixmap(doc, xref)
     smask = doc.extract_image(xref).get("smask")
-    if smask and not pix.alpha:  # según el PDF, la máscara de transparencia viene aparte: se combina
-        pix = pymupdf.Pixmap(pix, pymupdf.Pixmap(doc, smask))
+    if smask:  # la forma está en la máscara: se aplica siempre, aunque la imagen ya traiga un alfa
+        mask = pymupdf.Pixmap(doc, smask)
+        if (mask.width, mask.height) == (pix.width, pix.height):
+            pix = _with_mask(pix, mask)
     if pix.colorspace and pix.colorspace.n not in (1, 3):  # CMYK u otros: a RGB (conserva el alfa)
         pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
     if pix.alpha:
