@@ -103,6 +103,12 @@ class App:
         style.pack(side="right")
         style.bind("<<ComboboxSelected>>", lambda _: self.update_preview())
         ttk.Label(bottom, text="Estilo:").pack(side="right", padx=(12, 4))
+        self.separator_var = tk.StringVar(value="Según el estilo")  # cómo se ven los separadores de escena
+        separator = ttk.Combobox(bottom, textvariable=self.separator_var, values=convert.SEPARATOR_CHOICES,
+                                 width=16, state="readonly")
+        separator.pack(side="right")
+        separator.bind("<<ComboboxSelected>>", lambda _: self.update_preview())
+        ttk.Label(bottom, text="Separador:").pack(side="right", padx=(12, 4))
         ttk.Label(root, text="Clic en Tipo: capítulo, subtítulo o quitar · Doble clic en el título: editar",
                   padding=(8, 0)).pack(side="bottom", anchor="w")
 
@@ -315,7 +321,8 @@ class App:
                 chapter = self.tree.set(item, "inc") == ON
                 convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path,
                                    typography=self.typography_var.get(), style=self.style_var.get(),
-                                   contents=False)  # sin página de índice: el capítulo 1 es la sección
+                                   contents=False,  # sin página de índice: el capítulo 1 es la sección
+                                   separator=self.separator_var.get())
             except Exception:
                 self.epub_pages = -1  # no se pudo generar
         self.draw_epub()
@@ -528,7 +535,7 @@ class App:
         removed = [int(item) for item in self.tree.get_children()
                    if self.tree.set(item, "inc") == CUT and not self.is_image(item)]
         self.run(convert.write_epub, (self.book, chapters, out, "es", removed, self.typography_var.get(),
-                                      self.style_var.get()),
+                                      self.style_var.get(), True, self.separator_var.get()),
                  lambda _: self.saved(out))
         self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
 

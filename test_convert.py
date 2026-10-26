@@ -429,9 +429,8 @@ def test_mask_wins_over_opaque_alpha():
         result.pixel(0, 0), result.pixel(10, 5))
 
 
-def test_ornament_image_between_paragraphs_is_a_scene_break():
-    """Un adorno pequeño y centrado entre dos párrafos (Kage, Nageki) es un separador de escena;
-    una imagen pequeña pegada al margen, no."""
+def make_ornament_pdf():
+    """Página 1: adorno centrado entre dos párrafos. Página 2: la misma imagen pegada al margen."""
     doc = pymupdf.open()
     ornament = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 10, 16), False)
     ornament.clear_with(40)
@@ -443,11 +442,46 @@ def test_ornament_image_between_paragraphs_is_a_scene_break():
     doc[1].insert_image(pymupdf.Rect(40, 190, 55, 214), pixmap=ornament)  # pegado al margen
     path = TMP / "adorno.pdf"
     doc.save(path)
-    blocks = convert.analyze(path).blocks
+    return path
+
+
+def test_ornament_image_between_paragraphs_is_a_scene_break():
+    """Un adorno pequeño y centrado entre dos párrafos (Kage, Nageki) es un separador de escena;
+    una imagen pequeña pegada al margen, no."""
+    blocks = convert.analyze(make_ornament_pdf()).blocks
     page1 = [b.kind for b in blocks if b.page == 1]
     page2 = [b.kind for b in blocks if b.page == 2]
     assert page1 == ["heading", "p", "break", "p"], page1
     assert "break" not in page2, page2
+
+
+def test_scene_breaks_keep_their_original_form():
+    """Cada separador guarda lo que traía el PDF: el texto de un separador escrito, la imagen de un adorno."""
+    text_breaks = [b for b in convert.analyze(make_novel()).blocks if b.kind == "break"]
+    ornament_breaks = [b for b in convert.analyze(make_ornament_pdf()).blocks if b.kind == "break"]
+    assert [b.html for b in text_breaks] == ["* * *"], [b.html for b in text_breaks]
+    assert len(ornament_breaks) == 1 and pymupdf.Pixmap(ornament_breaks[0].image).width == 10
+
+
+def test_separator_options():
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
+              convert.Block("break", 1, "☆"), convert.Block("p", 1, "Dos."),
+              convert.Block("break", 1, image=JPEG), convert.Block("p", 1, "Tres.")]
+    book = convert.Book("Libro", "", JPEG, blocks, [0])
+    expected = {
+        "Según el estilo": ['<p class="brk">* * *</p>'] * 2,
+        "Original del PDF": ['<p class="brk">☆</p>', '<div class="brk-img"><img src="img/b00004.jpg" alt="* * *"/></div>'],
+        "✦": ['<p class="brk">✦</p>'] * 2,
+        "Línea": ['<hr class="brk"/>'] * 2,
+        "Espacio en blanco": ['<div class="brk-gap"></div>'] * 2,
+    }
+    for option, marks in expected.items():
+        out = TMP / "separador.epub"
+        convert.write_epub(book, [(0, "Cap 1")], out, separator=option)
+        text = epub_text(out)
+        found = re.findall(r'<p class="brk">[^<]*</p>|<div class="brk-img">.*?</div>|<hr class="brk"/>|<div class="brk-gap"></div>', text)
+        assert found == marks, (option, found)
+    assert set(convert.SEPARATOR_CHOICES) >= set(expected)
 
 
 def test_write_epub_leaves_out_images_not_kept():
@@ -1167,6 +1201,36 @@ def test_window_preview_shows_the_section_not_the_contents_page():
         names = z.namelist()
     window.close()
     assert "OEBPS/contents.xhtml" not in names, names
+
+
+def test_window_separator_reaches_preview_and_epub():
+    import time
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()  # su capítulo 1 tiene un separador "* * *"
+    window.show_book(convert.analyze(window.pdf))
+    default = window.separator_var.get()
+    window.separator_var.set("✦")
+    window.tree.selection_set(first_title(window))
+    root.update()
+    preview = epub_text(window.preview_path)
+    out = TMP / "separador-desde-ventana.epub"
+    originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
+    app.messagebox.showinfo = lambda *args: None
+    try:
+        window.generate()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
+        window.close()
+    assert default == "Según el estilo", default
+    assert '<p class="brk">✦</p>' in preview and '<p class="brk">✦</p>' in epub_text(out)
 
 
 def test_window_double_click_on_include_toggles_twice():

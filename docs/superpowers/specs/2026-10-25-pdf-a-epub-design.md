@@ -206,6 +206,10 @@ class Book:
   referencia en `nav.xhtml` (`landmarks`: portada, índice e inicio de la lectura, que es el
   primer capítulo y no "Inicio") y `<guide>` en el OPF con lo mismo, para Kindle y lectores
   antiguos.
+- Separadores (`separator`; en la ventana, desplegable "Separador", por defecto "Según el estilo"):
+  según el estilo (`* * *` o `❖`), "Original del PDF" (el texto que traía o el adorno dibujado,
+  que cada bloque `break` guarda), un símbolo fijo (`* * *`, `❖`, `✦`, `⁂`, `◆ ◆ ◆`, `~`), una
+  línea fina o solo un espacio en blanco.
 - Portada: `cover.jpg` marcada como `cover-image` y una página `cover.xhtml`.
 - CSS mínimo: márgenes, sangría de primera línea, imágenes al 100 % de ancho, separador centrado.
 - Se escribe en un archivo temporal junto al destino y se renombra al terminar. Si falla,

@@ -284,13 +284,13 @@ def _ornaments(page, rows):
     pequeñas, centradas, fuera de los márgenes y con texto encima y debajo."""
     width, height = page.rect.width, page.rect.height
     found = []
-    for info in page.get_image_info():
+    for info in page.get_image_info(xrefs=True):
         x0, y0, x1, y1 = info["bbox"]
         if (x1 - x0 < 0.3 * width and y1 - y0 < 0.1 * height and abs((x0 + x1) / 2 - width / 2) < 0.15 * width
                 and BAND * height < (y0 + y1) / 2 < (1 - BAND) * height
                 and any(r.y < y0 for r in rows) and any(r.y > y1 for r in rows)):
-            found.append((y0 + y1) / 2)
-    return sorted(found)
+            found.append(((y0 + y1) / 2, info["xref"]))
+    return sorted(found)  # [(posición vertical, xref)], de arriba abajo
 
 
 def _with_mask(pix, mask):
@@ -437,10 +437,10 @@ def analyze(pdf_path, progress=None):
             prev = None
             ornaments = _ornaments(page, rows)  # adornos-separador, de arriba abajo
             for r in rows:
-                while ornaments and ornaments[0] < r.y:  # el adorno queda por encima de esta línea
-                    ornaments.pop(0)
-                    if blocks and blocks[-1].kind != "break":
-                        blocks.append(Block("break", num))
+                while ornaments and ornaments[0][0] < r.y:  # el adorno queda por encima de esta línea
+                    xref = ornaments.pop(0)[1]
+                    if blocks and blocks[-1].kind != "break":  # guarda el adorno, por si se quiere el original
+                        blocks.append(Block("break", num, image=_extract(doc, xref) if xref else b""))
                     para = None
                 if r.heading:
                     # Se une a la línea anterior si es el mismo título partido: mismo tamaño y pegada
@@ -454,7 +454,7 @@ def analyze(pdf_path, progress=None):
                         blocks.append(Block("heading", num, html.escape(r.text), rect=_rect([r])))
                     para = None
                 elif SCENE_BREAK.fullmatch(r.text):
-                    blocks.append(Block("break", num))
+                    blocks.append(Block("break", num, r.html))  # guarda el texto original ("☆", "* * *")
                     para = None
                 else:
                     indented = r.x0 > left + body * 0.8
@@ -534,7 +534,11 @@ h1, h2 { -webkit-hyphens: none; hyphens: none; page-break-after: avoid; }
 h1 .num, h1 .name { display: block; }
 h2 { text-align: center; font-size: 1.15em; margin: 1.5em 0 1em; }
 p.brk { text-indent: 0; text-align: center; margin: 1em 0; }
-h1 + p, h2 + p, p.brk + p, div.img + p { text-indent: 0; }
+hr.brk { border: 0; border-top: 1px solid #999999; width: 33%; margin: 1.2em auto; }
+div.brk-gap { height: 1.5em; }
+div.brk-img { text-align: center; margin: 1em 0; }
+div.brk-img img { height: 1.4em; }
+h1 + p, h2 + p, p.brk + p, hr.brk + p, div.brk-gap + p, div.brk-img + p, div.img + p { text-indent: 0; }
 div.img { text-align: center; margin: 0; page-break-before: always; page-break-after: always; }
 div.img img { max-width: 100%; max-height: 95vh; }
 h1.toc { text-align: center; }
@@ -565,6 +569,8 @@ p.brk { font-size: 1.2em; }
 """,
 }
 SEPARATORS = {"Novela ligera": "❖"}  # separador de escena; el resto usa "* * *"
+SEPARATOR_CHOICES = ["Según el estilo", "Original del PDF", "* * *", "❖", "✦", "⁂", "◆ ◆ ◆", "~", "Línea",
+                     "Espacio en blanco"]  # en la ventana, desplegable "Separador"
 CHAPTER_NUMBER = re.compile(  # "Capítulo 3: Nombre" -> número y nombre, para el inicio de capítulo
     r"((?:cap[ií]tulo|chapter|pr[oó]logo|prologue|ep[ií]logo|epilogue|interludio|interlude|parte|part"
     r"|historia (?:paralela|adicional|corta))(?: [\w.]+)?)\s*[:.\-–—]\s*(.+)", re.I)
@@ -594,14 +600,35 @@ def _xhtml(title, body, lang):
             f'<body>\n{body}\n</body>\n</html>\n')
 
 
-def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True):
+def _separator(block, index, style, choice, images):
+    """XHTML de un separador de escena según la opción elegida (SEPARATOR_CHOICES). Con "Original del
+    PDF" usa el adorno dibujado o el texto que traía; si no trae nada, el del estilo."""
+    if choice == "Original del PDF":
+        if block.image:
+            ext = "png" if block.image[:4] == b"\x89PNG" else "jpg"
+            src = f"img/b{index:05d}.{ext}"
+            images[src] = block.image
+            return f'<div class="brk-img"><img src="{src}" alt="* * *"/></div>'
+        if block.html:
+            return f'<p class="brk">{block.html}</p>'
+        choice = "Según el estilo"
+    if choice == "Línea":
+        return '<hr class="brk"/>'
+    if choice == "Espacio en blanco":
+        return '<div class="brk-gap"></div>'
+    symbol = SEPARATORS.get(style, "* * *") if choice == "Según el estilo" else html.escape(choice)
+    return f'<p class="brk">{symbol}</p>'
+
+
+def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
+               separator="Según el estilo"):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
     hasta el siguiente título.
     typography: aplica la limpieza tipográfica al estilo RAE (_typography) a textos y títulos.
     style: uno de STYLES. contents: añade la página "Contenido" tras la portada (la vista previa
-    la omite para dibujar directamente la sección)."""
+    la omite para dibujar directamente la sección). separator: una de SEPARATOR_CHOICES."""
     fix = _typography if typography else (lambda s: s)
     starts = dict(chapters)
     skip = set()
@@ -633,7 +660,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 images[src] = b.image
                 parts.append(f'<div class="img"><img src="{src}" alt=""/></div>')
             elif b.kind == "break":
-                parts.append(f'<p class="brk">{SEPARATORS.get(style, "* * *")}</p>')
+                parts.append(_separator(b, k, style, separator, images))
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
                 parts.append(f'<h2 id="t{k}">{fix(b.html)}</h2>')
                 subtitles.setdefault(name, []).append((f"t{k}", fix(b.html)))
