@@ -34,6 +34,8 @@ class Row:
     y: float      # línea base
     size: float
     bold: bool
+    heading: bool = False  # se decide en analyze, cuando ya se conoce el tamaño normal del texto
+    starts: bool = False   # con esta línea empieza un marcador del PDF: abre un título nuevo
 
 
 @dataclass
@@ -141,9 +143,37 @@ def _first_group(rows):
     return group
 
 
+def _key(text):
+    """Clave para comparar títulos: solo letras y números (una repetición puede perder el "!")."""
+    return re.sub(r"[\W_]+", "", text.lower())
+
+
+def _title(rows):
+    """Clave del primer título de la página, para comparar páginas."""
+    heads = [r for r in rows if r.heading]
+    return _key(" ".join(r.text for r in _first_group(heads))) if heads else ""
+
+
 def _image_coverage(page):
     area = page.rect
     return sum(abs(pymupdf.Rect(i["bbox"]) & area) for i in page.get_image_info()) / abs(area)
+
+
+def _illustration(doc, page, uses):
+    """JPEG de la ilustración a página completa que hay bajo el texto, sin el texto encima.
+    Una imagen usada en más de 2 páginas es un fondo decorativo: None."""
+    infos = [i for i in page.get_image_info(xrefs=True) if i["xref"]]
+    if not infos:
+        return None
+    big = max(infos, key=lambda i: abs(pymupdf.Rect(i["bbox"]) & page.rect))
+    if abs(pymupdf.Rect(big["bbox"]) & page.rect) < 0.5 * abs(page.rect) or uses[big["xref"]] > 2:
+        return None
+    pix = pymupdf.Pixmap(doc, big["xref"])
+    if pix.alpha:
+        pix = pymupdf.Pixmap(pix, 0)
+    if pix.n not in (1, 3):  # CMYK u otros: JPEG necesita gris o RGB
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+    return pix.tobytes("jpg", jpg_quality=85)
 
 
 def _render(page):
@@ -191,29 +221,62 @@ def analyze(pdf_path, progress=None):
         line_gap = gaps.most_common(1)[0][0] if gaps else body * 1.2
         indent_style = indents > total * 0.05  # los párrafos se marcan con sangría
 
+        # Título por tamaño o negrita, o porque el PDF lo marca: hay subtítulos del tamaño del texto
+        # ("El lado de la bruja") que solo se distinguen por su marcador de nivel 2.
+        bookmarks = collections.defaultdict(set)
+        for _, title, p in doc.get_toc():
+            if 1 <= p <= n and _key(title):
+                bookmarks[p - 1].add(_key(title))
+        for i, rows in enumerate(pages):
+            for r in rows:
+                key = _key(r.text)
+                r.heading = _is_heading(r, body) or any(
+                    key == mark or (r.bold and len(key) >= 4 and key in mark) for mark in bookmarks[i])
+                r.starts = len(key) >= 4 and any(mark.startswith(key) for mark in bookmarks[i])
+
+        uses = collections.Counter(img[0] for page in doc for img in page.get_images())  # xref -> páginas
         blocks = []
         para, short, last_text = None, False, ""
+        repeated = ""  # título que la página anterior ya emitió junto a su ilustración
         for i, (page, rows) in enumerate(zip(doc, pages)):
             num = i + 1
             if progress:
                 progress(n + num, 2 * n)
-            headings = [r for r in rows if _is_heading(r, body)]
+            pending, repeated = repeated, ""
+            headings = [r for r in rows if r.heading]
             # ponytail: solo ilustraciones a página completa; las pequeñas dentro del texto se descartan
-            if not headings and sum(len(r.text) for r in rows) < 200 and _image_coverage(page) > 0.5:
+            covered = sum(len(r.text) for r in rows) < 200 and _image_coverage(page) > 0.5
+            if covered and not headings:
                 blocks.append(Block("image", num, image=_render(page)))
                 para = None
+                continue
+            # Portada de capítulo: la ilustración tapa el título (texto oculto) y la página siguiente lo repite.
+            # Se emite el título y la ilustración; sin repetición, la imagen es un fondo decorativo y se descarta.
+            if covered and len(headings) == len(rows) and i + 1 < n and _title(rows) == _title(pages[i + 1]):
+                blocks.append(Block("heading", num, html.escape(" ".join(r.text for r in _first_group(rows)))))
+                blocks.append(Block("image", num, image=_render(page)))
+                para, repeated = None, _title(rows)
                 continue
             if not rows or _is_toc(rows):
                 continue
             if len(headings) == len(rows):
                 rows = _first_group(rows)
-            normal = [r for r in rows if not _is_heading(r, body)]
+            start = len(blocks)
+            normal = [r for r in rows if not r.heading]
+            # Ilustración con el texto de la novela encima: se guardan las dos cosas. El párrafo abierto
+            # sigue abierto, así que su continuación se une a él aunque la imagen quede en medio.
+            art = _illustration(doc, page, uses) if normal else None
+            if art:
+                blocks.append(Block("image", num, image=art))
             left = min((r.x0 for r in normal), default=0)
             right = max((r.x1 for r in normal), default=0)
             prev = None
             for r in rows:
-                if _is_heading(r, body):
-                    if prev is not None and _is_heading(prev, body) and abs(prev.size - r.size) < 0.5:
+                if r.heading:
+                    # Se une a la línea anterior si es el mismo título partido: mismo tamaño y pegada
+                    # (un subtítulo justo debajo del capítulo queda más lejos, o lo abre un marcador).
+                    if (prev is not None and prev.heading and abs(prev.size - r.size) < 0.5
+                            and r.y - prev.y < 2 * r.size and not r.starts):
                         blocks[-1].html += " " + html.escape(r.text)
                     else:
                         blocks.append(Block("heading", num, html.escape(r.text)))
@@ -229,6 +292,8 @@ def analyze(pdf_path, progress=None):
                         new = not indent_style and last_text.endswith(END_PUNCT)
                     else:
                         new = r.y - prev.y > line_gap * 1.3
+                    if new and para is not None and r.text[:1].islower() and not last_text.endswith(END_PUNCT):
+                        new = False  # algunos PDF ponen con sangría el final de una frase sin acabar
                     if new:
                         para = Block("p", num, r.html)
                         blocks.append(para)
@@ -237,6 +302,10 @@ def analyze(pdf_path, progress=None):
                     short = r.x1 < right - (right - left) * 0.2
                     last_text = r.text
                 prev = r
+            if pending:  # quitar el título repetido: ya salió con la ilustración de la página anterior
+                k = next((k for k in range(start, len(blocks)) if blocks[k].kind == "heading"), None)
+                if k is not None and _key(html.unescape(blocks[k].html)) == pending:
+                    del blocks[k]
 
         if not any(b.kind in ("p", "heading") for b in blocks):
             raise ValueError("No se encontró texto de la novela en el PDF (¿solo tiene el índice?).")
@@ -255,6 +324,10 @@ def analyze(pdf_path, progress=None):
                     k = next((k for k, b in enumerate(blocks) if b.page >= p), len(blocks))
                     blocks.insert(k, Block("heading", p, html.escape(title)))
                 chosen.add(id(blocks[k]))
+            # Marcadores incompletos: un título de capítulo en una página sin ningún marcador también cuenta.
+            marked = {p for _, _, p in doc.get_toc()}
+            chosen |= {id(b) for b in blocks if b.kind == "heading" and b.page not in marked
+                       and KEYWORDS.match(html.unescape(b.html))}
             candidates = [k for k, b in enumerate(blocks) if id(b) in chosen]
         else:
             candidates = [k for k, b in enumerate(blocks) if b.kind == "heading"]
@@ -265,6 +338,7 @@ def analyze(pdf_path, progress=None):
 
 CSS = """body { margin: 0 4%; line-height: 1.5; }
 h1 { text-align: center; font-size: 1.4em; margin: 2em 0 1em; }
+h2 { text-align: center; font-size: 1.15em; margin: 1.5em 0 1em; }
 p { text-indent: 1.5em; margin: 0 0 0.4em; text-align: justify; }
 p.brk { text-indent: 0; text-align: center; margin: 1em 0; }
 div.img { text-align: center; margin: 0; page-break-before: always; page-break-after: always; }
@@ -309,6 +383,8 @@ def write_epub(book, chapters, out_path, lang="es"):
                 parts.append(f'<div class="img"><img src="{src}" alt=""/></div>')
             elif b.kind == "break":
                 parts.append('<p class="brk">* * *</p>')
+            elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
+                parts.append(f"<h2>{b.html}</h2>")
             else:
                 parts.append(f"<p>{b.html}</p>")
         files[f"sec{n:03d}.xhtml"] = _xhtml(title, "\n".join(parts), lang)

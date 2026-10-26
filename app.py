@@ -1,14 +1,20 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
 import html
 import multiprocessing
+import os
 import queue
+import tempfile
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import pymupdf
+
 import convert
 
 ON, OFF = "✔", "✘"
+PREVIEW_BOX = (400, 560)  # ancho y alto máximos de cada vista previa, en píxeles
+PREVIEW_BLOCKS = 60       # bloques que entran en el EPUB de la vista previa: basta para su primera página
 
 
 def _worker(events, work, args, report):
@@ -32,8 +38,10 @@ class App:
         self.partial = None                    # EPUB a medio escribir del trabajo en curso
         self.editor_save = None                # guarda y cierra el cuadro de edición abierto
         self.view = None                       # última posición del scroll de la lista
+        self.pdf_doc = None                    # PDF abierto para la vista previa
+        self.preview_path = os.path.join(tempfile.gettempdir(), f"lnepub-vista-{os.getpid()}.epub")
         root.title("PDF a EPUB")
-        root.geometry("780x560")
+        root.geometry("1300x720")
         root.protocol("WM_DELETE_WINDOW", self.close)
 
         top = ttk.Frame(root, padding=8)
@@ -51,10 +59,29 @@ class App:
         ttk.Label(meta, text="Autor:").pack(side="left")
         ttk.Entry(meta, textvariable=self.author_var, width=25).pack(side="left", padx=4)
 
-        frame = ttk.Frame(root, padding=8)
-        frame.pack(fill="both", expand=True)
+        # La barra inferior y la ayuda se empaquetan antes que el centro: pack reparte el espacio en
+        # orden, y así el centro (con las vistas previas) es el que encoge en pantallas bajas.
+        bottom = ttk.Frame(root, padding=8)
+        bottom.pack(side="bottom", fill="x")
+        self.progress = ttk.Progressbar(bottom, length=280)
+        self.progress.pack(side="left")
+        self.status = ttk.Label(bottom, text="")
+        self.status.pack(side="left", padx=8)
+        self.gen_btn = ttk.Button(bottom, text="Generar EPUB…", command=self.generate, state="disabled")
+        self.gen_btn.pack(side="right")
+        ttk.Label(root, text="Clic en Incluir: marcar o desmarcar · Doble clic en el título: editar",
+                  padding=(8, 0)).pack(side="bottom", anchor="w")
+
+        middle = ttk.Frame(root, padding=8)
+        middle.pack(fill="both", expand=True)
+        self.views = ttk.Frame(middle, padding=(8, 0, 0, 0))
+        self.views.pack(side="right", fill="y")
+        self.pdf_caption, self.pdf_view = self.preview_pane(self.views, "PDF")
+        self.epub_caption, self.epub_view = self.preview_pane(self.views, "EPUB")
+        frame = ttk.Frame(middle)
+        frame.pack(side="left", fill="both", expand=True)
         self.tree = ttk.Treeview(frame, columns=("inc", "title", "page"), show="headings", selectmode="browse")
-        for col, text, width in (("inc", "Incluir", 60), ("title", "Capítulo", 560), ("page", "Página", 70)):
+        for col, text, width in (("inc", "Incluir", 60), ("title", "Capítulo", 300), ("page", "Página", 60)):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor="w" if col == "title" else "center", stretch=col == "title")
         self.scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -63,17 +90,7 @@ class App:
         self.scroll.pack(side="right", fill="y")
         self.tree.bind("<Button-1>", self.on_click)
         self.tree.bind("<Double-1>", self.on_double_click)
-        ttk.Label(root, text="Clic en Incluir: marcar o desmarcar · Doble clic en el título: editar",
-                  padding=(8, 0)).pack(anchor="w")
-
-        bottom = ttk.Frame(root, padding=8)
-        bottom.pack(fill="x")
-        self.progress = ttk.Progressbar(bottom, length=280)
-        self.progress.pack(side="left")
-        self.status = ttk.Label(bottom, text="")
-        self.status.pack(side="left", padx=8)
-        self.gen_btn = ttk.Button(bottom, text="Generar EPUB…", command=self.generate, state="disabled")
-        self.gen_btn.pack(side="right")
+        self.tree.bind("<<TreeviewSelect>>", self.update_preview)
         root.after(100, self.poll)
 
     def run(self, work, args, done, report=False):
@@ -130,7 +147,57 @@ class App:
             self.proc.join()
             if self.partial:
                 Path(self.partial).unlink(missing_ok=True)
+        if self.pdf_doc:
+            self.pdf_doc.close()
+        Path(self.preview_path).unlink(missing_ok=True)
         self.root.destroy()
+
+    def preview_pane(self, parent, name):
+        pane = ttk.Frame(parent)
+        pane.pack(side="left", padx=4, anchor="n")
+        caption = ttk.Label(pane, text=name)
+        caption.pack()
+        view = ttk.Label(pane, text="Selecciona un título", anchor="center")
+        view.image = None  # referencia a la imagen: sin ella, Tk la borra
+        view.pack()
+        return caption, view
+
+    def show_page(self, view, page):
+        """Dibuja una página (del PDF o del EPUB) ajustada al tamaño de la vista previa."""
+        self.views.update_idletasks()
+        room = self.views.winfo_height() - 30  # alto disponible menos la leyenda
+        height = min(PREVIEW_BOX[1], room) if room > 150 else PREVIEW_BOX[1]  # sin dibujar aún: tamaño normal
+        zoom = min(PREVIEW_BOX[0] / page.rect.width, height / page.rect.height)
+        view.image = tk.PhotoImage(data=page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("png"))
+        view.configure(image=view.image, text="")
+
+    def update_preview(self, _=None):
+        """Muestra la página del PDF del título seleccionado y cómo quedará en el EPUB."""
+        selected = self.tree.selection()
+        if not selected or not self.book:
+            return
+        item = selected[0]
+        index = int(item)
+        page = self.book.blocks[index].page
+        try:
+            self.show_page(self.pdf_view, self.pdf_doc[page - 1])
+            self.pdf_caption.configure(text=f"PDF · página {page}")
+        except Exception:
+            self.pdf_view.image = None
+            self.pdf_view.configure(image="", text="Sin vista previa")
+        # EPUB mínimo con solo este trozo (del título al siguiente): rápido de escribir y de maquetar
+        try:
+            blocks = self.book.blocks
+            end = next((k for k in range(index + 1, len(blocks)) if blocks[k].kind == "heading"), len(blocks))
+            part = convert.Book(self.book.title, "", self.book.cover, blocks[index:min(end, index + PREVIEW_BLOCKS)], [])
+            chapter = self.tree.set(item, "inc") == ON
+            convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path)
+            with pymupdf.open(self.preview_path) as epub:
+                self.show_page(self.epub_view, epub.load_page((1, 0)))  # el capítulo 0 es la portada
+            self.epub_caption.configure(text="EPUB · así se verá (" + ("capítulo" if chapter else "subtítulo") + ")")
+        except Exception:
+            self.epub_view.image = None
+            self.epub_view.configure(image="", text="Sin vista previa")
 
     def open_pdf(self):
         path = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
@@ -143,21 +210,29 @@ class App:
 
     def show_book(self, book):
         self.book = book
+        if self.pdf_doc:
+            self.pdf_doc.close()
+        self.pdf_doc = pymupdf.open(self.pdf)
         self.title_var.set(book.title)
         self.author_var.set(book.author)
-        for i in book.candidates:
-            block = book.blocks[i]
-            self.tree.insert("", "end", iid=str(i), values=(ON, html.unescape(block.html), block.page))
+        # Todos los títulos: los capítulos marcados; los subtítulos ("El lado de…") desmarcados, por si
+        # alguno debe ser capítulo. Un título desmarcado sale en el EPUB como subtítulo.
+        chapters = set(book.candidates)
+        for i, block in enumerate(book.blocks):
+            if block.kind == "heading":
+                mark = ON if i in chapters else OFF
+                self.tree.insert("", "end", iid=str(i), values=(mark, html.unescape(block.html), block.page))
         self.gen_btn.state(["!disabled"])
         self.progress.configure(value=0)
-        found = len(book.candidates)
-        self.status.configure(text=f"{found} capítulos detectados" if found else
-                              "No se detectaron capítulos: el EPUB tendrá una sola sección")
+        found, others = len(chapters), len(self.tree.get_children()) - len(chapters)
+        text = f"{found} capítulos detectados" if found else "No se detectaron capítulos: el EPUB tendrá una sola sección"
+        self.status.configure(text=text + (f" y {others} subtítulos" if others else ""))
 
     def on_click(self, event):
         item = self.tree.identify_row(event.y)
         if item and self.tree.identify_column(event.x) == "#1":
             self.tree.set(item, "inc", OFF if self.tree.set(item, "inc") == ON else ON)
+            self.update_preview()
 
     def on_double_click(self, event):
         item = self.tree.identify_row(event.y)
@@ -179,6 +254,7 @@ class App:
             if entry.get().strip():
                 self.tree.set(item, "title", entry.get().strip())
             close()
+            self.update_preview()
 
         def close(_=None):
             entry.destroy()

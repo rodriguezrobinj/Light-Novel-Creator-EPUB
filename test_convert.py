@@ -171,6 +171,37 @@ def test_pdf_without_novel_text_is_rejected():
         raise AssertionError("debía lanzar ValueError: un EPUB sin texto no es válido")
 
 
+def test_chapter_art_with_hidden_title_is_kept_once():
+    """Portada de capítulo: ilustración que tapa el título (texto oculto) y título repetido en la página siguiente.
+    Debe quedar el título una vez, seguido de la ilustración. Sin repetición, es un fondo decorativo."""
+    doc = pymupdf.open()
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 85), False)
+    pix.clear_with(20)
+    p = add_page(doc, 1, [(150, 150, "Capitulo 1: Inicio!", 16, "hebo")])  # la repetición puede perder el "!"
+    p.insert_image(p.rect, pixmap=pix, keep_proportion=False)  # la ilustración tapa el título
+    add_page(doc, 2, [
+        (150, 150, "Capitulo 1: Inicio", 16, "hebo"),
+        (92, 190, line("Primera linea del capitulo", 57), 11, "cour"),
+        (72, 204, line("Segunda linea del capitulo", 60), 11, "cour"),
+        (72, 218, "fin.", 11, "cour"),
+    ])
+    p = add_page(doc, 3, [(150, 400, "Capitulo 2: Final", 16, "hebo")])
+    p.insert_image(p.rect, pixmap=pix, keep_proportion=False, overlay=False)  # fondo decorativo
+    add_page(doc, 4, [
+        (92, 150, line("Texto del segundo capitulo", 57), 11, "cour"),
+        (72, 164, line("que sigue en otra linea", 60), 11, "cour"),
+        (72, 178, "fin.", 11, "cour"),
+    ])
+    path = TMP / "portadas.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [plain(book.blocks[i].html) for i in book.candidates]
+    assert titles == ["Capitulo 1: Inicio!", "Capitulo 2: Final"], titles
+    kinds = [(b.kind, b.page) for b in book.blocks]
+    assert kinds[:3] == [("heading", 1), ("image", 1), ("p", 2)], kinds
+    assert ("image", 3) not in kinds, kinds
+
+
 def test_index_without_title_is_skipped():
     """Un índice sin título "Contenido" se reconoce por las líneas de puntos, aunque vayan en negrita."""
     doc = pymupdf.open()
@@ -201,10 +232,60 @@ def test_outline_bookmarks_choose_chapters():
     doc.save(path)
     book = convert.analyze(path)
     titles = [plain(book.blocks[i].html) for i in book.candidates]
-    assert titles == ["Ilustraciones", "Capitulo 1: Inicio"], titles
+    # "Capitulo 2: Final" no tiene marcador, pero es un capítulo: se añade (hay PDF con marcadores incompletos)
+    assert titles == ["Ilustraciones", "Capitulo 1: Inicio", "Capitulo 2: Final"], titles
     assert book.blocks[0].kind == "heading" and book.blocks[1].kind == "image"
-    final = [k for k, b in enumerate(book.blocks) if b.kind == "heading" and plain(b.html) == "Capitulo 2: Final"]
-    assert final and final[0] not in book.candidates
+
+
+def test_illustration_under_text_is_kept():
+    """Ilustración a página completa con el texto de la novela encima: se guarda el texto y la imagen
+    incrustada original (sin el texto). Una imagen repetida en muchas páginas es un fondo y se ignora."""
+    doc = pymupdf.open()
+    art = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 85), False)
+    art.clear_with(90)
+    texture = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 30, 40), False)
+    texture.clear_with(240)
+    body = [(92, 150, line("Texto encima de la ilustracion", 57), 11, "cour"),
+            (72, 164, line("que sigue en la segunda linea", 60), 11, "cour"),
+            (72, 178, line("y en la tercera linea tambien", 60), 11, "cour"),
+            (72, 192, line("y en la cuarta linea tambien", 60), 11, "cour"),
+            (72, 206, "fin.", 11, "cour")]
+    p = add_page(doc, 1, [(150, 110, "Capitulo 1: Inicio", 20, "helv")] + body)
+    p.insert_image(p.rect, pixmap=texture, keep_proportion=False, overlay=False)
+    xref = p.get_images()[0][0]
+    p = add_page(doc, 2, body)
+    p.insert_image(p.rect, pixmap=art, keep_proportion=False, overlay=False)  # ilustración bajo el texto
+    for n in (3, 4):
+        p = add_page(doc, n, body)
+        p.insert_image(p.rect, xref=xref, keep_proportion=False, overlay=False)  # el mismo fondo en todas
+    path = TMP / "ilustracion-bajo-texto.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    images = [b for b in book.blocks if b.kind == "image"]
+    assert [b.page for b in images] == [2], [b.page for b in images]
+    picture = pymupdf.Pixmap(images[0].image)
+    assert (picture.width, picture.height) == (60, 85), (picture.width, picture.height)  # la original, no la página
+    assert sum(1 for b in book.blocks if b.kind == "p" and b.page == 2) == 1
+
+
+def test_indented_lowercase_line_continues_unfinished_paragraph():
+    """Algunos PDF ponen en línea nueva y con sangría el final de una frase: si el párrafo anterior no
+    terminó y la línea empieza en minúscula, es continuación. Tras un punto, es otro párrafo."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [
+        (72, 110, "Capitulo 1: Inicio", 20, "helv"),
+        (92, 150, line("Primera linea del parrafo", 57), 11, "cour"),
+        (72, 164, line("Asenti, liberando el aliento que habia estado", 60), 11, "cour"),
+        (92, 178, "conteniendo la risa.", 11, "cour"),
+        (92, 206, "Termina aqui.", 11, "cour"),
+        (92, 220, "del mundo que faltaba.", 11, "cour"),
+    ])
+    add_page(doc, 2, [(92, 150, "Otra pagina.", 11, "cour")])
+    path = TMP / "continuacion.pdf"
+    doc.save(path)
+    texts = [plain(b.html) for b in convert.analyze(path).blocks if b.kind == "p"]
+    assert any(t.startswith("Primera linea") and t.endswith("conteniendo la risa.") for t in texts), texts
+    assert "Termina aqui." in texts and "del mundo que faltaba." in texts, texts
 
 
 def visible_window():
@@ -219,6 +300,134 @@ def visible_window():
     window = app.App(root)
     root.update()
     return root, window
+
+
+def test_bookmarked_subtitles_at_body_size_are_headings():
+    """Subtítulos del tamaño del texto ("El lado de la bruja") que el PDF marca como nivel 2:
+    se reconocen como títulos por el marcador, sin ser capítulos."""
+    doc = pymupdf.open()
+    paragraph = [(92, 0, line("Primera linea del parrafo", 57), 11, "cour"),
+                 (72, 14, line("Segunda linea del parrafo", 60), 11, "cour"),
+                 (72, 28, "fin.", 11, "cour")]
+
+    def at(y, lines):
+        return [(x, y + dy, t, s, f) for x, dy, t, s, f in lines]
+
+    add_page(doc, 1, [(72, 120, "Capitulo 1: Inicio", 20, "helv")] + at(160, paragraph))
+    add_page(doc, 2, [(72, 120, "Capitulo 2: Final", 11, "cobo"),        # capítulo y subtítulo seguidos,
+                      (72, 140, "El lado de la bruja", 11, "cobo")]      # mismo tamaño: no deben unirse
+             + at(180, paragraph))
+    add_page(doc, 3, [(72, 120, "Lado de Teto", 11, "cour")] + at(160, paragraph))  # ni siquiera negrita
+    add_page(doc, 4, [(72, 120, "El lado del heredero", 11, "cobo"),     # subtítulo partido en dos líneas
+                      (72, 140, "Sutherland Olvart", 11, "cobo")] + at(180, paragraph))
+    doc.set_toc([[1, "Capitulo 1: Inicio", 1], [1, "Capitulo 2: Final", 2], [2, "El lado de la bruja", 2],
+                 [2, "Lado de Teto", 3], [2, "El lado del heredero Sutherland Olvart", 4]])
+    path = TMP / "subtitulos.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    headings = [(plain(b.html), k in book.candidates) for k, b in enumerate(book.blocks) if b.kind == "heading"]
+    assert headings == [("Capitulo 1: Inicio", True), ("Capitulo 2: Final", True), ("El lado de la bruja", False),
+                        ("Lado de Teto", False), ("El lado del heredero Sutherland Olvart", False)], headings
+
+
+def test_distant_heading_lines_are_separate_titles():
+    """Sin marcadores: capítulo y subtítulo seguidos, mismo tamaño pero separados en vertical, son dos títulos.
+    Las líneas de un título partido van juntas y sí se unen."""
+    doc = pymupdf.open()
+    paragraph = [(92, 0, line("Primera linea del parrafo", 57), 11, "cour"),
+                 (72, 14, line("Segunda linea del parrafo", 60), 11, "cour"),
+                 (72, 28, "fin.", 11, "cour")]
+
+    def at(y, lines):
+        return [(x, y + dy, t, s, f) for x, dy, t, s, f in lines]
+
+    add_page(doc, 1, [(180, 120, "Capitulo 1: Defendiendo", 16, "hebo"),
+                      (72, 190, "El lado de la fortaleza", 16, "hebo")] + at(230, paragraph))
+    add_page(doc, 2, [(150, 120, "Capitulo 2: Un titulo tan largo", 16, "hebo"),
+                      (200, 140, "que ocupa dos lineas", 16, "hebo")] + at(180, paragraph))
+    path = TMP / "titulos-separados.pdf"
+    doc.save(path)
+    headings = [plain(b.html) for b in convert.analyze(path).blocks if b.kind == "heading"]
+    assert headings == ["Capitulo 1: Defendiendo", "El lado de la fortaleza",
+                        "Capitulo 2: Un titulo tan largo que ocupa dos lineas"], headings
+
+
+def test_heading_that_is_not_a_chapter_is_written_as_subtitle():
+    """Un título que no es capítulo (p. ej. "El lado de la bruja") se ve como subtítulo, no como texto normal."""
+    book = convert.analyze(make_novel())
+    first = book.candidates[0]
+    out = TMP / "subtitulo.epub"
+    convert.write_epub(book, [(first, "Capitulo 1: Inicio")], out)
+    with zipfile.ZipFile(out) as z:
+        body = "".join(z.read(n).decode() for n in z.namelist() if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n))
+    assert "<h2>Capitulo 2: Final</h2>" in body, re.findall(r"<[^>]+>Capitulo 2[^<]*<", body)
+
+
+def test_window_lists_all_headings_with_chapters_checked():
+    """La lista muestra también los subtítulos, desmarcados, para poder convertirlos en capítulo."""
+    import app
+
+    root, window = visible_window()
+    book = convert.Book("Libro", "", b"", [
+        convert.Block("heading", 1, "Capitulo 1: Inicio"),
+        convert.Block("p", 1, "Texto."),
+        convert.Block("heading", 2, "El lado de la bruja"),
+        convert.Block("p", 2, "Mas texto."),
+    ], [0])
+    window.show_book(book)
+    rows = [(window.tree.set(i, "inc"), window.tree.set(i, "title")) for i in window.tree.get_children()]
+    root.destroy()
+    assert rows == [(app.ON, "Capitulo 1: Inicio"), (app.OFF, "El lado de la bruja")], rows
+
+
+def test_window_previews_pdf_page_and_epub_for_selected_title():
+    """Al seleccionar un título se ven su página del PDF y cómo quedará en el EPUB."""
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.tree.selection_set(window.tree.get_children()[0])  # Capitulo 1: Inicio, página 3
+    root.update()
+    widths = [view.image.width() if view.image else 0 for view in (window.pdf_view, window.epub_view)]
+    caption = window.pdf_caption.cget("text")
+    window.close()
+    assert widths[0] > 0, "sin vista previa del PDF"
+    assert widths[1] > 0, "sin vista previa del EPUB"
+    assert "página 3" in caption, caption
+
+
+def test_window_bottom_bar_stays_visible_with_previews():
+    """En pantallas bajas las vistas previas no deben empujar fuera la barra de progreso y el botón."""
+    root, window = visible_window()
+    root.geometry("1300x600+0+0")
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.tree.selection_set(window.tree.get_children()[0])
+    root.update()
+    bottom = window.root.winfo_rooty() + window.root.winfo_height()
+    shown = [(w.winfo_ismapped(), w.winfo_rooty() + w.winfo_height() <= bottom) for w in (window.gen_btn, window.progress)]
+    image_height = window.pdf_view.image.height() if window.pdf_view.image else 0
+    window.close()
+    assert shown == [(1, True), (1, True)], shown
+    assert 0 < image_height < 560, image_height  # se ajustó al alto disponible
+
+
+def test_window_epub_preview_follows_include_mark():
+    """Desmarcar un título regenera la vista previa del EPUB: pasa de capítulo a subtítulo."""
+    from types import SimpleNamespace
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    item = window.tree.get_children()[0]
+    window.tree.selection_set(item)
+    root.update()
+    x, y, w, h = window.tree.bbox(item, "inc")
+    window.on_click(SimpleNamespace(x=x + w // 2, y=y + h // 2))  # desmarcar
+    root.update()
+    with zipfile.ZipFile(window.preview_path) as z:
+        body = "".join(z.read(n).decode() for n in z.namelist() if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n))
+    window.close()
+    assert "<h2>Capitulo 1: Inicio</h2>" in body, re.findall(r"<h\d>[^<]*</h\d>", body)
 
 
 def test_window_double_click_on_include_toggles_twice():
