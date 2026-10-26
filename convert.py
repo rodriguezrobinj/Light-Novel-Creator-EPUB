@@ -36,6 +36,7 @@ class Row:
     bold: bool
     heading: bool = False  # se decide en analyze, cuando ya se conoce el tamaño normal del texto
     starts: bool = False   # con esta línea empieza un marcador del PDF: abre un título nuevo
+    box: tuple = ()        # rectángulo propio si la línea junta varias (etiqueta + nombre debajo)
 
 
 @dataclass
@@ -221,7 +222,7 @@ def _join_labels(rows):
             j += 1
         text = f"{label}: {' '.join(n.text for n in names)}" if names else label
         group = [row] + names
-        joined.append(replace(row, text=text, html=html.escape(text), heading=True,
+        joined.append(replace(row, text=text, html=html.escape(text), heading=True, box=_rect(group),
                               x0=min(r.x0 for r in group), x1=max(r.x1 for r in group)))
         i = j
     return joined
@@ -252,8 +253,9 @@ def _key(text):
 def _rect(rows):
     """Rectángulo que abarca unas líneas: la caja del span no sirve (Cambria la estira), así que
     se calcula desde la línea base y el tamaño de letra."""
-    return (min(r.x0 for r in rows), min(r.y - r.size for r in rows),
-            max(r.x1 for r in rows), max(r.y + r.size * 0.3 for r in rows))
+    boxes = [r.box or (r.x0, r.y - r.size, r.x1, r.y + r.size * 0.3) for r in rows]
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
 def _title(rows):
@@ -510,9 +512,10 @@ h1 .num { font-size: 0.65em; font-weight: normal; text-transform: uppercase; let
 """,
     "Novela ligera": """body { font-family: serif; }
 p { text-indent: 1.5em; text-align: justify; }
-h1 { text-align: center; margin: 20% 0 1.5em; padding-bottom: 0.6em; border-bottom: 1px solid #999999; }
-h1 .num { font-size: 0.75em; font-weight: normal; font-variant: small-caps; letter-spacing: 0.15em; }
-h1 .name { font-size: 1.5em; margin-top: 0.3em; }
+h1 { text-align: center; font-size: 1.25em; margin: 12% 0 1.2em; padding-bottom: 0.5em; border-bottom: 1px solid #999999; }
+h1 .num { font-size: 0.8em; font-weight: normal; font-variant: small-caps; letter-spacing: 0.15em; }
+h1 .name { font-size: 1.2em; margin-top: 0.3em; }
+h1 .name.long { font-size: 1em; }
 p.brk { font-size: 1.2em; }
 """,
 }
@@ -527,7 +530,8 @@ def _chapter_heading(title):
     m = CHAPTER_NUMBER.fullmatch(title)
     if not m:
         return f"<h1>{title}</h1>"
-    return f'<h1><span class="num">{m.group(1)}</span> <span class="name">{m.group(2)}</span></h1>'
+    name = "name long" if len(html.unescape(m.group(2))) > 45 else "name"  # los nombres largos, algo menores
+    return f'<h1><span class="num">{m.group(1)}</span> <span class="{name}">{m.group(2)}</span></h1>'
 
 CONTAINER = """<?xml version="1.0" encoding="utf-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">

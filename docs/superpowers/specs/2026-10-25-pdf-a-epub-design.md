@@ -186,7 +186,8 @@ class Book:
   (número impar de comillas: el diálogo sigue en el párrafo siguiente).
 - Estilos (`style`; en la ventana, desplegable, por defecto "Clásico"): Clásico (serif,
   justificado, sangría), Moderno (sin serif, a la izquierda, párrafos separados) y Novela
-  ligera (número en versalitas, nombre grande, línea decorativa, separador `❖`). Todos llevan
+  ligera (número en versalitas, nombre hasta 1,5 veces el texto y menor si pasa de 45
+  caracteres, línea decorativa, separador `❖`). Todos llevan
   la tipografía de libro impreso: partición de palabras (`hyphens: auto`), sin sangría tras
   título, separador o ilustración, y `orphans`/`widows` 2.
 - Un capítulo cuyo título empieza por "Capítulo 3:", "Prólogo:", "Parte Uno:" o similar se

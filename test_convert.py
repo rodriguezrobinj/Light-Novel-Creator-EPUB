@@ -214,6 +214,29 @@ def test_epub_styles_and_print_typography():
         assert f'<p class="brk">{separator}</p>' in text, (style, separator)
 
 
+def test_novela_ligera_chapter_name_is_not_oversized():
+    """El nombre del capítulo no pasa de 1,5 veces el texto normal; los nombres largos, menos aún."""
+    css = convert.STYLES["Novela ligera"]
+    h1 = float(re.search(r"h1 \{[^}]*font-size: ([\d.]+)em", css).group(1))
+    name = float(re.search(r"h1 \.name \{[^}]*font-size: ([\d.]+)em", css).group(1))
+    long_name = float(re.search(r"h1 \.name\.long \{[^}]*font-size: ([\d.]+)em", css).group(1))
+    assert h1 * name <= 1.5 and h1 * long_name < h1 * name, (h1, name, long_name)
+    long_title = "Capítulo 2: Una Mañana Impactante, ¡El Caso de Asesinato por Empalamiento!"
+    assert 'class="name long"' in convert._chapter_heading(long_title)
+    assert 'class="name"' in convert._chapter_heading("Capítulo 3: La Guarida")
+
+
+def test_joined_title_rectangle_covers_the_name():
+    """El recuadro del título unido ("» Capitulo 1 «" + nombre debajo) abarca también el nombre."""
+    doc = pymupdf.open()
+    chapter_page(doc, 1, [(230, 120, "» Capitulo 1 «", 20, "hebo"), (200, 140, "¡El regreso!", 12, "hebo")])
+    path = TMP / "recuadro-unido.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    x0, y0, x1, y1 = book.blocks[book.candidates[0]].rect
+    assert y0 < 120 and y1 > 140, book.blocks[book.candidates[0]].rect
+
+
 def test_chapter_title_split_into_number_and_name():
     out = TMP / "titulo-partido.epub"
     convert.write_epub(styled_book(), [(0, "Capítulo 3: La Guarida"), (4, "Epílogo")], out)
