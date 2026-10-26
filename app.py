@@ -113,7 +113,7 @@ class App:
         self.pdf_view.pack()
         epub_pane = self.preview_pane(self.views, "EPUB", self.epub_step)
         self.epub_caption = epub_pane[0]
-        self.epub_view = ttk.Label(epub_pane[2], text="Selecciona un título", anchor="center")
+        self.epub_view = tk.Canvas(epub_pane[2], highlightthickness=0)
         self.epub_view.image = None  # referencia a la imagen: sin ella, Tk la borra
         self.epub_view.pack()
         device = ttk.Combobox(epub_pane[1], textvariable=self.device_var, values=list(DEVICES), width=11,
@@ -138,6 +138,10 @@ class App:
         for tag in KIND_TAG.values():
             self.tree.tag_configure(tag, font=self.fonts[tag],
                                     foreground={"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a"}[tag])
+        # Marcos de tamaño fijo: solo cambian si cambia el alto de la ventana, no con cada página
+        self.idle_text, self.views_height = "Abre un PDF para ver la vista previa", 0
+        self.views.bind("<Configure>", self.on_resize)
+        self.redraw()
         root.after(100, self.poll)
 
     def run(self, work, args, done, report=False):
@@ -216,16 +220,62 @@ class App:
         body.pack()
         return caption, controls, body
 
-    def render(self, page, dark=False):
-        """Imagen de una página (del PDF o del EPUB) ajustada al alto disponible, y su escala."""
-        self.views.update_idletasks()
+    def box_size(self):
+        """Tamaño fijo de cada vista previa (proporción 3:4) según el alto de la ventana. No depende
+        de la página: así cambiar de dispositivo o de página no mueve el resto de la ventana."""
         room = self.views.winfo_height() - PREVIEW_CHROME
-        height = min(PREVIEW_BOX[1], room) if room > 150 else PREVIEW_BOX[1]  # sin dibujar aún: tamaño normal
-        zoom = min(PREVIEW_BOX[0] / page.rect.width, height / page.rect.height)
+        height = min(PREVIEW_BOX[1], room) if room > 150 else 420  # aún sin dibujar: tamaño normal
+        return int(height * 0.75), height
+
+    def blank(self, canvas, text):
+        """Hoja en blanco del tamaño de la vista previa, con un aviso tenue en el centro."""
+        width, height = self.box_size()
+        canvas.delete("all")
+        canvas.image = None
+        canvas.configure(width=width, height=height)
+        canvas.create_rectangle(1, 1, width - 2, height - 2, fill="white", outline="#d4d4d4", tags="sheet")
+        canvas.create_text(width // 2, height // 2, text=text, fill="#9a9a9a", width=width - 40,
+                           justify="center", tags="message")
+
+    def place(self, canvas, image):
+        """Pone la imagen centrada en su marco fijo; devuelve el desplazamiento (x, y)."""
+        width, height = self.box_size()
+        canvas.delete("all")
+        canvas.image = image
+        canvas.configure(width=width, height=height)
+        x, y = (width - image.width()) // 2, (height - image.height()) // 2
+        canvas.create_image(x, y, anchor="nw", image=image)
+        return x, y
+
+    def redraw(self):
+        """Vuelve a dibujar las vistas previas (al iniciar, al cargar un libro o al cambiar el alto)."""
+        if self.book and self.tree.selection():
+            self.draw_pdf()
+            self.draw_epub()
+            return
+        self.blank(self.pdf_view, self.idle_text)
+        self.blank(self.epub_view, self.idle_text)
+        if not self.thumbs:  # tira vacía: rectángulos tenues en lugar de un hueco
+            self.strip.delete("placeholder")
+            width = int(THUMB_HEIGHT * 0.71)
+            for n in range(20):
+                x = 4 + n * (width + 8)
+                self.strip.create_rectangle(x, 6, x + width, 6 + THUMB_HEIGHT, fill="#e6e6e6", outline="",
+                                            tags="placeholder")
+
+    def on_resize(self, event):
+        if event.height != self.views_height:  # solo el alto cambia el tamaño de los marcos
+            self.views_height = event.height
+            self.redraw()
+
+    def render(self, page, dark=False):
+        """Imagen de una página (del PDF o del EPUB) ajustada a su marco, y su escala."""
+        width, height = self.box_size()
+        zoom = min(width / page.rect.width, height / page.rect.height)
         pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
         if dark:  # aproximación del modo oscuro de los lectores: invierte también las ilustraciones
             pix.invert_irect()
-        return tk.PhotoImage(data=pix.tobytes("ppm")), zoom
+        return tk.PhotoImage(master=self.root, data=pix.tobytes("ppm")), zoom
 
     def update_preview(self, _=None):
         """Al seleccionar (o cambiar) un título: su página del PDF y su sección en el EPUB."""
@@ -255,27 +305,23 @@ class App:
 
     def draw_pdf(self):
         canvas = self.pdf_view
-        canvas.delete("all")
         try:
-            canvas.image, zoom = self.render(self.pdf_doc[self.pdf_page])
+            image, zoom = self.render(self.pdf_doc[self.pdf_page])
         except Exception:
-            canvas.image = None
-            canvas.configure(width=PREVIEW_BOX[0], height=60)
-            canvas.create_text(PREVIEW_BOX[0] // 2, 30, text="Sin vista previa")
+            self.blank(canvas, "Sin vista previa")
             return
-        canvas.configure(width=canvas.image.width(), height=canvas.image.height())
-        canvas.create_image(0, 0, anchor="nw", image=canvas.image)
+        dx, dy = self.place(canvas, image)
         if self.highlight and self.highlight[0] == self.pdf_page:  # recuadro sobre la línea tomada como título
             x0, y0, x1, y1 = (v * zoom for v in self.highlight[1])
-            canvas.create_rectangle(x0 - 3, y0 - 2, x1 + 3, y1 + 2, outline="red", width=2, tags="title")
+            canvas.create_rectangle(dx + x0 - 3, dy + y0 - 2, dx + x1 + 3, dy + y1 + 2, outline="red", width=2,
+                                    tags="title")
         self.pdf_caption.configure(text=f"PDF · página {self.pdf_page + 1}")
         self.mark_current()
 
     def draw_epub(self):
         view = self.epub_view
         if self.epub_cut or self.epub_pages < 0:
-            view.image = None
-            view.configure(image="", text="Esta sección no irá en el EPUB" if self.epub_cut else "Sin vista previa")
+            self.blank(view, "Esta sección no irá en el EPUB" if self.epub_cut else "Sin vista previa")
             self.epub_caption.configure(text="EPUB")
             return
         try:
@@ -284,12 +330,11 @@ class App:
                 epub.layout(width=width, height=height, fontsize=11)
                 self.epub_pages = epub.chapter_page_count(1)  # el capítulo 0 es la portada
                 self.epub_page = max(0, min(self.epub_page, self.epub_pages - 1))
-                view.image, _ = self.render(epub.load_page((1, self.epub_page)), dark=self.dark_var.get())
+                image, _ = self.render(epub.load_page((1, self.epub_page)), dark=self.dark_var.get())
         except Exception:
-            view.image = None
-            view.configure(image="", text="Sin vista previa")
+            self.blank(view, "Sin vista previa")
             return
-        view.configure(image=view.image, text="")
+        self.place(view, image)
         self.epub_caption.configure(text=f"EPUB · {self.device_var.get()} · {self.epub_page + 1}/{self.epub_pages}")
 
     def pdf_step(self, delta):
@@ -315,10 +360,11 @@ class App:
         if job != self.thumb_job or not self.pdf_doc:
             return
         end = min(start + THUMBS_PER_TICK, self.pdf_doc.page_count)
+        self.strip.delete("placeholder")
         for n in range(start, end):
             page = self.pdf_doc[n]
             zoom = THUMB_HEIGHT / page.rect.height
-            image = tk.PhotoImage(data=page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("ppm"))
+            image = tk.PhotoImage(master=self.root, data=page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("ppm"))
             self.thumb_images.append(image)
             x, w, h = self.thumb_x, image.width(), image.height()
             self.strip.create_image(x, 6, anchor="nw", image=image, tags=(f"p{n}",))
@@ -379,6 +425,9 @@ class App:
                 mark = ON if i in chapters else OFF
                 self.tree.insert("", "end", iid=str(i), values=(mark, html.unescape(block.html), block.page),
                                  tags=(KIND_TAG[mark],))
+        self.idle_text = "Selecciona un título en la lista"
+        self.blank(self.pdf_view, self.idle_text)
+        self.blank(self.epub_view, self.idle_text)
         self.start_thumbs()
         self.gen_btn.state(["!disabled"])
         self.progress.configure(value=0)

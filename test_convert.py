@@ -598,7 +598,7 @@ def test_window_removed_section_preview_and_epub():
     root.update()
     window.tree.set(item, "inc", app.CUT)
     window.update_preview()
-    preview = (window.epub_view.cget("text"), window.epub_view.image)
+    preview = (window.epub_view.itemcget("message", "text"), window.epub_view.image)
     out = TMP / "quitado-desde-ventana.epub"
     originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
     app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
@@ -669,7 +669,7 @@ def test_window_highlights_detected_title_on_pdf_preview():
     canvas = window.pdf_view
     boxes = canvas.find_withtag("title")
     coords = canvas.coords(boxes[0]) if boxes else []
-    size = (window.pdf_view.image.width(), window.pdf_view.image.height())
+    size = (int(canvas.cget("width")), int(canvas.cget("height")))  # el marco donde va centrada la página
     window.close()
     assert coords, "sin recuadro sobre el título"
     assert 0 <= coords[0] < coords[2] <= size[0] and 0 <= coords[1] < coords[3] <= size[1], (coords, size)
@@ -755,6 +755,37 @@ def test_window_thumbnail_strip():
 def app_colors():
     import app
     return app.MARK_COLORS
+
+
+def test_window_starts_with_blank_canvases():
+    """Al iniciar, las vistas previas y la tira muestran una hoja en blanco, no un hueco vacío."""
+    root, window = visible_window()
+    root.update()
+    message = window.pdf_view.itemcget("message", "text")
+    sheets = [len(view.find_withtag("sheet")) for view in (window.pdf_view, window.epub_view)]
+    placeholders = len(window.strip.find_withtag("placeholder"))
+    window.close()
+    assert sheets == [1, 1] and "Abre un PDF" in message, (sheets, message)
+    assert placeholders > 0
+
+
+def test_window_device_change_keeps_layout():
+    """Cambiar de dispositivo no cambia el tamaño de las vistas previas ni mueve la lista."""
+    root, window = visible_window()
+    root.geometry("1366x690+0+0")  # como una pantalla de portátil: ahí se notaba el salto
+    window.pdf = make_novel()
+    window.show_book(long_book())
+    window.tree.selection_set(window.tree.get_children()[0])
+    root.update()
+    sizes = set()
+    for device in ("Celular", 'E-reader 6"', "Tablet", "Celular"):
+        window.device_var.set(device)
+        window.draw_epub()
+        root.update()
+        sizes.add((window.views.winfo_width(), window.epub_view.winfo_width(), window.epub_view.winfo_height(),
+                   window.tree.winfo_width()))
+    window.close()
+    assert len(sizes) == 1, sizes
 
 
 def test_window_double_click_on_include_toggles_twice():

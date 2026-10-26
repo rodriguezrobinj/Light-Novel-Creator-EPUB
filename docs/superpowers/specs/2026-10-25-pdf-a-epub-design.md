@@ -193,6 +193,10 @@ class Book:
 - Vista previa del PDF en un `Canvas`, con un recuadro rojo sobre la línea tomada como título
   (`Block.rect`, calculado desde línea base y tamaño de letra). Botones ◀ ▶ en cada vista:
   el PDF recorre todo el documento; el EPUB, la sección completa (del título al siguiente).
+- Las dos vistas previas son marcos de tamaño fijo (proporción 3:4, según el alto de la
+  ventana) con la página centrada dentro: cambiar de dispositivo o de página no mueve el
+  resto de la ventana. Sin libro, o sin título seleccionado, muestran una hoja en blanco con
+  un aviso, y la tira de miniaturas, rectángulos grises de relleno.
 - Vista del EPUB por dispositivo (Celular 300×560, E-reader 6" 420×560, Tablet 560×750 pt,
   con `doc.layout`) y modo oscuro aproximado invirtiendo la imagen (también las ilustraciones).
 - Tira de miniaturas del PDF bajo las vistas previas: borde azul si la página tiene título,
