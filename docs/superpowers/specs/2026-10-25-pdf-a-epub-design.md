@@ -100,9 +100,10 @@ class Book:
      fondo de una página de título. No se apuntan los fondos y barras repetidos ni las
      diminutas. `write_epub` omite las de `keep=False`; cada imagen se guarda como
      `img/bNNNNN.jpg` (por bloque: una página puede tener varias).
-5. **Página de índice del PDF:** una página cuya primera línea es exactamente
-   `Contenido`, `Índice`, `Tabla de contenido` o `Contents` (con o sin `:`), o que tiene
-   tres o más líneas terminadas en puntos y número (`.....  12`), se descarta completa.
+5. **Página de índice del PDF:** una página con `Contenido`, `Índice`, `Tabla de contenido` o
+   `Contents` (con o sin `:`) como una de sus 3 primeras líneas (puede haber créditos encima),
+   o con tres o más líneas acabadas en puntos o guiones hasta el número de página
+   (`.....  12`, `| Capítulo 1 | ---- Pág. 54`), se descarta completa.
 6. **Párrafos:** las líneas se agrupan por línea base (`span["origin"]`), no por la caja
    del span: en algunas fuentes (Cambria) la caja mide el triple de la línea real, y el
    texto justificado parte una línea en varios spans. Empieza párrafo nuevo si:
@@ -137,6 +138,12 @@ class Book:
      (entera; o en parte si va en negrita, para títulos partidos). Así se reconocen
      subtítulos del tamaño del texto que el PDF marca como nivel 2 (Maryoku: "El lado de…").
      Esos títulos no son capítulos: salen como subtítulo.
+   - Una línea de título que es solo la etiqueta del capítulo ("» Capítulo 1 «", "«Prólogo»",
+     "CAPITULO UNO:"; o cualquier texto corto entre adornos `» « - |`) se une con hasta 3
+     líneas en negrita pegadas debajo (a menos de 2,2 veces el tamaño de la anterior), aunque
+     no lleguen a tamaño de título: "Capítulo 1: Nombre" (Kage, UntitledT). Se quitan los adornos.
+   - Sin marcadores, los títulos anteriores al primer capítulo con palabra clave son portadilla
+     ("The Eminence in Shadow", "- Volumen 5 -") y no cuentan como capítulo.
    - Líneas de título consecutivas del mismo tamaño se unen en un solo bloque `heading`
      si están pegadas (a menos de 2 veces su tamaño de letra) y la segunda no abre un
      marcador. Un subtítulo justo debajo del capítulo queda más lejos (Maryoku Vol 6: 67 pt

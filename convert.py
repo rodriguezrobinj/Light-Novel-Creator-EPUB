@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,9 +17,9 @@ KEYWORDS = re.compile(
     r"(cap[ií]tulo|pr[oó]logo|ep[ií]logo|interludio|historia paralela|palabras de cierre"
     r"|extra|parte|chapter|prologue|epilogue|afterword|interlude)\b", re.I)
 TOC_TITLE = re.compile(r"(contenidos?|[ií]ndice|tabla de contenidos?|contents|table of contents):?", re.I)
-DOT_LEADER = re.compile(r"\.{4,}\s*\d+$")
+DOT_LEADER = re.compile(r"[.\-_·…]{4,}\s*(?:p[áa]g\.?\s*)?\d+\s*\|?$", re.I)  # "..... 12", "---- Pág. 54"
 SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈•·#~◎◯]+")
-END_PUNCT = (".", "!", "?", "…", '"', "'", "»", "”", "’", ":", ")")
+END_PUNCT = (".", "!", "?", "…", '"', "'", "»", "”", "’", ":", ")", "]")  # "]": notas del traductor
 SOFT_HYPHEN = "\u00ad"  # guion de partición: solo se ve si cae al final de la línea
 TAGS = re.compile(r"<[^>]+>")
 BAD_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
@@ -185,8 +185,53 @@ def _is_heading(r, body):
     return r.size >= body * 1.3 or (r.bold and (r.size >= body * 1.1 or bool(KEYWORDS.match(r.text))))
 
 
+LABEL_DECOR = "»«-–—|·*~ "  # adornos alrededor de una etiqueta de capítulo: "» Capítulo 1 «", "«Prólogo»"
+CHAPTER_LABEL = re.compile(
+    r"(?:cap[ií]tulo|chapter|pr[oó]logo|prologue|ep[ií]logo|epilogue|interludio|interlude|anexo|parte|part"
+    r"|volumen|historia\b[^:]*)(?: [\w.]+)?", re.I)
+
+
+def _label(row):
+    """Texto de una etiqueta de capítulo sola ("» Capítulo 1 «", "«Prólogo»", "CAPITULO UNO:"), sin
+    adornos; None si la línea es otra cosa."""
+    text = row.text.strip(LABEL_DECOR).rstrip(":.").strip()
+    if text and (CHAPTER_LABEL.fullmatch(text) or (text != row.text.strip() and len(text) <= 40)):
+        return text
+    return None
+
+
+def _join_labels(rows):
+    """Algunos PDF ponen la etiqueta del capítulo en una línea y el nombre debajo, en negrita y a
+    veces más pequeño que un título: se unen en un solo título "Capítulo 1: Nombre"."""
+    joined, i = [], 0
+    while i < len(rows):
+        row = rows[i]
+        label = _label(row) if row.heading else None
+        if label is None:
+            joined.append(row)
+            i += 1
+            continue
+        names, j = [], i + 1
+        while j < len(rows) and len(names) < 3:
+            nxt, last = rows[j], (names[-1] if names else row)
+            if (len(nxt.text) > 120 or not (nxt.bold or nxt.heading) or nxt.starts
+                    or nxt.y - last.y >= 2.2 * last.size or (names and abs(nxt.size - names[0].size) >= 0.5)):
+                break
+            names.append(nxt)
+            j += 1
+        text = f"{label}: {' '.join(n.text for n in names)}" if names else label
+        group = [row] + names
+        joined.append(replace(row, text=text, html=html.escape(text), heading=True,
+                              x0=min(r.x0 for r in group), x1=max(r.x1 for r in group)))
+        i = j
+    return joined
+
+
 def _is_toc(rows):
-    return bool(TOC_TITLE.fullmatch(rows[0].text)) or sum(bool(DOT_LEADER.search(r.text)) for r in rows) >= 3
+    """Página de índice del PDF: título "Contenido" en sus primeras líneas (puede haber créditos
+    encima) o al menos tres líneas con puntos o guiones hasta el número de página."""
+    return (any(TOC_TITLE.fullmatch(r.text) for r in rows[:3])
+            or sum(bool(DOT_LEADER.search(r.text)) for r in rows) >= 3)
 
 
 def _first_group(rows):
@@ -338,6 +383,7 @@ def analyze(pdf_path, progress=None):
             heading_only = len(headings) == len(rows)
             if heading_only:
                 rows = _first_group(rows)
+            rows = _join_labels(rows)
             start = len(blocks)
             normal = [r for r in rows if not r.heading]
             # Ilustración con el texto de la novela encima: se guardan las dos cosas. El párrafo abierto
@@ -417,7 +463,11 @@ def analyze(pdf_path, progress=None):
                        and KEYWORDS.match(html.unescape(b.html))}
             candidates = [k for k, b in enumerate(blocks) if id(b) in chosen]
         else:
-            candidates = [k for k, b in enumerate(blocks) if b.kind == "heading"]
+            # La portadilla ("The Eminence in Shadow", "- Volumen 5 -") va antes del primer capítulo con
+            # palabra clave: no cuenta como capítulo (en la ventana queda como subtítulo).
+            heads = [k for k, b in enumerate(blocks) if b.kind == "heading"]
+            first = next((k for k in heads if KEYWORDS.match(html.unescape(blocks[k].html))), None)
+            candidates = [k for k in heads if first is None or k >= first]
 
         meta = doc.metadata or {}
         meta_title = meta.get("title") or ""

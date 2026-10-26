@@ -397,6 +397,63 @@ def test_index_without_title_is_skipped():
     assert titles == ["Capitulo 1: Inicio"], titles
 
 
+def chapter_page(doc, number, title_lines):
+    """Página con unas líneas de título y un párrafo debajo."""
+    add_page(doc, number, title_lines + [
+        (92, 230, line("Primera linea del parrafo", 57), 11, "cour"),
+        (72, 244, line("Segunda linea del parrafo", 60), 11, "cour"),
+        (72, 258, "fin.", 11, "cour"),
+    ])
+
+
+def test_index_with_credit_line_and_dashed_leaders_is_skipped():
+    """Índice con una línea de créditos encima del título y líneas "| Capítulo 1 | ---- Pág. 3"."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [
+        (200, 130, "Grupo Scan Team", 10, "hebo"),
+        (200, 170, "Tabla De Contenido", 24, "helv"),
+        (54, 210, "| Capitulo 1 | ------------------ Pág. 2", 16, "helv"),
+        (54, 240, "| Capitulo 2 | ------------------ Pág. 3", 16, "helv"),
+        (54, 270, "| Epilogo | -------------------- Pág. 4", 16, "helv"),
+    ])
+    chapter_page(doc, 2, [(72, 150, "Capitulo 1: Inicio", 20, "helv")])
+    path = TMP / "indice-guiones.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [plain(book.blocks[i].html) for i in book.candidates]
+    assert titles == ["Capitulo 1: Inicio"], titles
+
+
+def test_chapter_label_joins_the_name_below():
+    """"» Capitulo 1 «" con el nombre debajo en negrita (aunque no llegue a tamaño de título), o
+    "«Capitulo 2»" con un nombre en dos líneas de otro tamaño: un solo capítulo, sin adornos."""
+    doc = pymupdf.open()
+    chapter_page(doc, 1, [(230, 120, "» Capitulo 1 «", 20, "hebo"),
+                          (200, 140, "¡El regreso!", 12, "hebo")])
+    chapter_page(doc, 2, [(230, 120, "«Capitulo 2»", 18, "hebo"),
+                          (180, 145, "Un titulo largo", 14, "hebo"),
+                          (190, 165, "en dos lineas", 14, "hebo")])
+    path = TMP / "etiquetas.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [plain(book.blocks[i].html) for i in book.candidates]
+    assert titles == ["Capitulo 1: ¡El regreso!", "Capitulo 2: Un titulo largo en dos lineas"], titles
+    assert not any(plain(b.html) == "¡El regreso!" for b in book.blocks if b.kind == "p")
+
+
+def test_front_matter_before_first_chapter_is_not_a_chapter():
+    """Sin marcadores, la portadilla ("Mi Serie", "- Volumen 5 -") no cuenta como capítulo."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(150, 200, "Mi Serie", 30, "hebo"), (150, 400, "- Volumen 5 -", 30, "helv")])
+    chapter_page(doc, 2, [(72, 150, "Capitulo 1: Inicio", 20, "helv")])
+    path = TMP / "portadilla.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    headings = [(plain(b.html), k in book.candidates) for k, b in enumerate(book.blocks) if b.kind == "heading"]
+    assert ("Capitulo 1: Inicio", True) in headings, headings
+    assert all(not chosen for title, chosen in headings if title != "Capitulo 1: Inicio"), headings
+
+
 def test_outline_bookmarks_choose_chapters():
     """Si el PDF tiene marcadores, los de primer nivel mandan sobre los títulos detectados."""
     doc = pymupdf.open(make_novel())
