@@ -279,6 +279,20 @@ def _images(page):
     return sorted(found.items(), key=lambda item: -item[1])
 
 
+def _ornaments(page, rows):
+    """Posición vertical de los adornos que hacen de separador de escena (Kage, Nageki): imágenes
+    pequeñas, centradas, fuera de los márgenes y con texto encima y debajo."""
+    width, height = page.rect.width, page.rect.height
+    found = []
+    for info in page.get_image_info():
+        x0, y0, x1, y1 = info["bbox"]
+        if (x1 - x0 < 0.3 * width and y1 - y0 < 0.1 * height and abs((x0 + x1) / 2 - width / 2) < 0.15 * width
+                and BAND * height < (y0 + y1) / 2 < (1 - BAND) * height
+                and any(r.y < y0 for r in rows) and any(r.y > y1 for r in rows)):
+            found.append((y0 + y1) / 2)
+    return sorted(found)
+
+
 def _with_mask(pix, mask):
     """Aplica una máscara de transparencia. PyMuPDF a veces entrega la imagen con un canal alfa
     opaco y la forma en la máscara aparte: ese alfa se descarta y manda la máscara."""
@@ -421,7 +435,13 @@ def analyze(pdf_path, progress=None):
             left = min((r.x0 for r in normal), default=0)
             right = max((r.x1 for r in normal), default=0)
             prev = None
+            ornaments = _ornaments(page, rows)  # adornos-separador, de arriba abajo
             for r in rows:
+                while ornaments and ornaments[0] < r.y:  # el adorno queda por encima de esta línea
+                    ornaments.pop(0)
+                    if blocks and blocks[-1].kind != "break":
+                        blocks.append(Block("break", num))
+                    para = None
                 if r.heading:
                     # Se une a la línea anterior si es el mismo título partido: mismo tamaño y pegada
                     # (un subtítulo justo debajo del capítulo queda más lejos, o lo abre un marcador).

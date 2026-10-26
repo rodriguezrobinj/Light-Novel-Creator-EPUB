@@ -429,6 +429,27 @@ def test_mask_wins_over_opaque_alpha():
         result.pixel(0, 0), result.pixel(10, 5))
 
 
+def test_ornament_image_between_paragraphs_is_a_scene_break():
+    """Un adorno pequeño y centrado entre dos párrafos (Kage, Nageki) es un separador de escena;
+    una imagen pequeña pegada al margen, no."""
+    doc = pymupdf.open()
+    ornament = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 10, 16), False)
+    ornament.clear_with(40)
+    lines = [(92, 150, line("Primer parrafo de la escena", 57), 11, "cour"), (72, 164, "fin uno.", 11, "cour"),
+             (92, 240, line("Segundo parrafo tras el adorno", 57), 11, "cour"), (72, 254, "fin dos.", 11, "cour")]
+    add_page(doc, 1, [(72, 110, "Capitulo 1: Inicio", 20, "helv")] + lines)
+    doc[0].insert_image(pymupdf.Rect(290, 190, 305, 214), pixmap=ornament)  # centrado entre los dos
+    add_page(doc, 2, lines)
+    doc[1].insert_image(pymupdf.Rect(40, 190, 55, 214), pixmap=ornament)  # pegado al margen
+    path = TMP / "adorno.pdf"
+    doc.save(path)
+    blocks = convert.analyze(path).blocks
+    page1 = [b.kind for b in blocks if b.page == 1]
+    page2 = [b.kind for b in blocks if b.page == 2]
+    assert page1 == ["heading", "p", "break", "p"], page1
+    assert "break" not in page2, page2
+
+
 def test_write_epub_leaves_out_images_not_kept():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("image", 1, image=JPEG, keep=True),
               convert.Block("image", 1, image=JPEG, keep=False), convert.Block("p", 1, "Texto.")]

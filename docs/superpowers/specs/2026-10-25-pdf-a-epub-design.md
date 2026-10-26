@@ -128,6 +128,9 @@ class Book:
    escapa para XHTML.
 8. **Separadores de escena:** una línea formada solo por símbolos (`☆★*◆◇●○#~`, etc.)
    se convierte en bloque `break`.
+   También un adorno dibujado (Kage, Nageki): imagen pequeña (menos del 30 % del ancho y del 10 %
+   del alto), centrada, fuera de las franjas de encabezado y pie y con texto encima y debajo;
+   el separador va en su posición entre las líneas.
 9. **Capítulos candidatos:**
    - Si el PDF tiene marcadores (`doc.get_toc()`), se usan los de primer nivel. Además
      cuenta un título detectado que empieza con palabra clave y está en una página sin
