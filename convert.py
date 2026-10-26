@@ -327,8 +327,18 @@ def _illustration(page, uses):
     return None
 
 
-def _render(page):
-    return page.get_pixmap(dpi=150).tobytes("jpg", jpg_quality=85)
+def _render(page, crop=False):
+    """La página como JPEG. Con crop, solo la zona de la ilustración: rara vez llega al borde exacto
+    de la página (medido: 0,2 a 2,8 pt) y el blanco del papel se veía como un marco. El recorte entra
+    1 pt para no dejar píxeles a medias con el blanco."""
+    clip = None
+    if crop:
+        art = pymupdf.Rect()
+        for info in page.get_image_info():
+            art |= pymupdf.Rect(info["bbox"]) & page.rect
+        if abs(art) >= 0.5 * abs(page.rect):
+            clip = art + (1, 1, -1, -1)
+    return page.get_pixmap(dpi=150, clip=clip).tobytes("jpg", jpg_quality=85)
 
 
 def _join(a, b):
@@ -401,7 +411,7 @@ def analyze(pdf_path, progress=None):
             # ponytail: solo ilustraciones a página completa; las pequeñas dentro del texto se descartan
             covered = sum(len(r.text) for r in rows) < 200 and _image_coverage(page) > 0.5
             if covered and not headings:
-                blocks.append(Block("image", num, image=_render(page)))
+                blocks.append(Block("image", num, image=_render(page, crop=True)))
                 para = None
                 continue
             # Portada de capítulo: la ilustración tapa el título (texto oculto) y la página siguiente lo repite.
@@ -409,7 +419,7 @@ def analyze(pdf_path, progress=None):
             if covered and len(headings) == len(rows) and i + 1 < n and _title(rows) == _title(pages[i + 1]):
                 group = _first_group(rows)
                 blocks.append(Block("heading", num, html.escape(" ".join(r.text for r in group)), rect=_rect(group)))
-                blocks.append(Block("image", num, image=_render(page)))
+                blocks.append(Block("image", num, image=_render(page, crop=True)))
                 para, repeated = None, _title(rows)
                 continue
             if not rows or _is_toc(rows):
@@ -493,7 +503,7 @@ def analyze(pdf_path, progress=None):
         if blocks and blocks[0].kind == "image" and blocks[0].page == 1:
             cover = blocks.pop(0).image
         else:
-            cover = _render(doc[0])
+            cover = _render(doc[0], crop=True)
 
         outline = [(title, p) for level, title, p in doc.get_toc() if level == 1]
         if outline:

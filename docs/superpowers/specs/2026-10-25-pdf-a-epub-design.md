@@ -86,6 +86,10 @@ class Book:
    la página se renderiza completa a JPEG (unos 150 dpi) como bloque `image`. Si el texto
    restante es un título de capítulo, se conserva solo el título y se descartan las
    decoraciones.
+   - Las páginas de solo ilustración, las portadas de capítulo y la portada se dibujan recortadas a
+     la zona de las imágenes, 1 pt hacia dentro: la ilustración rara vez llega al borde exacto de la
+     página (medido: 0,2 a 2,8 pt) y el blanco del papel se veía como un marco. Las páginas de
+     diseño de los preliminares se dibujan enteras (su fondo blanco es parte del diseño).
    - **Portada de capítulo** (World Project Vol 7): la ilustración tapa el título (texto
      oculto) y la página siguiente lo repite. Si el título de la página siguiente coincide
      (comparando solo letras y números), se emite el título, después la ilustración, y se

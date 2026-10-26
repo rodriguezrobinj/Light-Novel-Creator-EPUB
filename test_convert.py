@@ -484,6 +484,28 @@ def test_separator_options():
     assert set(convert.SEPARATOR_CHOICES) >= set(expected)
 
 
+def test_full_page_illustration_has_no_white_frame():
+    """La ilustración rara vez llega al borde exacto de la página (medido: 0,2 a 2,8 pt). Dibujar la
+    página entera dejaba el blanco del papel como un marco; se recorta a la zona de la ilustración."""
+    doc = pymupdf.open()
+    art = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 85), False)
+    art.clear_with(40)
+    page = doc.new_page(width=595, height=842)
+    page.insert_image(pymupdf.Rect(0, 0, 593, 839.5), pixmap=art, keep_proportion=False)  # se queda corta
+    chapter_page(doc, 2, [(72, 150, "Capitulo 1: Inicio", 20, "helv")])
+    page = doc.new_page(width=595, height=842)
+    page.insert_image(pymupdf.Rect(1.5, 0, 595, 842), pixmap=art, keep_proportion=False)  # corta a la izquierda
+    path = TMP / "marco-blanco.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    images = [book.cover] + [b.image for b in book.blocks if b.kind == "image" and b.keep]
+    for data in images:
+        pix = pymupdf.Pixmap(data)
+        w, h = pix.width, pix.height
+        edges = [pix.pixel(w - 1, h // 2), pix.pixel(w // 2, h - 1), pix.pixel(0, h // 2), pix.pixel(w // 2, 0)]
+        assert all(max(px) < 120 for px in edges), (w, h, edges)  # ningún borde blanco
+
+
 def test_write_epub_leaves_out_images_not_kept():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("image", 1, image=JPEG, keep=True),
               convert.Block("image", 1, image=JPEG, keep=False), convert.Block("p", 1, "Texto.")]
