@@ -385,6 +385,32 @@ def test_inline_image_is_noted_as_discarded():
     assert images == [(2, False)], images
 
 
+def test_transparent_image_keeps_its_transparency():
+    """Un logo con transparencia (color negro y la forma en el canal alfa) no debe salir como un
+    rectángulo negro: se guarda en PNG con su transparencia, y el EPUB lo declara como PNG."""
+    doc = pymupdf.open()
+    logo = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), True)
+    logo.clear_with(0)  # negro y del todo transparente
+    for x in range(10, 30):
+        logo.set_pixel(x, 15, (0, 0, 0, 255))  # una raya opaca: la forma del logo
+    add_page(doc, 1, [(92, 150, line("Texto de la pagina", 57), 11, "cour"), (72, 164, "fin.", 11, "cour")])
+    doc[0].insert_image(pymupdf.Rect(150, 300, 450, 525), pixmap=logo)
+    path = TMP / "logo-transparente.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    image = next(b for b in book.blocks if b.kind == "image")
+    picture = pymupdf.Pixmap(image.image)
+    assert image.image[:8] == b"\x89PNG\r\n\x1a\n" and picture.alpha, "se perdió la transparencia"
+    image.keep = True
+    out = TMP / "logo-transparente.epub"
+    convert.write_epub(book, [], out)
+    with zipfile.ZipFile(out) as z:
+        names = [n for n in z.namelist() if n.startswith("OEBPS/img/")]
+        opf = z.read("OEBPS/content.opf").decode()
+    assert names and names[0].endswith(".png"), names
+    assert f'href="{names[0][6:]}" media-type="image/png"' in opf, opf
+
+
 def test_write_epub_leaves_out_images_not_kept():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("image", 1, image=JPEG, keep=True),
               convert.Block("image", 1, image=JPEG, keep=False), convert.Block("p", 1, "Texto.")]

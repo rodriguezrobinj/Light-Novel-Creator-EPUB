@@ -280,12 +280,17 @@ def _images(page):
 
 
 def _extract(doc, xref):
-    """JPEG de una imagen incrustada tal como está en el PDF, sin el texto que tenga encima."""
+    """Imagen incrustada tal como está en el PDF, sin el texto que tenga encima. Con transparencia
+    (logos), en PNG para conservarla: sin el canal alfa, un logo negro con la forma en la
+    transparencia quedaría como un rectángulo negro. Sin transparencia, en JPEG."""
     pix = pymupdf.Pixmap(doc, xref)
-    if pix.alpha:
-        pix = pymupdf.Pixmap(pix, 0)
-    if pix.n not in (1, 3):  # CMYK u otros: JPEG necesita gris o RGB
+    smask = doc.extract_image(xref).get("smask")
+    if smask and not pix.alpha:  # según el PDF, la máscara de transparencia viene aparte: se combina
+        pix = pymupdf.Pixmap(pix, pymupdf.Pixmap(doc, smask))
+    if pix.colorspace and pix.colorspace.n not in (1, 3):  # CMYK u otros: a RGB (conserva el alfa)
         pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+    if pix.alpha:
+        return pix.tobytes("png")
     return pix.tobytes("jpg", jpg_quality=85)
 
 
@@ -583,7 +588,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         parts = [_chapter_heading(fix(html.escape(title)))] if is_chapter else []
         for k, b in blocks:
             if b.kind == "image":
-                src = f"img/b{k:05d}.jpg"  # por bloque: una página puede tener varias imágenes
+                ext = "png" if b.image[:4] == b"\x89PNG" else "jpg"  # PNG si trae transparencia
+                src = f"img/b{k:05d}.{ext}"  # por bloque: una página puede tener varias imágenes
                 images[src] = b.image
                 parts.append(f'<div class="img"><img src="{src}" alt=""/></div>')
             elif b.kind == "break":
@@ -615,7 +621,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         '<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>',
     ]
     manifest += [f'<item id="s{k}" href="{name}" media-type="application/xhtml+xml"/>' for k, name in enumerate(files)]
-    manifest += [f'<item id="i{k}" href="{src}" media-type="image/jpeg"/>' for k, src in enumerate(images)]
+    manifest += [f'<item id="i{k}" href="{src}" media-type="image/{"png" if src.endswith(".png") else "jpeg"}"/>'
+                 for k, src in enumerate(images)]
     spine = ['<itemref idref="cover"/>'] + [f'<itemref idref="s{k}"/>' for k in range(len(files))]
     toc_page = "contents.xhtml" if contents else "nav.xhtml"
     if contents:  # página "Contenido" visible, justo después de la portada

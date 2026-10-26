@@ -98,8 +98,9 @@ class Book:
      con `keep=False` (extraídas sin el texto encima), para poder recuperarlas en la ventana:
      las de dentro del texto (al menos un 2 % de la página y usadas en 2 páginas o menos) y el
      fondo de una página de título. No se apuntan los fondos y barras repetidos ni las
-     diminutas. `write_epub` omite las de `keep=False`; cada imagen se guarda como
-     `img/bNNNNN.jpg` (por bloque: una página puede tener varias).
+     diminutas. Una imagen con transparencia (máscara aparte o ya aplicada) se guarda en PNG
+     para conservarla; el resto, en JPEG. `write_epub` omite las de `keep=False`; cada imagen se guarda como
+     `img/bNNNNN.jpg` o `.png` con su tipo en el manifiesto (por bloque: una página puede tener varias).
 5. **Página de índice del PDF:** una página con `Contenido`, `Índice`, `Tabla de contenido` o
    `Contents` (con o sin `:`) como una de sus 3 primeras líneas (puede haber créditos encima),
    o con tres o más líneas acabadas en puntos o guiones hasta el número de página
