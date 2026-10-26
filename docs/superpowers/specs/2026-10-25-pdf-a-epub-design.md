@@ -177,6 +177,14 @@ class Book:
   empieza en cada párrafo. No convierte diálogo con comillas en diálogo con raya.
   Medido: los párrafos con comillas desparejadas que quedan ya lo estaban en el PDF
   (número impar de comillas: el diálogo sigue en el párrafo siguiente).
+- Estilos (`style`; en la ventana, desplegable, por defecto "Clásico"): Clásico (serif,
+  justificado, sangría), Moderno (sin serif, a la izquierda, párrafos separados) y Novela
+  ligera (número en versalitas, nombre grande, línea decorativa, separador `❖`). Todos llevan
+  la tipografía de libro impreso: partición de palabras (`hyphens: auto`), sin sangría tras
+  título, separador o ilustración, y `orphans`/`widows` 2.
+- Un capítulo cuyo título empieza por "Capítulo 3:", "Prólogo:", "Parte Uno:" o similar se
+  escribe con número y nombre en dos líneas (`<span class="num">` y `<span class="name">`); el
+  resto, en una. El índice conserva el título entero.
 - Portada: `cover.jpg` marcada como `cover-image` y una página `cover.xhtml`.
 - CSS mínimo: márgenes, sangría de primera línea, imágenes al 100 % de ancho, separador centrado.
 - Se escribe en un archivo temporal junto al destino y se renombra al terminar. Si falla,

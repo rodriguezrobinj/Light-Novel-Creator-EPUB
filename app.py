@@ -97,6 +97,12 @@ class App:
         self.typography_var = tk.BooleanVar(value=True)  # comillas «», puntos suspensivos, raya, espacios
         ttk.Checkbutton(bottom, text="Limpieza tipográfica", variable=self.typography_var,
                         command=self.update_preview).pack(side="right", padx=12)
+        self.style_var = tk.StringVar(value="Clásico")  # aspecto del EPUB: letra, párrafos e inicio de capítulo
+        style = ttk.Combobox(bottom, textvariable=self.style_var, values=list(convert.STYLES), width=13,
+                             state="readonly")
+        style.pack(side="right")
+        style.bind("<<ComboboxSelected>>", lambda _: self.update_preview())
+        ttk.Label(bottom, text="Estilo:").pack(side="right", padx=(12, 4))
         ttk.Label(root, text="Clic en Tipo: capítulo, subtítulo o quitar · Doble clic en el título: editar",
                   padding=(8, 0)).pack(side="bottom", anchor="w")
 
@@ -308,7 +314,7 @@ class App:
                 part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [])
                 chapter = self.tree.set(item, "inc") == ON
                 convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path,
-                                   typography=self.typography_var.get())
+                                   typography=self.typography_var.get(), style=self.style_var.get())
             except Exception:
                 self.epub_pages = -1  # no se pudo generar
         self.draw_epub()
@@ -520,7 +526,8 @@ class App:
                 self.book.blocks[int(item)].keep = self.tree.set(item, "inc") == IMG
         removed = [int(item) for item in self.tree.get_children()
                    if self.tree.set(item, "inc") == CUT and not self.is_image(item)]
-        self.run(convert.write_epub, (self.book, chapters, out, "es", removed, self.typography_var.get()),
+        self.run(convert.write_epub, (self.book, chapters, out, "es", removed, self.typography_var.get(),
+                                      self.style_var.get()),
                  lambda _: self.saved(out))
         self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
 

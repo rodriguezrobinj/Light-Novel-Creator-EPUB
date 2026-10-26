@@ -189,6 +189,40 @@ def test_write_epub_applies_typography_only_when_asked():
     assert 'Dijo "hola"...' in epub_text(out)
 
 
+def styled_book():
+    blocks = [convert.Block("heading", 1, "Capítulo 3: La Guarida"), convert.Block("p", 1, "Uno."),
+              convert.Block("break", 1), convert.Block("p", 1, "Dos."),
+              convert.Block("heading", 2, "Epílogo"), convert.Block("p", 2, "Fin.")]
+    return convert.Book("Libro", "", JPEG, blocks, [0, 4])
+
+
+def epub_file(path, name):
+    with zipfile.ZipFile(path) as z:
+        return z.read(name).decode()
+
+
+def test_epub_styles_and_print_typography():
+    signatures = {"Clásico": ("serif", "justify"), "Moderno": ("sans-serif",), "Novela ligera": ("small-caps",)}
+    for style, marks in signatures.items():
+        out = TMP / f"estilo-{style}.epub"
+        convert.write_epub(styled_book(), [(0, "Capítulo 3: La Guarida"), (4, "Epílogo")], out, style=style)
+        css, text = epub_file(out, "OEBPS/style.css"), epub_text(out)
+        assert all(m in css for m in marks), (style, css)
+        for rule in ("hyphens: auto", "orphans", "widows", "h1 + p"):  # tipografía de libro, en todos
+            assert rule in css, (style, rule)
+        separator = "❖" if style == "Novela ligera" else "* * *"
+        assert f'<p class="brk">{separator}</p>' in text, (style, separator)
+
+
+def test_chapter_title_split_into_number_and_name():
+    out = TMP / "titulo-partido.epub"
+    convert.write_epub(styled_book(), [(0, "Capítulo 3: La Guarida"), (4, "Epílogo")], out)
+    text = epub_text(out)
+    assert '<h1><span class="num">Capítulo 3</span> <span class="name">La Guarida</span></h1>' in text, text
+    assert "<h1>Epílogo</h1>" in text  # sin número ni nombre: una sola línea
+    assert "Capítulo 3: La Guarida" in epub_file(out, "OEBPS/nav.xhtml")  # el índice conserva el título entero
+
+
 def test_scanned_pdf_is_rejected():
     doc = pymupdf.open()
     p = doc.new_page()
@@ -221,7 +255,7 @@ def test_write_epub():
             if name.endswith((".xhtml", ".opf", ".ncx", ".xml")):
                 ET.fromstring(z.read(name))  # XML bien formado
         assert "Capitulo 1: Inicio" in z.read("OEBPS/nav.xhtml").decode()
-        assert "<h1>Capitulo 2: Final</h1>" in z.read(sections[2]).decode()
+        assert '<span class="num">Capitulo 2</span> <span class="name">Final</span>' in z.read(sections[2]).decode()
     assert not Path(f"{out}.tmp").exists()
 
 
@@ -880,6 +914,36 @@ def test_window_reviews_illustrations():
     with zipfile.ZipFile(out) as z:
         pictures = [n for n in z.namelist() if n.startswith("OEBPS/img/")]
     assert len(pictures) == 1, pictures  # entra el fondo recuperado, no la ilustración quitada
+
+
+def test_window_style_reaches_preview_and_epub():
+    import time
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    default = window.style_var.get()
+    window.style_var.set("Novela ligera")
+    window.tree.selection_set(first_title(window))
+    root.update()
+    preview_css = epub_file(window.preview_path, "OEBPS/style.css")
+    out = TMP / "estilo-desde-ventana.epub"
+    originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
+    app.messagebox.showinfo = lambda *args: None
+    try:
+        window.generate()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
+        window.close()
+    assert default == "Clásico", default
+    assert "small-caps" in preview_css and "small-caps" in epub_file(out, "OEBPS/style.css")
 
 
 def test_window_double_click_on_include_toggles_twice():

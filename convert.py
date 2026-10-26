@@ -429,14 +429,49 @@ def analyze(pdf_path, progress=None):
         return Book(title, meta.get("author") or "", cover, blocks, candidates, series, volume)
 
 
-CSS = """body { margin: 0 4%; line-height: 1.5; }
-h1 { text-align: center; font-size: 1.4em; margin: 2em 0 1em; }
+# Tipografía de libro impreso, común a todos los estilos: partición de palabras (el idioma ya va en
+# cada página), sin sangría tras un título, separador o ilustración, y sin líneas sueltas.
+BASE_CSS = """body { margin: 0 4%; line-height: 1.5; }
+p { margin: 0 0 0.4em; orphans: 2; widows: 2; -webkit-hyphens: auto; hyphens: auto; }
+h1, h2 { -webkit-hyphens: none; hyphens: none; page-break-after: avoid; }
+h1 .num, h1 .name { display: block; }
 h2 { text-align: center; font-size: 1.15em; margin: 1.5em 0 1em; }
-p { text-indent: 1.5em; margin: 0 0 0.4em; text-align: justify; }
 p.brk { text-indent: 0; text-align: center; margin: 1em 0; }
+h1 + p, h2 + p, p.brk + p, div.img + p { text-indent: 0; }
 div.img { text-align: center; margin: 0; page-break-before: always; page-break-after: always; }
 div.img img { max-width: 100%; max-height: 95vh; }
 """
+STYLES = {  # nombre en la ventana -> CSS propio del estilo
+    "Clásico": """body { font-family: serif; }
+p { text-indent: 1.5em; text-align: justify; }
+h1 { text-align: center; font-size: 1.4em; margin: 2em 0 1em; }
+h1 .num { font-size: 0.7em; font-weight: normal; }
+""",
+    "Moderno": """body { font-family: sans-serif; }
+p { text-indent: 0; text-align: left; margin-bottom: 0.8em; }
+h1 { text-align: left; font-size: 1.3em; margin: 1.5em 0 1em; }
+h1 .num { font-size: 0.65em; font-weight: normal; text-transform: uppercase; letter-spacing: 0.1em; color: #666666; }
+""",
+    "Novela ligera": """body { font-family: serif; }
+p { text-indent: 1.5em; text-align: justify; }
+h1 { text-align: center; margin: 20% 0 1.5em; padding-bottom: 0.6em; border-bottom: 1px solid #999999; }
+h1 .num { font-size: 0.75em; font-weight: normal; font-variant: small-caps; letter-spacing: 0.15em; }
+h1 .name { font-size: 1.5em; margin-top: 0.3em; }
+p.brk { font-size: 1.2em; }
+""",
+}
+SEPARATORS = {"Novela ligera": "❖"}  # separador de escena; el resto usa "* * *"
+CHAPTER_NUMBER = re.compile(  # "Capítulo 3: Nombre" -> número y nombre, para el inicio de capítulo
+    r"((?:cap[ií]tulo|chapter|pr[oó]logo|prologue|ep[ií]logo|epilogue|interludio|interlude|parte|part"
+    r"|historia (?:paralela|adicional|corta))(?: [\w.]+)?)\s*[:.\-–—]\s*(.+)", re.I)
+
+
+def _chapter_heading(title):
+    """<h1> de un capítulo: si empieza por "Capítulo 3:" o similar, número y nombre en dos líneas."""
+    m = CHAPTER_NUMBER.fullmatch(title)
+    if not m:
+        return f"<h1>{title}</h1>"
+    return f'<h1><span class="num">{m.group(1)}</span> <span class="name">{m.group(2)}</span></h1>'
 
 CONTAINER = """<?xml version="1.0" encoding="utf-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -454,7 +489,7 @@ def _xhtml(title, body, lang):
             f'<body>\n{body}\n</body>\n</html>\n')
 
 
-def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False):
+def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico"):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -483,14 +518,14 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     subtitles = {}  # archivo -> [(ancla, título escapado)]: subentradas del índice
     for n, (title, is_chapter, blocks) in enumerate(sections, 1):
         name = f"sec{n:03d}.xhtml"
-        parts = [f"<h1>{fix(html.escape(title))}</h1>"] if is_chapter else []
+        parts = [_chapter_heading(fix(html.escape(title)))] if is_chapter else []
         for k, b in blocks:
             if b.kind == "image":
                 src = f"img/b{k:05d}.jpg"  # por bloque: una página puede tener varias imágenes
                 images[src] = b.image
                 parts.append(f'<div class="img"><img src="{src}" alt=""/></div>')
             elif b.kind == "break":
-                parts.append('<p class="brk">* * *</p>')
+                parts.append(f'<p class="brk">{SEPARATORS.get(style, "* * *")}</p>')
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
                 parts.append(f'<h2 id="t{k}">{fix(b.html)}</h2>')
                 subtitles.setdefault(name, []).append((f"t{k}", fix(b.html)))
@@ -574,7 +609,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             z.writestr("OEBPS/content.opf", opf)
             z.writestr("OEBPS/nav.xhtml", nav)
             z.writestr("OEBPS/toc.ncx", ncx)
-            z.writestr("OEBPS/style.css", CSS)
+            z.writestr("OEBPS/style.css", BASE_CSS + STYLES[style])
             z.writestr("OEBPS/cover.xhtml", cover)
             z.writestr("OEBPS/cover.jpg", book.cover)
             for name, text in files.items():
