@@ -314,7 +314,8 @@ class App:
                 part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [])
                 chapter = self.tree.set(item, "inc") == ON
                 convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path,
-                                   typography=self.typography_var.get(), style=self.style_var.get())
+                                   typography=self.typography_var.get(), style=self.style_var.get(),
+                                   contents=False)  # sin página de índice: el capítulo 1 es la sección
             except Exception:
                 self.epub_pages = -1  # no se pudo generar
         self.draw_epub()

@@ -223,6 +223,31 @@ def test_chapter_title_split_into_number_and_name():
     assert "Capítulo 3: La Guarida" in epub_file(out, "OEBPS/nav.xhtml")  # el índice conserva el título entero
 
 
+def test_epub_landmarks_guide_and_contents_page():
+    """Puntos de referencia del lector (portada, índice, inicio de la lectura), <guide> para Kindle y
+    una página "Contenido" tras la portada con enlaces a capítulos y subtítulos."""
+    ops, opf_ns = "{http://www.idpf.org/2007/ops}type", {"o": "http://www.idpf.org/2007/opf"}
+    book = convert.analyze(make_novel())  # tiene "Inicio" (ilustración) antes del primer capítulo
+    out = TMP / "navegacion.epub"
+    convert.write_epub(book, [(book.candidates[0], "Capitulo 1: Inicio")], out)
+    with zipfile.ZipFile(out) as z:
+        nav = ET.fromstring(z.read("OEBPS/nav.xhtml"))
+        opf = ET.fromstring(z.read("OEBPS/content.opf"))
+        contents = z.read("OEBPS/contents.xhtml").decode()
+        first_chapter = next(n for n in sorted(z.namelist()) if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n)
+                             and "<h1>" in z.read(n).decode().replace('<h1><span', "<h1>"))
+    landmarks = next(e for e in nav.iter() if e.get(ops) == "landmarks")
+    marks = {a.get(ops): a.get("href") for a in landmarks.iter() if a.get("href")}
+    assert marks == {"cover": "cover.xhtml", "toc": "contents.xhtml",
+                     "bodymatter": first_chapter.split("/")[-1]}, marks  # el primer capítulo, no "Inicio"
+    guide = {r.get("type"): r.get("href") for r in opf.findall("o:guide/o:reference", opf_ns)}
+    assert guide == {"cover": "cover.xhtml", "toc": "contents.xhtml", "text": marks["bodymatter"]}, guide
+    spine = [r.get("idref") for r in opf.findall("o:spine/o:itemref", opf_ns)]
+    assert spine[:2] == ["cover", "contents"], spine
+    assert 'href="' + marks["bodymatter"] + '"' in contents and "Capitulo 2: Final" in contents
+    assert re.search(r'href="sec\d+\.xhtml#t\d+"', contents), contents  # subtítulos enlazados
+
+
 def test_scanned_pdf_is_rejected():
     doc = pymupdf.open()
     p = doc.new_page()
@@ -944,6 +969,21 @@ def test_window_style_reaches_preview_and_epub():
         window.close()
     assert default == "Clásico", default
     assert "small-caps" in preview_css and "small-caps" in epub_file(out, "OEBPS/style.css")
+    with zipfile.ZipFile(out) as z:
+        assert "OEBPS/contents.xhtml" in z.namelist()  # el EPUB final lleva la página de índice
+
+
+def test_window_preview_shows_the_section_not_the_contents_page():
+    """La vista previa dibuja el capítulo seleccionado, no la página "Contenido"."""
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.tree.selection_set(first_title(window))
+    root.update()
+    with zipfile.ZipFile(window.preview_path) as z:
+        names = z.namelist()
+    window.close()
+    assert "OEBPS/contents.xhtml" not in names, names
 
 
 def test_window_double_click_on_include_toggles_twice():

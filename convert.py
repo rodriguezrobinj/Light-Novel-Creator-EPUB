@@ -440,6 +440,12 @@ p.brk { text-indent: 0; text-align: center; margin: 1em 0; }
 h1 + p, h2 + p, p.brk + p, div.img + p { text-indent: 0; }
 div.img { text-align: center; margin: 0; page-break-before: always; page-break-after: always; }
 div.img img { max-width: 100%; max-height: 95vh; }
+h1.toc { text-align: center; }
+ol.toc, ol.toc ol { list-style: none; margin: 0; }
+ol.toc { padding: 0; }
+ol.toc ol { padding-left: 1.5em; font-size: 0.9em; }
+ol.toc li { margin: 0.35em 0; }
+ol.toc a { text-decoration: none; color: inherit; }
 """
 STYLES = {  # nombre en la ventana -> CSS propio del estilo
     "Clásico": """body { font-family: serif; }
@@ -489,12 +495,14 @@ def _xhtml(title, body, lang):
             f'<body>\n{body}\n</body>\n</html>\n')
 
 
-def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico"):
+def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
     hasta el siguiente título.
-    typography: aplica la limpieza tipográfica al estilo RAE (_typography) a textos y títulos."""
+    typography: aplica la limpieza tipográfica al estilo RAE (_typography) a textos y títulos.
+    style: uno de STYLES. contents: añade la página "Contenido" tras la portada (la vista previa
+    la omite para dibujar directamente la sección)."""
     fix = _typography if typography else (lambda s: s)
     starts = dict(chapters)
     skip = set()
@@ -555,6 +563,12 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     manifest += [f'<item id="s{k}" href="{name}" media-type="application/xhtml+xml"/>' for k, name in enumerate(files)]
     manifest += [f'<item id="i{k}" href="{src}" media-type="image/jpeg"/>' for k, src in enumerate(images)]
     spine = ['<itemref idref="cover"/>'] + [f'<itemref idref="s{k}"/>' for k in range(len(files))]
+    toc_page = "contents.xhtml" if contents else "nav.xhtml"
+    if contents:  # página "Contenido" visible, justo después de la portada
+        manifest.append('<item id="contents" href="contents.xhtml" media-type="application/xhtml+xml"/>')
+        spine.insert(1, '<itemref idref="contents"/>')
+    # Inicio de la lectura: el primer capítulo (no "Inicio", que son las láminas del principio)
+    reading = next((name for name, sec in zip(files, sections) if sec[1]), next(iter(files), "cover.xhtml"))
     manifest_xml, spine_xml = "\n".join(manifest), "\n".join(spine)
     opf = f"""<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
@@ -571,6 +585,11 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
 <spine toc="ncx">
 {spine_xml}
 </spine>
+<guide>
+<reference type="cover" title="Portada" href="cover.xhtml"/>
+<reference type="toc" title="Índice" href="{toc_page}"/>
+<reference type="text" title="Inicio de la lectura" href="{reading}"/>
+</guide>
 </package>
 """
     # Índice en dos niveles: cada sección y, dentro, sus subtítulos con enlace a su ancla.
@@ -589,7 +608,14 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                       f'<content src="{name}#{anchor}"/></navPoint>')
         points.append(point + "</navPoint>")
     items, points = "\n".join(items), "\n".join(points)
-    nav = _xhtml("Índice", f'<nav epub:type="toc" id="toc"><h1>Índice</h1><ol>\n{items}\n</ol></nav>', lang)
+    # Puntos de referencia: los botones "Ir a la portada / al índice / al inicio" de los lectores
+    landmarks = ('<nav epub:type="landmarks" id="landmarks" hidden="hidden"><ol>'
+                 '<li><a epub:type="cover" href="cover.xhtml">Portada</a></li>'
+                 f'<li><a epub:type="toc" href="{toc_page}">Índice</a></li>'
+                 f'<li><a epub:type="bodymatter" href="{reading}">Inicio de la lectura</a></li></ol></nav>')
+    nav = _xhtml("Índice", f'<nav epub:type="toc" id="toc"><h1>Índice</h1><ol>\n{items}\n</ol></nav>\n{landmarks}',
+                 lang)
+    contents_page = _xhtml("Contenido", f'<h1 class="toc">Contenido</h1>\n<ol class="toc">\n{items}\n</ol>', lang)
     ncx = f"""<?xml version="1.0" encoding="utf-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
 <head><meta name="dtb:uid" content="{uid}"/></head>
@@ -608,6 +634,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             z.writestr("META-INF/container.xml", CONTAINER)
             z.writestr("OEBPS/content.opf", opf)
             z.writestr("OEBPS/nav.xhtml", nav)
+            if contents:
+                z.writestr("OEBPS/contents.xhtml", contents_page)
             z.writestr("OEBPS/toc.ncx", ncx)
             z.writestr("OEBPS/style.css", BASE_CSS + STYLES[style])
             z.writestr("OEBPS/cover.xhtml", cover)

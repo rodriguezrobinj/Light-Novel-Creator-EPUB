@@ -185,6 +185,11 @@ class Book:
 - Un capítulo cuyo título empieza por "Capítulo 3:", "Prólogo:", "Parte Uno:" o similar se
   escribe con número y nombre en dos líneas (`<span class="num">` y `<span class="name">`); el
   resto, en una. El índice conserva el título entero.
+- Navegación: página "Contenido" (`contents.xhtml`) justo después de la portada, con los
+  capítulos y sus subtítulos enlazados (`contents=True`; la vista previa la omite). Puntos de
+  referencia en `nav.xhtml` (`landmarks`: portada, índice e inicio de la lectura, que es el
+  primer capítulo y no "Inicio") y `<guide>` en el OPF con lo mismo, para Kindle y lectores
+  antiguos.
 - Portada: `cover.jpg` marcada como `cover-image` y una página `cover.xhtml`.
 - CSS mínimo: márgenes, sangría de primera línea, imágenes al 100 % de ancho, separador centrado.
 - Se escribe en un archivo temporal junto al destino y se renombra al terminar. Si falla,
