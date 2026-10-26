@@ -70,6 +70,45 @@ def _series_volume(stem, meta_title):
     return series or meta_title.strip(), m.group(1).replace(",", ".")
 
 
+QUOTE_OPENERS = set("  ([¿¡—–«“‘")  # tras estos caracteres, una comilla abre
+QUOTE_CLOSE_NEXT = set(" ,.;:!?)»”")      # antes de estos, una comilla cierra aunque siga a un espacio
+
+
+def _typography(html_text):
+    """Tipografía de un párrafo al estilo RAE: «…» (y “…” dentro), ‘…’, puntos suspensivos, raya
+    y espacios. No toca las etiquetas <i>/<b>: la posición de cada comilla se mira a través de ellas.
+    La cuenta de comillas abiertas empieza en cada párrafo, para no arrastrar errores del PDF."""
+    parts = re.split(r"(<[^>]+>)", html_text)  # el texto queda en las posiciones pares
+    for k in range(0, len(parts), 2):
+        text = re.sub(r"\.{3,}", "…", parts[k]).replace("─", "—")
+        text = re.sub(r" {2,}", " ", text)
+        parts[k] = re.sub(r" +([,.;:!?])", r"\1", text)
+    chunks = [list(parts[k]) for k in range(0, len(parts), 2)]
+    chars = [(c, j, i) for j, chunk in enumerate(chunks) for i, c in enumerate(chunk)]
+    depth = 0
+    for n, (c, j, i) in enumerate(chars):
+        prev = chunks[chars[n - 1][1]][chars[n - 1][2]] if n else " "  # ya convertido
+        nxt = chars[n + 1][0] if n + 1 < len(chars) else " "
+        # Abre tras espacio o signo de apertura, o justo tras un cierre (“Hola.”“Adiós.”)
+        opening = (prev in QUOTE_OPENERS or prev in "»”") and nxt not in QUOTE_CLOSE_NEXT
+        if c in '"“”':
+            if opening:
+                chunks[j][i] = "“" if depth else "«"
+                depth += 1
+            else:
+                chunks[j][i] = "”" if depth > 1 else "»"
+                depth = max(0, depth - 1)
+        elif c == "«":
+            depth += 1
+        elif c == "»":
+            depth = max(0, depth - 1)
+        elif c == "'":
+            chunks[j][i] = "‘" if opening else "’"  # entre letras es apóstrofo: ’
+    for j, chunk in enumerate(chunks):
+        parts[2 * j] = "".join(chunk)
+    return "".join(parts)
+
+
 def _bold(s):
     return bool(s["flags"] & pymupdf.TEXT_FONT_BOLD) or "bold" in s["font"].lower()
 
@@ -382,11 +421,13 @@ def _xhtml(title, body, lang):
             f'<body>\n{body}\n</body>\n</html>\n')
 
 
-def write_epub(book, chapters, out_path, lang="es", removed=()):
+def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
-    hasta el siguiente título."""
+    hasta el siguiente título.
+    typography: aplica la limpieza tipográfica al estilo RAE (_typography) a textos y títulos."""
+    fix = _typography if typography else (lambda s: s)
     starts = dict(chapters)
     skip = set()
     for k in removed:
@@ -409,7 +450,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=()):
     subtitles = {}  # archivo -> [(ancla, título escapado)]: subentradas del índice
     for n, (title, is_chapter, blocks) in enumerate(sections, 1):
         name = f"sec{n:03d}.xhtml"
-        parts = [f"<h1>{html.escape(title)}</h1>"] if is_chapter else []
+        parts = [f"<h1>{fix(html.escape(title))}</h1>"] if is_chapter else []
         for k, b in blocks:
             if b.kind == "image":
                 src = f"img/p{b.page:04d}.jpg"
@@ -418,10 +459,10 @@ def write_epub(book, chapters, out_path, lang="es", removed=()):
             elif b.kind == "break":
                 parts.append('<p class="brk">* * *</p>')
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
-                parts.append(f'<h2 id="t{k}">{b.html}</h2>')
-                subtitles.setdefault(name, []).append((f"t{k}", b.html))
+                parts.append(f'<h2 id="t{k}">{fix(b.html)}</h2>')
+                subtitles.setdefault(name, []).append((f"t{k}", fix(b.html)))
             else:
-                parts.append(f"<p>{b.html}</p>")
+                parts.append(f"<p>{fix(b.html)}</p>")
         files[name] = _xhtml(title, "\n".join(parts), lang)
 
     uid = f"urn:uuid:{uuid.uuid4()}"
@@ -470,9 +511,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=()):
     for name, t in entries:
         subs = subtitles.get(name, [])
         children = "".join(f'<li><a href="{name}#{anchor}">{text}</a></li>' for anchor, text in subs)
-        items.append(f'<li><a href="{name}">{html.escape(t)}</a>' + (f"<ol>{children}</ol>" if subs else "") + "</li>")
+        items.append(f'<li><a href="{name}">{fix(html.escape(t))}</a>' + (f"<ol>{children}</ol>" if subs else "") + "</li>")
         order += 1  # playOrder: el capítulo antes que sus subtítulos, todos correlativos
-        point = (f'<navPoint id="n{order}" playOrder="{order}"><navLabel><text>{html.escape(t)}</text></navLabel>'
+        point = (f'<navPoint id="n{order}" playOrder="{order}"><navLabel><text>{fix(html.escape(t))}</text></navLabel>'
                  f'<content src="{name}"/>')
         for anchor, text in subs:
             order += 1

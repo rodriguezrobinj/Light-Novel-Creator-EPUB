@@ -71,6 +71,9 @@ class App:
         self.status.pack(side="left", padx=8)
         self.gen_btn = ttk.Button(bottom, text="Generar EPUB…", command=self.generate, state="disabled")
         self.gen_btn.pack(side="right")
+        self.typography_var = tk.BooleanVar(value=True)  # comillas «», puntos suspensivos, raya, espacios
+        ttk.Checkbutton(bottom, text="Limpieza tipográfica", variable=self.typography_var,
+                        command=self.update_preview).pack(side="right", padx=12)
         ttk.Label(root, text="Clic en Tipo: capítulo, subtítulo o quitar · Doble clic en el título: editar",
                   padding=(8, 0)).pack(side="bottom", anchor="w")
 
@@ -198,7 +201,8 @@ class App:
             end = next((k for k in range(index + 1, len(blocks)) if blocks[k].kind == "heading"), len(blocks))
             part = convert.Book(self.book.title, "", self.book.cover, blocks[index:min(end, index + PREVIEW_BLOCKS)], [])
             chapter = self.tree.set(item, "inc") == ON
-            convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path)
+            convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path,
+                               typography=self.typography_var.get())
             with pymupdf.open(self.preview_path) as epub:
                 self.show_page(self.epub_view, epub.load_page((1, 0)))  # el capítulo 0 es la portada
             self.epub_caption.configure(text="EPUB · así se verá (" + ("capítulo" if chapter else "subtítulo") + ")")
@@ -294,7 +298,8 @@ class App:
                     if self.tree.set(item, "inc") == ON]
         self.status.configure(text="Generando EPUB…")
         removed = [int(item) for item in self.tree.get_children() if self.tree.set(item, "inc") == CUT]
-        self.run(convert.write_epub, (self.book, chapters, out, "es", removed), lambda _: self.saved(out))
+        self.run(convert.write_epub, (self.book, chapters, out, "es", removed, self.typography_var.get()),
+                 lambda _: self.saved(out))
         self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
 
     def saved(self, out):

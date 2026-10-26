@@ -162,6 +162,33 @@ def test_epub_has_series_metadata():
         assert b"belongs-to-collection" not in z.read("OEBPS/content.opf")  # sin serie, nada
 
 
+def test_typography_rae_style():
+    cases = [
+        ('Dijo "hola" y se fue...', "Dijo «hola» y se fue…"),
+        ('“Hola" , dijo', "«Hola», dijo"),                      # comillas mezcladas y espacio antes de coma
+        ('<i>"Hola</i>"', "<i>«Hola</i>»"),                     # la posición se mira a través de etiquetas
+        ('"Ella dijo "ven" ayer"', "«Ella dijo “ven” ayer»"),   # comillas dentro de comillas
+        ("Tom's 'casa'", "Tom’s ‘casa’"),                       # apóstrofo y comillas simples
+        ("Espera─dijo  él .", "Espera—dijo él."),               # raya de caja, espacio doble y antes de punto
+        ('"...Bueno"', "«…Bueno»"),
+        ("«Ya» lo sé", "«Ya» lo sé"),                           # ya correcto: no cambia
+        ("“Hola.”“Adiós.”", "«Hola.»«Adiós.»"),                 # cierre y apertura pegados
+        ("Tom &amp; Jerry &lt;3", "Tom &amp; Jerry &lt;3"),     # no toca entidades
+    ]
+    for source, expected in cases:
+        assert convert._typography(source) == expected, (source, convert._typography(source))
+
+
+def test_write_epub_applies_typography_only_when_asked():
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"),
+                                           convert.Block("p", 1, 'Dijo "hola"...')], [0])
+    out = TMP / "tipografia.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, typography=True)
+    assert "Dijo «hola»…" in epub_text(out)
+    convert.write_epub(book, [(0, "Cap 1")], out)
+    assert 'Dijo "hola"...' in epub_text(out)
+
+
 def test_scanned_pdf_is_rejected():
     doc = pymupdf.open()
     p = doc.new_page()
@@ -589,6 +616,35 @@ def test_window_removed_section_preview_and_epub():
     text = epub_text(out)
     assert "Capitulo 1: Inicio" not in text and "Primera linea" not in text
     assert "Capitulo 2: Final" in text
+
+
+def test_window_typography_checkbox_reaches_the_epub():
+    """La casilla viene marcada; desmarcada, el EPUB conserva la tipografía original."""
+    import time
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"),
+                                                      convert.Block("p", 1, 'Dijo "hola"...')], [0]))
+    default = window.typography_var.get()
+    window.typography_var.set(False)
+    out = TMP / "sin-tipografia.epub"
+    originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
+    app.messagebox.showinfo = lambda *args: None
+    try:
+        window.generate()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
+        window.close()
+    assert default is True
+    assert 'Dijo "hola"...' in epub_text(out)
 
 
 def test_window_double_click_on_include_toggles_twice():

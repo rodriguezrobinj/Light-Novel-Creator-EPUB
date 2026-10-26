@@ -162,6 +162,15 @@ class Book:
 - Secciones quitadas (`removed`: índices de títulos): un capítulo se quita con todo lo que
   hay hasta el siguiente capítulo que se conserva, subtítulos e ilustraciones incluidos; un
   subtítulo, hasta el siguiente título. No aparecen ni en el texto ni en el índice.
+- Limpieza tipográfica opcional (`typography=True`; en la ventana, casilla marcada por
+  defecto), al estilo RAE, por párrafo y sin tocar las etiquetas: `...` → `…`; comillas
+  dobles (rectas o tipográficas) → `« »`, y `“ ”` dentro de otras; comillas simples → `‘ ’`
+  y apóstrofo `’`; `─` → `—`; espacios dobles y espacio antes de `, . ; : ! ?` fuera. Una
+  comilla abre tras espacio, signo de apertura o un cierre pegado (`“Hola.”“Adiós.”`), y
+  cierra en otro caso o si la sigue espacio o puntuación. La cuenta de comillas abiertas
+  empieza en cada párrafo. No convierte diálogo con comillas en diálogo con raya.
+  Medido: los párrafos con comillas desparejadas que quedan ya lo estaban en el PDF
+  (número impar de comillas: el diálogo sigue en el párrafo siguiente).
 - Portada: `cover.jpg` marcada como `cover-image` y una página `cover.xhtml`.
 - CSS mínimo: márgenes, sangría de primera línea, imágenes al 100 % de ancho, separador centrado.
 - Se escribe en un archivo temporal junto al destino y se renombra al terminar. Si falla,
