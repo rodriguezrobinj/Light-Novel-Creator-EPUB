@@ -360,7 +360,30 @@ def test_heading_that_is_not_a_chapter_is_written_as_subtitle():
     convert.write_epub(book, [(first, "Capitulo 1: Inicio")], out)
     with zipfile.ZipFile(out) as z:
         body = "".join(z.read(n).decode() for n in z.namelist() if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n))
-    assert "<h2>Capitulo 2: Final</h2>" in body, re.findall(r"<[^>]+>Capitulo 2[^<]*<", body)
+    assert re.search(r"<h2[^>]*>Capitulo 2: Final</h2>", body), re.findall(r"<[^>]+>Capitulo 2[^<]*<", body)
+
+
+def test_epub_index_nests_subtitles_under_their_chapter():
+    """En el índice del lector, los subtítulos salen como subentradas de su capítulo, con enlace a su sitio."""
+    book = convert.analyze(make_novel())
+    out = TMP / "indice.epub"
+    convert.write_epub(book, [(book.candidates[0], "Capitulo 1: Inicio")], out)
+    toc = [(level, title) for level, title, _ in pymupdf.open(out).get_toc()]
+    assert toc == [(1, "Inicio"), (1, "Capitulo 1: Inicio"), (2, "Capitulo 2: Final")], toc
+    ns = {"n": "http://www.daisy.org/z3986/2005/ncx/"}
+    with zipfile.ZipFile(out) as z:
+        ncx = ET.fromstring(z.read("OEBPS/toc.ncx"))
+        nav = z.read("OEBPS/nav.xhtml").decode()
+        sections = {n: z.read(n).decode() for n in z.namelist() if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n)}
+    chapter = ncx.findall("n:navMap/n:navPoint", ns)[1]  # [0] es Inicio
+    sub = chapter.findall("n:navPoint", ns)
+    assert [p.find("n:navLabel/n:text", ns).text for p in sub] == ["Capitulo 2: Final"]
+    orders = [int(p.get("playOrder")) for p in ncx.iter("{%s}navPoint" % ns["n"])]
+    assert orders == list(range(1, len(orders) + 1)), orders  # correlativos, sin repetir
+    target = sub[0].find("n:content", ns).get("src")
+    page, anchor = target.split("#")
+    assert f'id="{anchor}"' in sections["OEBPS/" + page], target  # el enlace lleva al subtítulo
+    assert f'href="{target}"' in nav
 
 
 def test_window_lists_all_headings_with_chapters_checked():
@@ -427,7 +450,7 @@ def test_window_epub_preview_follows_include_mark():
     with zipfile.ZipFile(window.preview_path) as z:
         body = "".join(z.read(n).decode() for n in z.namelist() if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n))
     window.close()
-    assert "<h2>Capitulo 1: Inicio</h2>" in body, re.findall(r"<h\d>[^<]*</h\d>", body)
+    assert re.search(r"<h2[^>]*>Capitulo 1: Inicio</h2>", body), re.findall(r"<h\d[^>]*>[^<]*</h\d>", body)
 
 
 def test_window_double_click_on_include_toggles_twice():

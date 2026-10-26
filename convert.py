@@ -364,19 +364,21 @@ def _xhtml(title, body, lang):
 def write_epub(book, chapters, out_path, lang="es"):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario."""
     starts = dict(chapters)
-    sections = []  # [título, es_capítulo, bloques]
+    sections = []  # [título, es_capítulo, [(índice, bloque)]]
     for k, b in enumerate(book.blocks):
         if k in starts:
             sections.append([starts[k], True, []])
         else:
             if not sections:
                 sections.append(["Inicio", False, []])
-            sections[-1][2].append(b)
+            sections[-1][2].append((k, b))
 
     files, images = {}, {}
+    subtitles = {}  # archivo -> [(ancla, título escapado)]: subentradas del índice
     for n, (title, is_chapter, blocks) in enumerate(sections, 1):
+        name = f"sec{n:03d}.xhtml"
         parts = [f"<h1>{html.escape(title)}</h1>"] if is_chapter else []
-        for b in blocks:
+        for k, b in blocks:
             if b.kind == "image":
                 src = f"img/p{b.page:04d}.jpg"
                 images[src] = b.image
@@ -384,10 +386,11 @@ def write_epub(book, chapters, out_path, lang="es"):
             elif b.kind == "break":
                 parts.append('<p class="brk">* * *</p>')
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
-                parts.append(f"<h2>{b.html}</h2>")
+                parts.append(f'<h2 id="t{k}">{b.html}</h2>')
+                subtitles.setdefault(name, []).append((f"t{k}", b.html))
             else:
                 parts.append(f"<p>{b.html}</p>")
-        files[f"sec{n:03d}.xhtml"] = _xhtml(title, "\n".join(parts), lang)
+        files[name] = _xhtml(title, "\n".join(parts), lang)
 
     uid = f"urn:uuid:{uuid.uuid4()}"
     title = html.escape(book.title)
@@ -421,12 +424,23 @@ def write_epub(book, chapters, out_path, lang="es"):
 </spine>
 </package>
 """
+    # Índice en dos niveles: cada sección y, dentro, sus subtítulos con enlace a su ancla.
     entries = [(name, sec[0]) for name, sec in zip(files, sections)]
-    items = "\n".join(f'<li><a href="{name}">{html.escape(t)}</a></li>' for name, t in entries)
+    items, points, order = [], [], 0
+    for name, t in entries:
+        subs = subtitles.get(name, [])
+        children = "".join(f'<li><a href="{name}#{anchor}">{text}</a></li>' for anchor, text in subs)
+        items.append(f'<li><a href="{name}">{html.escape(t)}</a>' + (f"<ol>{children}</ol>" if subs else "") + "</li>")
+        order += 1  # playOrder: el capítulo antes que sus subtítulos, todos correlativos
+        point = (f'<navPoint id="n{order}" playOrder="{order}"><navLabel><text>{html.escape(t)}</text></navLabel>'
+                 f'<content src="{name}"/>')
+        for anchor, text in subs:
+            order += 1
+            point += (f'<navPoint id="n{order}" playOrder="{order}"><navLabel><text>{text}</text></navLabel>'
+                      f'<content src="{name}#{anchor}"/></navPoint>')
+        points.append(point + "</navPoint>")
+    items, points = "\n".join(items), "\n".join(points)
     nav = _xhtml("Índice", f'<nav epub:type="toc" id="toc"><h1>Índice</h1><ol>\n{items}\n</ol></nav>', lang)
-    points = "\n".join(
-        f'<navPoint id="n{k}" playOrder="{k}"><navLabel><text>{html.escape(t)}</text></navLabel>'
-        f'<content src="{name}"/></navPoint>' for k, (name, t) in enumerate(entries, 1))
     ncx = f"""<?xml version="1.0" encoding="utf-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
 <head><meta name="dtb:uid" content="{uid}"/></head>

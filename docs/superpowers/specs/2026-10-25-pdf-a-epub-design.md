@@ -144,6 +144,9 @@ class Book:
 ## Escritura del EPUB (`write_epub`)
 
 - EPUB 3 con `nav.xhtml` (y `toc.ncx` por compatibilidad con lectores antiguos).
+- Índice en dos niveles: cada sección y, anidados dentro, sus subtítulos (`<h2 id="tN">`,
+  con N el índice del bloque) enlazados a su ancla. En `toc.ncx`, `navPoint` anidados con
+  `playOrder` correlativo (el capítulo antes que sus subtítulos).
 - `mimetype` primero en el zip y sin comprimir.
 - Un XHTML por capítulo. Los bloques anteriores al primer capítulo van a una sección
   "Inicio". Un título que no es capítulo (desmarcado, o subtítulo detectado) se escribe
