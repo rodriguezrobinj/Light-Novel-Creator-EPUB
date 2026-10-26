@@ -15,7 +15,10 @@ import convert
 
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
 NEXT = {ON: OFF, OFF: CUT, CUT: ON}                 # cada clic pasa al siguiente
-KIND_TAG = {ON: "chapter", OFF: "subtitle", CUT: "cut"}  # estilo de cada fila según su tipo
+IMG, DROPPED = "Ilustración", "Descartada"           # tipo de las filas de imagen
+IMAGE_NEXT = {IMG: CUT, CUT: IMG, DROPPED: IMG}      # clic en una imagen: se quita o se recupera
+KIND_TAG = {ON: "chapter", OFF: "subtitle", CUT: "cut", IMG: "image", DROPPED: "dropped"}  # estilo por tipo
+KIND_COLOR = {"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a", "image": "#2e7d32", "dropped": "#8a8a8a"}
 PREVIEW_BOX = (400, 560)  # ancho y alto máximos de cada vista previa, en píxeles
 PREVIEW_CHROME = 190      # alto de leyendas, botones y miniaturas que rodean a las vistas previas
 DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
@@ -56,7 +59,8 @@ class App:
         self.device_var = tk.StringVar(value='E-reader 6"')
         self.dark_var = tk.BooleanVar(value=False)
         base = tkfont.nametofont("TkDefaultFont")
-        self.fonts = {name: base.copy() for name in ("chapter", "subtitle", "cut")}
+        self.fonts = {name: base.copy() for name in KIND_COLOR}
+        self.fonts["dropped"].configure(slant="italic")
         self.fonts["chapter"].configure(weight="bold")
         self.fonts["subtitle"].configure(slant="italic")
         self.fonts["cut"].configure(overstrike=1)
@@ -137,7 +141,7 @@ class App:
         self.tree.bind("<<TreeviewSelect>>", self.update_preview)
         for tag in KIND_TAG.values():
             self.tree.tag_configure(tag, font=self.fonts[tag],
-                                    foreground={"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a"}[tag])
+                                    foreground=KIND_COLOR[tag])
         # Marcos de tamaño fijo: solo cambian si cambia el alto de la ventana, no con cada página
         self.idle_text, self.views_height = "Abre un PDF para ver la vista previa", 0
         self.views.bind("<Configure>", self.on_resize)
@@ -289,13 +293,19 @@ class App:
         self.highlight = (self.pdf_page, block.rect) if block.rect else None
         self.draw_pdf()
         self.epub_page, self.epub_pages = 0, 0
-        self.epub_cut = self.tree.set(item, "inc") == CUT
+        is_image = block.kind == "image"
+        self.epub_cut = self.tree.set(item, "inc") in (CUT, DROPPED)
+        self.epub_message = "Esta ilustración no irá en el EPUB" if is_image else "Esta sección no irá en el EPUB"
         if not self.epub_cut:
-            # EPUB mínimo con solo esta sección (del título al siguiente): rápido de escribir y de maquetar
+            # EPUB mínimo con solo esta sección (del título al siguiente) o esta ilustración: rápido
             try:
                 blocks = self.book.blocks
-                end = next((k for k in range(index + 1, len(blocks)) if blocks[k].kind == "heading"), len(blocks))
-                part = convert.Book(self.book.title, "", self.book.cover, blocks[index:end], [])
+                if is_image:
+                    part_blocks = [convert.Block("image", block.page, image=block.image)]
+                else:
+                    end = next((k for k in range(index + 1, len(blocks)) if blocks[k].kind == "heading"), len(blocks))
+                    part_blocks = blocks[index:end]
+                part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [])
                 chapter = self.tree.set(item, "inc") == ON
                 convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path,
                                    typography=self.typography_var.get())
@@ -321,7 +331,7 @@ class App:
     def draw_epub(self):
         view = self.epub_view
         if self.epub_cut or self.epub_pages < 0:
-            self.blank(view, "Esta sección no irá en el EPUB" if self.epub_cut else "Sin vista previa")
+            self.blank(view, self.epub_message if self.epub_cut else "Sin vista previa")
             self.epub_caption.configure(text="EPUB")
             return
         try:
@@ -419,26 +429,40 @@ class App:
         self.volume_var.set(book.volume)
         # Todos los títulos: los capítulos marcados; los subtítulos ("El lado de…") desmarcados, por si
         # alguno debe ser capítulo. Un título desmarcado sale en el EPUB como subtítulo.
+        # Las ilustraciones van intercaladas, en el orden del libro: las que entran como "Ilustración" y las
+        # descartadas por el análisis (fondos de título, imágenes dentro del texto) como "Descartada".
         chapters = set(book.candidates)
+        images = dropped = 0
         for i, block in enumerate(book.blocks):
             if block.kind == "heading":
-                mark = ON if i in chapters else OFF
-                self.tree.insert("", "end", iid=str(i), values=(mark, html.unescape(block.html), block.page),
-                                 tags=(KIND_TAG[mark],))
+                mark, title = (ON if i in chapters else OFF), html.unescape(block.html)
+            elif block.kind == "image":
+                mark, title = (IMG if block.keep else DROPPED), f"Ilustración · página {block.page}"
+                images += 1
+                dropped += not block.keep
+            else:
+                continue
+            self.tree.insert("", "end", iid=str(i), values=(mark, title, block.page), tags=(KIND_TAG[mark],))
         self.idle_text = "Selecciona un título en la lista"
         self.blank(self.pdf_view, self.idle_text)
         self.blank(self.epub_view, self.idle_text)
         self.start_thumbs()
         self.gen_btn.state(["!disabled"])
         self.progress.configure(value=0)
-        found, others = len(chapters), len(self.tree.get_children()) - len(chapters)
+        found, others = len(chapters), len(self.tree.get_children()) - len(chapters) - images
         text = f"{found} capítulos detectados" if found else "No se detectaron capítulos: el EPUB tendrá una sola sección"
-        self.status.configure(text=text + (f" y {others} subtítulos" if others else ""))
+        text += f", {others} subtítulos" if others else ""
+        text += f" y {images} ilustraciones" + (f" ({dropped} descartadas)" if dropped else "") if images else ""
+        self.status.configure(text=text)
+
+    def is_image(self, item):
+        return self.book is not None and self.book.blocks[int(item)].kind == "image"
 
     def on_click(self, event):
         item = self.tree.identify_row(event.y)
         if item and self.tree.identify_column(event.x) == "#1":
-            self.set_kind(item, NEXT[self.tree.set(item, "inc")])
+            cycle = IMAGE_NEXT if self.is_image(item) else NEXT
+            self.set_kind(item, cycle[self.tree.set(item, "inc")])
             self.update_preview()
 
     def on_double_click(self, event):
@@ -446,7 +470,7 @@ class App:
         column = self.tree.identify_column(event.x)
         if item and column == "#1":  # Tk manda el segundo clic rápido aquí, no a on_click
             self.on_click(event)
-        if not item or column != "#2":
+        if not item or column != "#2" or self.is_image(item):  # el nombre de una ilustración no se edita
             return
         x, y, w, h = self.tree.bbox(item, "title")
         entry = ttk.Entry(self.tree)
@@ -491,7 +515,11 @@ class App:
         chapters = [(int(item), self.tree.set(item, "title")) for item in self.tree.get_children()
                     if self.tree.set(item, "inc") == ON]
         self.status.configure(text="Generando EPUB…")
-        removed = [int(item) for item in self.tree.get_children() if self.tree.set(item, "inc") == CUT]
+        for item in self.tree.get_children():  # ilustraciones: entran solo las que quedan como "Ilustración"
+            if self.is_image(item):
+                self.book.blocks[int(item)].keep = self.tree.set(item, "inc") == IMG
+        removed = [int(item) for item in self.tree.get_children()
+                   if self.tree.set(item, "inc") == CUT and not self.is_image(item)]
         self.run(convert.write_epub, (self.book, chapters, out, "es", removed, self.typography_var.get()),
                  lambda _: self.saved(out))
         self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub

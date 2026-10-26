@@ -44,6 +44,7 @@ class Block:
     page: int           # página de origen (empieza en 1)
     html: str = ""
     image: bytes = b""  # JPEG si kind == "image"
+    keep: bool = True   # imagen: va en el EPUB (False = descartada, se puede recuperar en la ventana)
     rect: tuple = ()    # (x0, y0, x1, y1) del título en su página, para resaltarlo en la vista previa
 
 
@@ -221,21 +222,33 @@ def _image_coverage(page):
     return sum(abs(pymupdf.Rect(i["bbox"]) & area) for i in page.get_image_info()) / abs(area)
 
 
-def _illustration(doc, page, uses):
-    """JPEG de la ilustración a página completa que hay bajo el texto, sin el texto encima.
-    Una imagen usada en más de 2 páginas es un fondo decorativo: None."""
-    infos = [i for i in page.get_image_info(xrefs=True) if i["xref"]]
-    if not infos:
-        return None
-    big = max(infos, key=lambda i: abs(pymupdf.Rect(i["bbox"]) & page.rect))
-    if abs(pymupdf.Rect(big["bbox"]) & page.rect) < 0.5 * abs(page.rect) or uses[big["xref"]] > 2:
-        return None
-    pix = pymupdf.Pixmap(doc, big["xref"])
+def _images(page):
+    """Imágenes incrustadas de la página: [(xref, fracción de la página que cubre)], de mayor a menor."""
+    area, found = abs(page.rect), {}
+    for info in page.get_image_info(xrefs=True):
+        if info["xref"]:
+            share = abs(pymupdf.Rect(info["bbox"]) & page.rect) / area
+            found[info["xref"]] = max(found.get(info["xref"], 0), share)
+    return sorted(found.items(), key=lambda item: -item[1])
+
+
+def _extract(doc, xref):
+    """JPEG de una imagen incrustada tal como está en el PDF, sin el texto que tenga encima."""
+    pix = pymupdf.Pixmap(doc, xref)
     if pix.alpha:
         pix = pymupdf.Pixmap(pix, 0)
     if pix.n not in (1, 3):  # CMYK u otros: JPEG necesita gris o RGB
         pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
     return pix.tobytes("jpg", jpg_quality=85)
+
+
+def _illustration(page, uses):
+    """xref de la ilustración a página completa que hay bajo el texto, o None.
+    Una imagen usada en más de 2 páginas es un fondo decorativo."""
+    images = _images(page)
+    if images and images[0][1] >= 0.5 and uses[images[0][0]] <= 2:
+        return images[0][0]
+    return None
 
 
 def _render(page):
@@ -322,15 +335,16 @@ def analyze(pdf_path, progress=None):
                 continue
             if not rows or _is_toc(rows):
                 continue
-            if len(headings) == len(rows):
+            heading_only = len(headings) == len(rows)
+            if heading_only:
                 rows = _first_group(rows)
             start = len(blocks)
             normal = [r for r in rows if not r.heading]
             # Ilustración con el texto de la novela encima: se guardan las dos cosas. El párrafo abierto
             # sigue abierto, así que su continuación se une a él aunque la imagen quede en medio.
-            art = _illustration(doc, page, uses) if normal else None
+            art = _illustration(page, uses) if normal else None
             if art:
-                blocks.append(Block("image", num, image=art))
+                blocks.append(Block("image", num, image=_extract(doc, art)))
             left = min((r.x0 for r in normal), default=0)
             right = max((r.x1 for r in normal), default=0)
             prev = None
@@ -367,6 +381,14 @@ def analyze(pdf_path, progress=None):
                     short = r.x1 < right - (right - left) * 0.2
                     last_text = r.text
                 prev = r
+            # Imágenes que no entran solas, apuntadas como descartadas para poder recuperarlas en la
+            # ventana: las de dentro del texto y el fondo de una página de título. Los fondos y barras
+            # que se repiten en muchas páginas y las diminutas no: serían ruido.
+            images = _images(page)
+            for xref, share in images:
+                background = heading_only and covered and xref == images[0][0]
+                if xref != art and share >= 0.02 and (uses[xref] <= 2 or background):
+                    blocks.append(Block("image", num, image=_extract(doc, xref), keep=False))
             if pending:  # quitar el título repetido: ya salió con la ilustración de la página anterior
                 k = next((k for k in range(start, len(blocks)) if blocks[k].kind == "heading"), None)
                 if k is not None and _key(html.unescape(blocks[k].html)) == pending:
@@ -448,7 +470,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         skip.update(range(k, end))
     sections = []  # [título, es_capítulo, [(índice, bloque)]]
     for k, b in enumerate(book.blocks):
-        if k in skip:
+        if k in skip or (b.kind == "image" and not b.keep):  # sección quitada o imagen descartada
             continue
         if k in starts:
             sections.append([starts[k], True, []])
@@ -464,7 +486,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         parts = [f"<h1>{fix(html.escape(title))}</h1>"] if is_chapter else []
         for k, b in blocks:
             if b.kind == "image":
-                src = f"img/p{b.page:04d}.jpg"
+                src = f"img/b{k:05d}.jpg"  # por bloque: una página puede tener varias imágenes
                 images[src] = b.image
                 parts.append(f'<div class="img"><img src="{src}" alt=""/></div>')
             elif b.kind == "break":

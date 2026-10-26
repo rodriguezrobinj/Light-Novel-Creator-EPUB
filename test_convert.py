@@ -242,9 +242,8 @@ def test_pdf_without_novel_text_is_rejected():
         raise AssertionError("debía lanzar ValueError: un EPUB sin texto no es válido")
 
 
-def test_chapter_art_with_hidden_title_is_kept_once():
-    """Portada de capítulo: ilustración que tapa el título (texto oculto) y título repetido en la página siguiente.
-    Debe quedar el título una vez, seguido de la ilustración. Sin repetición, es un fondo decorativo."""
+def make_covers():
+    """Página 1: ilustración que tapa el título, repetido en la 2. Página 3: fondo decorativo bajo un título."""
     doc = pymupdf.open()
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 85), False)
     pix.clear_with(20)
@@ -265,12 +264,56 @@ def test_chapter_art_with_hidden_title_is_kept_once():
     ])
     path = TMP / "portadas.pdf"
     doc.save(path)
-    book = convert.analyze(path)
+    return path
+
+
+def test_chapter_art_with_hidden_title_is_kept_once():
+    """Portada de capítulo: ilustración que tapa el título (texto oculto) y título repetido en la página siguiente.
+    Debe quedar el título una vez, seguido de la ilustración. Sin repetición, es un fondo decorativo:
+    queda apuntado como descartado, por si se quiere recuperar."""
+    book = convert.analyze(make_covers())
     titles = [plain(book.blocks[i].html) for i in book.candidates]
     assert titles == ["Capitulo 1: Inicio!", "Capitulo 2: Final"], titles
-    kinds = [(b.kind, b.page) for b in book.blocks]
-    assert kinds[:3] == [("heading", 1), ("image", 1), ("p", 2)], kinds
-    assert ("image", 3) not in kinds, kinds
+    kinds = [(b.kind, b.page, b.keep) for b in book.blocks]
+    assert kinds[:3] == [("heading", 1, True), ("image", 1, True), ("p", 2, True)], kinds
+    assert [k for k in kinds if k[:2] == ("image", 3)] == [("image", 3, False)], kinds
+
+
+def test_inline_image_is_noted_as_discarded():
+    """Una imagen mediana dentro del texto queda descartada (se puede recuperar); un fondo repetido, no aparece."""
+    doc = pymupdf.open()
+    art = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), False)
+    art.clear_with(60)
+    bar = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 50, 4), False)
+    bar.clear_with(30)
+    body = [(92, 150, line("Texto de la pagina", 57), 11, "cour"), (72, 164, "fin.", 11, "cour")]
+    xref = 0
+    for n in (1, 2, 3):
+        p = add_page(doc, n, body)
+        if xref:
+            p.insert_image(pymupdf.Rect(0, 0, 595, 30), xref=xref)  # barra repetida en todas
+        else:
+            p.insert_image(pymupdf.Rect(0, 0, 595, 30), pixmap=bar)
+            xref = p.get_images()[0][0]
+        if n == 2:
+            p.insert_image(pymupdf.Rect(150, 300, 450, 525), pixmap=art)  # ~13 % de la página
+    path = TMP / "imagen-en-texto.pdf"
+    doc.save(path)
+    images = [(b.page, b.keep) for b in convert.analyze(path).blocks if b.kind == "image"]
+    assert images == [(2, False)], images
+
+
+def test_write_epub_leaves_out_images_not_kept():
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("image", 1, image=JPEG, keep=True),
+              convert.Block("image", 1, image=JPEG, keep=False), convert.Block("p", 1, "Texto.")]
+    out = TMP / "imagenes.epub"
+    convert.write_epub(convert.Book("Libro", "", JPEG, blocks, [0]), [(0, "Cap 1")], out)
+    with zipfile.ZipFile(out) as z:
+        pictures = [n for n in z.namelist() if n.startswith("OEBPS/img/")]
+    assert len(pictures) == 1, pictures
+
+
+JPEG = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False).tobytes("jpg")
 
 
 def test_index_without_title_is_skipped():
@@ -357,6 +400,11 @@ def test_indented_lowercase_line_continues_unfinished_paragraph():
     texts = [plain(b.html) for b in convert.analyze(path).blocks if b.kind == "p"]
     assert any(t.startswith("Primera linea") and t.endswith("conteniendo la risa.") for t in texts), texts
     assert "Termina aqui." in texts and "del mundo que faltaba." in texts, texts
+
+
+def first_title(window):
+    """Primera fila de título de la lista: las ilustraciones van intercaladas entre los títulos."""
+    return next(i for i in window.tree.get_children() if not window.is_image(i))
 
 
 def visible_window():
@@ -507,7 +555,7 @@ def test_window_previews_pdf_page_and_epub_for_selected_title():
     root, window = visible_window()
     window.pdf = make_novel()
     window.show_book(convert.analyze(window.pdf))
-    window.tree.selection_set(window.tree.get_children()[0])  # Capitulo 1: Inicio, página 3
+    window.tree.selection_set(first_title(window))  # Capitulo 1: Inicio, página 3
     root.update()
     widths = [view.image.width() if view.image else 0 for view in (window.pdf_view, window.epub_view)]
     caption = window.pdf_caption.cget("text")
@@ -523,7 +571,7 @@ def test_window_bottom_bar_stays_visible_with_previews():
     root.geometry("1300x600+0+0")
     window.pdf = make_novel()
     window.show_book(convert.analyze(window.pdf))
-    window.tree.selection_set(window.tree.get_children()[0])
+    window.tree.selection_set(first_title(window))
     root.update()
     bottom = window.root.winfo_rooty() + window.root.winfo_height()
     shown = [(w.winfo_ismapped(), w.winfo_rooty() + w.winfo_height() <= bottom) for w in (window.gen_btn, window.progress)]
@@ -540,7 +588,7 @@ def test_window_epub_preview_follows_include_mark():
     root, window = visible_window()
     window.pdf = make_novel()
     window.show_book(convert.analyze(window.pdf))
-    item = window.tree.get_children()[0]
+    item = first_title(window)
     window.tree.selection_set(item)
     root.update()
     x, y, w, h = window.tree.bbox(item, "inc")
@@ -593,7 +641,7 @@ def test_window_removed_section_preview_and_epub():
     root, window = visible_window()
     window.pdf = make_novel()
     window.show_book(convert.analyze(window.pdf))
-    item = window.tree.get_children()[0]  # Capitulo 1: Inicio
+    item = first_title(window)  # Capitulo 1: Inicio
     window.tree.selection_set(item)
     root.update()
     window.tree.set(item, "inc", app.CUT)
@@ -664,7 +712,7 @@ def test_window_highlights_detected_title_on_pdf_preview():
     root, window = visible_window()
     window.pdf = make_novel()
     window.show_book(convert.analyze(window.pdf))
-    window.tree.selection_set(window.tree.get_children()[0])
+    window.tree.selection_set(first_title(window))
     root.update()
     canvas = window.pdf_view
     boxes = canvas.find_withtag("title")
@@ -679,7 +727,7 @@ def test_window_preview_page_navigation():
     root, window = visible_window()
     window.pdf = make_novel()
     window.show_book(long_book())
-    window.tree.selection_set(window.tree.get_children()[0])
+    window.tree.selection_set(first_title(window))
     root.update()
     window.pdf_step(1)
     pdf_caption = window.pdf_caption.cget("text")
@@ -699,7 +747,7 @@ def test_window_list_styles_follow_type():
     root, window = visible_window()
     window.pdf = make_novel()
     window.show_book(convert.analyze(window.pdf))
-    item = window.tree.get_children()[0]
+    item = first_title(window)
     root.update()
     x, y, w, h = window.tree.bbox(item, "inc")
     styles = [window.tree.item(item, "tags")]
@@ -714,7 +762,7 @@ def test_window_device_preview_and_dark_mode():
     root, window = visible_window()
     window.pdf = make_novel()
     window.show_book(long_book())
-    window.tree.selection_set(window.tree.get_children()[0])
+    window.tree.selection_set(first_title(window))
     root.update()
     shapes = {}
     for device in ("Celular", "Tablet"):
@@ -775,7 +823,7 @@ def test_window_device_change_keeps_layout():
     root.geometry("1366x690+0+0")  # como una pantalla de portátil: ahí se notaba el salto
     window.pdf = make_novel()
     window.show_book(long_book())
-    window.tree.selection_set(window.tree.get_children()[0])
+    window.tree.selection_set(first_title(window))
     root.update()
     sizes = set()
     for device in ("Celular", 'E-reader 6"', "Tablet", "Celular"):
@@ -786,6 +834,52 @@ def test_window_device_change_keeps_layout():
                    window.tree.winfo_width()))
     window.close()
     assert len(sizes) == 1, sizes
+
+
+def test_window_reviews_illustrations():
+    """Las ilustraciones salen en la lista: se pueden quitar, recuperar las descartadas, y eso llega al EPUB."""
+    import time
+    from types import SimpleNamespace
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_covers()
+    window.show_book(convert.analyze(window.pdf))
+    root.update()
+    rows = {window.tree.set(i, "title"): i for i in window.tree.get_children()}
+    art, decor = rows["Ilustración · página 1"], rows["Ilustración · página 3"]
+    types = (window.tree.set(art, "inc"), window.tree.set(decor, "inc"))
+
+    def click(item):
+        x, y, w, h = window.tree.bbox(item, "inc")
+        window.on_click(SimpleNamespace(x=x + w // 2, y=y + h // 2))
+
+    click(decor)  # Descartada -> Ilustración
+    click(art)    # Ilustración -> Quitar
+    window.tree.selection_set(art)
+    root.update()
+    message = window.epub_view.itemcget("message", "text")
+    out = TMP / "ilustraciones-elegidas.epub"
+    originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
+    app.messagebox.showinfo = lambda *args: None
+    try:
+        window.generate()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
+        after = (window.tree.set(art, "inc"), window.tree.set(decor, "inc"))
+        window.close()
+    assert types == (app.IMG, app.DROPPED), types
+    assert after == (app.CUT, app.IMG), after
+    assert message == "Esta ilustración no irá en el EPUB", message
+    with zipfile.ZipFile(out) as z:
+        pictures = [n for n in z.namelist() if n.startswith("OEBPS/img/")]
+    assert len(pictures) == 1, pictures  # entra el fondo recuperado, no la ilustración quitada
 
 
 def test_window_double_click_on_include_toggles_twice():

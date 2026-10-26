@@ -94,6 +94,12 @@ class Book:
      que cubre más de la mitad conserva el texto y añade la imagen incrustada original
      (extraída, sin el texto encima). Una imagen usada en más de 2 páginas es un fondo y se
      ignora.
+   - **Imágenes descartadas:** las que no entran solas quedan apuntadas como bloque `image`
+     con `keep=False` (extraídas sin el texto encima), para poder recuperarlas en la ventana:
+     las de dentro del texto (al menos un 2 % de la página y usadas en 2 páginas o menos) y el
+     fondo de una página de título. No se apuntan los fondos y barras repetidos ni las
+     diminutas. `write_epub` omite las de `keep=False`; cada imagen se guarda como
+     `img/bNNNNN.jpg` (por bloque: una página puede tener varias).
 5. **Página de índice del PDF:** una página cuya primera línea es exactamente
    `Contenido`, `Índice`, `Tabla de contenido` o `Contents` (con o sin `:`), o que tiene
    tres o más líneas terminadas en puntos y número (`.....  12`), se descarta completa.
@@ -190,6 +196,10 @@ class Book:
   tipo rota Capítulo → Subtítulo → Quitar. Un título en "Quitar" no llega al EPUB, y su
   vista previa del EPUB lo avisa. Estilo por tipo: capítulo en negrita, subtítulo gris en
   cursiva, quitar gris claro tachado.
+- Las ilustraciones van intercaladas en la lista, en el orden del libro, como "Ilustración ·
+  página N" (en verde, sin edición del nombre). Tipos: Ilustración (entra), Quitar y
+  Descartada (apuntada por el análisis); un clic quita o recupera. Al generar, la ventana pone
+  `keep` según el tipo. Su vista previa del EPUB muestra solo esa imagen, o avisa si no entra.
 - Vista previa del PDF en un `Canvas`, con un recuadro rojo sobre la línea tomada como título
   (`Block.rect`, calculado desde línea base y tamaño de letra). Botones ◀ ▶ en cada vista:
   el PDF recorre todo el documento; el EPUB, la sección completa (del título al siguiente).
