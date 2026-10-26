@@ -521,6 +521,44 @@ def test_front_matter_before_first_chapter_is_not_a_chapter():
     assert all(not chosen for title, chosen in headings if title != "Capitulo 1: Inicio"), headings
 
 
+def design_book():
+    """Página 1: portada. Página 2: portadilla con logo y créditos. Página 3: capítulo.
+    Página 4: agradecimiento con logo."""
+    doc = pymupdf.open()
+    cover = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 85), False)
+    cover.clear_with(150)
+    logo = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 20), False)
+    logo.clear_with(70)
+    add_page(doc, 1, [])
+    doc[0].insert_image(doc[0].rect, pixmap=cover, keep_proportion=False)
+    add_page(doc, 2, [(200, 500, "Volumen 6", 20, "helv"), (72, 760, "Autor", 9, "helv"),
+                      (72, 772, "Fulano de Tal", 9, "hebo")])
+    doc[1].insert_image(pymupdf.Rect(100, 250, 500, 450), pixmap=logo)  # ~16 % de la página
+    chapter_page(doc, 3, [(72, 150, "Capitulo 1: Inicio", 20, "helv")])
+    add_page(doc, 4, [(200, 500, "Gracias por leer", 20, "helv")])
+    doc[3].insert_image(pymupdf.Rect(100, 250, 500, 450), pixmap=logo)
+    path = TMP / "diseno.pdf"
+    doc.save(path)
+    return path
+
+
+def test_design_page_before_first_chapter_is_kept_whole():
+    """La portadilla con logo y créditos se conserva entera, como una imagen de la página."""
+    book = convert.analyze(design_book())
+    first = [(b.kind, b.keep) for b in book.blocks if b.page == 2]
+    page = [b for b in book.blocks if b.page == 2 and b.kind == "image"]
+    assert first == [("image", True)], first  # ni el logo suelto ni los textos por separado
+    picture = pymupdf.Pixmap(page[0].image)
+    assert abs(picture.height / picture.width - 842 / 595) < 0.02, (picture.width, picture.height)
+
+
+def test_design_like_page_after_first_chapter_is_unchanged():
+    """Después del primer capítulo no se toca: título como texto y el logo como descartado."""
+    book = convert.analyze(design_book())
+    last = [(b.kind, b.keep) for b in book.blocks if b.page == 4]
+    assert ("heading", True) in last and ("image", False) in last, last
+
+
 def test_outline_bookmarks_choose_chapters():
     """Si el PDF tiene marcadores, los de primer nivel mandan sobre los títulos detectados."""
     doc = pymupdf.open(make_novel())

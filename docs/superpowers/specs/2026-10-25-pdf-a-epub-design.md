@@ -94,6 +94,10 @@ class Book:
      que cubre más de la mitad conserva el texto y añade la imagen incrustada original
      (extraída, sin el texto encima). Una imagen usada en más de 2 páginas es un fondo y se
      ignora.
+   - **Páginas de diseño de los preliminares** (Kage Vol 6, portadilla con logo y créditos): antes de
+     la primera página con un capítulo, una página con menos de 200 caracteres y alguna imagen
+     propia (al menos un 2 % y usada en 2 páginas o menos) se conserva entera como imagen, para no
+     perder su composición. Si el libro no tiene ningún capítulo detectable, no hay preliminares.
    - **Imágenes descartadas:** las que no entran solas quedan apuntadas como bloque `image`
      con `keep=False` (extraídas sin el texto encima), para poder recuperarlas en la ventana:
      las de dentro del texto (al menos un 2 % de la página y usadas en 2 páginas o menos) y el

@@ -372,6 +372,9 @@ def analyze(pdf_path, progress=None):
                 r.starts = len(key) >= 4 and any(mark.startswith(key) for mark in bookmarks[i])
 
         uses = collections.Counter(img[0] for page in doc for img in page.get_images())  # xref -> páginas
+        # Primera página con un capítulo: lo anterior son preliminares (portadilla, créditos, logos)
+        first_chapter = next((i for i, rows in enumerate(pages) if rows and not _is_toc(rows) and any(
+            r.heading and KEYWORDS.match(r.text.strip(LABEL_DECOR)) for r in rows)), 0)  # sin capítulos: nada
         blocks = []
         para, short, last_text = None, False, ""
         repeated = ""  # título que la página anterior ya emitió junto a su ilustración
@@ -396,6 +399,13 @@ def analyze(pdf_path, progress=None):
                 para, repeated = None, _title(rows)
                 continue
             if not rows or _is_toc(rows):
+                continue
+            # Página de diseño de los preliminares (portadilla con logo y créditos): poco texto y alguna
+            # imagen propia. Se conserva entera, como imagen, para no perder su composición.
+            if i < first_chapter and sum(len(r.text) for r in rows) < 200 and any(
+                    share >= 0.02 and uses[xref] <= 2 for xref, share in _images(page)):
+                blocks.append(Block("image", num, image=_render(page)))
+                para = None
                 continue
             heading_only = len(headings) == len(rows)
             if heading_only:
