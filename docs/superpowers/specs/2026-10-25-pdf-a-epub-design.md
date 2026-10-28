@@ -35,7 +35,6 @@ Conclusión: la detección debe ser automática y no depender de un formato conc
 
 - OCR para PDFs escaneados (solo se avisa al usuario).
 - Agregar capítulos a mano en la ventana.
-- Empaquetar como `.exe`.
 
 ## Arquitectura
 

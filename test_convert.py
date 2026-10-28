@@ -1534,6 +1534,198 @@ def test_window_metadata_cover_and_shrink_reach_the_epub():
     assert (pix.width, pix.height) == (933, convert.SHRINK), (pix.width, pix.height)  # reducida por defecto
 
 
+def two_color(width, height):
+    """JPEG con la mitad izquierda roja y la derecha azul, para saber qué mitad es cada página."""
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
+    pix.set_rect(pix.irect, (255, 0, 0))
+    pix.set_rect(pymupdf.IRect(width // 2, 0, width, height), (0, 0, 255))
+    return pix.tobytes("jpg", jpg_quality=95)
+
+
+def test_wide_illustration_split_or_rotated():
+    wide = two_color(400, 200)
+    assert convert.is_wide(wide) and not convert.is_wide(jpeg(200, 300))
+    for layout in ("split", "rotate"):
+        book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"),
+                                               convert.Block("image", 1, image=wide, layout=layout)], [0])
+        out = TMP / f"doble-{layout}.epub"
+        convert.write_epub(book, [(0, "Cap 1")], out)
+        with zipfile.ZipFile(out) as z:
+            section = z.read("OEBPS/sec001.xhtml").decode()
+            srcs = re.findall(r'<img src="([^"]+)"', section)
+            pixes = [pymupdf.Pixmap(z.read("OEBPS/" + s)) for s in srcs]
+        if layout == "split":
+            assert [(p.width, p.height) for p in pixes] == [(200, 200), (200, 200)], srcs
+            assert pixes[0].pixel(100, 100)[2] > 200 and pixes[1].pixel(100, 100)[0] > 200  # derecha (azul) primero
+        else:
+            assert [(p.width, p.height) for p in pixes] == [(200, 400)], srcs
+            assert pixes[0].pixel(100, 50)[0] > 200  # girada a la derecha: la mitad izquierda queda arriba
+
+
+def test_replacements_change_whole_words_outside_tags():
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap Ana"),
+                                           convert.Block("p", 1, "<i>Ana</i> y Anabel: Onii-chan &amp; i.")], [0])
+    out = TMP / "reemplazos.epub"
+    convert.write_epub(book, [(0, "Cap Ana")], out,
+                       replacements=[("Ana", "Hana"), ("Onii-chan", "Onii-san"), ("i", "<x>"), ("", "nada")])
+    text = epub_file(out, "OEBPS/sec001.xhtml")
+    assert "<p><i>Hana</i> y Anabel: Onii-san &amp; &lt;x&gt;.</p>" in text, text
+    assert "Cap Hana" in text and "Cap Hana" in epub_file(out, "OEBPS/nav.xhtml")
+
+
+def wide_book():
+    return convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Texto."),
+                                           convert.Block("image", 1, image=two_color(400, 200)),
+                                           convert.Block("image", 1, image=jpeg(200, 300))], [0])
+
+
+def test_window_wide_illustration_types():
+    from types import SimpleNamespace
+
+    import app
+
+    root, window = visible_window()
+    book = wide_book()
+    window.show_book(book)
+    root.update()
+    titles = [window.tree.set(i, "title") for i in ("2", "3")]
+
+    def click(item):
+        x, y, w, h = window.tree.bbox(item, "inc")
+        window.on_click(SimpleNamespace(x=x + w // 2, y=y + h // 2))
+        return window.tree.set(item, "inc")
+
+    wide = [click("2") for _ in range(4)]
+    narrow = [click("3") for _ in range(2)]
+    click("2")  # Dividida
+    window.tree.selection_set("2")
+    root.update()
+    with zipfile.ZipFile(window.preview_path) as z:
+        preview = [n for n in z.namelist() if n.startswith("OEBPS/img/")]
+    _, removed = app._plan(book, window.rows())
+    window.close()
+    assert titles == ["Ilustración doble · página 1", "Ilustración · página 1"], titles
+    assert wide == [app.SPLIT, app.ROTATED, app.CUT, app.IMG], wide
+    assert narrow == [app.CUT, app.IMG], narrow
+    assert len(preview) == 2, preview  # la vista previa ya muestra las dos mitades
+    assert (book.blocks[2].layout, book.blocks[2].keep, removed) == ("split", True, []), book.blocks[2].layout
+
+
+def test_window_undo_restores_type_and_title():
+    import app
+
+    root, window = visible_window()
+    window.show_book(sectioned_book())
+    window.set_kind("0", app.CUT)
+    window.set_kind("2", app.ON)
+    window.history.append(("2", window.tree.set("2", "inc"), window.tree.set("2", "title")))
+    window.tree.set("2", "title", "Lado A editado")  # como hace el cuadro de edición
+    window.tree.focus_force()
+    root.update()
+    window.tree.event_generate("<Control-z>")
+    root.update()
+    after_title = (window.tree.set("2", "inc"), window.tree.set("2", "title"))
+    window.undo()
+    window.undo()
+    window.undo()  # sin más cambios: no hace nada
+    rows = [window.tree.set(i, "inc") for i in ("0", "2")]
+    window.close()
+    assert after_title == (app.ON, "Lado A"), after_title
+    assert rows == [app.ON, app.OFF], rows
+
+
+def series_folder():
+    folder = TMP / f"serie-{time_ns()}"
+    folder.mkdir()
+    for n in (1, 2):
+        make_novel().replace(folder / f"Mi Serie - Volumen 0{n}.pdf")
+    return folder
+
+
+def time_ns():
+    import time
+    return time.time_ns()
+
+
+def review_volume_one(folder):
+    """Revisa el tomo 1 en la ventana y la cierra (lo que guarda la revisión)."""
+    root, window = visible_window()
+    window.pdf = folder / "Mi Serie - Volumen 01.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    window.tree.set(first_title(window), "title", "Capítulo uno")
+    window.publisher_var.set("Grupo X")
+    window.translator_var.set("Ana")
+    window.style_var.set("Moderno")
+    window.description = "Solo del tomo 1."
+    window.replacements = [["Primera", "Inicial"]]
+    window.close()
+
+
+def test_window_new_volume_inherits_series_data():
+    folder = series_folder()
+    review_volume_one(folder)
+    root, window = visible_window()
+    window.pdf = folder / "Mi Serie - Volumen 02.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    got = (window.publisher_var.get(), window.translator_var.get(), window.style_var.get(), window.replacements,
+           window.description, window.volume_var.get(), window.tree.set(first_title(window), "title"))
+    status = window.status.cget("text")
+    window.close()
+    assert got == ("Grupo X", "Ana", "Moderno", [["Primera", "Inicial"]], "", "2", "Capitulo 1: Inicio"), got
+    assert "otro tomo" in status, status
+
+
+def test_batch_converts_with_review_and_inherited_data():
+    import app
+
+    folder = series_folder()
+    review_volume_one(folder)
+    pdfs = [str(folder / f"Mi Serie - Volumen 0{n}.pdf") for n in (1, 2)] + [str(folder / "roto.pdf")]
+    (folder / "roto.pdf").write_bytes(b"no es un pdf")
+    seen = []
+    results = app._batch(pdfs, {"style": "Clásico", "shrink": False}, progress=lambda d, t: seen.append((d, t)))
+    assert [r[0] for r in results] == ["Mi Serie - Volumen 01.pdf", "Mi Serie - Volumen 02.pdf", "roto.pdf"]
+    assert results[0][1] == results[1][1] == "" and results[2][1], results
+    assert seen[-1] == (3, 3), seen
+    one, two = (folder / f"Mi Serie - Volumen 0{n}.epub" for n in (1, 2))
+    assert "Capítulo uno" in epub_text(one) and "Solo del tomo 1." in epub_file(one, "OEBPS/content.opf")
+    opf = epub_file(two, "OEBPS/content.opf")
+    assert "Grupo X" in opf and "Solo del tomo 1." not in opf, opf
+    assert "Inicial linea" in epub_text(two) and "Primera linea" not in epub_text(two)
+    assert "sans-serif" in epub_file(two, "OEBPS/style.css")  # estilo heredado, no el de la ventana
+
+
+def test_window_convert_folder_skips_existing_epubs_on_no():
+    import time
+
+    import app
+
+    folder = series_folder()
+    (folder / "Mi Serie - Volumen 01.epub").write_bytes(b"mio")
+    root, window = visible_window()
+    asked, done = [], []
+    originals = (app.filedialog.askdirectory, app.messagebox.askyesnocancel, app.messagebox.showinfo,
+                 app.messagebox.showwarning)
+    app.filedialog.askdirectory = lambda **kwargs: str(folder)
+    app.messagebox.askyesnocancel = lambda title, message: asked.append(message) or False
+    app.messagebox.showinfo = app.messagebox.showwarning = lambda title, message: done.append(message)
+    try:
+        window.convert_folder()
+        deadline = time.time() + 120
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+    finally:
+        (app.filedialog.askdirectory, app.messagebox.askyesnocancel, app.messagebox.showinfo,
+         app.messagebox.showwarning) = originals
+        status = window.status.cget("text")
+        window.close()
+    assert asked and "1 de 2" in asked[0], asked
+    assert (folder / "Mi Serie - Volumen 01.epub").read_bytes() == b"mio"  # "No": no se reemplaza
+    assert zipfile.is_zipfile(folder / "Mi Serie - Volumen 02.epub")
+    assert status == "1 de 1 EPUB generados", (status, done)
+
+
 if __name__ == "__main__":
     failed = 0
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

@@ -19,9 +19,17 @@ ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la
 NEXT = {ON: OFF, OFF: CUT, CUT: ON}                 # cada clic pasa al siguiente
 IMG, DROPPED = "Ilustración", "Descartada"           # tipo de las filas de imagen
 IMAGE_NEXT = {IMG: CUT, CUT: IMG, DROPPED: IMG}      # clic en una imagen: se quita o se recupera
-KIND_TAG = {ON: "chapter", OFF: "subtitle", CUT: "cut", IMG: "image", DROPPED: "dropped"}  # estilo por tipo
-KEYS = {"c": ON, "s": OFF, "q": CUT, "i": IMG}       # atajos de teclado en la lista
+SPLIT, ROTATED = "Dividida", "Girada"                # ilustración doble: en dos páginas o girada 90°
+WIDE_NEXT = {IMG: SPLIT, SPLIT: ROTATED, ROTATED: CUT, CUT: IMG, DROPPED: IMG}
+LAYOUT = {SPLIT: "split", ROTATED: "rotate"}         # tipo de la fila -> Block.layout
+KIND_TAG = {ON: "chapter", OFF: "subtitle", CUT: "cut", IMG: "image", DROPPED: "dropped",
+            SPLIT: "image", ROTATED: "image"}        # estilo por tipo
+KEYS = {"c": ON, "s": OFF, "q": CUT, "i": IMG, "d": SPLIT, "g": ROTATED}  # atajos de teclado en la lista
 LANGUAGES = ["es", "en", "pt", "fr", "it", "ja"]     # idioma del EPUB: lo usan la partición de palabras y la voz
+LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual en el XML del EPUB
+# Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
+INHERITED = ("author", "publisher", "translator", "lang", "style", "separator", "typography", "shrink",
+             "replacements")
 KIND_COLOR = {"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a", "image": "#2e7d32", "dropped": "#8a8a8a"}
 PREVIEW_BOX = (400, 560)  # ancho y alto máximos de cada vista previa, en píxeles
 PREVIEW_CHROME = 190      # alto de leyendas, botones y miniaturas que rodean a las vistas previas
@@ -43,6 +51,119 @@ def _worker(events, work, args, report):
         events.put(("error", str(e) or type(e).__name__))  # MemoryError() no trae mensaje
 
 
+# La revisión (tipos, títulos editados, datos del libro y opciones) se guarda junto al PDF en un
+# .json: al volver a abrir el mismo PDF se recupera, aunque se haya cerrado la ventana sin generar.
+def _review_path(pdf):
+    return Path(pdf).with_name(Path(pdf).stem + ".lnepub.json")
+
+
+def _fingerprint(pdf):
+    """Tamaño y fecha del PDF: si cambian, la revisión guardada es de otro PDF y no se usa."""
+    stat = Path(pdf).stat()
+    return [stat.st_size, stat.st_mtime_ns]
+
+
+def _read_review(pdf, blocks):
+    """Revisión guardada de este PDF, o None si no hay o si el PDF cambió desde entonces."""
+    try:
+        state = json.loads(_review_path(pdf).read_text(encoding="utf-8"))
+        if state["pdf"] == _fingerprint(pdf) and state["blocks"] == blocks and isinstance(state["rows"], dict):
+            return state
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _inherited(pdf, series):
+    """Datos de la serie (INHERITED) de la revisión más reciente de otro tomo de la misma serie,
+    en la misma carpeta. {} si no hay."""
+    found = []
+    for path in Path(pdf).parent.glob("*.lnepub.json") if series else ():
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if path != _review_path(pdf) and str(state.get("series", "")).strip().lower() == series.strip().lower():
+                found.append((path.stat().st_mtime, path.name, state))
+        except (OSError, ValueError, AttributeError):
+            continue
+    if not found:
+        return {}
+    state = max(found, key=lambda f: f[:2])[2]
+    return {name: state[name] for name in INHERITED if name in state}
+
+
+def _plan(book, rows):
+    """Capítulos y secciones quitadas según los tipos de la lista ({fila: (tipo, título)}); marca
+    también qué ilustraciones entran y cómo."""
+    chapters, removed = [], []
+    for item, (kind, title) in rows.items():
+        k = int(item)
+        if book.blocks[k].kind == "image":
+            book.blocks[k].keep = kind in (IMG, SPLIT, ROTATED)
+            book.blocks[k].layout = LAYOUT.get(kind, "")
+        elif kind == ON:
+            chapters.append((k, title))
+        elif kind == CUT:
+            removed.append(k)
+    return chapters, removed
+
+
+def _cover_image(doc, choice):
+    """Portada elegida: ("page", n) es una página del PDF (desde 0); ("file", ruta), una imagen."""
+    kind, value = choice
+    return convert._render(doc[value], crop=True) if kind == "page" else convert.load_cover(value)
+
+
+def _parse_replacements(text):
+    """Una regla por línea, "buscar -> reemplazo"; las líneas sin flecha no cuentan."""
+    rules = []
+    for line in text.splitlines():
+        if "->" in line:
+            find, new = (s.strip() for s in line.split("->", 1))
+            if find:
+                rules.append([find, new])
+    return rules
+
+
+def _batch(pdfs, options, progress=None):
+    """Convierte varios PDF sin pasar por la ventana: con la revisión guardada de cada uno si la hay y,
+    si no, con lo detectado y los datos heredados de otro tomo de la serie. options: estilo y demás
+    opciones de la ventana, para los PDF sin revisión. Devuelve [(nombre del PDF, error o "")]."""
+    results = []
+    for n, pdf in enumerate(pdfs):
+        try:
+            book = convert.analyze(pdf)
+            state = _read_review(pdf, len(book.blocks))
+            if state:
+                chapters, removed = _plan(book, state["rows"])
+            else:
+                state = {**options, **_inherited(pdf, book.series)}
+                state["author"] = book.author or state.get("author", "")
+                chapters = [(k, html.unescape(book.blocks[k].html)) for k in book.candidates]
+                removed = []
+            for name in ("title", "author", "series", "volume", "publisher", "translator", "description"):
+                if name in state:
+                    setattr(book, name, str(state[name]).strip())
+            if state.get("cover"):
+                try:
+                    with pymupdf.open(pdf) as doc:
+                        book.cover = _cover_image(doc, state["cover"])
+                except Exception:
+                    pass  # la imagen de portada ya no existe: se queda la del PDF
+            lang = str(state.get("lang", "es"))
+            style = state.get("style")
+            convert.write_epub(book, chapters, Path(pdf).with_suffix(".epub"), lang if LANG.fullmatch(lang) else "es",
+                               removed, bool(state.get("typography", True)),
+                               style if style in convert.STYLES else "Clásico", True,
+                               str(state.get("separator", "Según el estilo")), bool(state.get("shrink", True)),
+                               [tuple(rule) for rule in state.get("replacements", [])])
+            results.append((Path(pdf).name, ""))
+        except Exception as e:
+            results.append((Path(pdf).name, str(e) or type(e).__name__))
+        if progress:
+            progress(n + 1, len(pdfs))
+    return results
+
+
 class App:
     def __init__(self, root):
         self.root, self.book, self.pdf = root, None, None
@@ -60,6 +181,9 @@ class App:
         self.epub_cut = False                  # la sección seleccionada está en "Quitar"
         self.thumbs, self.thumb_images = {}, []  # miniaturas: página -> (x, ancho, alto)
         self.thumb_job, self.thumb_x = 0, 4    # tanda en curso (para cancelarla) y posición siguiente
+        self.wide = set()                      # filas de ilustraciones dobles (apaisadas)
+        self.history = []                      # cambios de la lista, para deshacer: (fila, tipo, título) de antes
+        self.busy = ""                         # qué dice la barra de estado mientras avanza el trabajo
         self.device_var = tk.StringVar(value='E-reader 6"')
         self.dark_var = tk.BooleanVar(value=False)
         base = tkfont.nametofont("TkDefaultFont")
@@ -76,6 +200,8 @@ class App:
         top.pack(fill="x")
         self.open_btn = ttk.Button(top, text="Abrir PDF…", command=self.open_pdf)
         self.open_btn.pack(side="left")
+        self.batch_btn = ttk.Button(top, text="Convertir carpeta…", command=self.convert_folder)
+        self.batch_btn.pack(side="left", padx=(4, 0))
         self.file_label = ttk.Label(top, text="Ningún archivo")
         self.file_label.pack(side="left", padx=8)
         ttk.Button(top, text="Portada: archivo…", command=self.cover_from_file).pack(side="right")
@@ -97,12 +223,14 @@ class App:
         self.publisher_var, self.translator_var = tk.StringVar(), tk.StringVar()
         self.lang_var = tk.StringVar(value="es")
         self.description = ""  # sinopsis; se edita en su propio cuadro
+        self.replacements = []  # [[buscar, reemplazo]]; se editan en su propio cuadro
         for label, var, width in (("Grupo:", self.publisher_var, 30), ("Traductor:", self.translator_var, 30)):
             ttk.Label(meta2, text=label).pack(side="left")
             ttk.Entry(meta2, textvariable=var, width=width).pack(side="left", padx=(4, 12))
         ttk.Label(meta2, text="Idioma:").pack(side="left")
         ttk.Combobox(meta2, textvariable=self.lang_var, values=LANGUAGES, width=4).pack(side="left", padx=(4, 12))
         ttk.Button(meta2, text="Sinopsis…", command=self.edit_description).pack(side="left")
+        ttk.Button(meta2, text="Reemplazos…", command=self.edit_replacements).pack(side="left", padx=4)
 
         # La barra inferior y la ayuda se empaquetan antes que el centro: pack reparte el espacio en
         # orden, y así el centro (con las vistas previas) es el que encoge en pantallas bajas.
@@ -131,8 +259,9 @@ class App:
         separator.pack(side="right")
         separator.bind("<<ComboboxSelected>>", lambda _: self.update_preview())
         ttk.Label(bottom, text="Separador:").pack(side="right", padx=(12, 4))
-        ttk.Label(root, text="Clic en Tipo, o teclas C (capítulo), S (subtítulo), Q (quitar), I (ilustración)"
-                             " · Doble clic en el título o F2: editar", padding=(8, 0)).pack(side="bottom", anchor="w")
+        ttk.Label(root, text="Clic en Tipo, o teclas C (capítulo), S (subtítulo), Q (quitar), I (ilustración),"
+                             " D/G (ilustración doble: dividir o girar) · Doble clic o F2: editar título"
+                             " · Ctrl+Z: deshacer", padding=(8, 0)).pack(side="bottom", anchor="w")
 
         middle = ttk.Frame(root, padding=8)
         middle.pack(fill="both", expand=True)
@@ -177,6 +306,8 @@ class App:
             for k in (key, key.upper()):
                 self.tree.bind(f"<KeyPress-{k}>", lambda _, kind=kind: self.shortcut(kind))
         self.tree.bind("<F2>", lambda _: self.tree.selection() and self.edit_title(self.tree.selection()[0]))
+        self.tree.bind("<Control-z>", self.undo)
+        self.tree.bind("<Control-Z>", self.undo)  # con Bloq Mayús
         for tag in KIND_TAG.values():
             self.tree.tag_configure(tag, font=self.fonts[tag],
                                     foreground=KIND_COLOR[tag])
@@ -186,12 +317,13 @@ class App:
         self.redraw()
         root.after(100, self.poll)
 
-    def run(self, work, args, done, report=False):
+    def run(self, work, args, done, report=False, busy="Analizando…"):
         """Ejecuta work(*args) en otro proceso y llama a done(resultado) en la ventana.
-        Con report=True, work recibe progress=... y la barra avanza."""
+        Con report=True, work recibe progress=... y la barra avanza junto al texto busy."""
         self.open_btn.state(["disabled"])
+        self.batch_btn.state(["disabled"])
         self.gen_btn.state(["disabled"])
-        self.done = done
+        self.done, self.busy = done, busy
         self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, args, report), daemon=True)
         self.proc.start()
 
@@ -217,13 +349,14 @@ class App:
         if latest:
             done, total = latest
             self.progress.configure(maximum=total, value=done)
-            self.status.configure(text=f"Analizando… {done * 100 // total} %")
+            self.status.configure(text=f"{self.busy} {done * 100 // total} %")
         self.root.after(100, self.poll)
 
     def finish(self, event):
         """Cierra el trabajo en curso: desbloquea la ventana y entrega el resultado o el error."""
         done, self.done, self.latest, self.partial = self.done, None, None, None
         self.open_btn.state(["!disabled"])
+        self.batch_btn.state(["!disabled"])
         if self.book:
             self.gen_btn.state(["!disabled"])
         if event[0] == "done":
@@ -333,23 +466,23 @@ class App:
         self.draw_pdf()
         self.epub_page, self.epub_pages = 0, 0
         is_image = block.kind == "image"
-        self.epub_cut = self.tree.set(item, "inc") in (CUT, DROPPED)
+        kind = self.tree.set(item, "inc")
+        self.epub_cut = kind in (CUT, DROPPED)
         self.epub_message = "Esta ilustración no irá en el EPUB" if is_image else "Esta sección no irá en el EPUB"
         if not self.epub_cut:
             # EPUB mínimo con solo esta sección (del título al siguiente) o esta ilustración: rápido
             try:
                 blocks = self.book.blocks
                 if is_image:
-                    part_blocks = [convert.Block("image", block.page, image=block.image)]
+                    part_blocks = [convert.Block("image", block.page, image=block.image, layout=LAYOUT.get(kind, ""))]
                 else:
                     end = next((k for k in range(index + 1, len(blocks)) if blocks[k].kind == "heading"), len(blocks))
                     part_blocks = blocks[index:end]
                 part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [])
-                chapter = self.tree.set(item, "inc") == ON
-                convert.write_epub(part, [(0, self.tree.set(item, "title"))] if chapter else [], self.preview_path,
+                convert.write_epub(part, [(0, self.tree.set(item, "title"))] if kind == ON else [], self.preview_path,
                                    typography=self.typography_var.get(), style=self.style_var.get(),
                                    contents=False,  # sin página de índice: el capítulo 1 es la sección
-                                   separator=self.separator_var.get())
+                                   separator=self.separator_var.get(), replacements=self.replacements)
             except Exception:
                 self.epub_pages = -1  # no se pudo generar
         self.draw_epub()
@@ -447,8 +580,27 @@ class App:
             self.tree.see(item)
 
     def set_kind(self, item, kind):
+        self.history.append((item, self.tree.set(item, "inc"), self.tree.set(item, "title")))
         self.tree.set(item, "inc", kind)
         self.tree.item(item, tags=(KIND_TAG[kind],))
+
+    def undo(self, _=None):
+        """Ctrl+Z: deshace el último cambio de tipo o de título de la lista."""
+        if not self.history:
+            return
+        item, kind, title = self.history.pop()
+        self.tree.set(item, "inc", kind)
+        self.tree.item(item, tags=(KIND_TAG[kind],))
+        self.tree.set(item, "title", title)
+        self.tree.selection_set(item)
+        self.tree.see(item)
+        self.update_preview()
+
+    def cycle(self, item):
+        """Orden de tipos de una fila al hacer clic: título, ilustración o ilustración doble."""
+        if not self.is_image(item):
+            return NEXT
+        return WIDE_NEXT if item in self.wide else IMAGE_NEXT
 
     def open_pdf(self):
         path = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
@@ -472,6 +624,7 @@ class App:
         self.publisher_var.set(book.publisher)
         self.translator_var.set(book.translator)
         self.description = book.description
+        self.replacements = []  # son de la serie: llegan con la revisión o heredados de otro tomo
         self.cover_choice = None
         self.cover_label.configure(text="Portada: la del PDF")
         # Todos los títulos: los capítulos marcados; los subtítulos ("El lado de…") desmarcados, por si
@@ -480,11 +633,13 @@ class App:
         # descartadas por el análisis (fondos de título, imágenes dentro del texto) como "Descartada".
         chapters = set(book.candidates)
         images = dropped = 0
+        self.wide = {str(i) for i, b in enumerate(book.blocks) if b.kind == "image" and b.image and convert.is_wide(b.image)}
         for i, block in enumerate(book.blocks):
             if block.kind == "heading":
                 mark, title = (ON if i in chapters else OFF), html.unescape(block.html)
             elif block.kind == "image":
-                mark, title = (IMG if block.keep else DROPPED), f"Ilustración · página {block.page}"
+                double = " doble" if str(i) in self.wide else ""
+                mark, title = (IMG if block.keep else DROPPED), f"Ilustración{double} · página {block.page}"
                 images += 1
                 dropped += not block.keep
             else:
@@ -502,6 +657,14 @@ class App:
         text += f" y {images} ilustraciones" + (f" ({dropped} descartadas)" if dropped else "") if images else ""
         if self.load_review():
             text = "Revisión anterior recuperada"
+        elif self.pdf:
+            inherited = _inherited(self.pdf, book.series)
+            if book.author:
+                inherited.pop("author", None)  # el del PDF manda
+            if inherited:
+                self.apply_state(inherited)
+                text += " · datos de la serie tomados de otro tomo"
+        self.history = []  # lo recuperado no se deshace
         self.status.configure(text=text)
 
     def is_image(self, item):
@@ -510,8 +673,7 @@ class App:
     def on_click(self, event):
         item = self.tree.identify_row(event.y)
         if item and self.tree.identify_column(event.x) == "#1":
-            cycle = IMAGE_NEXT if self.is_image(item) else NEXT
-            self.set_kind(item, cycle[self.tree.set(item, "inc")])
+            self.set_kind(item, self.cycle(item)[self.tree.set(item, "inc")])
             self.update_preview()
 
     def on_double_click(self, event):
@@ -523,12 +685,13 @@ class App:
             self.edit_title(item)
 
     def shortcut(self, kind):
-        """Tecla C/S/Q/I sobre la fila seleccionada. Una ilustración solo admite I y Q; un título, C, S y Q."""
+        """Atajo (KEYS) sobre la fila seleccionada; se ignora si ese tipo no vale para la fila (C en una
+        ilustración, D en una que no es doble)."""
         selected = self.tree.selection()
         if not selected:
             return
         item = selected[0]
-        if kind in (IMAGE_NEXT if self.is_image(item) else NEXT):
+        if kind in self.cycle(item) and kind != self.tree.set(item, "inc"):
             self.set_kind(item, kind)
             self.update_preview()
 
@@ -547,7 +710,8 @@ class App:
         def save(_=None):
             if not entry.winfo_exists():  # ya cerrado por otro camino (scroll, Return, Escape)
                 return
-            if entry.get().strip():
+            if entry.get().strip() and entry.get().strip() != self.tree.set(item, "title"):
+                self.history.append((item, self.tree.set(item, "inc"), self.tree.set(item, "title")))
                 self.tree.set(item, "title", entry.get().strip())
             close()
             self.update_preview()
@@ -581,19 +745,13 @@ class App:
         self.book.translator = self.translator_var.get().strip()
         self.book.description = self.description
         self.save_review()
-        chapters = [(int(item), self.tree.set(item, "title")) for item in self.tree.get_children()
-                    if self.tree.set(item, "inc") == ON]
+        chapters, removed = _plan(self.book, self.rows())
         self.status.configure(text="Generando EPUB…")
-        for item in self.tree.get_children():  # ilustraciones: entran solo las que quedan como "Ilustración"
-            if self.is_image(item):
-                self.book.blocks[int(item)].keep = self.tree.set(item, "inc") == IMG
-        removed = [int(item) for item in self.tree.get_children()
-                   if self.tree.set(item, "inc") == CUT and not self.is_image(item)]
         lang = self.lang_var.get().strip()
-        if not re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*", lang):  # va tal cual en el XML del EPUB
-            lang = "es"
+        lang = lang if LANG.fullmatch(lang) else "es"
         self.run(convert.write_epub, (self.book, chapters, out, lang, removed, self.typography_var.get(),
-                                      self.style_var.get(), True, self.separator_var.get(), self.shrink_var.get()),
+                                      self.style_var.get(), True, self.separator_var.get(), self.shrink_var.get(),
+                                      self.replacements),
                  lambda _: self.saved(out))
         self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
 
@@ -616,17 +774,62 @@ class App:
 
         ttk.Button(win, text="Aceptar", command=save).pack(pady=(0, 8))
 
-    def set_cover(self, choice):
-        """Cambia la portada: ("page", n) es una página del PDF (desde 0); ("file", ruta), una imagen."""
-        kind, value = choice
-        if kind == "page":
-            self.book.cover = convert._render(self.pdf_doc[value], crop=True)
-            text = f"Portada: página {value + 1}"
+    def edit_replacements(self):
+        win = tk.Toplevel(self.root)
+        win.title("Reemplazos")
+        win.transient(self.root)
+        ttk.Label(win, text="Una regla por línea:  buscar -> reemplazo\nCambia palabras completas en textos y títulos."
+                            " Pasan a los demás tomos de la serie.", padding=(8, 8, 8, 0)).pack(anchor="w")
+        text = tk.Text(win, width=60, height=14, wrap="none")
+        text.pack(fill="both", expand=True, padx=8, pady=8)
+        text.insert("1.0", "\n".join(f"{find} -> {new}" for find, new in self.replacements))
+        text.focus()
+
+        def save():
+            self.replacements = _parse_replacements(text.get("1.0", "end"))
+            win.destroy()
+            self.update_preview()
+
+        ttk.Button(win, text="Aceptar", command=save).pack(pady=(0, 8))
+
+    def convert_folder(self):
+        """Genera un EPUB por cada PDF de una carpeta, junto al PDF, sin revisarlos uno a uno."""
+        folder = filedialog.askdirectory()
+        if not folder:
+            return
+        self.save_review()  # el PDF abierto también se convierte con lo revisado hasta ahora
+        pdfs = sorted(Path(folder).glob("*.pdf"))
+        existing = [p for p in pdfs if p.with_suffix(".epub").exists()]
+        if existing:
+            answer = messagebox.askyesnocancel(
+                "Convertir carpeta", f"{len(existing)} de {len(pdfs)} PDF ya tienen su EPUB.\n\n"
+                "Sí: reemplazarlos · No: convertir solo los que faltan")
+            if answer is None:
+                return
+            if not answer:
+                pdfs = [p for p in pdfs if p not in existing]
+        if not pdfs:
+            messagebox.showinfo("Convertir carpeta", "No hay PDF que convertir en esa carpeta.")
+            return
+        fields = self.fields()
+        options = {name: fields[name].get() for name in ("lang", "style", "separator", "typography", "shrink")}
+        self.run(_batch, ([str(p) for p in pdfs], options), self.batch_done, report=True, busy="Convirtiendo…")
+
+    def batch_done(self, results):
+        self.progress.configure(value=0)
+        failed = [f"{name}: {error}" for name, error in results if error]
+        self.status.configure(text=f"{len(results) - len(failed)} de {len(results)} EPUB generados")
+        if failed:
+            messagebox.showwarning("Convertir carpeta", "No se pudieron convertir:\n\n" + "\n".join(failed))
         else:
-            self.book.cover = convert.load_cover(value)
-            text = f"Portada: {Path(value).name}"
+            messagebox.showinfo("Convertir carpeta", f"{len(results)} EPUB generados junto a sus PDF.")
+
+    def set_cover(self, choice):
+        """Cambia la portada (ver _cover_image)."""
+        kind, value = choice
+        self.book.cover = _cover_image(self.pdf_doc, choice)
         self.cover_choice = [kind, value]
-        self.cover_label.configure(text=text)
+        self.cover_label.configure(text=f"Portada: página {value + 1}" if kind == "page" else f"Portada: {Path(value).name}")
         self.update_preview()
 
     def cover_from_page(self):
@@ -643,54 +846,50 @@ class App:
             except ValueError as e:
                 messagebox.showerror("Error", str(e))
 
-    # La revisión (tipos, títulos editados, datos del libro y opciones) se guarda junto al PDF en un
-    # .json: al volver a abrir el mismo PDF se recupera, aunque se haya cerrado la ventana sin generar.
     def fields(self):
+        """Campos de la ventana que se guardan en la revisión."""
         return {"title": self.title_var, "author": self.author_var, "series": self.series_var,
                 "volume": self.volume_var, "publisher": self.publisher_var, "translator": self.translator_var,
                 "lang": self.lang_var, "style": self.style_var, "separator": self.separator_var,
                 "typography": self.typography_var, "shrink": self.shrink_var}
 
-    def review_path(self):
-        return self.pdf.with_name(self.pdf.stem + ".lnepub.json")
-
-    def fingerprint(self):
-        """Tamaño y fecha del PDF: si cambian, la revisión guardada es de otro PDF y no se usa."""
-        stat = self.pdf.stat()
-        return [stat.st_size, stat.st_mtime_ns]
+    def rows(self):
+        return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title")] for item in self.tree.get_children()}
 
     def save_review(self):
         if not (self.book and self.pdf):
             return
         state = {name: var.get() for name, var in self.fields().items()}
         state.update(blocks=len(self.book.blocks), description=self.description, cover=self.cover_choice,
-                     rows={item: [self.tree.set(item, "inc"), self.tree.set(item, "title")]
-                           for item in self.tree.get_children()})
+                     replacements=self.replacements, rows=self.rows())
         try:
-            state["pdf"] = self.fingerprint()
-            self.review_path().write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+            state["pdf"] = _fingerprint(self.pdf)
+            _review_path(self.pdf).write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
         except OSError:
             pass  # PDF borrado o carpeta de solo lectura: se pierde la revisión guardada, no el trabajo en curso
 
-    def load_review(self):
-        """Recupera la revisión guardada de este PDF. False si no hay o si el PDF cambió desde entonces."""
-        if not self.pdf:
-            return False
-        try:
-            state = json.loads(self.review_path().read_text(encoding="utf-8"))
-            if state["pdf"] != self.fingerprint() or state["blocks"] != len(self.book.blocks):
-                return False
-        except (OSError, ValueError, KeyError, TypeError):
-            return False
-        for item, (kind, title) in state.get("rows", {}).items():
-            if self.tree.exists(item) and kind in KIND_TAG:
-                self.set_kind(item, kind)
-                self.tree.set(item, "title", title)
+    def apply_state(self, state):
+        """Pone en la ventana los campos y reemplazos de una revisión guardada (o heredada)."""
         for name, var in self.fields().items():
             if name in state:
                 var.set(state[name])
         if self.style_var.get() not in convert.STYLES:  # el .json se puede editar a mano
             self.style_var.set("Clásico")
+        try:
+            self.replacements = [[str(a), str(b)] for a, b in state["replacements"]]
+        except (KeyError, TypeError, ValueError):
+            pass  # sin reemplazos guardados, o mal escritos a mano
+
+    def load_review(self):
+        """Recupera la revisión guardada de este PDF. False si no hay o si el PDF cambió desde entonces."""
+        state = _read_review(self.pdf, len(self.book.blocks)) if self.pdf else None
+        if not state:
+            return False
+        for item, (kind, title) in state["rows"].items():
+            if self.tree.exists(item) and kind in self.cycle(item):
+                self.set_kind(item, kind)
+                self.tree.set(item, "title", title)
+        self.apply_state(state)
         self.description = state.get("description", "")
         if state.get("cover"):
             try:
@@ -701,6 +900,7 @@ class App:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()  # en el .exe, el proceso de trabajo vuelve a lanzar el ejecutable
     root = tk.Tk()
     App(root)
     root.mainloop()

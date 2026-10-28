@@ -46,6 +46,7 @@ class Block:
     html: str = ""
     image: bytes = b""  # JPEG si kind == "image"
     keep: bool = True   # imagen: va en el EPUB (False = descartada, se puede recuperar en la ventana)
+    layout: str = ""    # imagen doble: "" tal cual, "split" en dos páginas, "rotate" girada 90°
     rect: tuple = ()    # (x0, y0, x1, y1) del título en su página, para resaltarlo en la vista previa
 
 
@@ -374,6 +375,44 @@ def _shrink(data):
     return small if len(small) < len(data) else data
 
 
+def is_wide(data):
+    """Ilustración doble (dos páginas del libro en una imagen apaisada): en un celular en vertical
+    se ve diminuta, así que la ventana ofrece dividirla o girarla."""
+    pix = pymupdf.Pixmap(data)
+    return pix.width > pix.height * 1.15
+
+
+def _spread(data, layout):
+    """Imagen doble preparada para una pantalla vertical: "split", las dos mitades como páginas
+    (la derecha primero, como en el libro japonés); "rotate", girada 90° a la derecha."""
+    pix = pymupdf.Pixmap(data)
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=pix.width, height=pix.height)  # 1 punto = 1 píxel a 72 ppp
+        page.insert_image(page.rect, stream=data)
+        if layout == "rotate":
+            page.set_rotation(90)
+            return [page.get_pixmap().tobytes("jpg", jpg_quality=90)]
+        w, h = page.rect.width, page.rect.height
+        return [page.get_pixmap(clip=pymupdf.Rect(x0, 0, x0 + w / 2, h)).tobytes("jpg", jpg_quality=90)
+                for x0 in (w / 2, 0)]
+
+
+def _replace(html_text, rules):
+    """Aplica los reemplazos del usuario (_rules) solo al texto, sin tocar las etiquetas <i>/<b>."""
+    parts = re.split(r"(<[^>]+>)", html_text)
+    for k in range(0, len(parts), 2):
+        for pattern, new in rules:
+            parts[k] = pattern.sub(lambda _: new, parts[k])
+    return "".join(parts)
+
+
+def _rules(replacements):
+    """[(buscar, reemplazo)] a expresiones: palabras completas ("Ana" no cambia "Anabel") y escapadas
+    como el texto del EPUB ("Tom & Jerry" está como "Tom &amp; Jerry")."""
+    return [(re.compile(rf"(?<!\w){re.escape(html.escape(a, quote=False))}(?!\w)"), html.escape(b, quote=False))
+            for a, b in replacements if a]
+
+
 def _join(a, b):
     """Une dos líneas de un párrafo; una palabra partida con guion se junta aunque haya etiquetas."""
     if re.search(r"\w-$", TAGS.sub("", a)) and TAGS.sub("", b)[:1].islower():
@@ -664,7 +703,7 @@ def _separator(block, index, style, choice, images):
 
 
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
-               separator="Según el estilo", shrink=False):
+               separator="Según el estilo", shrink=False, replacements=()):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -672,8 +711,11 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     typography: aplica la limpieza tipográfica al estilo RAE (_typography) a textos y títulos.
     style: uno de STYLES. contents: añade la página "Contenido" tras la portada (la vista previa
     la omite para dibujar directamente la sección). separator: una de SEPARATOR_CHOICES.
-    shrink: reduce las imágenes y la portada (_shrink) para que el EPUB pese menos."""
-    fix = _typography if typography else (lambda s: s)
+    shrink: reduce las imágenes y la portada (_shrink) para que el EPUB pese menos.
+    replacements: [(buscar, reemplazo)] del usuario, en textos y títulos (nombres, honoríficos…)."""
+    rules = _rules(replacements)
+    typo = _typography if typography else (lambda s: s)
+    fix = (lambda s: typo(_replace(s, rules))) if rules else typo
     starts = dict(chapters)
     skip = set()
     for k in removed:
@@ -699,10 +741,11 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         parts = [_chapter_heading(fix(html.escape(title)))] if is_chapter else []
         for k, b in blocks:
             if b.kind == "image":
-                ext = "png" if b.image[:4] == b"\x89PNG" else "jpg"  # PNG si trae transparencia
-                src = f"img/b{k:05d}.{ext}"  # por bloque: una página puede tener varias imágenes
-                images[src] = b.image
-                parts.append(f'<div class="img"><img src="{src}" alt=""/></div>')
+                for n, data in enumerate(_spread(b.image, b.layout) if b.layout else [b.image]):
+                    ext = "png" if data[:4] == b"\x89PNG" else "jpg"  # PNG si trae transparencia
+                    src = f"img/b{k:05d}{'_' + str(n) if b.layout else ''}.{ext}"  # por bloque: una página puede tener varias
+                    images[src] = data
+                    parts.append(f'<div class="img"><img src="{src}" alt=""/></div>')
             elif b.kind == "break":
                 parts.append(_separator(b, k, style, separator, images))
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
