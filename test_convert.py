@@ -1726,6 +1726,140 @@ def test_window_convert_folder_skips_existing_epubs_on_no():
     assert status == "1 de 1 EPUB generados", (status, done)
 
 
+def test_dashes_for_dialogue_and_asides():
+    cases = {
+        "- Hola -dijo él-. Vamos.": "—Hola —dijo él—. Vamos.",
+        "Las reliquias -para empezar- eran caras.": "Las reliquias —para empezar— eran caras.",
+        "cazadores - incluida la mía - en": "cazadores —incluida la mía— en",
+        "-<i>Muy</i> raramente-, los fantasmas": "—<i>Muy</i> raramente—, los fantasmas",
+        "Greg-sama vio 1-2 casas a -5 grados": "Greg-sama vio 1-2 casas a -5 grados",
+        "—¿Qué? —preguntó—. Nada.": "—¿Qué? —preguntó—. Nada.",
+        '-"Hola" -dijo.': "—«Hola» —dijo.",
+    }
+    got = {k: convert._typography(k) for k in cases}
+    assert got == cases, {k: v for k, v in got.items() if v != cases[k]}
+
+
+def test_line_break_before_honorific_keeps_hyphen():
+    assert convert._join("vio a Gilbert-", "kun llegar") == "vio a Gilbert-kun llegar"
+    assert convert._join("una pala-", "bra partida") == "una palabra partida"
+
+
+def test_edit_section_moves_images_and_adds_titles():
+    blocks = [("heading", "Cap 1"), ("p", "Uno &amp; <i>dos</i>."), ("image", ""), ("break", "* * *"), ("p", "Tres."),
+              ("heading", "Cap 2"), ("p", "Cuatro.")]
+    book = convert.Book("Libro", "", b"", [convert.Block(k, 1, h) for k, h in blocks], [0, 5])
+    text = convert.section_text(book, 1, 5)
+    assert text == "Uno & <i>dos</i>.\n\n[Ilustración 2]\n\n[Separador 3]\n\nTres.", text
+    edited = "Uno & <i>dos</i> <b>mal.\n# Nuevo título\n[Ilustración 2]\nTres.\n\n* * *\n[Ilustración 6]"
+    mapping = convert.edit_section(book, 1, 5, edited)
+    kinds = [(b.kind, b.html) for b in book.blocks]
+    assert kinds == [("heading", "Cap 1"), ("p", "Uno &amp; dos mal."), ("heading", "Nuevo título"), ("image", ""),
+                     ("p", "Tres."), ("break", "* * *"), ("p", "[Ilustración 6]"), ("heading", "Cap 2"),
+                     ("p", "Cuatro.")], kinds  # <b> sin cerrar: se quitan las etiquetas; la marca 6 no es de aquí
+    assert mapping[2] == 3 and 3 not in mapping and mapping[5] == 7, mapping  # el separador 3 se borró
+    assert book.candidates == [0, 7], book.candidates
+
+
+def test_name_variants_finds_names_written_two_ways():
+    text = ["Vio a Greg-sama y luego a Greg sama.", "Dijo que Tino y Tiño eran la misma.", "Él vio el mar.",
+            "Utilizó la llave.", "Utilizo la llave.", "Lo saludó Claire."]
+    book = convert.Book("Libro", "", b"", [convert.Block("p", 1, t) for t in text], [])
+    groups = [sorted(g) for g in convert.name_variants(book)]
+    assert sorted(groups) == [["Greg sama", "Greg-sama"], ["Tino", "Tiño"]], groups
+
+
+def test_link_sections_and_credits_page():
+    blocks = [("heading", "Cap 1"), ("p", "Texto largo. " * 200), ("heading", "Agradecimientos"),
+              ("p", "Síguenos en https://discord.gg/abc y en Patreon."), ("heading", "Cap 2"),
+              ("p", "Mira mi Twitter, dijo. " + "Más texto. " * 300)]
+    book = convert.Book("Mi libro", "Autora", b"", [convert.Block(k, 1, h) for k, h in blocks], [0, 2, 4],
+                        series="Serie", volume="2", translator="Ana", publisher="Grupo")
+    assert convert.link_sections(book) == [2]  # el capítulo 2 menciona Twitter, pero es largo
+    out = TMP / "creditos.epub"
+    convert.write_epub(book, [(0, "Cap 1"), (4, "Cap 2")], out, credits=True)
+    credits = epub_file(out, "OEBPS/credits.xhtml")
+    for line in ("<b>Mi libro</b>", "Serie: Serie, volumen 2", "Autor: Autora", "Traducción: Ana", "Grupo: Grupo"):
+        assert line in credits, credits
+    opf = epub_file(out, "OEBPS/content.opf")
+    assert opf.index('idref="cover"') < opf.index('idref="credits"') < opf.index('idref="contents"'), opf
+
+
+def make_group_pdf():
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"),
+                      (72, 140, "La espada Excalibur brillaba.", 11, "cour"),
+                      (72, 168, "Otro parrafo del capitulo.", 11, "cour")])
+    add_page(doc, 2, [(72, 100, "Agradecimientos", 20, "helv"),
+                      (72, 140, "Siguenos en https://discord.gg/grupo", 11, "cour")])
+    add_page(doc, 3, [(72, 100, "Capitulo 2: Final", 20, "helv"),
+                      (72, 140, "El final de la historia.", 11, "cour")])
+    path = TMP / "grupo.pdf"
+    doc.save(path)
+    return path
+
+
+def test_window_proposes_removing_group_sections():
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_group_pdf()
+    window.show_book(convert.analyze(window.pdf))
+    rows = {window.tree.set(i, "title"): window.tree.set(i, "inc") for i in window.tree.get_children()}
+    status = window.status.cget("text")
+    window.close()
+    assert rows == {"Capitulo 1: Inicio": app.ON, "Agradecimientos": app.CUT, "Capitulo 2: Final": app.ON}, rows
+    assert "1 secciones del grupo en Quitar" in status, status
+
+
+def test_window_edited_text_survives_reopening_and_reaches_epub():
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_group_pdf()
+    window.show_book(convert.analyze(window.pdf))
+    chapter2 = next(i for i in window.tree.get_children() if window.tree.set(i, "title") == "Capitulo 2: Final")
+    window.set_kind(chapter2, app.OFF)
+    first = first_title(window)
+    window.tree.selection_set(first)
+    root.update()
+    start = int(first) + 1
+    end = next(k for k in range(start, len(window.book.blocks)) if window.book.blocks[k].kind == "heading")
+    window.apply_edit([start, end, "La espada Excalibur brillaba mucho.\n# Interludio perdido\nOtro parrafo."], first)
+    titles = [(window.tree.set(i, "title"), window.tree.set(i, "inc")) for i in window.tree.get_children()]
+    window.close()
+    assert titles == [("Capitulo 1: Inicio", app.ON), ("Interludio perdido", app.OFF), ("Agradecimientos", app.CUT),
+                      ("Capitulo 2: Final", app.OFF)], titles
+
+    root, window = visible_window()
+    window.pdf = TMP / "grupo.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    again = [(window.tree.set(i, "title"), window.tree.set(i, "inc")) for i in window.tree.get_children()]
+    window.close()
+    assert again == titles, again
+    results = app._batch([str(window.pdf)], {"shrink": False})
+    assert results == [("grupo.pdf", "")], results
+    text = epub_text(TMP / "grupo.epub")
+    assert "brillaba mucho." in text and "Interludio perdido" in text and "discord" not in text, text
+
+
+def test_window_find_moves_previews_to_the_match():
+    root, window = visible_window()
+    window.pdf = make_group_pdf()
+    window.show_book(convert.analyze(window.pdf))
+    root.update()
+    k = next(k for k, b in enumerate(window.book.blocks) if "final de la historia" in b.html)
+    window.show_match(k, 3, "final de la historia")
+    root.update()
+    selected = window.tree.set(window.tree.selection()[0], "title")
+    caption = window.pdf_caption.cget("text")
+    window.find()  # el cuadro de búsqueda se abre sin errores
+    root.update()
+    window.close()
+    assert selected == "Capitulo 2: Final", selected
+    assert "página 3" in caption, caption
+
+
 if __name__ == "__main__":
     failed = 0
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

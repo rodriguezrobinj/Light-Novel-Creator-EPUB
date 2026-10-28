@@ -3,6 +3,7 @@ import collections
 import html
 import os
 import re
+import unicodedata
 import uuid
 import zipfile
 from dataclasses import dataclass, replace
@@ -79,19 +80,63 @@ def _series_volume(stem, meta_title):
 
 QUOTE_OPENERS = set("  ([¿¡—–«“‘")  # tras estos caracteres, una comilla abre
 QUOTE_CLOSE_NEXT = set(" ,.;:!?)»”")      # antes de estos, una comilla cierra aunque siga a un espacio
+DASH_CLOSE_NEXT = set(",.;:!?)»”…")       # tras una raya de cierre puede venir puntuación
+
+
+def _dashes(chunks):
+    """Guiones que hacen de raya, al estilo RAE: el que abre el párrafo es la raya de diálogo
+    ("- Hola" -> "—Hola") y los demás abren o cierran un inciso ("-dijo-." -> "—dijo—."): la raya de
+    apertura va pegada a lo que sigue y la de cierre a lo que precede. Un guion entre letras o cifras
+    (Greg-sama, 1-2) no se toca. Las letras quitadas quedan como "" en chunks."""
+    chars = [(c, j, i) for j, chunk in enumerate(chunks) for i, c in enumerate(chunk)]
+    first = next((n for n, (c, _, _) in enumerate(chars) if not c.isspace()), None)
+    opened = False
+
+    def put(n, s):
+        chunks[chars[n][1]][chars[n][2]] = s
+
+    for n, (c, _, _) in enumerate(chars):
+        if c not in "-–—":
+            continue
+        prev = chars[n - 1][0] if n else " "
+        nxt = chars[n + 1][0] if n + 1 < len(chars) else " "
+        if n == first:
+            put(n, "—")
+            if nxt == " ":
+                put(n + 1, "")
+            continue
+        before, after = prev.isspace(), nxt.isspace() or nxt in DASH_CLOSE_NEXT
+        if before == after:  # entre espacios decide el inciso abierto; entre letras, palabra compuesta
+            if not before:
+                continue
+            opening = not opened
+        elif before:
+            if nxt.isdigit():  # número negativo
+                continue
+            opening = True
+        else:
+            opening = False
+        put(n, "—")
+        if opening and nxt == " ":
+            put(n + 1, "")
+        elif not opening and prev == " ":
+            put(n - 1, "")
+        opened = opening
 
 
 def _typography(html_text):
     """Tipografía de un párrafo al estilo RAE: «…» (y “…” dentro), ‘…’, puntos suspensivos, raya
-    y espacios. No toca las etiquetas <i>/<b>: la posición de cada comilla se mira a través de ellas.
-    La cuenta de comillas abiertas empieza en cada párrafo, para no arrastrar errores del PDF."""
+    de diálogo e incisos (_dashes) y espacios. No toca las etiquetas <i>/<b>: la posición de cada
+    comilla se mira a través de ellas. La cuenta de comillas abiertas empieza en cada párrafo, para
+    no arrastrar errores del PDF."""
     parts = re.split(r"(<[^>]+>)", html_text)  # el texto queda en las posiciones pares
     for k in range(0, len(parts), 2):
         text = re.sub(r"\.{3,}", "…", parts[k]).replace("─", "—")
         text = re.sub(r" {2,}", " ", text)
         parts[k] = re.sub(r" +([,.;:!?])", r"\1", text)
     chunks = [list(parts[k]) for k in range(0, len(parts), 2)]
-    chars = [(c, j, i) for j, chunk in enumerate(chunks) for i, c in enumerate(chunk)]
+    _dashes(chunks)  # antes que las comillas: tras una raya, la comilla abre
+    chars = [(c, j, i) for j, chunk in enumerate(chunks) for i, c in enumerate(chunk) if c]
     depth = 0
     for n, (c, j, i) in enumerate(chars):
         prev = chunks[chars[n - 1][1]][chars[n - 1][2]] if n else " "  # ya convertido
@@ -413,9 +458,125 @@ def _rules(replacements):
             for a, b in replacements if a]
 
 
+TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
+INLINE = re.compile(r"&lt;(/?)([ib])&gt;")
+
+
+def section_text(book, start, end):
+    """Texto editable de los bloques start..end-1: un párrafo por línea (con <i>/<b>), "# " delante
+    de un título, y las ilustraciones y separadores como marcas "[Ilustración N]" / "[Separador N]"
+    (N, el índice del bloque) para poder moverlos o borrarlos."""
+    lines = []
+    for k in range(start, end):
+        b = book.blocks[k]
+        if b.kind == "p":
+            lines.append(html.unescape(b.html))
+        elif b.kind == "heading":
+            lines.append("# " + html.unescape(b.html))
+        else:
+            lines.append(f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]")
+    return "\n\n".join(lines)
+
+
+def _inline(text):
+    """Línea escrita por el usuario a XHTML: escapada, salvo <i> y <b>, que se conservan si están bien
+    cerradas; si no, se quitan para no romper el EPUB."""
+    out = INLINE.sub(r"<\1\2>", html.escape(text, quote=False))
+    stack = []
+    for close, tag in re.findall(r"<(/?)([ib])>", out):
+        if not close:
+            stack.append(tag)
+        elif not stack or stack.pop() != tag:
+            return TAGS.sub("", out)
+    return TAGS.sub("", out) if stack else out
+
+
+def edit_section(book, start, end, text):
+    """Cambia los bloques start..end-1 por el texto editado (formato de section_text). Las marcas
+    recuperan su ilustración o separador; "# Título" crea un título; una línea de solo símbolos
+    ("* * *") crea un separador. Ajusta book.candidates y devuelve {índice viejo: índice nuevo} de los
+    bloques que siguen en el libro (los párrafos se sustituyen: no están)."""
+    old = book.blocks
+    page = old[start - 1].page if start else 1
+    new, kept = [], {}
+    for line in (line.strip() for line in text.splitlines()):
+        if not line:
+            continue
+        m = TOKEN.fullmatch(line)
+        k = int(m.group(2)) if m else -1
+        if m and start <= k < end and k not in kept and old[k].kind == ("image" if m.group(1) == "Ilustración" else "break"):
+            kept[k] = start + len(new)
+            new.append(old[k])
+            page = old[k].page
+        elif line.startswith("# ") and line[2:].strip():
+            new.append(Block("heading", page, _inline(line[2:].strip())))
+        elif SCENE_BREAK.fullmatch(line):
+            new.append(Block("break", page, html.escape(line, quote=False)))
+        else:
+            new.append(Block("p", page, _inline(line)))
+    delta = len(new) - (end - start)
+    book.blocks = old[:start] + new + old[end:]
+    mapping = {k: k for k in range(start)} | kept | {k: k + delta for k in range(end, len(old))}
+    book.candidates = [mapping[k] for k in book.candidates if k in mapping]
+    return mapping
+
+
+HONORIFICS = {"san", "sama", "kun", "chan", "dono", "sensei", "senpai", "sempai", "nee", "nii", "onee", "onii",
+              "neesan", "niisan", "oneesan", "oniisan", "ue"}
+
+
+def _fold(text):
+    """Clave de un nombre sin tildes, mayúsculas, guiones ni espacios: "Tiño-Sama" -> "tinosama"."""
+    plain = "".join(c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c))
+    return re.sub(r"[\s\-]", "", plain.lower())
+
+
+def name_variants(book):
+    """Nombres escritos de varias formas ("Greg-sama" / "Greg sama", "Tino" / "Tiño"):
+    [[forma más usada, otras…]], los más frecuentes primero. Solo palabras con mayúscula que nunca
+    salen en minúscula ("Él" / "El", "Tú" / "Tu") y que alguna vez van con mayúscula en mitad de una
+    frase, como los nombres propios ("Utilizó" / "Utilizo" al empezar frase, "Ja-ja" / "Jaja", no)."""
+    text = " ".join(html.unescape(TAGS.sub("", b.html)) for b in book.blocks if b.kind in ("p", "heading"))
+    tokens = re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", text)
+    common = {_fold(t) for t in tokens if t[:1].islower()}
+    proper = {_fold(re.split(r"[- ]", m.group(1))[0]) for m in re.finditer(r"(?<=[\w,;]) ([^\W\d_][\w-]*)", text)
+              if m.group(1)[:1].isupper()}
+    forms = collections.Counter(t for t in tokens if t[:1].isupper() and not (len(t) > 1 and t.isupper()))
+    forms.update(f"{a} {b}" for a, b in zip(tokens, tokens[1:]) if a[:1].isupper() and b.lower() in HONORIFICS)
+    groups = collections.defaultdict(dict)
+    for form, n in forms.items():
+        key = _fold(form)
+        if len(key) >= 3 and key not in common:
+            groups[key][form] = n
+    found = [sorted(g, key=lambda f: -g[f]) for g in groups.values()
+             if len(g) > 1 and any(_fold(re.split(r"[- ]", f)[0]) in proper for f in g)]
+    return sorted(found, key=lambda g: -sum(forms[f] for f in g))
+
+
+LINKS = re.compile(r"https?://|www\.|facebook|twitter|discord|patreon|ko-fi|paypal|instagram|tiktok|wixsite"
+                   r"|blogspot", re.I)
+
+
+def link_sections(book):
+    """Títulos cuya sección es publicidad del grupo (redes, Patreon, enlaces): corta, de menos de 2000
+    letras, y con algún enlace. La sección llega hasta donde la quitaría write_epub."""
+    heads = [k for k, b in enumerate(book.blocks) if b.kind == "heading"]
+    found = []
+    for k in heads:
+        chapter = k in book.candidates
+        end = next((j for j in heads if j > k and (j in book.candidates or not chapter)), len(book.blocks))
+        text = " ".join(TAGS.sub("", b.html) for b in book.blocks[k:end] if b.kind in ("p", "heading"))
+        if len(text) < 2000 and LINKS.search(text):
+            found.append(k)
+    return found
+
+
 def _join(a, b):
-    """Une dos líneas de un párrafo; una palabra partida con guion se junta aunque haya etiquetas."""
+    """Une dos líneas de un párrafo; una palabra partida con guion se junta aunque haya etiquetas.
+    Un honorífico tras el guion ("Gilbert-" / "kun") no es una palabra partida: conserva el guion."""
     if re.search(r"\w-$", TAGS.sub("", a)) and TAGS.sub("", b)[:1].islower():
+        if re.match(r"[^\W\d_]*", TAGS.sub("", b)).group().lower() in HONORIFICS:
+            return a + b
         i = a.rindex("-")  # el guion final; detrás solo puede haber etiquetas de cierre
         return a[:i] + a[i + 1:] + b
     return f"{a} {b}"
@@ -629,6 +790,7 @@ ol.toc { padding: 0; }
 ol.toc ol { padding-left: 1.5em; font-size: 0.9em; }
 ol.toc li { margin: 0.35em 0; }
 ol.toc a { text-decoration: none; color: inherit; }
+p.credits { text-indent: 0; text-align: center; margin: 0.6em 0; }
 """
 STYLES = {  # nombre en la ventana -> CSS propio del estilo
     "Clásico": """body { font-family: serif; }
@@ -703,7 +865,7 @@ def _separator(block, index, style, choice, images):
 
 
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
-               separator="Según el estilo", shrink=False, replacements=()):
+               separator="Según el estilo", shrink=False, replacements=(), credits=False):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -712,7 +874,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     style: uno de STYLES. contents: añade la página "Contenido" tras la portada (la vista previa
     la omite para dibujar directamente la sección). separator: una de SEPARATOR_CHOICES.
     shrink: reduce las imágenes y la portada (_shrink) para que el EPUB pese menos.
-    replacements: [(buscar, reemplazo)] del usuario, en textos y títulos (nombres, honoríficos…)."""
+    replacements: [(buscar, reemplazo)] del usuario, en textos y títulos (nombres, honoríficos…).
+    credits: añade tras la portada una página "Créditos" con los datos del libro."""
     rules = _rules(replacements)
     typo = _typography if typography else (lambda s: s)
     fix = (lambda s: typo(_replace(s, rules))) if rules else typo
@@ -789,6 +952,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     if contents:  # página "Contenido" visible, justo después de la portada
         manifest.append('<item id="contents" href="contents.xhtml" media-type="application/xhtml+xml"/>')
         spine.insert(1, '<itemref idref="contents"/>')
+    if credits:  # antes del índice
+        manifest.append('<item id="credits" href="credits.xhtml" media-type="application/xhtml+xml"/>')
+        spine.insert(1, '<itemref idref="credits"/>')
     # Inicio de la lectura: el primer capítulo (no "Inicio", que son las láminas del principio)
     reading = next((name for name, sec in zip(files, sections) if sec[1]), next(iter(files), "cover.xhtml"))
     manifest_xml, spine_xml = "\n".join(manifest), "\n".join(spine)
@@ -848,6 +1014,12 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
 </ncx>
 """
     cover = _xhtml(book.title, '<div class="img"><img src="cover.jpg" alt="Portada"/></div>', lang)
+    serie = f"{book.series}, volumen {book.volume}" if book.series and book.volume else book.series
+    lines = [f"<b>{title}</b>"] + [f"{label}: {html.escape(value)}" for label, value in (
+        ("Serie", serie), ("Autor", book.author), ("Traducción", book.translator), ("Grupo", book.publisher))
+        if value] + [f"EPUB creado el {datetime.now():%d/%m/%Y}"]
+    credits_page = _xhtml("Créditos", '<h1 class="toc">Créditos</h1>\n'
+                          + "\n".join(f'<p class="credits">{line}</p>' for line in lines), lang)
 
     tmp = f"{out_path}.tmp"
     try:
@@ -858,6 +1030,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             z.writestr("OEBPS/nav.xhtml", nav)
             if contents:
                 z.writestr("OEBPS/contents.xhtml", contents_page)
+            if credits:
+                z.writestr("OEBPS/credits.xhtml", credits_page)
             z.writestr("OEBPS/toc.ncx", ncx)
             z.writestr("OEBPS/style.css", BASE_CSS + STYLES[style])
             z.writestr("OEBPS/cover.xhtml", cover)
