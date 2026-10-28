@@ -1,4 +1,5 @@
 """Pruebas de convert.py con PDFs sintéticos. Ejecutar: python test_convert.py"""
+import html
 import re
 import sys
 import tempfile
@@ -1998,6 +1999,81 @@ def test_window_epub_preview_continues_into_next_section():
     assert pages > 1 and last == pages - 1, (pages, last)
     assert moved == (items[1], 0), moved
     assert back == (items[0], pages - 1, pages), back
+
+
+def make_rezero_like():
+    """Como Re Zero: página de créditos con enlaces, capítulos con "Parte 1, 2…" que vuelven a empezar,
+    pie que cambia con el capítulo ("Grupo X Capítulo 1 | 3") y una página girada con texto vertical."""
+    doc = pymupdf.open()
+
+    def page(n, lines, footer):
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((200, 815), footer, fontsize=10, fontname="helv")
+        for x, y, text, size, font in lines:
+            p.insert_text((x, y), text, fontsize=size, fontname=font)
+        return p
+
+    page(1, [(200, 100, "OBRA ORIGINAL", 16, "hebo"), (150, 130, "Autor: Tappei Nagatsuki", 11, "helv"),
+             (200, 170, "TRADUCCION", 16, "hebo"), (150, 200, "Traduccion al ingles: YenPress", 11, "helv"),
+             (150, 220, "Traduccion al espanol: Ana - Luis -", 11, "helv"), (150, 240, "Eva", 11, "helv"),
+             (150, 280, "Visitanos en http://grupo.wordpress.com/", 11, "helv")], "Grupo X Creditos | 1")
+    n = 2
+    for chapter in (1, 2):
+        for part in (1, 2):
+            names = {1: "El fin del principio", 2: "Una prueba tardia"}  # distintos, como en los libros
+            lines = [(72, 130, f"Capitulo {chapter}: {names[chapter]}", 20, "helv")] if part == 1 else []
+            lines += [(72, 160, f"Parte {part}", 11, "hebo")]
+            lines += [(72, 190 + 14 * i, line(f"Texto del capitulo {chapter} parte {part} linea {i}", 60), 11, "cour")
+                      for i in range(20)]
+            page(n, lines, f"Grupo X Capitulo {chapter} | {n}")
+            n += 1
+    p = page(n, [(72, 140, line("Ultima pagina del libro", 60), 11, "cour")], f"Grupo X Palabras del autor | {n}")
+    p.insert_text((300, 400), "Re Zero Volumen 1", fontsize=16, fontname="hebo", rotate=90)  # texto vertical
+    path = TMP / "rezero.pdf"
+    doc.save(path)
+    return path
+
+
+def test_rezero_like_pdf():
+    book = convert.analyze(make_rezero_like())
+    heads = [(html.unescape(book.blocks[k].html), k in book.candidates) for k, b in enumerate(book.blocks)
+             if b.kind == "heading"]
+    assert heads == [("OBRA ORIGINAL", False), ("TRADUCCION", False), ("Capitulo 1: El fin del principio", True),
+                     ("Parte 1", False), ("Parte 2", False), ("Capitulo 2: Una prueba tardia", True),
+                     ("Parte 1", False), ("Parte 2", False)], heads
+    assert (book.author, book.translator) == ("Tappei Nagatsuki", "Ana - Luis - Eva"), (book.author, book.translator)
+    text = " ".join(b.html for b in book.blocks)
+    assert "Grupo X" not in text and "Re Zero Volumen" not in text, text[-300:]
+    cut = [book.blocks[k].html for k in convert.link_sections(book)]
+    assert cut == ["OBRA ORIGINAL", "TRADUCCION"], cut  # toda la página de créditos, no solo el último título
+
+
+def test_named_part_stays_a_chapter():
+    """"Parte uno: Stifled Shadow" (Nageki) es una parte del libro: tiene nombre y no se repite."""
+    doc = pymupdf.open()
+    for n, title in enumerate(("Parte 1: La sombra", "Capitulo 1: Inicio", "Capitulo 2: Final"), 1):
+        add_page(doc, n, [(72, 100, title, 20, "helv"), (72, 140, "Texto de la pagina.", 11, "cour")])
+    path = TMP / "partes.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    assert [html.unescape(book.blocks[k].html) for k in book.candidates] == [
+        "Parte 1: La sombra", "Capitulo 1: Inicio", "Capitulo 2: Final"]
+
+
+def test_bookmarked_chapter_name_joins_bare_label():
+    """Re Zero 3: marcador de nivel 1 "Capitulo 1" y de nivel 2 su nombre, en líneas separadas."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(150, 118, "Capitulo 1", 40, "helv"), (100, 170, "El reinicio de Subaru", 24, "helv"),
+                      (72, 218, "Parte 1", 11, "hebo"), (72, 250, "Texto del capitulo.", 11, "cour")])
+    add_page(doc, 2, [(150, 118, "Capitulo 2", 40, "helv"), (100, 170, "Llore y grite", 24, "helv"),
+                      (72, 250, "Mas texto.", 11, "cour")])
+    doc.set_toc([[1, "Capitulo 1", 1], [2, "El reinicio de Subaru", 1], [1, "Capitulo 2", 2], [2, "Llore y grite", 2]])
+    path = TMP / "marcadores-nombre.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = [(html.unescape(b.html), k in book.candidates) for k, b in enumerate(book.blocks) if b.kind == "heading"]
+    assert heads == [("Capitulo 1: El reinicio de Subaru", True), ("Parte 1", False),
+                     ("Capitulo 2: Llore y grite", True)], heads
 
 
 if __name__ == "__main__":

@@ -275,34 +275,37 @@ class App:
         # orden, y así el centro (con las vistas previas) es el que encoge en pantallas bajas.
         bottom = ttk.Frame(root, padding=8)
         bottom.pack(side="bottom", fill="x")
-        self.progress = ttk.Progressbar(bottom, length=200)
+        self.progress = ttk.Progressbar(bottom, length=280)
         self.progress.pack(side="left")
         self.status = ttk.Label(bottom, text="")
         self.status.pack(side="left", padx=8)
         self.gen_btn = ttk.Button(bottom, text="Generar EPUB…", command=self.generate, state="disabled")
         self.gen_btn.pack(side="right")
-        self.credits_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bottom, text="Página de créditos", variable=self.credits_var).pack(side="right", padx=(12, 0))
-        self.shrink_var = tk.BooleanVar(value=True)  # las imágenes son casi todo el peso del EPUB
-        ttk.Checkbutton(bottom, text="Reducir imágenes", variable=self.shrink_var).pack(side="right", padx=(12, 0))
-        self.gray_var = tk.BooleanVar(value=False)  # para e-readers de tinta: pesa menos y se ve igual
-        ttk.Checkbutton(bottom, text="Imágenes en gris", variable=self.gray_var,
-                        command=self.update_preview).pack(side="right", padx=(12, 0))
-        self.typography_var = tk.BooleanVar(value=True)  # comillas «», puntos suspensivos, raya, espacios
-        ttk.Checkbutton(bottom, text="Limpieza tipográfica", variable=self.typography_var,
-                        command=self.update_preview).pack(side="right", padx=12)
-        self.style_var = tk.StringVar(value="Clásico")  # aspecto del EPUB: letra, párrafos e inicio de capítulo
-        style = ttk.Combobox(bottom, textvariable=self.style_var, values=list(convert.STYLES), width=13,
-                             state="readonly")
-        style.pack(side="right")
-        style.bind("<<ComboboxSelected>>", lambda _: self.update_preview())
-        ttk.Label(bottom, text="Estilo:").pack(side="right", padx=(12, 4))
+        # Opciones del EPUB en su propia fila: en la de abajo no caben junto al estado (pantallas de 1366 px)
+        options = ttk.Frame(root, padding=(8, 0))
+        options.pack(side="bottom", fill="x")
+        ttk.Label(options, text="Separador:").pack(side="left", padx=(0, 4))
         self.separator_var = tk.StringVar(value="Según el estilo")  # cómo se ven los separadores de escena
-        separator = ttk.Combobox(bottom, textvariable=self.separator_var, values=convert.SEPARATOR_CHOICES,
+        separator = ttk.Combobox(options, textvariable=self.separator_var, values=convert.SEPARATOR_CHOICES,
                                  width=16, state="readonly")
-        separator.pack(side="right")
+        separator.pack(side="left")
         separator.bind("<<ComboboxSelected>>", lambda _: self.update_preview())
-        ttk.Label(bottom, text="Separador:").pack(side="right", padx=(12, 4))
+        ttk.Label(options, text="Estilo:").pack(side="left", padx=(12, 4))
+        self.style_var = tk.StringVar(value="Clásico")  # aspecto del EPUB: letra, párrafos e inicio de capítulo
+        style = ttk.Combobox(options, textvariable=self.style_var, values=list(convert.STYLES), width=13,
+                             state="readonly")
+        style.pack(side="left")
+        style.bind("<<ComboboxSelected>>", lambda _: self.update_preview())
+        self.typography_var = tk.BooleanVar(value=True)  # comillas «», puntos suspensivos, raya, espacios
+        ttk.Checkbutton(options, text="Limpieza tipográfica", variable=self.typography_var,
+                        command=self.update_preview).pack(side="left", padx=(12, 0))
+        self.gray_var = tk.BooleanVar(value=False)  # para e-readers de tinta: pesa menos y se ve igual
+        ttk.Checkbutton(options, text="Imágenes en gris", variable=self.gray_var,
+                        command=self.update_preview).pack(side="left", padx=(12, 0))
+        self.shrink_var = tk.BooleanVar(value=True)  # las imágenes son casi todo el peso del EPUB
+        ttk.Checkbutton(options, text="Reducir imágenes", variable=self.shrink_var).pack(side="left", padx=(12, 0))
+        self.credits_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options, text="Página de créditos", variable=self.credits_var).pack(side="left", padx=(12, 0))
         ttk.Label(root, text="Clic en Tipo, o teclas C (capítulo), S (subtítulo), Q (quitar), I (ilustración),"
                              " D/G (ilustración doble: dividir o girar) · Doble clic o F2: editar título"
                              " · E: editar texto · Ctrl+F: buscar · Ctrl+Z: deshacer",

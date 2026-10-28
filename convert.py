@@ -198,8 +198,10 @@ def _row(spans):
 
 
 def _rows(page):
-    """Agrupa los spans por línea base: el texto justificado parte una línea en varios spans."""
-    spans = [s for b in page.get_text("dict")["blocks"] for line in b.get("lines", [])
+    """Agrupa los spans por línea base: el texto justificado parte una línea en varios spans.
+    Las líneas que no van en horizontal se saltan: son el encabezado y el pie de una página girada
+    para una ilustración apaisada (Re Zero 6), que quedarían en mitad de la página como títulos."""
+    spans = [s for b in page.get_text("dict")["blocks"] for line in b.get("lines", []) if abs(line["dir"][0]) > 0.9
              for s in line["spans"] if s["text"].strip()]
     rows, group = [], []
     for s in sorted(spans, key=lambda s: s["origin"][1]):
@@ -221,13 +223,29 @@ def _strip_margins(pages, heights):
     def in_band(r, h):
         return r.y < h * BAND or r.y > h * (1 - BAND)
 
-    counts = collections.Counter()
+    def loose(text):  # "Einherjar Project Prólogo | 11" y "… Capítulo 3 | 25" -> "einherjar project"
+        return " ".join(re.sub(r"[\W\d_]+", " ", KEYWORDS.sub(" ", _norm(text).replace("#", " "))).split())
+
+    counts, loose_counts = collections.Counter(), collections.Counter()
     for rows, h in zip(pages, heights):
         counts.update({_norm(r.text) for r in rows if in_band(r, h)})
-    repeated = {k for k, n in counts.items() if n >= max(2, REPEAT * len(pages))}
+        loose_counts.update({loose(r.text) for r in rows if in_band(r, h)})
+    least = max(2, REPEAT * len(pages))
+    repeated = {k for k, n in counts.items() if n >= least}
     repeated.add("#")  # números de página sueltos
-    return [[r for r in rows if not (in_band(r, h) and _norm(r.text) in repeated)]
-            for rows, h in zip(pages, heights)]
+    # Encabezados que cambian con el capítulo: la variante del prólogo o de las palabras del autor
+    # ("Einherjar Project Palabras del autor | 230") sale en pocas páginas, pero empieza igual.
+    loose_repeated = tuple(k for k, n in loose_counts.items() if n >= least and len(k) >= 6)
+
+    def margin(r, h):
+        if not in_band(r, h):
+            return False
+        # La clave suelta solo para líneas con número de página que no abren con "Capítulo…": un título
+        # de capítulo en la franja superior también se queda en pocas palabras repetidas
+        footer = re.search(r"\d", r.text) and not KEYWORDS.match(r.text.strip(LABEL_DECOR))
+        return _norm(r.text) in repeated or bool(footer and loose_repeated and loose(r.text).startswith(loose_repeated))
+
+    return [[r for r in rows if not margin(r, h)] for rows, h in zip(pages, heights)]
 
 
 def _is_heading(r, body):
@@ -265,7 +283,10 @@ def _join_labels(rows):
         names, j = [], i + 1
         while j < len(rows) and len(names) < 3:
             nxt, last = rows[j], (names[-1] if names else row)
-            if (len(nxt.text) > 120 or not (nxt.bold or nxt.heading) or nxt.starts
+            # Un marcador abre un título nuevo, salvo en la primera línea bajo la etiqueta: hay PDF que
+            # marcan "Capitulo 1" y, en el nivel 2, su nombre (Re Zero 3). "Parte 1" no es un nombre.
+            if (len(nxt.text) > 120 or not (nxt.bold or nxt.heading) or (nxt.starts and names)
+                    or SUBPART.fullmatch(nxt.text.strip())
                     or nxt.y - last.y >= 2.2 * last.size or (names and abs(nxt.size - names[0].size) >= 0.5)):
                 break
             names.append(nxt)
@@ -603,16 +624,20 @@ LINKS = re.compile(r"https?://|www\.|facebook|twitter|discord|patreon|ko-fi|payp
 
 def link_sections(book):
     """Títulos cuya sección es publicidad del grupo (redes, Patreon, enlaces): corta, de menos de 2000
-    letras, y con algún enlace. La sección llega hasta donde la quitaría write_epub."""
+    letras, y con algún enlace. La sección llega hasta donde la quitaría write_epub. En los
+    preliminares cuenta también la página: en una página de créditos con enlaces (Re Zero) se quitan
+    todos sus títulos, no solo el último."""
     heads = [k for k, b in enumerate(book.blocks) if b.kind == "heading"]
-    found = []
+    first = book.blocks[book.candidates[0]].page if book.candidates else 0
+    linked = {b.page for b in book.blocks if b.page < first and b.kind in ("p", "heading") and LINKS.search(b.html)}
+    found = [k for k in heads if book.blocks[k].page in linked]
     for k in heads:
         chapter = k in book.candidates
         end = next((j for j in heads if j > k and (j in book.candidates or not chapter)), len(book.blocks))
         text = " ".join(TAGS.sub("", b.html) for b in book.blocks[k:end] if b.kind in ("p", "heading"))
-        if len(text) < 2000 and LINKS.search(text):
+        if len(text) < 2000 and LINKS.search(text) and k not in found:
             found.append(k)
-    return found
+    return sorted(found)
 
 
 def _join(a, b):
@@ -624,6 +649,35 @@ def _join(a, b):
         i = a.rindex("-")  # el guion final; detrás solo puede haber etiquetas de cierre
         return a[:i] + a[i + 1:] + b
     return f"{a} {b}"
+
+
+SUBPART = re.compile(r"(parte|part|secci[oó]n|section)\s+[\w.]+", re.I)
+CREDIT = re.compile(r"(autor|author|escrito por|historia|traducci[oó]n|traductor(?:es)?|translation)"
+                    r"([^:]{0,25}):\s*(.+)", re.I)
+
+
+def _credits(blocks):
+    """Autor y traductor desde la página de créditos de los preliminares ("Autor: Tappei Nagatsuki",
+    "Traducción al español: …"). Una línea que acaba en guion sigue en la siguiente. La traducción a
+    otro idioma ("Traducción al inglés") no cuenta: es la de la edición de la que se tradujo."""
+    lines, found = [], {}
+    for b in blocks:
+        if b.kind == "p":
+            text = html.unescape(TAGS.sub("", b.html)).strip()
+            if lines and re.search(r"[-–]$", lines[-1]):
+                lines[-1] += " " + text
+            else:
+                lines.append(text)
+    for line in lines:
+        m = CREDIT.match(line)
+        if not m:
+            continue
+        what, detail, value = m.group(1).lower(), m.group(2).lower(), m.group(3).strip(" -–")
+        if what.startswith(("autor", "author", "escrito", "historia")):
+            found.setdefault("author", value)
+        elif not re.search(r"ingl[eé]s|japon[eé]s|english|japanese", detail) or "español" in detail:
+            found.setdefault("translator", value)
+    return found
 
 
 def analyze(pdf_path, progress=None):
@@ -802,6 +856,11 @@ def analyze(pdf_path, progress=None):
             heads = [k for k, b in enumerate(blocks) if b.kind == "heading"]
             first = next((k for k in heads if KEYWORDS.match(html.unescape(blocks[k].html))), None)
             candidates = [k for k in heads if first is None or k >= first]
+        # "Parte 1", "Parte 2"… sin nombre y con la numeración que vuelve a empezar en cada capítulo
+        # (Re Zero) son apartados del capítulo: subtítulos. "Parte uno: Stifled Shadow" sí es una parte.
+        bare = [k for k in candidates if SUBPART.fullmatch(html.unescape(blocks[k].html).strip())]
+        if len({_key(blocks[k].html) for k in bare}) < len(bare):
+            candidates = [k for k in candidates if k not in bare]
 
         meta = doc.metadata or {}
         meta_title = meta.get("title") or ""
@@ -810,7 +869,10 @@ def analyze(pdf_path, progress=None):
         # Sin el volumen en el título, todos los tomos se llamarían igual en lectores que no muestran la serie
         if series and volume and not re.search(rf"(?<!\d)0*{re.escape(volume)}(?!\d)", meta_title):
             title = f"{series} - Volumen {volume}"
-        return Book(title, meta.get("author") or "", cover, blocks, candidates, series, volume)
+        credits = _credits(blocks[:candidates[0]] if candidates else [])
+        # El autor de los metadatos suele ser quien maquetó el PDF: manda la página de créditos
+        return Book(title, credits.get("author") or meta.get("author") or "", cover, blocks, candidates, series,
+                    volume, translator=credits.get("translator", ""))
 
 
 # Tipografía de libro impreso, común a todos los estilos: partición de palabras (el idioma ya va en
