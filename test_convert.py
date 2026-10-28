@@ -197,9 +197,14 @@ def styled_book():
     return convert.Book("Libro", "", JPEG, blocks, [0, 4])
 
 
-def epub_file(path, name):
+PAGE_MARK = re.compile(r'<span epub:type="pagebreak"[^>]*></span>')
+
+
+def epub_file(path, name, marks=False):
+    """Un archivo del EPUB; sin las marcas de página, salvo que la prueba sea de ellas."""
     with zipfile.ZipFile(path) as z:
-        return z.read(name).decode()
+        text = z.read(name).decode()
+    return text if marks else PAGE_MARK.sub("", text)
 
 
 def test_epub_styles_and_print_typography():
@@ -339,7 +344,9 @@ def make_covers():
         (72, 218, "fin.", 11, "cour"),
     ])
     p = add_page(doc, 3, [(150, 400, "Capitulo 2: Final", 16, "hebo")])
-    p.insert_image(p.rect, pixmap=pix, keep_proportion=False, overlay=False)  # fondo decorativo
+    deco = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 85), False)
+    deco.clear_with(120)  # otra imagen: si fuera la misma, saldría como ilustración repetida
+    p.insert_image(p.rect, pixmap=deco, keep_proportion=False, overlay=False)  # fondo decorativo
     add_page(doc, 4, [
         (92, 150, line("Texto del segundo capitulo", 57), 11, "cour"),
         (72, 164, line("que sigue en otra linea", 60), 11, "cour"),
@@ -814,7 +821,7 @@ def sectioned_book():
 
 def epub_text(path):
     with zipfile.ZipFile(path) as z:
-        return "".join(z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml"))
+        return PAGE_MARK.sub("", "".join(z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml")))
 
 
 def test_removed_subtitle_leaves_out_only_its_part():
@@ -1051,11 +1058,11 @@ def test_window_list_styles_follow_type():
     root.update()
     x, y, w, h = window.tree.bbox(item, "inc")
     styles = [window.tree.item(item, "tags")]
-    for _ in range(2):
+    for _ in range(3):
         window.on_click(SimpleNamespace(x=x + w // 2, y=y + h // 2))
         styles.append(window.tree.item(item, "tags"))
     window.close()
-    assert [tuple(s) for s in styles] == [("chapter",), ("subtitle",), ("cut",)], styles
+    assert [tuple(s) for s in styles] == [("chapter",), ("subtitle",), ("separator",), ("cut",)], styles
 
 
 def test_window_device_preview_and_dark_mode():
@@ -1156,6 +1163,7 @@ def test_window_reviews_illustrations():
         window.on_click(SimpleNamespace(x=x + w // 2, y=y + h // 2))
 
     click(decor)  # Descartada -> Ilustración
+    click(art)    # Descartada (es la misma imagen que la portada, la página 1) -> Ilustración
     click(art)    # Ilustración -> Quitar
     window.tree.selection_set(art)
     root.update()
@@ -1174,7 +1182,7 @@ def test_window_reviews_illustrations():
         app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
         after = (window.tree.set(art, "inc"), window.tree.set(decor, "inc"))
         window.close()
-    assert types == (app.IMG, app.DROPPED), types
+    assert types == (app.DROPPED, app.DROPPED), types  # repetida de la portada; fondo de título
     assert after == (app.CUT, app.IMG), after
     assert message == "Esta ilustración no irá en el EPUB", message
     with zipfile.ZipFile(out) as z:
@@ -1258,7 +1266,7 @@ def test_window_separator_reaches_preview_and_epub():
 
 
 def test_window_double_click_on_include_toggles_twice():
-    """Cada clic rota Capítulo → Subtítulo → Quitar → Capítulo. Tk manda el segundo clic rápido
+    """Cada clic rota Capítulo → Subtítulo → Separador → Quitar → Capítulo. Tk manda el segundo clic rápido
     a <Double-1>: también cuenta."""
     from types import SimpleNamespace
 
@@ -1270,11 +1278,11 @@ def test_window_double_click_on_include_toggles_twice():
     x, y, w, h = window.tree.bbox("0", "inc")
     click = SimpleNamespace(x=x + w // 2, y=y + h // 2)
     states = []
-    for handler in (window.on_click, window.on_double_click, window.on_click):
+    for handler in (window.on_click, window.on_double_click, window.on_click, window.on_click):
         handler(click)
         states.append(window.tree.set("0", "inc"))
     root.destroy()
-    assert states == [app.OFF, app.CUT, app.ON], states
+    assert states == [app.OFF, app.SEP, app.CUT, app.ON], states
 
 
 def test_window_title_editor_closes_on_scroll():
@@ -1604,7 +1612,7 @@ def test_window_wide_illustration_types():
     root.update()
     with zipfile.ZipFile(window.preview_path) as z:
         preview = [n for n in z.namelist() if n.startswith("OEBPS/img/")]
-    _, removed = app._plan(book, window.rows())
+    _, removed, _ = app._plan(book, window.rows())
     window.close()
     assert titles == ["Ilustración doble · página 1", "Ilustración · página 1"], titles
     assert wide == [app.SPLIT, app.ROTATED, app.CUT, app.IMG], wide
@@ -1894,7 +1902,7 @@ def test_check_epub_reports_problems():
     broken = TMP / "roto.epub"
     with zipfile.ZipFile(out) as src, zipfile.ZipFile(broken, "w") as dst:
         for name in src.namelist():
-            data = src.read(name)
+            data = PAGE_MARK.sub("", src.read(name).decode()).encode()
             if name == "OEBPS/sec001.xhtml":
                 data = data.replace(b"<p>Uno.</p>", b'<p>Uno &amp; <img src="img/no.jpg" alt=""/></p><p>sin cerrar')
             if name == "OEBPS/sec002.xhtml":
@@ -2074,6 +2082,235 @@ def test_bookmarked_chapter_name_joins_bare_label():
     heads = [(html.unescape(b.html), k in book.candidates) for k, b in enumerate(book.blocks) if b.kind == "heading"]
     assert heads == [("Capitulo 1: El reinicio de Subaru", True), ("Parte 1", False),
                      ("Capitulo 2: Llore y grite", True)], heads
+
+
+def test_numbered_chapter_titles():
+    cases = {"Capítulo Uno: Las luchas": "Capítulo 1: Las luchas", "Capítulo IV: ¡Mi nombre!": "Capítulo 4: ¡Mi nombre!",
+             "Capitulo 3": "Capítulo 3", "CAPITULO DOS: FIN": "CAPÍTULO 2: FIN", "Prologo: Un sueño": "Prólogo: Un sueño",
+             "Capítulo Final": "Capítulo Final", "Interludio: Rem": "Interludio: Rem"}
+    got = {k: convert.numbered(k) for k in cases}
+    assert got == cases, {k: v for k, v in got.items() if v != cases[k]}
+
+
+def test_move_section_and_replay():
+    import app
+
+    book = sectioned_book()  # 0 Cap 1, 1 Uno, 2 Lado A, 3 Texto A, 4 Lado B, 5 Texto B, 6 Cap 2, 7 Dos
+    mapping = convert.move_section(book, 6, 8, 2)  # Cap 2 antes de Lado A
+    assert [b.html for b in book.blocks] == ["Cap 1", "Uno.", "Cap 2", "Dos.", "Lado A", "Texto A.", "Lado B",
+                                             "Texto B."], [b.html for b in book.blocks]
+    assert (mapping[6], mapping[2], book.candidates) == (2, 4, [0, 2])
+    again = sectioned_book()
+    done = app._replay(again, {"edits": [["move", 6, 8, 2], [5, 6, "Texto A cambiado."]]})
+    assert done == [["move", 6, 8, 2], [5, 6, "Texto A cambiado."]], done
+    assert [b.html for b in again.blocks][4:6] == ["Lado A", "Texto A cambiado."], [b.html for b in again.blocks]
+
+
+def test_duplicate_images_and_trim():
+    art = two_color(300, 400)
+    other = jpeg(300, 400)
+    book = convert.Book("Libro", "", art, [convert.Block("image", 1, image=other), convert.Block("image", 2, image=art),
+                                           convert.Block("image", 3, image=other)], [])
+    assert convert.duplicate_images(book) == [1, 2]  # la portada otra vez y la repetida
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 400, 500), False)
+    pix.set_rect(pix.irect, (255, 255, 255))
+    pix.set_rect(pymupdf.IRect(40, 50, 360, 450), (30, 90, 160))
+    trimmed = pymupdf.Pixmap(convert._trim(pix.tobytes("jpg", jpg_quality=95)))
+    assert abs(trimmed.width - 320) <= 4 and abs(trimmed.height - 400) <= 4, (trimmed.width, trimmed.height)
+    assert convert._trim(other) == other  # sin margen blanco no cambia
+
+
+def test_quality_report():
+    blocks = [("heading", "Cap 1"), ("p", "Texto normal. " * 40), ("p", "y esto sigue en minúscula."),
+              ("p", "Visítanos en https://grupo.com"), ("heading", "Cap 2"), ("p", "Corto.")]
+    book = convert.Book("Libro", "", b"", [convert.Block(k, 2, h) for k, h in blocks], [0, 4],
+                        skipped=[(1, 400, "se omitió como índice del PDF")])
+    report = [(k, why.split(" (")[0]) for k, page, why, text in convert.quality_report(book)]
+    assert report == [(None, "Texto no incluido: se omitió como índice del PDF"), (2, "Empieza en minúscula"),
+                      (3, "Enlace o red social"), (4, "Capítulo muy corto")], report
+
+
+def test_regex_replacements_and_counts():
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"),
+                                           convert.Block("p", 1, "Onii-chan y Oniichan y Onii chan.")], [0])
+    rules = [("re:Onii[- ]?chan", "Onii-chan"), ("re:(", "x"), ("Cap", "Capítulo")]
+    counts = convert.count_matches(book, rules)
+    assert counts[0] == ("re:Onii[- ]?chan", 3) and "no válida" in counts[1][1] and counts[2] == ("Cap", 1), counts
+    out = TMP / "regex.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, replacements=rules)  # la regla mala se salta
+    text = epub_file(out, "OEBPS/sec001.xhtml")
+    assert "<p>Onii-chan y Onii-chan y Onii-chan.</p>" in text and "Capítulo 1" in text, text
+
+
+def test_epub_extras_pages_classes_fonts_metadata():
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
+              convert.Block("p", 1, "Querida Ana:", align="center"), convert.Block("p", 2, "【Habilidad adquirida】"),
+              convert.Block("heading", 2, "Parte 1"), convert.Block("p", 3, "Tres.")]
+    book = convert.Book("Libro", "Tappei Nagatsuki", b"", blocks, [0], illustrator="Otsuka", proofreader="HaruK",
+                        subjects="Fantasía, Isekai", date="2014", original_title="Re:Zero")
+    out = TMP / "extras.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, breaks=[4], font="Literata", reading=True)
+    sec, nav = epub_file(out, "OEBPS/sec001.xhtml", marks=True), epub_file(out, "OEBPS/nav.xhtml")
+    opf, css = epub_file(out, "OEBPS/content.opf"), epub_file(out, "OEBPS/style.css")
+    assert '<p class="center">Querida Ana:</p>' in sec and '<p class="status">' in sec, sec
+    assert "<h2" not in sec and "Parte 1" not in sec, sec  # el apartado va como separador
+    assert 'id="pg1"' in sec and 'id="pg2"' in sec and 'id="pg3"' in sec, sec
+    assert 'epub:type="page-list"' in nav and 'href="sec001.xhtml#pg3"' in nav, nav
+    assert ">ill</meta>" in opf and ">pfr</meta>" in opf and "Nagatsuki, Tappei" in opf, opf
+    assert "<dc:subject>Isekai</dc:subject>" in opf and "<dc:date>2014</dc:date>" in opf and "Re:Zero" in opf, opf
+    assert '@font-face' in css and 'font-family: "Literata"' in css, css
+    with zipfile.ZipFile(out) as z:
+        assert sum(n.endswith(".ttf") for n in z.namelist()) == 4
+    assert "min</span>" in epub_file(out, "OEBPS/contents.xhtml")
+    assert convert.check_epub(out) == []
+    old = TMP / "epub2.epub"
+    convert.write_epub(book, [(0, "Cap 1")], old, epub2=True)
+    opf2 = epub_file(old, "OEBPS/content.opf")
+    assert 'version="2.0"' in opf2 and "refines" not in opf2 and 'opf:role="aut"' in opf2, opf2
+    assert 'properties=' not in opf2 and "page-list" not in epub_file(old, "OEBPS/nav.xhtml")
+    ET.fromstring(opf2.encode())
+
+
+def test_omnibus_joins_volumes():
+    import app
+
+    folder = series_folder()
+    out = folder / "recopilatorio.epub"
+    pdfs = [str(folder / f"Mi Serie - Volumen 0{n}.pdf") for n in (1, 2)]
+    problems = app._omnibus(pdfs, str(out), {"shrink": False})
+    nav = epub_file(out, "OEBPS/nav.xhtml")
+    titles = re.findall(r'<li><a href="sec\d+\.xhtml">([^<]+)</a>', nav)
+    assert problems == [], problems
+    assert titles[0] == "Mi Serie - Volumen 1" and "Mi Serie - Volumen 2" in titles, titles
+    assert titles.count("Capitulo 1: Inicio") == 2, titles
+    assert "Mi Serie - Volúmenes 1-2" in epub_file(out, "OEBPS/content.opf")
+
+
+def test_worker_error_is_logged():
+    import app
+
+    events = multiprocessing_queue()
+
+    def boom():
+        raise ValueError("roto")
+
+    app._worker(events, boom, (), False)
+    first, second = events.get(timeout=5), events.get(timeout=5)
+    assert first == ("error", "roto") and second[0] == "log" and "ValueError: roto" in second[1], (first, second)
+    path = app._log(second[1])
+    assert path.parent == app.SETTINGS.parent and "ValueError: roto" in path.read_text(encoding="utf-8")
+
+
+def multiprocessing_queue():
+    import multiprocessing
+    return multiprocessing.Queue()
+
+
+def test_window_titles_tools_and_profiles():
+    import app
+
+    root, window = visible_window()
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capitulo Uno: El Inicio"),
+                                           convert.Block("p", 1, "Texto del inicio."),
+                                           convert.Block("heading", 1, "Parte 1"), convert.Block("p", 1, "Más."),
+                                           convert.Block("heading", 2, "Parte 2"), convert.Block("p", 2, "Y más.")], [0])
+    window.show_book(book)
+    window.fix_numbers()
+    numbered = window.tree.set("0", "title")
+    window.parts_as_breaks()
+    kinds = [window.tree.set(i, "inc") for i in ("2", "4")]
+    window.undo()
+    undone = [window.tree.set(i, "inc") for i in ("2", "4")]
+    window.profile_var.set("E-reader de tinta")
+    window.apply_profile()
+    profile = (window.gray_var.get(), window.shrink_size_var.get(), window.write_options()["shrink"])
+    window.profile_var.set("Lector antiguo (EPUB 2)")
+    window.apply_profile()
+    epub2 = window.write_options()["epub2"]
+    minutes = window.tree.set("0", "min")
+    window.close()
+    assert numbered == "Capítulo 1: El Inicio", numbered
+    assert kinds == [app.SEP, app.SEP] and undone == [app.OFF, app.OFF], (kinds, undone)
+    assert profile == (True, 1400, 1400) and epub2, (profile, epub2)
+    assert minutes == "1 min", minutes
+
+
+def test_window_move_section_persists_and_undoes():
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_group_pdf()
+    window.show_book(convert.analyze(window.pdf))
+    titles = lambda: [window.tree.set(i, "title") for i in window.tree.get_children()]
+    before = titles()
+    last = window.tree.get_children()[-1]  # Capitulo 2: Final
+    window.tree.selection_set(last)
+    root.update()
+    window.move_selected(-1)
+    moved = titles()
+    window.close()
+    root, window = visible_window()
+    window.pdf = TMP / "grupo.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    reopened = titles()
+    window.undo()  # lo recuperado no se deshace
+    still = titles()
+    window.tree.selection_set(window.tree.get_children()[1])
+    window.move_selected(1)
+    window.undo()
+    undone = titles()
+    window.close()
+    assert before == ["Capitulo 1: Inicio", "Agradecimientos", "Capitulo 2: Final"], before
+    assert moved == ["Capitulo 1: Inicio", "Capitulo 2: Final", "Agradecimientos"], moved
+    assert reopened == moved and still == moved and undone == moved, (reopened, still, undone)
+
+
+def test_window_cover_from_illustration_quality_and_series_panel():
+    root, window = visible_window()
+    window.pdf = make_covers()
+    window.show_book(convert.analyze(window.pdf))
+    image = next(i for i in window.tree.get_children() if window.is_image(i))
+    window.set_cover(("image", int(image)))
+    label = window.cover_label.cget("text")
+    same = window.book.cover == window.book.blocks[int(image)].image
+    window.choose_cover()
+    window.quality()
+    window.series_panel()
+    root.update()
+    panels = [w for w in root.winfo_children() if isinstance(w, __import__("tkinter").Toplevel)]
+    tables = [c for p in panels for c in p.winfo_children() if c.winfo_class() == "Treeview"]
+    states = [tables[0].set(i, "state") for i in tables[0].get_children()] if tables else []
+    window.close()
+    assert label.startswith("Portada: ilustración de la página") and same, label
+    assert len(panels) == 3, panels
+    assert "Sin revisar" in states or "Revisado, sin EPUB" in states, states
+
+
+def test_window_error_is_logged_and_shown():
+    import app
+
+    root, window = visible_window()
+    shown = []
+    original = app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message: shown.append(message)
+    try:
+        try:
+            raise RuntimeError("fallo de prueba")
+        except RuntimeError as e:
+            window.on_error(type(e), e, e.__traceback__)
+    finally:
+        app.messagebox.showerror = original
+        root.destroy()
+    log = (app.SETTINGS.parent / "errores.log").read_text(encoding="utf-8")
+    assert shown and "fallo de prueba" in shown[0] and "errores.log" in shown[0], shown
+    assert "RuntimeError: fallo de prueba" in log
+
+
+def test_install_paths_are_per_user():
+    import app
+
+    exe, link = app._install_paths()
+    assert "Programs" in str(exe) and exe.name == "PDF a EPUB.exe" and link.suffix == ".lnk", (exe, link)
 
 
 if __name__ == "__main__":
