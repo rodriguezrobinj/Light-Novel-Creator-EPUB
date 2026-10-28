@@ -711,6 +711,7 @@ def visible_window():
 
     import app
 
+    app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"  # cada ventana sin preferencias de otra prueba
     root = tk.Tk()
     root.attributes("-alpha", 0.0)
     root.geometry("780x560+0+0")
@@ -1618,19 +1619,17 @@ def test_window_undo_restores_type_and_title():
     window.show_book(sectioned_book())
     window.set_kind("0", app.CUT)
     window.set_kind("2", app.ON)
-    window.history.append(("2", window.tree.set("2", "inc"), window.tree.set("2", "title")))
+    window.history.append([window.row_state("2")])
     window.tree.set("2", "title", "Lado A editado")  # como hace el cuadro de edición
-    window.tree.focus_force()
-    root.update()
-    window.tree.event_generate("<Control-z>")
-    root.update()
+    bound = window.tree.bind("<Control-z>")  # el atajo; pulsarlo de verdad depende del foco de la ventana
+    window.undo()
     after_title = (window.tree.set("2", "inc"), window.tree.set("2", "title"))
     window.undo()
     window.undo()
     window.undo()  # sin más cambios: no hace nada
     rows = [window.tree.set(i, "inc") for i in ("0", "2")]
     window.close()
-    assert after_title == (app.ON, "Lado A"), after_title
+    assert bound and after_title == (app.ON, "Lado A"), (bound, after_title)
     assert rows == [app.ON, app.OFF], rows
 
 
@@ -1838,7 +1837,7 @@ def test_window_edited_text_survives_reopening_and_reaches_epub():
     window.close()
     assert again == titles, again
     results = app._batch([str(window.pdf)], {"shrink": False})
-    assert results == [("grupo.pdf", "")], results
+    assert results == [("grupo.pdf", "", [])], results
     text = epub_text(TMP / "grupo.epub")
     assert "brillaba mucho." in text and "Interludio perdido" in text and "discord" not in text, text
 
@@ -1860,10 +1859,153 @@ def test_window_find_moves_previews_to_the_match():
     assert "página 3" in caption, caption
 
 
+def test_spanish_case_for_titles():
+    body = [convert.Block("p", 1, "Las luchas y el renacimiento de la guarida, al final, con Teto y el Heraldo. "
+                                  "Vio a Teto. Habló con el Heraldo y con Teto. Un heraldo más.")]
+    words = convert.body_words(convert.Book("Libro", "", b"", body, []))
+    cases = {
+        "Capítulo Uno: Las Luchas Posteriores Al Renacimiento": "Capítulo uno: Las luchas posteriores al renacimiento",
+        "Capítulo 6: Teto Y La Guarida": "Capítulo 6: Teto y la guarida",
+        "CAPITULO 2: EL FINAL DE TETO": "Capitulo 2: El final de Teto",
+        "Prólogo: ¡Hola, Mundo! ¿Qué Tal?": "Prólogo: ¡Hola, mundo! ¿Qué tal?",
+        "La NPC Del Final": "La NPC del final",
+    }
+    got = {k: convert.spanish_case(k, words) for k in cases}
+    assert got == cases, {k: v for k, v in got.items() if v != cases[k]}
+
+
+def test_gray_illustrations_keep_color_cover():
+    color = jpeg(200, 300)
+    book = convert.Book("Libro", "", color, [convert.Block("heading", 1, "Cap 1"),
+                                             convert.Block("image", 1, image=color)], [0])
+    out = TMP / "gris.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, gray=True)
+    with zipfile.ZipFile(out) as z:
+        art = pymupdf.Pixmap(z.read(next(n for n in z.namelist() if n.startswith("OEBPS/img/"))))
+        cover = pymupdf.Pixmap(z.read("OEBPS/cover.jpg"))
+    assert (art.n, cover.n) == (1, 3), (art.n, cover.n)
+
+
+def test_check_epub_reports_problems():
+    out = TMP / "revisar.epub"
+    convert.write_epub(sectioned_book(), [(0, "Cap 1"), (6, "Cap 2")], out)
+    assert convert.check_epub(out) == []
+    broken = TMP / "roto.epub"
+    with zipfile.ZipFile(out) as src, zipfile.ZipFile(broken, "w") as dst:
+        for name in src.namelist():
+            data = src.read(name)
+            if name == "OEBPS/sec001.xhtml":
+                data = data.replace(b"<p>Uno.</p>", b'<p>Uno &amp; <img src="img/no.jpg" alt=""/></p><p>sin cerrar')
+            if name == "OEBPS/sec002.xhtml":
+                data = re.sub(rb"<p>.*?</p>", b"", data)
+            dst.writestr(name, data)
+    problems = convert.check_epub(broken)
+    assert any("sec001.xhtml: XML no válido" in p for p in problems), problems
+    assert "Capítulo vacío: Cap 2" in problems, problems
+    empty_part = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Parte uno"),
+                                                 convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Ya.")], [0, 1])
+    convert.write_epub(empty_part, [(0, "Parte uno"), (1, "Cap 1")], out)
+    assert convert.check_epub(out) == []  # una portadilla vacía es a propósito
+
+
+def test_window_fix_case_and_undo_it_at_once():
+    import app
+
+    root, window = visible_window()
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1: La Gran Aventura"),
+                                           convert.Block("p", 1, "Una gran aventura empieza."),
+                                           convert.Block("heading", 1, "Capítulo 2: El Final")], [0, 2])
+    window.show_book(book)
+    window.fix_case()
+    fixed = [window.tree.set(i, "title") for i in window.tree.get_children()]
+    window.undo()
+    back = [window.tree.set(i, "title") for i in window.tree.get_children()]
+    window.close()
+    assert fixed == ["Capítulo 1: La gran aventura", "Capítulo 2: El final"], fixed
+    assert back == ["Capítulo 1: La Gran Aventura", "Capítulo 2: El Final"], back
+
+
+def test_window_undo_text_edit():
+    import app
+
+    root, window = visible_window()
+    window.show_book(sectioned_book())
+    window.set_kind("6", app.OFF)
+    window.tree.selection_set("0")
+    root.update()
+    window.apply_edit([1, 2, "Uno cambiado.\n# Nuevo"], "0")
+    edited = [window.tree.set(i, "title") for i in window.tree.get_children()]
+    window.undo()  # el texto
+    after_text = ([window.tree.set(i, "title") for i in window.tree.get_children()], window.edits,
+                  window.book.blocks[1].html, window.tree.set("6", "inc"))
+    window.undo()  # el tipo de Cap 2, de antes de editar
+    kind = window.tree.set("6", "inc")
+    window.close()
+    assert edited == ["Cap 1", "Nuevo", "Lado A", "Lado B", "Cap 2"], edited
+    assert after_text == (["Cap 1", "Lado A", "Lado B", "Cap 2"], [], "Uno.", app.OFF), after_text
+    assert kind == app.ON, kind
+
+
+def test_window_remembers_settings_and_recent_pdfs():
+    import time
+
+    import app
+
+    root, window = visible_window()
+    settings = app.SETTINGS
+    window.style_var.set("Moderno")
+    window.gray_var.set(True)
+    pdf = make_novel()
+    window.open_path(str(pdf))  # como un PDF arrastrado sobre el .exe
+    deadline = time.time() + 60
+    while window.done and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    loaded = window.book is not None
+    window.close()
+    app.SETTINGS = settings
+    import tkinter as tk
+    root = tk.Tk()
+    root.withdraw()
+    window = app.App(root)
+    got = (window.style_var.get(), window.gray_var.get(), window.recent_menu.entrycget(0, "label"),
+           window.settings["folder"])
+    root.destroy()
+    assert loaded
+    assert got == ("Moderno", True, "novela.pdf", str(pdf.parent.resolve())), got
+
+
+def test_window_epub_preview_continues_into_next_section():
+    root, window = visible_window()
+    book = long_book()
+    book.candidates.append(len(book.blocks))
+    book.blocks += [convert.Block("heading", 1, "Cap 2"), convert.Block("p", 1, "Fin.")]
+    window.show_book(book)
+    items = window.tree.get_children()
+    window.tree.selection_set(items[0])
+    root.update()
+    pages = window.epub_pages
+    for _ in range(pages - 1):
+        window.epub_step(1)
+    last = window.epub_page
+    window.epub_step(1)  # pasa a la sección siguiente
+    root.update()
+    moved = (window.tree.selection()[0], window.epub_page)
+    window.epub_step(-1)  # vuelve a la última página de la anterior
+    root.update()
+    back = (window.tree.selection()[0], window.epub_page, window.epub_pages)
+    window.close()
+    assert pages > 1 and last == pages - 1, (pages, last)
+    assert moved == (items[1], 0), moved
+    assert back == (items[0], pages - 1, pages), back
+
+
 if __name__ == "__main__":
     failed = 0
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         TMP = Path(tmp)
+        import app
+        app.SETTINGS = TMP / "ajustes.json"  # nunca las preferencias reales del usuario
         for name, fn in list(globals().items()):
             if name.startswith("test_"):
                 try:

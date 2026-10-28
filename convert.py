@@ -5,6 +5,7 @@ import os
 import re
 import unicodedata
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -420,6 +421,15 @@ def _shrink(data):
     return small if len(small) < len(data) else data
 
 
+def _gray(data):
+    """Imagen en escala de grises: en un e-reader de tinta se ve igual y pesa menos."""
+    pix = pymupdf.Pixmap(data)
+    if pix.n - pix.alpha == 1:
+        return data
+    pix = pymupdf.Pixmap(pymupdf.csGRAY, pix)
+    return pix.tobytes("png") if pix.alpha else pix.tobytes("jpg", jpg_quality=85)
+
+
 def is_wide(data):
     """Ilustración doble (dos páginas del libro en una imagen apaisada): en un celular en vertical
     se ve diminuta, así que la ventana ofrece dividirla o girarla."""
@@ -551,6 +561,40 @@ def name_variants(book):
     found = [sorted(g, key=lambda f: -g[f]) for g in groups.values()
              if len(g) > 1 and any(_fold(re.split(r"[- ]", f)[0]) in proper for f in g)]
     return sorted(found, key=lambda g: -sum(forms[f] for f in g))
+
+
+def body_words(book):
+    """Cómo escribe el libro cada palabra: (veces en minúscula, veces con mayúscula en mitad de una
+    frase), para saber cuáles son nombres propios."""
+    text = " ".join(html.unescape(TAGS.sub("", b.html)) for b in book.blocks if b.kind == "p")
+    lower = collections.Counter(w for w in re.findall(r"[^\W\d_]+", text) if w.islower())
+    proper = collections.Counter(m.group(1).lower() for m in re.finditer(r"(?<=[\w,;] )([^\W\d_]+)", text)
+                                 if m.group(1)[:1].isupper())
+    return lower, proper
+
+
+def spanish_case(title, words):
+    """Título con las mayúsculas del español: solo la primera palabra (y la que sigue a ":" o a un
+    punto, cierre de exclamación o interrogación) y los nombres propios. words: body_words; es nombre
+    la palabra que el libro escribe con mayúscula en mitad de frase más veces que en minúscula."""
+    lower, proper = words
+    all_caps = title.isupper()
+    parts = re.split(r"([^\W\d_]+)", title)  # las palabras quedan en las posiciones impares
+    capital = True
+    for k, part in enumerate(parts):
+        if k % 2 == 0:
+            if re.search(r"[.:!?]", part):
+                capital = True
+            continue
+        low = part.lower()
+        if capital:
+            parts[k] = low[:1].upper() + low[1:] if all_caps else part[:1].upper() + part[1:]
+        elif proper[low] > lower[low]:
+            parts[k] = low[:1].upper() + low[1:] if all_caps else part
+        elif all_caps or part[1:] == low[1:]:  # "Al" -> "al"; una sigla ("NPC") en un título normal, no
+            parts[k] = low
+        capital = False
+    return "".join(parts)
 
 
 LINKS = re.compile(r"https?://|www\.|facebook|twitter|discord|patreon|ko-fi|paypal|instagram|tiktok|wixsite"
@@ -865,7 +909,7 @@ def _separator(block, index, style, choice, images):
 
 
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
-               separator="Según el estilo", shrink=False, replacements=(), credits=False):
+               separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -875,7 +919,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     la omite para dibujar directamente la sección). separator: una de SEPARATOR_CHOICES.
     shrink: reduce las imágenes y la portada (_shrink) para que el EPUB pese menos.
     replacements: [(buscar, reemplazo)] del usuario, en textos y títulos (nombres, honoríficos…).
-    credits: añade tras la portada una página "Créditos" con los datos del libro."""
+    credits: añade tras la portada una página "Créditos" con los datos del libro.
+    gray: ilustraciones en escala de grises (la portada no: en la biblioteca del lector se ve en color)."""
     rules = _rules(replacements)
     typo = _typography if typography else (lambda s: s)
     fix = (lambda s: typo(_replace(s, rules))) if rules else typo
@@ -1039,9 +1084,52 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             for name, text in files.items():
                 z.writestr(f"OEBPS/{name}", text)
             for src, data in images.items():
+                data = _gray(data) if gray else data
                 z.writestr(f"OEBPS/{src}", _shrink(data) if shrink else data)
         os.replace(tmp, out_path)
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
+
+
+XHTML = "{http://www.w3.org/1999/xhtml}"
+PART_TITLE = re.compile(r"(parte|volumen|libro|part|book)\b", re.I)  # portadillas: sin texto a propósito
+
+
+def check_epub(path):
+    """Revisa un EPUB ya escrito: XML válido, ningún archivo, imagen ni enlace del índice que falte, y
+    ningún capítulo vacío (salvo portadillas como "Parte uno"). Devuelve los problemas, en español."""
+    problems = []
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        trees = {}
+        for name in sorted(n for n in names if n.endswith((".xhtml", ".opf", ".ncx"))):
+            try:
+                trees[name] = ET.fromstring(z.read(name))
+            except ET.ParseError as e:
+                problems.append(f"{name}: XML no válido ({e})")
+    base = "OEBPS/"
+    opf = trees.get(base + "content.opf")
+    if opf is not None:
+        for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
+            if base + item.get("href") not in names:
+                problems.append(f"Falta {item.get('href')}, declarado en content.opf")
+    ids = {name: {e.get("id") for e in tree.iter() if e.get("id")} for name, tree in trees.items()}
+    for name, tree in trees.items():
+        if not name.endswith(".xhtml"):
+            continue
+        for img in tree.iter(XHTML + "img"):
+            if base + img.get("src", "") not in names:
+                problems.append(f"{name[len(base):]}: falta la imagen {img.get('src')}")
+        for a in tree.iter(XHTML + "a"):
+            target, _, anchor = a.get("href", "").partition("#")
+            if target and (base + target not in names or (anchor and anchor not in ids.get(base + target, ()))):
+                problems.append(f"{name[len(base):]}: enlace roto a {a.get('href')}")
+        h1 = next(tree.iter(XHTML + "h1"), None)
+        if (re.fullmatch(r"OEBPS/sec\d+\.xhtml", name) and h1 is not None
+                and not any(True for _ in tree.iter(XHTML + "p")) and not any(True for _ in tree.iter(XHTML + "img"))):
+            title = " ".join("".join(h1.itertext()).split())
+            if not PART_TITLE.match(title):
+                problems.append(f"Capítulo vacío: {title}")
+    return problems
