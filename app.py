@@ -1,8 +1,10 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
 import html
+import json
 import multiprocessing
 import os
 import queue
+import re
 import tempfile
 import tkinter as tk
 import tkinter.font as tkfont
@@ -18,6 +20,8 @@ NEXT = {ON: OFF, OFF: CUT, CUT: ON}                 # cada clic pasa al siguient
 IMG, DROPPED = "Ilustración", "Descartada"           # tipo de las filas de imagen
 IMAGE_NEXT = {IMG: CUT, CUT: IMG, DROPPED: IMG}      # clic en una imagen: se quita o se recupera
 KIND_TAG = {ON: "chapter", OFF: "subtitle", CUT: "cut", IMG: "image", DROPPED: "dropped"}  # estilo por tipo
+KEYS = {"c": ON, "s": OFF, "q": CUT, "i": IMG}       # atajos de teclado en la lista
+LANGUAGES = ["es", "en", "pt", "fr", "it", "ja"]     # idioma del EPUB: lo usan la partición de palabras y la voz
 KIND_COLOR = {"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a", "image": "#2e7d32", "dropped": "#8a8a8a"}
 PREVIEW_BOX = (400, 560)  # ancho y alto máximos de cada vista previa, en píxeles
 PREVIEW_CHROME = 190      # alto de leyendas, botones y miniaturas que rodean a las vistas previas
@@ -74,6 +78,11 @@ class App:
         self.open_btn.pack(side="left")
         self.file_label = ttk.Label(top, text="Ningún archivo")
         self.file_label.pack(side="left", padx=8)
+        ttk.Button(top, text="Portada: archivo…", command=self.cover_from_file).pack(side="right")
+        ttk.Button(top, text="Portada: página mostrada", command=self.cover_from_page).pack(side="right", padx=4)
+        self.cover_label = ttk.Label(top, text="")
+        self.cover_label.pack(side="right", padx=8)
+        self.cover_choice = None  # ("page", n), ("file", ruta) o None: la que eligió el análisis
 
         meta = ttk.Frame(root, padding=(8, 0))
         meta.pack(fill="x")
@@ -83,6 +92,17 @@ class App:
                                   ("Serie:", self.series_var, 35), ("Vol.:", self.volume_var, 5)):
             ttk.Label(meta, text=label).pack(side="left")
             ttk.Entry(meta, textvariable=var, width=width).pack(side="left", padx=(4, 12))
+        meta2 = ttk.Frame(root, padding=(8, 4, 8, 0))
+        meta2.pack(fill="x")
+        self.publisher_var, self.translator_var = tk.StringVar(), tk.StringVar()
+        self.lang_var = tk.StringVar(value="es")
+        self.description = ""  # sinopsis; se edita en su propio cuadro
+        for label, var, width in (("Grupo:", self.publisher_var, 30), ("Traductor:", self.translator_var, 30)):
+            ttk.Label(meta2, text=label).pack(side="left")
+            ttk.Entry(meta2, textvariable=var, width=width).pack(side="left", padx=(4, 12))
+        ttk.Label(meta2, text="Idioma:").pack(side="left")
+        ttk.Combobox(meta2, textvariable=self.lang_var, values=LANGUAGES, width=4).pack(side="left", padx=(4, 12))
+        ttk.Button(meta2, text="Sinopsis…", command=self.edit_description).pack(side="left")
 
         # La barra inferior y la ayuda se empaquetan antes que el centro: pack reparte el espacio en
         # orden, y así el centro (con las vistas previas) es el que encoge en pantallas bajas.
@@ -94,6 +114,8 @@ class App:
         self.status.pack(side="left", padx=8)
         self.gen_btn = ttk.Button(bottom, text="Generar EPUB…", command=self.generate, state="disabled")
         self.gen_btn.pack(side="right")
+        self.shrink_var = tk.BooleanVar(value=True)  # las imágenes son casi todo el peso del EPUB
+        ttk.Checkbutton(bottom, text="Reducir imágenes", variable=self.shrink_var).pack(side="right", padx=(12, 0))
         self.typography_var = tk.BooleanVar(value=True)  # comillas «», puntos suspensivos, raya, espacios
         ttk.Checkbutton(bottom, text="Limpieza tipográfica", variable=self.typography_var,
                         command=self.update_preview).pack(side="right", padx=12)
@@ -109,8 +131,8 @@ class App:
         separator.pack(side="right")
         separator.bind("<<ComboboxSelected>>", lambda _: self.update_preview())
         ttk.Label(bottom, text="Separador:").pack(side="right", padx=(12, 4))
-        ttk.Label(root, text="Clic en Tipo: capítulo, subtítulo o quitar · Doble clic en el título: editar",
-                  padding=(8, 0)).pack(side="bottom", anchor="w")
+        ttk.Label(root, text="Clic en Tipo, o teclas C (capítulo), S (subtítulo), Q (quitar), I (ilustración)"
+                             " · Doble clic en el título o F2: editar", padding=(8, 0)).pack(side="bottom", anchor="w")
 
         middle = ttk.Frame(root, padding=8)
         middle.pack(fill="both", expand=True)
@@ -151,6 +173,10 @@ class App:
         self.tree.bind("<Button-1>", self.on_click)
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<<TreeviewSelect>>", self.update_preview)
+        for key, kind in KEYS.items():
+            for k in (key, key.upper()):
+                self.tree.bind(f"<KeyPress-{k}>", lambda _, kind=kind: self.shortcut(kind))
+        self.tree.bind("<F2>", lambda _: self.tree.selection() and self.edit_title(self.tree.selection()[0]))
         for tag in KIND_TAG.values():
             self.tree.tag_configure(tag, font=self.fonts[tag],
                                     foreground=KIND_COLOR[tag])
@@ -209,6 +235,7 @@ class App:
 
     def close(self):
         """Al cerrar a mitad de un trabajo, detiene el proceso y borra el EPUB a medio escribir."""
+        self.save_review()
         if self.done and self.proc.is_alive():
             self.proc.terminate()
             self.proc.join()
@@ -427,6 +454,7 @@ class App:
         path = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
         if not path:
             return
+        self.save_review()
         self.pdf, self.book = Path(path), None
         self.file_label.configure(text=self.pdf.name)
         self.tree.delete(*self.tree.get_children())
@@ -441,6 +469,11 @@ class App:
         self.author_var.set(book.author)
         self.series_var.set(book.series)
         self.volume_var.set(book.volume)
+        self.publisher_var.set(book.publisher)
+        self.translator_var.set(book.translator)
+        self.description = book.description
+        self.cover_choice = None
+        self.cover_label.configure(text="Portada: la del PDF")
         # Todos los títulos: los capítulos marcados; los subtítulos ("El lado de…") desmarcados, por si
         # alguno debe ser capítulo. Un título desmarcado sale en el EPUB como subtítulo.
         # Las ilustraciones van intercaladas, en el orden del libro: las que entran como "Ilustración" y las
@@ -467,6 +500,8 @@ class App:
         text = f"{found} capítulos detectados" if found else "No se detectaron capítulos: el EPUB tendrá una sola sección"
         text += f", {others} subtítulos" if others else ""
         text += f" y {images} ilustraciones" + (f" ({dropped} descartadas)" if dropped else "") if images else ""
+        if self.load_review():
+            text = "Revisión anterior recuperada"
         self.status.configure(text=text)
 
     def is_image(self, item):
@@ -484,8 +519,24 @@ class App:
         column = self.tree.identify_column(event.x)
         if item and column == "#1":  # Tk manda el segundo clic rápido aquí, no a on_click
             self.on_click(event)
-        if not item or column != "#2" or self.is_image(item):  # el nombre de una ilustración no se edita
+        if item and column == "#2":
+            self.edit_title(item)
+
+    def shortcut(self, kind):
+        """Tecla C/S/Q/I sobre la fila seleccionada. Una ilustración solo admite I y Q; un título, C, S y Q."""
+        selected = self.tree.selection()
+        if not selected:
             return
+        item = selected[0]
+        if kind in (IMAGE_NEXT if self.is_image(item) else NEXT):
+            self.set_kind(item, kind)
+            self.update_preview()
+
+    def edit_title(self, item):
+        if self.is_image(item):  # el nombre de una ilustración no se edita
+            return
+        self.tree.see(item)
+        self.root.update_idletasks()
         x, y, w, h = self.tree.bbox(item, "title")
         entry = ttk.Entry(self.tree)
         entry.insert(0, self.tree.set(item, "title"))
@@ -526,6 +577,10 @@ class App:
         self.book.author = self.author_var.get().strip()
         self.book.series = self.series_var.get().strip()
         self.book.volume = self.volume_var.get().strip()
+        self.book.publisher = self.publisher_var.get().strip()
+        self.book.translator = self.translator_var.get().strip()
+        self.book.description = self.description
+        self.save_review()
         chapters = [(int(item), self.tree.set(item, "title")) for item in self.tree.get_children()
                     if self.tree.set(item, "inc") == ON]
         self.status.configure(text="Generando EPUB…")
@@ -534,14 +589,115 @@ class App:
                 self.book.blocks[int(item)].keep = self.tree.set(item, "inc") == IMG
         removed = [int(item) for item in self.tree.get_children()
                    if self.tree.set(item, "inc") == CUT and not self.is_image(item)]
-        self.run(convert.write_epub, (self.book, chapters, out, "es", removed, self.typography_var.get(),
-                                      self.style_var.get(), True, self.separator_var.get()),
+        lang = self.lang_var.get().strip()
+        if not re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*", lang):  # va tal cual en el XML del EPUB
+            lang = "es"
+        self.run(convert.write_epub, (self.book, chapters, out, lang, removed, self.typography_var.get(),
+                                      self.style_var.get(), True, self.separator_var.get(), self.shrink_var.get()),
                  lambda _: self.saved(out))
         self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
 
     def saved(self, out):
         self.status.configure(text=f"Guardado: {Path(out).name}")
         messagebox.showinfo("Listo", f"EPUB guardado en:\n{out}")
+
+    def edit_description(self):
+        win = tk.Toplevel(self.root)
+        win.title("Sinopsis")
+        win.transient(self.root)
+        text = tk.Text(win, width=70, height=12, wrap="word")
+        text.pack(fill="both", expand=True, padx=8, pady=8)
+        text.insert("1.0", self.description)
+        text.focus()
+
+        def save():
+            self.description = text.get("1.0", "end").strip()
+            win.destroy()
+
+        ttk.Button(win, text="Aceptar", command=save).pack(pady=(0, 8))
+
+    def set_cover(self, choice):
+        """Cambia la portada: ("page", n) es una página del PDF (desde 0); ("file", ruta), una imagen."""
+        kind, value = choice
+        if kind == "page":
+            self.book.cover = convert._render(self.pdf_doc[value], crop=True)
+            text = f"Portada: página {value + 1}"
+        else:
+            self.book.cover = convert.load_cover(value)
+            text = f"Portada: {Path(value).name}"
+        self.cover_choice = [kind, value]
+        self.cover_label.configure(text=text)
+        self.update_preview()
+
+    def cover_from_page(self):
+        if self.book and self.pdf_doc:
+            self.set_cover(("page", self.pdf_page))
+
+    def cover_from_file(self):
+        if not self.book:
+            return
+        path = filedialog.askopenfilename(filetypes=[("Imagen", "*.jpg *.jpeg *.png *.webp")])
+        if path:
+            try:
+                self.set_cover(("file", path))
+            except ValueError as e:
+                messagebox.showerror("Error", str(e))
+
+    # La revisión (tipos, títulos editados, datos del libro y opciones) se guarda junto al PDF en un
+    # .json: al volver a abrir el mismo PDF se recupera, aunque se haya cerrado la ventana sin generar.
+    def fields(self):
+        return {"title": self.title_var, "author": self.author_var, "series": self.series_var,
+                "volume": self.volume_var, "publisher": self.publisher_var, "translator": self.translator_var,
+                "lang": self.lang_var, "style": self.style_var, "separator": self.separator_var,
+                "typography": self.typography_var, "shrink": self.shrink_var}
+
+    def review_path(self):
+        return self.pdf.with_name(self.pdf.stem + ".lnepub.json")
+
+    def fingerprint(self):
+        """Tamaño y fecha del PDF: si cambian, la revisión guardada es de otro PDF y no se usa."""
+        stat = self.pdf.stat()
+        return [stat.st_size, stat.st_mtime_ns]
+
+    def save_review(self):
+        if not (self.book and self.pdf):
+            return
+        state = {name: var.get() for name, var in self.fields().items()}
+        state.update(blocks=len(self.book.blocks), description=self.description, cover=self.cover_choice,
+                     rows={item: [self.tree.set(item, "inc"), self.tree.set(item, "title")]
+                           for item in self.tree.get_children()})
+        try:
+            state["pdf"] = self.fingerprint()
+            self.review_path().write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            pass  # PDF borrado o carpeta de solo lectura: se pierde la revisión guardada, no el trabajo en curso
+
+    def load_review(self):
+        """Recupera la revisión guardada de este PDF. False si no hay o si el PDF cambió desde entonces."""
+        if not self.pdf:
+            return False
+        try:
+            state = json.loads(self.review_path().read_text(encoding="utf-8"))
+            if state["pdf"] != self.fingerprint() or state["blocks"] != len(self.book.blocks):
+                return False
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        for item, (kind, title) in state.get("rows", {}).items():
+            if self.tree.exists(item) and kind in KIND_TAG:
+                self.set_kind(item, kind)
+                self.tree.set(item, "title", title)
+        for name, var in self.fields().items():
+            if name in state:
+                var.set(state[name])
+        if self.style_var.get() not in convert.STYLES:  # el .json se puede editar a mano
+            self.style_var.set("Clásico")
+        self.description = state.get("description", "")
+        if state.get("cover"):
+            try:
+                self.set_cover(state["cover"])
+            except Exception:
+                pass  # la imagen de portada ya no existe: se queda la del PDF
+        return True
 
 
 if __name__ == "__main__":

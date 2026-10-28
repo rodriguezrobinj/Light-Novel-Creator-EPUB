@@ -58,6 +58,9 @@ class Book:
     candidates: list    # índices en blocks de los títulos de capítulo detectados
     series: str = ""    # serie a la que pertenece ("" si no se sabe)
     volume: str = ""    # número de volumen dentro de la serie ("1", "2.5")
+    publisher: str = ""    # grupo de traducción
+    translator: str = ""
+    description: str = ""  # sinopsis
 
 
 VOLUME = re.compile(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*0*(\d+(?:[.,]\d+)?)", re.I)
@@ -339,6 +342,36 @@ def _render(page, crop=False):
         if abs(art) >= 0.5 * abs(page.rect):
             clip = art + (1, 1, -1, -1)
     return page.get_pixmap(dpi=150, clip=clip).tobytes("jpg", jpg_quality=85)
+
+
+def load_cover(path):
+    """Imagen de portada desde un archivo, en JPEG: el EPUB declara la portada como cover.jpg."""
+    try:
+        data = Path(path).read_bytes()
+        if data[:3] == b"\xff\xd8\xff":
+            return data
+        pix = pymupdf.Pixmap(data)
+    except Exception as e:
+        raise ValueError(f"No se pudo abrir la imagen: {e}") from e
+    if pix.alpha:
+        pix = pymupdf.Pixmap(pix, 0)
+    if pix.colorspace and pix.colorspace.n not in (1, 3):
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+    return pix.tobytes("jpg", jpg_quality=90)
+
+
+SHRINK = 1400  # lado mayor de las imágenes reducidas, en píxeles: de sobra para un celular o un e-reader
+
+
+def _shrink(data):
+    """Imagen más ligera: lado mayor de SHRINK píxeles como mucho y JPEG de calidad 75. Con
+    transparencia sigue en PNG. Si no gana nada, devuelve la original."""
+    pix = pymupdf.Pixmap(data)
+    scale = SHRINK / max(pix.width, pix.height)
+    if scale < 1:
+        pix = pymupdf.Pixmap(pix, round(pix.width * scale), round(pix.height * scale), None)
+    small = pix.tobytes("png") if pix.alpha else pix.tobytes("jpg", jpg_quality=75)
+    return small if len(small) < len(data) else data
 
 
 def _join(a, b):
@@ -631,14 +664,15 @@ def _separator(block, index, style, choice, images):
 
 
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
-               separator="Según el estilo"):
+               separator="Según el estilo", shrink=False):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
     hasta el siguiente título.
     typography: aplica la limpieza tipográfica al estilo RAE (_typography) a textos y títulos.
     style: uno de STYLES. contents: añade la página "Contenido" tras la portada (la vista previa
-    la omite para dibujar directamente la sección). separator: una de SEPARATOR_CHOICES."""
+    la omite para dibujar directamente la sección). separator: una de SEPARATOR_CHOICES.
+    shrink: reduce las imágenes y la portada (_shrink) para que el EPUB pese menos."""
     fix = _typography if typography else (lambda s: s)
     starts = dict(chapters)
     skip = set()
@@ -681,6 +715,13 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     uid = f"urn:uuid:{uuid.uuid4()}"
     title = html.escape(book.title)
     creator = f"<dc:creator>{html.escape(book.author)}</dc:creator>\n" if book.author else ""
+    if book.translator:
+        creator += (f'<dc:contributor id="trl">{html.escape(book.translator)}</dc:contributor>\n'
+                    '<meta refines="#trl" property="role" scheme="marc:relators">trl</meta>\n')
+    if book.publisher:
+        creator += f"<dc:publisher>{html.escape(book.publisher)}</dc:publisher>\n"
+    if book.description:
+        creator += f"<dc:description>{html.escape(BAD_XML.sub('', book.description))}</dc:description>\n"
     if book.series:  # serie en EPUB 3 (belongs-to-collection) y en el formato de Calibre
         name, number = html.escape(book.series), html.escape(book.volume)
         creator += (f'<meta property="belongs-to-collection" id="serie">{name}</meta>\n'
@@ -777,11 +818,11 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             z.writestr("OEBPS/toc.ncx", ncx)
             z.writestr("OEBPS/style.css", BASE_CSS + STYLES[style])
             z.writestr("OEBPS/cover.xhtml", cover)
-            z.writestr("OEBPS/cover.jpg", book.cover)
+            z.writestr("OEBPS/cover.jpg", _shrink(book.cover) if shrink and book.cover else book.cover)
             for name, text in files.items():
                 z.writestr(f"OEBPS/{name}", text)
             for src, data in images.items():
-                z.writestr(f"OEBPS/{src}", data)
+                z.writestr(f"OEBPS/{src}", _shrink(data) if shrink else data)
         os.replace(tmp, out_path)
     except Exception:
         if os.path.exists(tmp):

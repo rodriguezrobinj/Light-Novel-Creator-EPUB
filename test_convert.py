@@ -1393,6 +1393,147 @@ def test_window_reports_worker_crash():
     assert unlocked
 
 
+def test_epub_metadata_group_translator_synopsis():
+    book = sectioned_book()
+    book.publisher, book.translator, book.description = "Grupo & Co", "Ana", "Una bruja <muy> fuerte."
+    out = TMP / "metadatos.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out)
+    opf = epub_file(out, "OEBPS/content.opf")
+    ET.fromstring(opf.encode())  # sigue siendo XML válido con & y <>
+    assert "<dc:publisher>Grupo &amp; Co</dc:publisher>" in opf, opf
+    assert '<dc:contributor id="trl">Ana</dc:contributor>' in opf and ">trl</meta>" in opf, opf
+    assert "<dc:description>Una bruja &lt;muy&gt; fuerte.</dc:description>" in opf, opf
+
+
+def jpeg(width, height):
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
+    pix.set_rect(pix.irect, (200, 120, 40))
+    pix.set_rect(pymupdf.IRect(0, 0, width // 2, height // 3), (20, 60, 200))
+    return pix.tobytes("jpg", jpg_quality=95)
+
+
+def test_shrink_makes_big_images_lighter():
+    big = jpeg(2000, 3000)
+    book = convert.Book("Libro", "", big, [convert.Block("heading", 1, "Cap 1"),
+                                            convert.Block("image", 1, image=big)], [0])
+    out = TMP / "reducido.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, shrink=True)
+    with zipfile.ZipFile(out) as z:
+        pictures = [z.read(n) for n in z.namelist() if n.startswith("OEBPS/img/") or n == "OEBPS/cover.jpg"]
+    assert len(pictures) == 2, len(pictures)
+    for data in pictures:
+        pix = pymupdf.Pixmap(data)
+        assert max(pix.width, pix.height) == convert.SHRINK, (pix.width, pix.height)
+        assert len(data) < len(big) and data[:3] == b"\xff\xd8\xff"
+    small = jpeg(300, 400)
+    assert convert._shrink(small) == small or len(convert._shrink(small)) < len(small)
+
+
+def test_load_cover_converts_png_to_jpeg():
+    path = TMP / "portada.png"
+    pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 60), True).save(path)
+    data = convert.load_cover(path)
+    assert data[:3] == b"\xff\xd8\xff", data[:4]
+    (TMP / "portada.jpg").write_bytes(jpeg(40, 60))
+    assert convert.load_cover(TMP / "portada.jpg") == (TMP / "portada.jpg").read_bytes()
+    try:
+        convert.load_cover(TMP / "no-existe.png")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("debía avisar de la imagen que falta")
+
+
+def test_window_keyboard_shortcuts_change_type():
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_covers()
+    window.show_book(convert.analyze(window.pdf))
+    title = first_title(window)
+    image = next(i for i in window.tree.get_children() if window.is_image(i))
+    window.tree.focus_force()  # Tk entrega las teclas al widget con el foco
+    seen = []
+    for item, key in ((title, "s"), (title, "Q"), (title, "i"), (title, "c"), (image, "q"), (image, "s"), (image, "i")):
+        window.tree.selection_set(item)
+        root.update()
+        window.tree.event_generate(f"<KeyPress-{key}>")
+        root.update()
+        seen.append(window.tree.set(item, "inc"))
+    window.close()
+    assert seen == [app.OFF, app.CUT, app.CUT, app.ON, app.CUT, app.CUT, app.IMG], seen
+
+
+def test_window_review_is_restored_when_reopening_the_pdf():
+    """La revisión se guarda al cerrar y vuelve al abrir el mismo PDF; si el PDF cambia, no."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    item = first_title(window)
+    window.set_kind(item, app.OFF)
+    window.tree.set(item, "title", "Capítulo uno")
+    window.publisher_var.set("Grupo X")
+    window.style_var.set("Moderno")
+    window.description = "Sinopsis."
+    window.pdf_page = 2
+    window.cover_from_page()
+    window.close()
+
+    root, window = visible_window()
+    window.pdf = TMP / "novela.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    restored = (window.tree.set(item, "inc"), window.tree.set(item, "title"), window.publisher_var.get(),
+                window.style_var.get(), window.description, window.cover_choice, window.status.cget("text"))
+    window.close()
+    assert restored == (app.OFF, "Capítulo uno", "Grupo X", "Moderno", "Sinopsis.", ["page", 2],
+                        "Revisión anterior recuperada"), restored
+
+    root, window = visible_window()
+    window.pdf = make_novel()  # PDF nuevo en la misma ruta: la revisión guardada ya no vale
+    window.show_book(convert.analyze(window.pdf))
+    fresh = (window.tree.set(item, "inc"), window.style_var.get(), window.cover_choice)
+    window.close()
+    assert fresh == (app.ON, "Clásico", None), fresh
+
+
+def test_window_metadata_cover_and_shrink_reach_the_epub():
+    import time
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.translator_var.set("Ana")
+    window.lang_var.set("en")
+    cover = TMP / "otra-portada.jpg"
+    cover.write_bytes(jpeg(2000, 3000))
+    out = TMP / "metadatos-desde-ventana.epub"
+    originals = app.filedialog.askopenfilename, app.filedialog.asksaveasfilename, app.messagebox.showinfo
+    app.filedialog.askopenfilename = lambda **kwargs: str(cover)
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
+    app.messagebox.showinfo = lambda *args: None
+    try:
+        window.cover_from_file()
+        label = window.cover_label.cget("text")
+        window.generate()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+    finally:
+        app.filedialog.askopenfilename, app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
+        window.close()
+    assert label == "Portada: otra-portada.jpg", label
+    opf = epub_file(out, "OEBPS/content.opf")
+    assert "<dc:language>en</dc:language>" in opf and ">Ana</dc:contributor>" in opf, opf
+    with zipfile.ZipFile(out) as z:
+        pix = pymupdf.Pixmap(z.read("OEBPS/cover.jpg"))
+    assert (pix.width, pix.height) == (933, convert.SHRINK), (pix.width, pix.height)  # reducida por defecto
+
+
 if __name__ == "__main__":
     failed = 0
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
