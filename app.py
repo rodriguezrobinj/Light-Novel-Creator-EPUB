@@ -60,6 +60,7 @@ THUMB_HEIGHT = 80         # alto de las miniaturas del PDF, en píxeles
 THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe congelaría la ventana
 MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
+MARK = re.compile(r"</?[ib]>")  # marcas de cursiva y negrita del editor de texto
 
 
 def _log(text):
@@ -331,6 +332,14 @@ def _uninstall():
             pass  # ya no estaba
     if Path(sys.executable).resolve() != exe.resolve():  # el .exe en uso no se puede borrar
         exe.unlink(missing_ok=True)
+
+
+def _is_paragraph(line):
+    """Línea del editor de texto que es un párrafo: ni título, ni marca de ilustración o separador, ni
+    separador escrito. Solo los párrafos se unen, se parten o pasan a título."""
+    line = line.strip()
+    return (bool(line) and not line.startswith("# ") and not convert.TOKEN.fullmatch(line)
+            and not convert.SCENE_BREAK.fullmatch(line))
 
 
 class App:
@@ -1231,38 +1240,15 @@ class App:
         ttk.Button(buttons, text="Aceptar", command=save).pack(side="left", padx=4)
 
     def edit_text(self):
-        """Editor del texto de la sección seleccionada (de su título al siguiente): erratas, párrafos
-        unidos o partidos, títulos que el análisis no vio ("# Título"), ilustraciones movidas."""
+        """Abre el editor del texto de la sección seleccionada (de su título al siguiente)."""
         selected = self.tree.selection()
         if not self.book or not selected or self.is_image(selected[0]):
-            return
+            return None
         item = selected[0]
         start = int(item) + 1
         end = next((k for k in range(start, len(self.book.blocks)) if self.book.blocks[k].kind == "heading"),
                    len(self.book.blocks))
-        win = tk.Toplevel(self.root)
-        win.title(f"Texto · {self.tree.set(item, 'title')}")
-        win.transient(self.root)
-        ttk.Label(win, text="Un párrafo por línea · «# Título» crea un título nuevo · [Ilustración N] y [Separador N]"
-                            " se pueden mover o borrar · <i>cursiva</i> y <b>negrita</b>",
-                  padding=(8, 8, 8, 0)).pack(anchor="w")
-        text = tk.Text(win, width=100, height=32, wrap="word", undo=True)
-        scroll = ttk.Scrollbar(win, orient="vertical", command=text.yview)
-        text.configure(yscrollcommand=scroll.set)
-        buttons = ttk.Frame(win)
-        buttons.pack(side="bottom", pady=8)
-        scroll.pack(side="right", fill="y", pady=8)
-        text.pack(fill="both", expand=True, padx=(8, 0), pady=8)
-        text.insert("1.0", convert.section_text(self.book, start, end))
-        text.edit_reset()
-        text.focus()
-
-        def save():
-            self.apply_edit([start, end, text.get("1.0", "end")], item)
-            win.destroy()
-
-        ttk.Button(buttons, text="Aceptar", command=save).pack(side="left", padx=4)
-        ttk.Button(buttons, text="Cancelar", command=win.destroy).pack(side="left", padx=4)
+        return TextEditor(self, item, start, end)
 
     def apply_edit(self, edit, item):
         """Aplica un texto editado: cambia los bloques, renumera la lista conservando los tipos elegidos
@@ -1718,6 +1704,60 @@ class App:
             except Exception:
                 pass  # la imagen de portada ya no existe: se queda la del PDF
         return True
+
+
+class TextEditor:
+    """Editor del texto de una sección, de su título al siguiente: erratas, párrafos unidos o partidos,
+    títulos que el análisis no vio ("# Título"), ilustraciones movidas. Mismo formato que
+    convert.section_text; al aceptar, App.apply_edit lo aplica con convert.edit_section."""
+
+    def __init__(self, app, item, start, end):
+        self.app, self.item, self.start, self.end = app, item, start, end
+        self.win = win = tk.Toplevel(app.root)
+        win.title(f"Texto · {app.tree.set(item, 'title')}")
+        win.transient(app.root)
+        width, height = min(1250, win.winfo_screenwidth() - 60), min(760, win.winfo_screenheight() - 110)
+        win.geometry(f"{width}x{height}+20+20")
+        win.protocol("WM_DELETE_WINDOW", self.cancel)
+        win.bind("<Escape>", self.cancel)
+        self.tools = ttk.Frame(win, padding=(8, 8, 8, 0))  # botones de formato
+        self.tools.pack(fill="x")
+        ttk.Label(win, text="Un párrafo por línea · «# Título» crea un título · [Ilustración N] y [Separador N]"
+                            " se pueden mover o borrar", padding=(8, 4, 8, 0)).pack(anchor="w")
+        buttons = ttk.Frame(win)
+        buttons.pack(side="bottom", pady=8)
+        ttk.Button(buttons, text="Aceptar", command=self.save).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Cancelar", command=self.cancel).pack(side="left", padx=4)
+        self.body = ttk.Frame(win, padding=8)
+        self.body.pack(fill="both", expand=True)
+        self.text = text = tk.Text(self.body, wrap="word", undo=True)
+        self.scroll = ttk.Scrollbar(self.body, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=self.scroll.set)
+        self.scroll.pack(side="right", fill="y")
+        text.pack(side="left", fill="both", expand=True)
+        # Cada bloque con su tag src<k>: los tags se mueven con el texto y dicen de qué bloque viene cada línea
+        for k in range(start, end):
+            if k > start:
+                text.insert("end", "\n\n")
+            text.insert("end", convert.section_text(app.book, k, k + 1), (f"src{k}",))
+        self.original = text.get("1.0", "end-1c")
+        text.edit_reset()
+        text.focus()
+
+    def dirty(self):
+        return self.text.get("1.0", "end-1c") != self.original
+
+    def save(self):
+        """Aplica el texto solo si cambió: edit_section rehace los párrafos y perderían su página del PDF."""
+        if self.dirty():
+            self.app.apply_edit([self.start, self.end, self.text.get("1.0", "end")], self.item)
+        self.win.destroy()
+
+    def cancel(self, _=None):
+        if self.dirty() and not messagebox.askyesno(
+                "Descartar cambios", "El texto tiene cambios sin guardar. ¿Descartarlos?", parent=self.win):
+            return
+        self.win.destroy()
 
 
 if __name__ == "__main__":

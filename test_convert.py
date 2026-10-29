@@ -1878,6 +1878,38 @@ def test_window_edited_text_survives_reopening_and_reaches_epub():
     assert "brillaba mucho." in text and "Interludio perdido" in text and "discord" not in text, text
 
 
+def test_text_editor_opens_section_and_saves_only_changes():
+    """El editor muestra la sección en el formato de section_text; aceptar sin cambios no toca el libro
+    (los párrafos conservan su página) y cancelar con cambios pregunta antes de descartarlos."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    before = [(b.kind, b.html, b.page) for b in window.book.blocks]
+    window.tree.selection_set("1")  # "Capitulo 1: Inicio": su sección son los bloques 2..5
+    editor = window.edit_text()
+    shown = editor.text.get("1.0", "end-1c") == convert.section_text(window.book, 2, 6)
+    sources = [t for t in editor.text.tag_names("1.0") if t.startswith("src")]
+    editor.save()
+    same = [(b.kind, b.html, b.page) for b in window.book.blocks] == before
+    editor = window.edit_text()
+    editor.text.insert("1.0", "Hola ")
+    original, answers = app.messagebox.askyesno, []
+    try:
+        app.messagebox.askyesno = lambda *args, **kwargs: answers.append(args) or False
+        editor.cancel()
+        kept = bool(editor.win.winfo_exists())
+        app.messagebox.askyesno = lambda *args, **kwargs: True
+        editor.cancel()
+        closed = not editor.win.winfo_exists()
+    finally:
+        app.messagebox.askyesno = original
+    window.close()
+    assert shown and sources == ["src2"] and same, (shown, sources, same)
+    assert len(answers) == 1 and kept and closed, (answers, kept, closed)
+
+
 def test_window_find_moves_previews_to_the_match():
     root, window = visible_window()
     window.pdf = make_group_pdf()
