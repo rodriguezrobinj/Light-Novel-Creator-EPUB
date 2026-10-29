@@ -344,27 +344,41 @@ def _title(rows):
     return _key(" ".join(r.text for r in _first_group(heads))) if heads else ""
 
 
-def _image_coverage(page):
+def _image_info(page, digests):
+    """Imágenes dibujadas en la página, con su xref. get_image_info(xrefs=True) decodifica cada imagen
+    de la página en cada llamada para sacar su huella; digests (xref -> huella) la guarda para todo el PDF."""
+    infos = page.get_image_info(hashes=True)
+    by_digest = {}
+    for xref, *_ in page.get_images():
+        if xref not in digests:
+            digests[xref] = pymupdf.Pixmap(page.parent, xref).digest
+        by_digest[digests[xref]] = xref
+    for info in infos:
+        info["xref"] = by_digest.get(info["digest"], 0)
+    return infos
+
+
+def _image_coverage(page, infos):
     area = page.rect
-    return sum(abs(pymupdf.Rect(i["bbox"]) & area) for i in page.get_image_info()) / abs(area)
+    return sum(abs(pymupdf.Rect(i["bbox"]) & area) for i in infos) / abs(area)
 
 
-def _images(page):
+def _images(page, infos):
     """Imágenes incrustadas de la página: [(xref, fracción de la página que cubre)], de mayor a menor."""
     area, found = abs(page.rect), {}
-    for info in page.get_image_info(xrefs=True):
+    for info in infos:
         if info["xref"]:
             share = abs(pymupdf.Rect(info["bbox"]) & page.rect) / area
             found[info["xref"]] = max(found.get(info["xref"], 0), share)
     return sorted(found.items(), key=lambda item: -item[1])
 
 
-def _ornaments(page, rows):
+def _ornaments(page, rows, infos):
     """Posición vertical de los adornos que hacen de separador de escena (Kage, Nageki): imágenes
     pequeñas, centradas, fuera de los márgenes y con texto encima y debajo."""
     width, height = page.rect.width, page.rect.height
     found = []
-    for info in page.get_image_info(xrefs=True):
+    for info in infos:
         x0, y0, x1, y1 = info["bbox"]
         if (x1 - x0 < 0.3 * width and y1 - y0 < 0.1 * height and abs((x0 + x1) / 2 - width / 2) < 0.15 * width
                 and BAND * height < (y0 + y1) / 2 < (1 - BAND) * height
@@ -398,10 +412,9 @@ def _extract(doc, xref):
     return pix.tobytes("jpg", jpg_quality=85)
 
 
-def _illustration(page, uses):
-    """xref de la ilustración a página completa que hay bajo el texto, o None.
+def _illustration(images, uses):
+    """xref de la ilustración a página completa que hay bajo el texto, o None. images: de _images.
     Una imagen usada en más de 2 páginas es un fondo decorativo."""
-    images = _images(page)
     if images and images[0][1] >= 0.5 and uses[images[0][0]] <= 2:
         return images[0][0]
     return None
@@ -957,14 +970,17 @@ def analyze(pdf_path, progress=None):
         blocks, skipped = [], []
         para, short, last_text = None, False, ""
         repeated = ""  # título que la página anterior ya emitió junto a su ilustración
+        digests = {}
         for i, (page, rows) in enumerate(zip(doc, pages)):
             num = i + 1
             if progress:
                 progress(n + num, 2 * n)
             pending, repeated = repeated, ""
             headings = [r for r in rows if r.heading]
+            infos = _image_info(page, digests)
+            images = _images(page, infos)
             # ponytail: solo ilustraciones a página completa; las pequeñas dentro del texto se descartan
-            covered = sum(len(r.text) for r in rows) < 200 and _image_coverage(page) > 0.5
+            covered = sum(len(r.text) for r in rows) < 200 and _image_coverage(page, infos) > 0.5
             if covered and not headings:
                 blocks.append(Block("image", num, image=_render(page, crop=True)))
                 para = None
@@ -985,7 +1001,7 @@ def analyze(pdf_path, progress=None):
             # Página de diseño de los preliminares (portadilla con logo y créditos): poco texto y alguna
             # imagen propia. Se conserva entera, como imagen, para no perder su composición.
             if i < first_chapter and sum(len(r.text) for r in rows) < 200 and any(
-                    share >= 0.02 and uses[xref] <= 2 for xref, share in _images(page)):
+                    share >= 0.02 and uses[xref] <= 2 for xref, share in images):
                 blocks.append(Block("image", num, image=_render(page)))
                 para = None
                 continue
@@ -1001,13 +1017,13 @@ def analyze(pdf_path, progress=None):
             normal = [r for r in rows if not r.heading]
             # Ilustración con el texto de la novela encima: se guardan las dos cosas. El párrafo abierto
             # sigue abierto, así que su continuación se une a él aunque la imagen quede en medio.
-            art = _illustration(page, uses) if normal else None
+            art = _illustration(images, uses) if normal else None
             if art:
                 blocks.append(Block("image", num, image=_extract(doc, art)))
             left = min((r.x0 for r in normal), default=0)
             right = max((r.x1 for r in normal), default=0)
             prev = None
-            ornaments = _ornaments(page, rows)  # adornos-separador, de arriba abajo
+            ornaments = _ornaments(page, rows, infos)  # adornos-separador, de arriba abajo
             for r in rows:
                 while ornaments and ornaments[0][0] < r.y:  # el adorno queda por encima de esta línea
                     xref = ornaments.pop(0)[1]
@@ -1054,7 +1070,6 @@ def analyze(pdf_path, progress=None):
             # Imágenes que no entran solas, apuntadas como descartadas para poder recuperarlas en la
             # ventana: las de dentro del texto y el fondo de una página de título. Los fondos y barras
             # que se repiten en muchas páginas y las diminutas no: serían ruido.
-            images = _images(page)
             for xref, share in images:
                 background = heading_only and covered and xref == images[0][0]
                 if xref != art and share >= 0.02 and (uses[xref] <= 2 or background):

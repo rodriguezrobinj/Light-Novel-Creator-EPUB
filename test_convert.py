@@ -463,6 +463,16 @@ def test_ornament_image_between_paragraphs_is_a_scene_break():
     assert "break" not in page2, page2
 
 
+def test_image_info_matches_pymupdf_xrefs():
+    """_image_info guarda las huellas para todo el PDF: da los mismos xref que get_image_info(xrefs=True)."""
+    with pymupdf.open(make_ornament_pdf()) as doc:
+        digests = {}
+        for page in doc:
+            ours = [(i["bbox"], i["xref"]) for i in convert._image_info(page, digests)]
+            theirs = [(i["bbox"], i["xref"]) for i in doc[page.number].get_image_info(xrefs=True)]
+            assert ours == theirs and all(x for _, x in ours), (ours, theirs)
+
+
 def test_scene_breaks_keep_their_original_form():
     """Cada separador guarda lo que traía el PDF: el texto de un separador escrito, la imagen de un adorno."""
     text_breaks = [b for b in convert.analyze(make_novel()).blocks if b.kind == "break"]
