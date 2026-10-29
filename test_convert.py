@@ -2560,6 +2560,125 @@ def test_install_paths_are_per_user():
     assert "Programs" in str(exe) and exe.name == "PDF a EPUB.exe" and link.suffix == ".lnk", (exe, link)
 
 
+def test_edit_section_keeps_pages_of_unchanged_paragraphs():
+    """Corregir una errata no cambia la página de los demás párrafos: la lista de páginas del EPUB y el
+    panel del PDF del editor dependen de ella. Lo cambiado o nuevo toma la del párrafo anterior."""
+    doc = pymupdf.open()
+    texts = ("El primer parrafo de la pagina uno.", "El segundo parrafo de la pagina dos.",
+             "El tercer parrafo de la pagina tres.")
+    for n, text in enumerate(texts, 1):
+        title = [(72, 100, "Capitulo 1: Inicio", 20, "helv")] if n == 1 else []
+        add_page(doc, n, title + [(92, 140, text, 11, "cour")])
+    path = TMP / "paginas.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    start, end = book.candidates[0] + 1, len(book.blocks)
+    text = convert.section_text(book, start, end).replace("pagina dos.", "pagina dos!") + "\n\nNuevo."
+    convert.edit_section(book, start, end, text)
+    pages = [b.page for b in book.blocks[start:]]
+    assert pages == [1, 1, 3, 3], pages
+
+
+def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
+    """Si el análisis cambia (otra versión del programa), la revisión vieja no se pisa al cerrar: queda en .bak."""
+    import json
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.set_kind(first_title(window), app.OFF)
+    window.close()
+    review = app._review_path(window.pdf)
+    state = json.loads(review.read_text(encoding="utf-8"))
+    state["blocks"] += 1  # como si otra versión del análisis hubiera dado otros bloques
+    review.write_text(json.dumps(state), encoding="utf-8")
+
+    root, window = visible_window()
+    window.pdf = TMP / "novela.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    status = window.status.cget("text")
+    window.close()
+    backup = review.with_name(review.name + ".bak")
+    assert backup.is_file() and json.loads(backup.read_text(encoding="utf-8")) == state, "se perdió la revisión vieja"
+    assert backup.name in status, status
+
+
+def test_window_does_not_start_a_second_job():
+    """Con un trabajo en curso no se lanza otro: el resultado del primero llegaría al segundo."""
+    import app
+
+    root, window = visible_window()
+    asked = []
+    original = app.filedialog.askopenfilenames
+    app.filedialog.askopenfilenames = lambda **kwargs: asked.append(kwargs) or ()
+    try:
+        window.done = lambda result: None  # análisis en curso
+        window.omnibus()
+        started = window.run(convert.analyze, (str(TMP / "no-existe.pdf"),), lambda result: None)
+    finally:
+        app.filedialog.askopenfilenames = original
+        window.done = None
+    window.close()
+    assert not asked and started is False, (asked, started)
+
+
+def test_window_does_not_decode_illustrations_again():
+    """Las ilustraciones repetidas se buscan en el proceso de trabajo y la lista no vuelve a decodificar las
+    imágenes en cada edición: en la ventana costaba 4,5 s al abrir Kage 5 y 2 s por edición."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    book, twins = app._analyze(str(window.pdf))
+    found = convert.duplicate_images
+    original = convert.pymupdf.Pixmap
+    decoded = []
+    convert.duplicate_images = lambda b: 1 / 0  # ya viene del proceso de trabajo
+    try:
+        window.show_book(book, twins)
+        convert.pymupdf.Pixmap = lambda *args: decoded.append(args) or original(*args)
+        window.fill_tree(window.rows())
+    finally:
+        convert.duplicate_images, convert.pymupdf.Pixmap = found, original
+    window.close()
+    assert twins == found(book) and not decoded, (twins, len(decoded))
+
+
+def test_window_warns_when_the_review_cannot_be_saved():
+    """Si la revisión no se puede escribir (OneDrive la bloquea, carpeta de solo lectura), se avisa y no
+    queda un temporal; la revisión anterior sigue entera."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    review = app._review_path(window.pdf)
+    review.unlink(missing_ok=True)
+    review.mkdir()  # en su sitio, una carpeta: el reemplazo falla
+    try:
+        window.save_review()
+        status = window.status.cget("text")
+    finally:
+        review.rmdir()
+    window.close()
+    assert "No se pudo guardar la revisión" in status, status
+    assert not list(TMP.glob("*.json.tmp")), "quedó un temporal"
+
+
+def test_install_quotes_paths_with_apostrophes_for_powershell():
+    """Un usuario llamado O'Neil: la ruta del acceso directo no debe romper el script de PowerShell."""
+    import subprocess
+
+    import app
+
+    path = r"C:\Users\O'Neil\AppData\PDF a EPUB.lnk"
+    out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Write-Output {app._ps_quote(path)}"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert out == path, out
+
+
 if __name__ == "__main__":
     failed = 0
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

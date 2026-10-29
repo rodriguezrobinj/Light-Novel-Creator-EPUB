@@ -1,5 +1,6 @@
 """Convierte PDFs de novelas ligeras en EPUB con texto fluido."""
 import collections
+import functools
 import html
 import os
 import re
@@ -391,6 +392,15 @@ def _ornaments(page, rows, infos):
     return sorted(found)  # [(posición vertical, xref)], de arriba abajo
 
 
+def _rgb(pix, alpha=True):
+    """Pixmap en gris o RGB: CMYK u otros pasan a RGB. Con alpha=False, sin transparencia."""
+    if pix.alpha and not alpha:
+        pix = pymupdf.Pixmap(pix, 0)
+    if pix.colorspace and pix.colorspace.n not in (1, 3):
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+    return pix
+
+
 def _with_mask(pix, mask):
     """Aplica una máscara de transparencia. PyMuPDF a veces entrega la imagen con un canal alfa
     opaco y la forma en la máscara aparte: ese alfa se descarta y manda la máscara."""
@@ -409,8 +419,7 @@ def _extract(doc, xref):
         mask = pymupdf.Pixmap(doc, smask)
         if (mask.width, mask.height) == (pix.width, pix.height):
             pix = _with_mask(pix, mask)
-    if pix.colorspace and pix.colorspace.n not in (1, 3):  # CMYK u otros: a RGB (conserva el alfa)
-        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+    pix = _rgb(pix)
     if pix.alpha:
         return pix.tobytes("png")
     return pix.tobytes("jpg", jpg_quality=85)
@@ -447,11 +456,7 @@ def load_cover(path):
         pix = pymupdf.Pixmap(data)
     except Exception as e:
         raise ValueError(f"No se pudo abrir la imagen: {e}") from e
-    if pix.alpha:
-        pix = pymupdf.Pixmap(pix, 0)
-    if pix.colorspace and pix.colorspace.n not in (1, 3):
-        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-    return pix.tobytes("jpg", jpg_quality=90)
+    return _rgb(pix, alpha=False).tobytes("jpg", jpg_quality=90)
 
 
 SHRINK = 1400  # lado mayor de las imágenes reducidas, en píxeles: de sobra para un celular o un e-reader
@@ -477,6 +482,7 @@ def _gray(data):
     return pix.tobytes("png") if pix.alpha else pix.tobytes("jpg", jpg_quality=85)
 
 
+@functools.lru_cache(maxsize=1024)  # la lista lo pregunta en cada edición: decodificar costaba 2 s (Kage 5)
 def is_wide(data):
     """Ilustración doble (dos páginas del libro en una imagen apaisada): en un celular en vertical
     se ve diminuta, así que la ventana ofrece dividirla o girarla."""
@@ -554,16 +560,16 @@ def section_text(book, start, end):
     """Texto editable de los bloques start..end-1: un párrafo por línea (con <i>/<b>), "# " delante
     de un título, y las ilustraciones y separadores como marcas "[Ilustración N]" / "[Separador N]"
     (N, el índice del bloque) para poder moverlos o borrarlos."""
-    lines = []
-    for k in range(start, end):
-        b = book.blocks[k]
-        if b.kind == "p":
-            lines.append(html.unescape(b.html))
-        elif b.kind == "heading":
-            lines.append("# " + html.unescape(b.html))
-        else:
-            lines.append(f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]")
-    return "\n\n".join(lines)
+    return "\n\n".join(_line(book.blocks[k], k) for k in range(start, end))
+
+
+def _line(b, k):
+    """Línea de section_text del bloque b, que es el número k del libro."""
+    if b.kind == "p":
+        return html.unescape(b.html)
+    if b.kind == "heading":
+        return "# " + html.unescape(b.html)
+    return f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]"
 
 
 def _inline(text):
@@ -586,10 +592,15 @@ def edit_section(book, start, end, text):
     bloques que siguen en el libro (los párrafos se sustituyen: no están)."""
     old = book.blocks
     page = old[start - 1].page if start else 1
+    # Una línea sin cambios conserva la página de su párrafo; la cambiada o nueva, la del anterior
+    pages = {}
+    for k in range(start, end):
+        pages.setdefault(_line(old[k], k).strip(), old[k].page)
     new, kept = [], {}
     for line in (line.strip() for line in text.splitlines()):
         if not line:
             continue
+        page = pages.get(line, page)
         m = TOKEN.fullmatch(line)
         k = int(m.group(2)) if m else -1
         if m and start <= k < end and k not in kept and old[k].kind == ("image" if m.group(1) == "Ilustración" else "break"):
@@ -812,9 +823,7 @@ def move_section(book, start, end, dest):
 
 def _hash(data):
     """Huella de 64×64 en gris de una imagen, para encontrar repetidas aunque cambie la compresión."""
-    pix = pymupdf.Pixmap(data)
-    if pix.alpha:
-        pix = pymupdf.Pixmap(pix, 0)
+    pix = _rgb(pymupdf.Pixmap(data), alpha=False)
     pix = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.Pixmap(pix, 64, 64, None))
     return pix.samples
 

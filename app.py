@@ -95,6 +95,29 @@ def _worker(events, work, args, report):
         events.put(("log", traceback.format_exc()))  # la ventana lo apunta en errores.log
 
 
+def _analyze(pdf, progress=None):
+    """convert.analyze y las ilustraciones repetidas, en el proceso de trabajo: en la ventana, buscarlas
+    la congelaba (Kage 5: 2,4 s)."""
+    book = convert.analyze(pdf, progress)
+    return book, convert.duplicate_images(book)
+
+
+def _write_json(path, data):
+    """Escribe el .json entero o nada: un corte a mitad dejaba el archivo roto y la revisión se ignoraba."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _ps_quote(text):
+    """Texto entre comillas simples de PowerShell: un apóstrofo (O'Neil) se escribe doble."""
+    return "'" + str(text).replace("'", "''") + "'"
+
+
 def _write_options(state, breaks=()):
     """Opciones de write_epub a partir de una revisión, de los campos de la ventana o de lo heredado."""
     lang, style = str(state.get("lang", "es")).strip(), state.get("style")
@@ -138,6 +161,18 @@ def _read_review(pdf, blocks=None):
     except (OSError, ValueError, KeyError, TypeError):
         pass
     return None
+
+
+def _set_aside(pdf):
+    """Revisión guardada que ya no vale (otro análisis u otro PDF), apartada en .bak antes de que la ventana
+    escriba la nueva encima. Devuelve la copia, o None si no había revisión."""
+    review = _review_path(pdf)
+    backup = review.with_name(review.name + ".bak")
+    try:
+        os.replace(review, backup)
+    except OSError:
+        return None  # no había revisión
+    return backup
 
 
 def _inherited(pdf, series):
@@ -316,8 +351,8 @@ def _install(source):
     exe.parent.mkdir(parents=True, exist_ok=True)
     if Path(source).resolve() != exe.resolve():
         shutil.copy2(source, exe)
-    script = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{link}');"
-              f"$s.TargetPath='{exe}';$s.IconLocation='{exe},0';$s.Save()")
+    script = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({_ps_quote(link)});"
+              f"$s.TargetPath={_ps_quote(exe)};$s.IconLocation={_ps_quote(f'{exe},0')};$s.Save()")
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, OPEN_WITH) as key:
@@ -608,13 +643,17 @@ class App:
 
     def run(self, work, args, done, report=False, busy="Analizando…"):
         """Ejecuta work(*args) en otro proceso y llama a done(resultado) en la ventana.
-        Con report=True, work recibe progress=... y la barra avanza junto al texto busy."""
+        Con report=True, work recibe progress=... y la barra avanza junto al texto busy. False si ya había
+        un trabajo en curso: su resultado llegaría a este done."""
+        if self.done:
+            return False
         self.open_btn.state(["disabled"])
         self.batch_btn.state(["disabled"])
         self.gen_btn.state(["disabled"])
         self.done, self.busy = done, busy
         self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, args, report), daemon=True)
         self.proc.start()
+        return True
 
     def report(self, done, total):
         # Solo se guarda el último valor: pintar cada evento de progreso cuesta llamadas a Tk.
@@ -965,9 +1004,10 @@ class App:
         self.pdf, self.book = Path(path), None
         self.file_label.configure(text=self.pdf.name)
         self.tree.delete(*self.tree.get_children())
-        self.run(convert.analyze, (path,), self.show_book, report=True)
+        self.run(_analyze, (path,), lambda result: self.show_book(*result), report=True)
 
-    def show_book(self, book):
+    def show_book(self, book, twins=None):
+        """Pone en la ventana un libro analizado. twins: sus ilustraciones repetidas, si ya se buscaron."""
         self.book = book
         if self.pdf_doc:
             self.pdf_doc.close()
@@ -989,7 +1029,8 @@ class App:
         cut = convert.link_sections(book)  # publicidad del grupo: se propone quitarla
         for k in cut:
             self.set_kind(str(k), CUT)
-        twins = convert.duplicate_images(book)  # la misma ilustración otra vez: se propone descartarla
+        if twins is None:  # la misma ilustración otra vez: se propone descartarla
+            twins = convert.duplicate_images(book)
         for k in twins:
             self.set_kind(str(k), DROPPED)
         heads = [i for i in self.tree.get_children() if not self.is_image(i)]
@@ -1014,6 +1055,9 @@ class App:
         if self.load_review():
             text = "Revisión anterior recuperada"
         elif self.pdf:
+            backup = _set_aside(self.pdf)
+            if backup:
+                text += f" · la revisión guardada no coincide con este análisis: copia en {backup.name}"
             inherited = _inherited(self.pdf, book.series)
             if book.author:
                 inherited.pop("author", None)  # el del PDF manda
@@ -1126,9 +1170,9 @@ class App:
         self.save_review()
         chapters, removed, breaks = _plan(self.book, self.rows())
         self.status.configure(text="Generando EPUB…")
-        self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
-                 lambda problems: self.saved(out, problems))
-        self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
+        if self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
+                    lambda problems: self.saved(out, problems)):
+            self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
 
     def write_options(self, breaks=()):
         """Opciones de write_epub según la ventana (ver _write_options)."""
@@ -1195,7 +1239,7 @@ class App:
         self.settings.update({name: fields[name].get() for name in PREFS})
         try:
             SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-            SETTINGS.write_text(json.dumps(self.settings, ensure_ascii=False, indent=1), encoding="utf-8")
+            _write_json(SETTINGS, self.settings)
         except OSError:
             pass  # sin preferencias guardadas la próxima vez; nada más
 
@@ -1435,13 +1479,9 @@ class App:
         win.images = []  # referencias: sin ellas, Tk borra las miniaturas
         images = [k for k, b in enumerate(self.book.blocks) if b.kind == "image" and b.image]
         for n, k in enumerate(images):
-            pix = pymupdf.Pixmap(self.book.blocks[k].image)
-            if pix.alpha:
-                pix = pymupdf.Pixmap(pix, 0)
+            pix = convert._rgb(pymupdf.Pixmap(self.book.blocks[k].image), alpha=False)
             scale = 130 / max(pix.width, pix.height)
             pix = pymupdf.Pixmap(pix, max(1, int(pix.width * scale)), max(1, int(pix.height * scale)), None)
-            if pix.colorspace and pix.colorspace.n not in (1, 3):
-                pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
             image = tk.PhotoImage(master=win, data=pix.tobytes("ppm"))
             win.images.append(image)
             x, y = 10 + (n % 5) * 150, 10 + (n // 5) * 160
@@ -1573,6 +1613,8 @@ class App:
 
     def omnibus(self):
         """Volumen recopilatorio: varios PDF (en orden de nombre) en un solo EPUB (ver _omnibus)."""
+        if self.done:  # trabajo en curso: el menú no se desactiva como los botones
+            return
         paths = filedialog.askopenfilenames(filetypes=[("PDF", "*.pdf")], initialdir=self.settings.get("folder"),
                                             title="Tomos del recopilatorio")
         if len(paths) < 2:
@@ -1587,9 +1629,9 @@ class App:
         self.save_review()  # el tomo abierto entra con lo revisado hasta ahora
         options = {name: self.fields()[name].get() for name in PREFS}
         options["replacements"] = self.replacements
-        self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems), report=True,
-                 busy="Preparando el recopilatorio…")
-        self.partial = f"{out}.tmp"
+        if self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems), report=True,
+                    busy="Preparando el recopilatorio…"):
+            self.partial = f"{out}.tmp"
 
     def install(self):
         """Instala el .exe para este usuario (ver _install). Desde Python no hay .exe que instalar."""
@@ -1699,9 +1741,9 @@ class App:
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems)
         try:
             state["pdf"] = _fingerprint(self.pdf)
-            _review_path(self.pdf).write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
-        except OSError:
-            pass  # PDF borrado o carpeta de solo lectura: se pierde la revisión guardada, no el trabajo en curso
+            _write_json(_review_path(self.pdf), state)
+        except OSError as e:  # PDF borrado, carpeta de solo lectura, OneDrive bloqueándolo: el trabajo en curso sigue
+            self.status.configure(text=f"No se pudo guardar la revisión: {e.strerror or e}")
 
     def apply_state(self, state):
         """Pone en la ventana los campos y reemplazos de una revisión guardada (o heredada)."""
