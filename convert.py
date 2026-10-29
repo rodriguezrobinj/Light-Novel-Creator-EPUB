@@ -482,7 +482,7 @@ def _gray(data):
     return pix.tobytes("png") if pix.alpha else pix.tobytes("jpg", jpg_quality=85)
 
 
-@functools.lru_cache(maxsize=1024)  # la lista lo pregunta en cada edición: decodificar costaba 2 s (Kage 5)
+@functools.lru_cache(maxsize=256)  # la lista lo pregunta en cada edición: decodificar costaba 2 s (Kage 5)
 def is_wide(data):
     """Ilustración doble (dos páginas del libro en una imagen apaisada): en un celular en vertical
     se ve diminuta, así que la ventana ofrece dividirla o girarla."""
