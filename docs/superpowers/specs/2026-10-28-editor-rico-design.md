@@ -36,6 +36,12 @@ las marcas `# Título`, `[Ilustración N]`, `[Separador N]`, `<i>` y `<b>` sin d
   deshacer y se pierden al cortar y pegar. La ilustración se ve en el panel lateral.
 - **Se mejora la ventana actual** (`Toplevel`), no se mete el editor en la ventana principal: a 1366 px
   no cabe junto a la lista y las vistas previas.
+- **Editor modal** (añadido tras la revisión). Con la lista activa se podía abrir otro PDF, otro editor o
+  deshacer en la lista, y «Aceptar» escribía sobre bloques que ya no eran los de la sección. Cerrar la
+  ventana principal con cambios sin guardar en el editor pregunta antes.
+- **Lo que no llegaría al EPUB se ve en rojo** (añadido tras la revisión): las marcas mal anidadas, que
+  `edit_section` quitaría de toda la línea, y una `[Ilustración N]` copiada o ajena a la sección, que
+  saldría como texto. Las acciones de formato nunca producen marcas así.
 
 ## Diseño
 
@@ -90,8 +96,8 @@ inserta un tabulador, Ctrl+T intercambia letras.
 
 ### Panel del PDF
 
-**Origen de cada párrafo.** Al abrir, cada línea que viene de un bloque `k` recibe el tag `b<k>`. Los
-tags de `tk.Text` se mueven con el texto. Para la línea del cursor, el bloque es el de su tag `b<k>` o,
+**Origen de cada párrafo.** Al abrir, cada línea que viene de un bloque `k` recibe el tag `src<k>`. Los
+tags de `tk.Text` se mueven con el texto. Para la línea del cursor, el bloque es el de su tag `src<k>` o,
 si no tiene (línea nueva), el de la línea anterior más cercana que lo tenga. Sin ninguno, el primer
 bloque de la sección.
 
@@ -106,7 +112,7 @@ movimiento):
 
 Los botones ◀ ▶ hojean páginas sin mover el cursor. El siguiente movimiento del cursor vuelve a la página
 de su párrafo. Sin PDF abierto (revisión de un libro cuyo PDF ya no está), el panel muestra el aviso
-tenue de `App.blank`.
+tenue «Sin el PDF original no se puede mostrar la página».
 
 La página se dibuja en la ventana, no en el proceso de trabajo: es una sola página, igual que la vista
 previa actual.
@@ -120,7 +126,7 @@ crea. Partes de `TextEditor`:
 - `highlight()`: pone los tags de la tabla de resaltado.
 - `toggle_mark(tag)`, `toggle_heading()`, `insert_break()`, `join_next()`, `split_here()`: las acciones.
 - `source_block()`: bloque de origen de la línea del cursor.
-- `show_source()`: dibuja el panel.
+- `draw_source()`: dibuja el panel.
 - `dirty()`, `save()`, `cancel()`.
 
 `App.editor_save` no se toca: es del cuadro para editar un título dentro de la lista, no de este editor.

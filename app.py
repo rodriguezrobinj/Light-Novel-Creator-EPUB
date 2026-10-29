@@ -54,7 +54,7 @@ FONT_CHOICES = ["Del lector"] + list(convert.FONTS)
 KIND_COLOR = {"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a", "image": "#2e7d32", "dropped": "#8a8a8a",
               "separator": "#7a5c00"}
 PREVIEW_BOX = (400, 560)  # ancho y alto máximos de cada vista previa, en píxeles
-EDITOR_PANEL = (360, 480)  # ancho y alto del panel del PDF en el editor de texto, en píxeles
+EDITOR_PANEL = (360, 480)  # ancho y alto máximos del panel del PDF en el editor de texto, en píxeles
 PREVIEW_CHROME = 190      # alto de leyendas, botones y miniaturas que rodean a las vistas previas
 DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
 THUMB_HEIGHT = 80         # alto de las miniaturas del PDF, en píxeles
@@ -65,7 +65,8 @@ MARK = re.compile(r"</?[ib]>")  # marcas de cursiva y negrita del editor de text
 # Aspecto de las marcas en el editor de texto. En este orden de prioridad: si dos tags fijan lo mismo, manda el último
 EDITOR_TAGS = {"italic": {}, "bold": {}, "bolditalic": {}, "heading": {"foreground": "#1f6fd1"},
                "mark": {"foreground": "#a8a8a8"}, "token": {"background": "#e3efe5", "foreground": "#2e7d32"},
-               "scene": {"foreground": "#7a5c00", "justify": "center"}}
+               "scene": {"foreground": "#7a5c00", "justify": "center"},
+               "broken": {"foreground": "#c62828", "underline": True}}  # lo que edit_section quitaría
 STYLE_TAGS = {1: "italic", 2: "bold", 3: "bolditalic"}  # cursiva suma 1 y negrita 2: Tk no mezcla dos fuentes
 
 
@@ -348,6 +349,28 @@ def _is_paragraph(line):
             and not convert.SCENE_BREAK.fullmatch(line))
 
 
+def _open_marks(text):
+    """Marcas <i>/<b> que quedan abiertas al final de text, de fuera adentro."""
+    stack = []
+    for m in MARK.finditer(text):
+        if not m.group().startswith("</"):
+            stack.append(m.group()[1])
+        elif stack and stack[-1] == m.group()[2]:
+            stack.pop()
+    return stack
+
+
+def _balanced(text):
+    """¿Cierran todas las marcas <i>/<b> y en orden? Si no, convert.edit_section quita todas las de la línea."""
+    stack = []
+    for m in MARK.finditer(text):
+        if not m.group().startswith("</"):
+            stack.append(m.group()[1])
+        elif not stack or stack.pop() != m.group()[2]:
+            return False
+    return not stack
+
+
 class App:
     def __init__(self, root):
         self.root, self.book, self.pdf = root, None, None
@@ -374,6 +397,7 @@ class App:
         self.settings = {}                     # preferencias guardadas (SETTINGS)
         self.last_problems = None              # avisos del último EPUB generado (para el panel de serie)
         self.drag_source = None                # fila que se arrastra para moverla
+        self.text_editor = None                # editor de texto abierto (TextEditor), si lo hay
         self.device_var = tk.StringVar(value='E-reader 6"')
         self.dark_var = tk.BooleanVar(value=False)
         base = tkfont.nametofont("TkDefaultFont")
@@ -641,6 +665,12 @@ class App:
 
     def close(self):
         """Al cerrar a mitad de un trabajo, detiene el proceso y borra el EPUB a medio escribir."""
+        editor = self.text_editor
+        if editor and editor.dirty() and not messagebox.askyesno(
+                "Cerrar", "El texto que estás editando tiene cambios sin guardar. ¿Cerrar y descartarlos?",
+                parent=editor.win):
+            editor.win.lift()
+            return
         self.save_review()
         self.save_settings()
         if self.done and self.proc.is_alive():
@@ -1724,6 +1754,8 @@ class TextEditor:
         win.transient(app.root)
         width, height = min(1250, win.winfo_screenwidth() - 60), min(760, win.winfo_screenheight() - 110)
         win.geometry(f"{width}x{height}+20+20")
+        panel_height = max(240, min(EDITOR_PANEL[1], height - 250))  # barra, ayuda, ◀ ▶, estado y botones
+        self.panel = (min(EDITOR_PANEL[0], int(panel_height * 0.75)), panel_height)
         win.protocol("WM_DELETE_WINDOW", self.cancel)
         win.bind("<Escape>", self.cancel)
         self.tools = ttk.Frame(win, padding=(8, 8, 8, 0))  # botones de formato
@@ -1743,7 +1775,7 @@ class TextEditor:
         text.configure(yscrollcommand=self.scroll.set)
         panel = ttk.Frame(self.body, padding=(8, 0, 0, 0))  # antes que la barra: así queda a la derecha del todo
         panel.pack(side="right", fill="y")
-        self.canvas = tk.Canvas(panel, width=EDITOR_PANEL[0], height=EDITOR_PANEL[1], highlightthickness=0,
+        self.canvas = tk.Canvas(panel, width=self.panel[0], height=self.panel[1], highlightthickness=0,
                                 background="#f4f4f4")
         self.canvas.pack()
         nav = ttk.Frame(panel)
@@ -1753,6 +1785,7 @@ class TextEditor:
         self.page_label.pack(side="left", padx=4)
         ttk.Button(nav, text="▶", width=3, command=lambda: self.turn(1)).pack(side="left")
         self.shown, self.box, self.page, self.photo, self.offset = None, None, 0, None, (0, 0)
+        self.drawn = None  # (bloque, PDF) del dibujo actual del panel
         self.scroll.pack(side="right", fill="y")
         text.pack(side="left", fill="both", expand=True)
         family = tkfont.nametofont("TkDefaultFont").actual("family")
@@ -1789,6 +1822,12 @@ class TextEditor:
         text.focus()
         self.highlight()
         self.draw_source()
+        app.text_editor = self
+        try:  # modal: con la lista activa se podía abrir otro PDF u otro editor y aceptar sobre otros bloques
+            win.wait_visibility()
+            win.grab_set()
+        except tk.TclError:
+            pass  # ventana aún sin mostrar: sin bloqueo, como antes
 
     def later(self, name, ms, fn):
         """Ejecuta fn tras ms milisegundos sin otro aviso del mismo nombre: no repinta en cada tecla."""
@@ -1803,6 +1842,8 @@ class TextEditor:
 
     def on_destroy(self, event):
         if event.widget is self.win:  # <Destroy> llega también por cada hijo
+            if self.app.text_editor is self:
+                self.app.text_editor = None
             for job in self.pending.values():
                 self.win.after_cancel(job)
             self.pending.clear()
@@ -1831,23 +1872,27 @@ class TextEditor:
         """Panel lateral: la ilustración del bloque del cursor, o su página del PDF con el párrafo recuadrado."""
         k = self.source_block()
         block = self.app.book.blocks[k]
+        if (k, id(self.app.pdf_doc)) == self.drawn:  # mismo bloque: la página ya está dibujada
+            self.update_status()
+            return
+        self.drawn = (k, id(self.app.pdf_doc))
         if block.kind == "image" and block.image:
             pix = pymupdf.Pixmap(block.image)
             if pix.alpha:
                 pix = pymupdf.Pixmap(pix, 0)
             if pix.colorspace and pix.colorspace.n not in (1, 3):
                 pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-            scale = min(EDITOR_PANEL[0] / pix.width, EDITOR_PANEL[1] / pix.height, 1)
+            scale = min(self.panel[0] / pix.width, self.panel[1] / pix.height, 1)
             if scale < 1:
                 pix = pymupdf.Pixmap(pix, max(1, round(pix.width * scale)), max(1, round(pix.height * scale)), None)
-            self.shown, self.box = ("image", k), None
+            self.shown, self.box, self.page = ("image", k), None, block.page - 1  # ◀ ▶ siguen desde aquí
             self.put(pix)
             self.page_label.configure(text=f"Ilustración · pág. {block.page}")
         elif self.app.pdf_doc is None:
             self.shown, self.box = None, None
             self.canvas.delete("all")
-            self.canvas.create_text(EDITOR_PANEL[0] // 2, EDITOR_PANEL[1] // 2, fill="#9a9a9a",
-                                    width=EDITOR_PANEL[0] - 40, justify="center",
+            self.canvas.create_text(self.panel[0] // 2, self.panel[1] // 2, fill="#9a9a9a",
+                                    width=self.panel[0] - 40, justify="center",
                                     text="Sin el PDF original no se puede mostrar la página")
             self.page_label.configure(text="")
         else:
@@ -1860,7 +1905,7 @@ class TextEditor:
         """Dibuja la página index (desde 0) del PDF, con self.box recuadrado si lo hay."""
         page = self.app.pdf_doc[index]
         self.page, self.shown = index, ("page", index + 1)
-        zoom = min(EDITOR_PANEL[0] / page.rect.width, EDITOR_PANEL[1] / page.rect.height)
+        zoom = min(self.panel[0] / page.rect.width, self.panel[1] / page.rect.height)
         self.put(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)))
         if self.box:
             x, y = self.offset
@@ -1872,7 +1917,7 @@ class TextEditor:
     def put(self, pix):
         """Dibuja el pixmap centrado en el panel."""
         self.photo = tk.PhotoImage(master=self.win, data=pix.tobytes("ppm"))  # referencia: sin ella, Tk la borra
-        self.offset = ((EDITOR_PANEL[0] - pix.width) // 2, (EDITOR_PANEL[1] - pix.height) // 2)
+        self.offset = ((self.panel[0] - pix.width) // 2, (self.panel[1] - pix.height) // 2)
         self.canvas.delete("all")
         self.canvas.create_image(*self.offset, anchor="nw", image=self.photo)
 
@@ -1880,7 +1925,7 @@ class TextEditor:
         """◀ ▶: hojea el PDF sin mover el cursor; el siguiente movimiento vuelve a la página de su párrafo."""
         if self.app.pdf_doc is None:
             return
-        self.box = None
+        self.box, self.drawn = None, None  # el próximo movimiento del cursor vuelve a su página
         self.show_page(min(max(self.page + delta, 0), self.app.pdf_doc.page_count - 1))
 
     @staticmethod
@@ -1889,7 +1934,7 @@ class TextEditor:
         aparece tal cual (palabra partida con guion en el PDF, párrafo ya editado)."""
         words = convert._plain(block).split()
         hits = page.search_for(" ".join(words[:6])) if words else []
-        if not hits:
+        if not hits or (len(hits) > 1 and len(words) <= 6):  # línea corta repetida ("—Sí."): no se sabe cuál
             return None
         box = hits[0]
         tail = [r for r in page.search_for(" ".join(words[-6:])) if r.y0 >= box.y0]
@@ -1920,25 +1965,37 @@ class TextEditor:
             text.edit_separator()
             text.configure(autoseparators=True)
         self.highlight()
+        self.later("source", 150, self.draw_source)  # el cursor pudo moverse (unir, partir…)
         text.focus_set()
         return "break"
 
     def toggle_mark(self, mark):
         """Envuelve la selección en <i>/<b>, o quita las marcas si ya la envuelven. Sin selección, deja las
-        marcas vacías con el cursor dentro. No cruza párrafos: la marca quedaría sin cerrar."""
+        marcas vacías con el cursor dentro. No cruza párrafos ni corta otra marca: quedaría mal anidada y
+        edit_section quitaría todas las de la línea. Tampoco toca [Ilustración N]: dejaría de reconocerse."""
         text, opening, closing = self.text, f"<{mark}>", f"</{mark}>"
-        if not text.tag_ranges("sel"):
+        selected = bool(text.tag_ranges("sel"))
+        first = text.index("sel.first") if selected else text.index("insert")
+        last = text.index("sel.last") if selected else first
+        if last != first and last.endswith(".0"):  # triple clic: la línea más su salto
+            last = text.index(f"{last}-1c")
+        line = text.get(f"{first} linestart", f"{first} lineend").strip()
+        inside = text.get(first, last)
+        if (first.split(".")[0] != last.split(".")[0] or convert.TOKEN.fullmatch(line)
+                or (line and convert.SCENE_BREAK.fullmatch(line))):
+            self.win.bell()
+        elif first == last:
             text.insert("insert", opening + closing)
             text.mark_set("insert", f"insert-{len(closing)}c")
-            return
-        first, last = text.index("sel.first"), text.index("sel.last")
-        if first.split(".")[0] != last.split(".")[0]:
-            self.win.bell()
-            return
-        if (text.get(f"{first}-{len(opening)}c", first) == opening
+        elif (text.get(f"{first}-{len(opening)}c", first) == opening
                 and text.get(last, f"{last}+{len(closing)}c") == closing):
             text.delete(last, f"{last}+{len(closing)}c")
             text.delete(f"{first}-{len(opening)}c", first)
+        elif inside.startswith(opening) and inside.endswith(closing) and _balanced(inside):  # marcas incluidas
+            text.delete(f"{last}-{len(closing)}c", last)
+            text.delete(first, f"{first}+{len(opening)}c")
+        elif not _balanced(inside):
+            self.win.bell()
         else:
             text.insert(last, closing)
             text.insert(first, opening)
@@ -1988,22 +2045,27 @@ class TextEditor:
             text.delete("insert-1c")
         while text.get("insert") == " ":
             text.delete("insert")
-        before = text.get("insert linestart", "insert")
-        opened = [m for m in "ib" if before.count(f"<{m}>") > before.count(f"</{m}>")]
+        opened = _open_marks(text.get("insert linestart", "insert"))  # de fuera adentro: se cierran al revés
         text.insert("insert", "".join(f"</{m}>" for m in reversed(opened)) + "\n\n"
                     + "".join(f"<{m}>" for m in opened))
 
     def highlight(self):
         """Pone los tags de aspecto según las marcas. Solo cambia tags, no texto: no entra en deshacer."""
-        text = self.text
+        text, blocks, used = self.text, self.app.book.blocks, set()
         for tag in EDITOR_TAGS:
             text.tag_remove(tag, "1.0", "end")
         for n, line in enumerate(text.get("1.0", "end-1c").split("\n"), start=1):
             bare = line.strip()
+            token = convert.TOKEN.fullmatch(bare)
             if bare.startswith("# "):
                 text.tag_add("heading", f"{n}.0", f"{n}.end")
-            elif convert.TOKEN.fullmatch(bare):
-                text.tag_add("token", f"{n}.0", f"{n}.end")
+            elif token:
+                # Las mismas condiciones que edit_section: si no, la marca saldría como texto en el EPUB
+                k = int(token.group(2))
+                valid = (self.start <= k < self.end and k not in used
+                         and blocks[k].kind == ("image" if token.group(1) == "Ilustración" else "break"))
+                used.add(k)
+                text.tag_add("token" if valid else "broken", f"{n}.0", f"{n}.end")
             elif bare and convert.SCENE_BREAK.fullmatch(bare):
                 text.tag_add("scene", f"{n}.0", f"{n}.end")
             flags = [0] * len(line)
@@ -2017,11 +2079,15 @@ class TextEditor:
                     if flags[run]:
                         text.tag_add(STYLE_TAGS[flags[run]], f"{n}.{run}", f"{n}.{c}")
                     run = c
+            broken = not _balanced(line)
             for m in MARK.finditer(line):
-                text.tag_add("mark", f"{n}.{m.start()}", f"{n}.{m.end()}")
+                text.tag_add("broken" if broken else "mark", f"{n}.{m.start()}", f"{n}.{m.end()}")
 
     def dirty(self):
-        return self.text.get("1.0", "end-1c") != self.original
+        """¿Cambió algo que edit_section lea? Líneas en blanco y espacios sobrantes no cuentan."""
+        def lines(text):
+            return [line.strip() for line in text.splitlines() if line.strip()]
+        return lines(self.text.get("1.0", "end-1c")) != lines(self.original)
 
     def save(self):
         """Aplica el texto solo si cambió: edit_section rehace los párrafos y perderían su página del PDF."""

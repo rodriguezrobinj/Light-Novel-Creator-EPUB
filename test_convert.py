@@ -1891,6 +1891,9 @@ def test_text_editor_opens_section_and_saves_only_changes():
     editor = window.edit_text()
     shown = editor.text.get("1.0", "end-1c") == convert.section_text(window.book, 2, 6)
     sources = [t for t in editor.text.tag_names("1.0") if t.startswith("src")]
+    grabbed = editor.win.grab_status() == "local"  # la lista no cambia por debajo mientras se edita
+    editor.text.insert("end", "\n\n  ")  # líneas en blanco: no es un cambio (aceptar re-paginaría la sección)
+    blank_only = not editor.dirty()
     editor.save()
     same = [(b.kind, b.html, b.page) for b in window.book.blocks] == before
     editor = window.edit_text()
@@ -1907,6 +1910,7 @@ def test_text_editor_opens_section_and_saves_only_changes():
         app.messagebox.askyesno = original
     window.close()
     assert shown and sources == ["src2"] and same, (shown, sources, same)
+    assert grabbed and blank_only, (grabbed, blank_only)
     assert len(answers) == 1 and kept and closed, (answers, kept, closed)
 
 
@@ -1933,7 +1937,16 @@ def test_text_editor_highlights_marks():
     found["negrita"] = "bold" in tags("uno")
     found["negrita y cursiva"] = "bolditalic" in tags("dos</i>")
     found["separador escrito"] = "scene" in tags("* * *")
-    window.close()  # con el editor abierto: sus after pendientes no deben dar errores
+    original, asked = app.messagebox.askyesno, []
+    try:  # cerrar la ventana principal con cambios sin guardar en el editor: pregunta antes
+        app.messagebox.askyesno = lambda *args, **kwargs: asked.append(args) or False
+        window.close()
+        kept = bool(root.winfo_exists())
+        app.messagebox.askyesno = lambda *args, **kwargs: asked.append(args) or True
+        window.close()  # con el editor abierto: sus after pendientes no deben dar errores
+    finally:
+        app.messagebox.askyesno = original
+    found["pregunta al cerrar"] = len(asked) == 2 and kept
     assert all(found.values()), found
 
 
@@ -1984,11 +1997,69 @@ def test_text_editor_actions_and_undo():
     seen.append(line(3))
     bound = all(text.bind(key) for key in ("<Control-i>", "<Control-b>", "<Control-t>", "<Control-j>",
                                            "<Control-Return>"))
+    editor.win.destroy()  # sin pasar por la pregunta de cambios sin guardar
     window.close()
     assert seen == ["<i>Fin</i>.", "Fin.", ("Fin.", "Dijo <i>hola</i>, y se fue."), "# Fin.", "# Fin.",
                     "Fin. Dijo <i>hola</i>, y se fue.", ("Fin.", "Dijo <i>hola</i>, y se fue."),
                     ("Dijo <i>h</i>", "<i>ola</i>, y se fue."), "* * *"], seen
     assert bound
+
+
+def test_text_editor_never_breaks_marks():
+    """Lo que el editor muestra con formato llega con formato al EPUB: partir respeta el anidado, no se
+    envuelve media marca, no se escribe dentro de [Ilustración N], y las marcas que edit_section quitaría
+    (mal anidadas, ilustración copiada) se ven en rojo."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    editor = app.TextEditor(window, "1", 0, len(window.book.blocks))
+    text = editor.text
+
+    def line(n):
+        return text.get(f"{n}.0", f"{n}.end")
+
+    def select(first, last):
+        text.tag_remove("sel", "1.0", "end")
+        text.tag_add("sel", first, last)
+
+    text.delete("1.0", "end")
+    text.insert("1.0", "<b>uno <i>dos</i></b>\n\nDijo <i>hola</i>, y se fue.\n\n[Ilustración 0]\n\nFin.")
+    seen = []
+    text.mark_set("insert", "1.12")                    # "<b>uno <i>do|s</i></b>"
+    editor.step(editor.split_here)
+    seen.append((line(1), line(3)))
+    select("5.10", "5.19")                             # "la</i>, y": media cursiva
+    editor.step(lambda: editor.toggle_mark("b"))
+    seen.append(line(5))
+    select("5.5", "5.16")                              # "<i>hola</i>" con sus marcas: se quita
+    editor.step(lambda: editor.toggle_mark("i"))
+    seen.append(line(5))
+    text.tag_remove("sel", "1.0", "end")
+    text.mark_set("insert", "7.3")                     # dentro de [Ilustración 0]
+    editor.step(lambda: editor.toggle_mark("i"))
+    seen.append(line(7))
+    select("9.0", "10.0")                              # triple clic: la línea y su salto
+    editor.step(lambda: editor.toggle_mark("i"))
+    seen.append(line(9))
+    text.insert("end", "\n\n[Ilustración 0]\n\n<i>mal <b>anidado</i></b>")
+    editor.highlight()
+    content = text.get("1.0", "end-1c")
+    copy = content.rindex("[Ilustración 0]")
+    seen.append(set(text.tag_names(f"1.0+{copy}c")) & {"token", "broken"})
+    seen.append("broken" in text.tag_names(f"1.0+{content.index('<i>mal')}c"))
+    editor.win.destroy()
+    window.close()
+    with pymupdf.open() as doc:  # una línea corta repetida en la página: no se sabe cuál es, sin recuadro
+        page = doc.new_page()
+        for y in (100, 200):
+            page.insert_text((72, y), "Si.")
+        page.insert_text((72, 300), "Una sola vez")
+        boxes = [app.TextEditor.find_box(page, convert.Block("p", 1, t)) for t in ("Si.", "Una sola vez")]
+    assert seen == [("<b>uno <i>do</i></b>", "<b><i>s</i></b>"), "Dijo <i>hola</i>, y se fue.",
+                    "Dijo hola, y se fue.", "[Ilustración 0]", "<i>Fin.</i>", {"broken"}, True], seen
+    assert boxes[0] is None and boxes[1] is not None, boxes
 
 
 def test_text_editor_shows_source_page_and_illustration():
@@ -2007,7 +2078,9 @@ def test_text_editor_shows_source_page_and_illustration():
         editor.draw_source()
         return editor.shown
 
-    seen = [at("Fin."), editor.box is not None, at("[Ilustración 0]"), at("Ella penso")]
+    seen = [at("Fin."), editor.box is not None, at("[Ilustración 0]")]
+    editor.turn(1)  # ▶ desde una ilustración: la página siguiente a la suya
+    seen += [editor.shown, at("Ella penso")]
     text.insert(text.index(f"{text.search('Fin.', '1.0')} lineend"), "\n\nParrafo nuevo")
     seen.append(at("Parrafo nuevo"))
     status = editor.status.cget("text")
@@ -2018,8 +2091,10 @@ def test_text_editor_shows_source_page_and_illustration():
     at("Fin.")
     seen.append(editor.shown)
     window.pdf_doc = doc
+    editor.win.destroy()
+    empty.win.destroy()
     window.close()
-    assert seen == [("page", 4), True, ("image", 0), ("page", 3), ("page", 4), ("page", 4), None], seen
+    assert seen == [("page", 4), True, ("image", 0), ("page", 3), ("page", 3), ("page", 4), ("page", 4), None], seen
     assert status.startswith("Página 4 del PDF · párrafo "), status
 
 
