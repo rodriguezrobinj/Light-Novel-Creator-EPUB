@@ -54,6 +54,7 @@ FONT_CHOICES = ["Del lector"] + list(convert.FONTS)
 KIND_COLOR = {"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a", "image": "#2e7d32", "dropped": "#8a8a8a",
               "separator": "#7a5c00"}
 PREVIEW_BOX = (400, 560)  # ancho y alto máximos de cada vista previa, en píxeles
+EDITOR_PANEL = (360, 480)  # ancho y alto del panel del PDF en el editor de texto, en píxeles
 PREVIEW_CHROME = 190      # alto de leyendas, botones y miniaturas que rodean a las vistas previas
 DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
 THUMB_HEIGHT = 80         # alto de las miniaturas del PDF, en píxeles
@@ -1733,11 +1734,25 @@ class TextEditor:
         buttons.pack(side="bottom", pady=8)
         ttk.Button(buttons, text="Aceptar", command=self.save).pack(side="left", padx=4)
         ttk.Button(buttons, text="Cancelar", command=self.cancel).pack(side="left", padx=4)
+        self.status = ttk.Label(win, text="", padding=(8, 0))
+        self.status.pack(side="bottom", anchor="w")
         self.body = ttk.Frame(win, padding=8)
         self.body.pack(fill="both", expand=True)
         self.text = text = tk.Text(self.body, wrap="word", undo=True)
         self.scroll = ttk.Scrollbar(self.body, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=self.scroll.set)
+        panel = ttk.Frame(self.body, padding=(8, 0, 0, 0))  # antes que la barra: así queda a la derecha del todo
+        panel.pack(side="right", fill="y")
+        self.canvas = tk.Canvas(panel, width=EDITOR_PANEL[0], height=EDITOR_PANEL[1], highlightthickness=0,
+                                background="#f4f4f4")
+        self.canvas.pack()
+        nav = ttk.Frame(panel)
+        nav.pack(pady=(6, 0))
+        ttk.Button(nav, text="◀", width=3, command=lambda: self.turn(-1)).pack(side="left")
+        self.page_label = ttk.Label(nav, text="", width=16, anchor="center")
+        self.page_label.pack(side="left", padx=4)
+        ttk.Button(nav, text="▶", width=3, command=lambda: self.turn(1)).pack(side="left")
+        self.shown, self.box, self.page, self.photo, self.offset = None, None, 0, None, (0, 0)
         self.scroll.pack(side="right", fill="y")
         text.pack(side="left", fill="both", expand=True)
         family = tkfont.nametofont("TkDefaultFont").actual("family")
@@ -1751,6 +1766,8 @@ class TextEditor:
         self.pending = {}  # trabajo diferido: nombre -> id de after
         text.bind("<<Modified>>", self.on_modified)
         win.bind("<Destroy>", self.on_destroy)
+        for event in ("<KeyRelease>", "<ButtonRelease-1>"):  # el cursor se movió: el panel lo sigue
+            text.bind(event, lambda _: self.later("source", 150, self.draw_source), add="+")
         actions = (("Cursiva", "Ctrl+I", ("<Control-i>", "<Control-I>"), lambda: self.toggle_mark("i")),
                    ("Negrita", "Ctrl+B", ("<Control-b>", "<Control-B>"), lambda: self.toggle_mark("b")),
                    ("Título ↔ párrafo", "Ctrl+T", ("<Control-t>", "<Control-T>"), self.toggle_heading),
@@ -1771,6 +1788,7 @@ class TextEditor:
         text.edit_reset()
         text.focus()
         self.highlight()
+        self.draw_source()
 
     def later(self, name, ms, fn):
         """Ejecuta fn tras ms milisegundos sin otro aviso del mismo nombre: no repinta en cada tecla."""
@@ -1791,6 +1809,104 @@ class TextEditor:
 
     def refresh(self):
         self.highlight()
+        self.update_status()
+
+    def source_block(self):
+        """Bloque del libro del que viene la línea del cursor: el de su marca [Ilustración N], el de su tag
+        src<k> o, en una línea nueva, el de la línea anterior más cercana que lo tenga. Sin ninguno (sección
+        vacía), el título de la sección."""
+        text = self.text
+        n = int(text.index("insert").split(".")[0])
+        token = convert.TOKEN.fullmatch(text.get(f"{n}.0", f"{n}.end").strip())
+        if token and int(token.group(2)) < len(self.app.book.blocks):
+            return int(token.group(2))
+        for m in range(n, 0, -1):
+            for index in (f"{m}.0", f"{m}.end-1c"):
+                for tag in text.tag_names(index):
+                    if tag.startswith("src"):
+                        return int(tag[3:])
+        return int(self.item)
+
+    def draw_source(self):
+        """Panel lateral: la ilustración del bloque del cursor, o su página del PDF con el párrafo recuadrado."""
+        k = self.source_block()
+        block = self.app.book.blocks[k]
+        if block.kind == "image" and block.image:
+            pix = pymupdf.Pixmap(block.image)
+            if pix.alpha:
+                pix = pymupdf.Pixmap(pix, 0)
+            if pix.colorspace and pix.colorspace.n not in (1, 3):
+                pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+            scale = min(EDITOR_PANEL[0] / pix.width, EDITOR_PANEL[1] / pix.height, 1)
+            if scale < 1:
+                pix = pymupdf.Pixmap(pix, max(1, round(pix.width * scale)), max(1, round(pix.height * scale)), None)
+            self.shown, self.box = ("image", k), None
+            self.put(pix)
+            self.page_label.configure(text=f"Ilustración · pág. {block.page}")
+        elif self.app.pdf_doc is None:
+            self.shown, self.box = None, None
+            self.canvas.delete("all")
+            self.canvas.create_text(EDITOR_PANEL[0] // 2, EDITOR_PANEL[1] // 2, fill="#9a9a9a",
+                                    width=EDITOR_PANEL[0] - 40, justify="center",
+                                    text="Sin el PDF original no se puede mostrar la página")
+            self.page_label.configure(text="")
+        else:
+            page = self.app.pdf_doc[block.page - 1]
+            self.box = pymupdf.Rect(block.rect) if block.rect else self.find_box(page, block)
+            self.show_page(block.page - 1)
+        self.update_status()
+
+    def show_page(self, index):
+        """Dibuja la página index (desde 0) del PDF, con self.box recuadrado si lo hay."""
+        page = self.app.pdf_doc[index]
+        self.page, self.shown = index, ("page", index + 1)
+        zoom = min(EDITOR_PANEL[0] / page.rect.width, EDITOR_PANEL[1] / page.rect.height)
+        self.put(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)))
+        if self.box:
+            x, y = self.offset
+            box = self.box * zoom
+            self.canvas.create_rectangle(x + box.x0 - 3, y + box.y0 - 3, x + box.x1 + 3, y + box.y1 + 3,
+                                         outline=MARK_COLORS["current"], width=2)
+        self.page_label.configure(text=f"Página {index + 1} de {self.app.pdf_doc.page_count}")
+
+    def put(self, pix):
+        """Dibuja el pixmap centrado en el panel."""
+        self.photo = tk.PhotoImage(master=self.win, data=pix.tobytes("ppm"))  # referencia: sin ella, Tk la borra
+        self.offset = ((EDITOR_PANEL[0] - pix.width) // 2, (EDITOR_PANEL[1] - pix.height) // 2)
+        self.canvas.delete("all")
+        self.canvas.create_image(*self.offset, anchor="nw", image=self.photo)
+
+    def turn(self, delta):
+        """◀ ▶: hojea el PDF sin mover el cursor; el siguiente movimiento vuelve a la página de su párrafo."""
+        if self.app.pdf_doc is None:
+            return
+        self.box = None
+        self.show_page(min(max(self.page + delta, 0), self.app.pdf_doc.page_count - 1))
+
+    @staticmethod
+    def find_box(page, block):
+        """Recuadro del párrafo en su página, de sus 6 primeras palabras a sus 6 últimas. None si el texto no
+        aparece tal cual (palabra partida con guion en el PDF, párrafo ya editado)."""
+        words = convert._plain(block).split()
+        hits = page.search_for(" ".join(words[:6])) if words else []
+        if not hits:
+            return None
+        box = hits[0]
+        tail = [r for r in page.search_for(" ".join(words[-6:])) if r.y0 >= box.y0]
+        return box | tail[0] if tail else box
+
+    def update_status(self):
+        """«Página 34 del PDF · párrafo 12 de 80 · 3.412 palabras»."""
+        lines = self.text.get("1.0", "end-1c").split("\n")
+        paragraphs = [n for n, line in enumerate(lines, start=1) if _is_paragraph(line)]
+        current = int(self.text.index("insert").split(".")[0])
+        words = sum(len(MARK.sub("", lines[n - 1]).split()) for n in paragraphs)
+        count = len(paragraphs)
+        where = (f"párrafo {paragraphs.index(current) + 1} de {count}" if current in paragraphs
+                 else f"{count} párrafo{'' if count == 1 else 's'}")
+        page = self.app.book.blocks[self.source_block()].page
+        self.status.configure(text=f"Página {page} del PDF · {where} · "
+                                   f"{words:,} palabra{'' if words == 1 else 's'}".replace(",", "."))
 
     def step(self, change):
         """Una acción del editor como un solo paso de deshacer. Devuelve "break" para que Tk no haga

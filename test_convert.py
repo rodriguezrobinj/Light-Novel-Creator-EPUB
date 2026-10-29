@@ -1991,6 +1991,38 @@ def test_text_editor_actions_and_undo():
     assert bound
 
 
+def test_text_editor_shows_source_page_and_illustration():
+    """El panel lateral sigue al cursor: la página del PDF del párrafo (recuadrado), también en una línea
+    nueva escrita debajo; sobre [Ilustración N], la ilustración. Sección vacía y libro sin PDF: sin errores."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    editor = app.TextEditor(window, "1", 0, len(window.book.blocks))
+    text = editor.text
+
+    def at(needle):
+        text.mark_set("insert", text.search(needle, "1.0"))
+        editor.draw_source()
+        return editor.shown
+
+    seen = [at("Fin."), editor.box is not None, at("[Ilustración 0]"), at("Ella penso")]
+    text.insert(text.index(f"{text.search('Fin.', '1.0')} lineend"), "\n\nParrafo nuevo")
+    seen.append(at("Parrafo nuevo"))
+    status = editor.status.cget("text")
+    empty = app.TextEditor(window, "6", 7, 7)  # título sin texto debajo: muestra la página del título
+    empty.draw_source()
+    seen.append(empty.shown)
+    doc, window.pdf_doc = window.pdf_doc, None  # revisión de un PDF que ya no está
+    at("Fin.")
+    seen.append(editor.shown)
+    window.pdf_doc = doc
+    window.close()
+    assert seen == [("page", 4), True, ("image", 0), ("page", 3), ("page", 4), ("page", 4), None], seen
+    assert status.startswith("Página 4 del PDF · párrafo "), status
+
+
 def test_window_find_moves_previews_to_the_match():
     root, window = visible_window()
     window.pdf = make_group_pdf()
