@@ -1937,6 +1937,60 @@ def test_text_editor_highlights_marks():
     assert all(found.values()), found
 
 
+def test_text_editor_actions_and_undo():
+    """Cursiva, título, unir y partir párrafos sin escribir marcas; cada acción se deshace con un Ctrl+Z."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    editor = app.TextEditor(window, "6", 7, 10)  # "Fin." / "Dijo <i>hola</i>, y se fue." / "Palabra separada."
+    text = editor.text
+
+    def line(n):
+        return text.get(f"{n}.0", f"{n}.end")
+
+    def select(first, last):
+        text.tag_remove("sel", "1.0", "end")
+        text.tag_add("sel", first, last)
+
+    seen = []
+    select("1.0", "1.3")
+    editor.step(lambda: editor.toggle_mark("i"))
+    seen.append(line(1))                       # envuelve "Fin"
+    select("1.3", "1.6")
+    editor.step(lambda: editor.toggle_mark("i"))
+    seen.append(line(1))                       # otra vez: la quita
+    select("1.0", "3.2")
+    editor.step(lambda: editor.toggle_mark("i"))
+    seen.append((line(1), line(3)))            # varias líneas: no hace nada
+    text.tag_remove("sel", "1.0", "end")
+    text.mark_set("insert", "1.2")
+    editor.step(editor.toggle_heading)
+    seen.append(line(1))
+    editor.step(editor.join_next)
+    seen.append(line(1))                       # un título no se une
+    editor.step(editor.toggle_heading)
+    text.mark_set("insert", "1.2")
+    editor.step(editor.join_next)
+    seen.append(line(1))
+    text.edit_undo()
+    seen.append((line(1), line(3)))            # un solo Ctrl+Z deshace la unión entera
+    text.mark_set("insert", "3.9")             # "Dijo <i>h|ola</i>"
+    editor.step(editor.split_here)
+    seen.append((line(3), line(5)))            # la cursiva se cierra y se vuelve a abrir
+    text.mark_set("insert", "1.0")
+    editor.step(editor.insert_break)
+    seen.append(line(3))
+    bound = all(text.bind(key) for key in ("<Control-i>", "<Control-b>", "<Control-t>", "<Control-j>",
+                                           "<Control-Return>"))
+    window.close()
+    assert seen == ["<i>Fin</i>.", "Fin.", ("Fin.", "Dijo <i>hola</i>, y se fue."), "# Fin.", "# Fin.",
+                    "Fin. Dijo <i>hola</i>, y se fue.", ("Fin.", "Dijo <i>hola</i>, y se fue."),
+                    ("Dijo <i>h</i>", "<i>ola</i>, y se fue."), "* * *"], seen
+    assert bound
+
+
 def test_window_find_moves_previews_to_the_match():
     root, window = visible_window()
     window.pdf = make_group_pdf()

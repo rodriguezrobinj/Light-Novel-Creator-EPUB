@@ -1751,6 +1751,17 @@ class TextEditor:
         self.pending = {}  # trabajo diferido: nombre -> id de after
         text.bind("<<Modified>>", self.on_modified)
         win.bind("<Destroy>", self.on_destroy)
+        actions = (("Cursiva", "Ctrl+I", ("<Control-i>", "<Control-I>"), lambda: self.toggle_mark("i")),
+                   ("Negrita", "Ctrl+B", ("<Control-b>", "<Control-B>"), lambda: self.toggle_mark("b")),
+                   ("Título ↔ párrafo", "Ctrl+T", ("<Control-t>", "<Control-T>"), self.toggle_heading),
+                   ("Separador", "", (), self.insert_break),
+                   ("Unir con el siguiente", "Ctrl+J", ("<Control-j>", "<Control-J>"), self.join_next),
+                   ("Partir aquí", "Ctrl+Enter", ("<Control-Return>",), self.split_here))
+        for label, shortcut, keys, change in actions:
+            ttk.Button(self.tools, text=f"{label}  {shortcut}".strip(),
+                       command=lambda change=change: self.step(change)).pack(side="left", padx=(0, 4))
+            for key in keys:  # las dos formas: con Bloq Mayús Tk recibe la mayúscula
+                text.bind(key, lambda _, change=change: self.step(change))
         # Cada bloque con su tag src<k>: los tags se mueven con el texto y dicen de qué bloque viene cada línea
         for k in range(start, end):
             if k > start:
@@ -1780,6 +1791,91 @@ class TextEditor:
 
     def refresh(self):
         self.highlight()
+
+    def step(self, change):
+        """Una acción del editor como un solo paso de deshacer. Devuelve "break" para que Tk no haga
+        además lo suyo: Ctrl+I inserta un tabulador y Ctrl+T intercambia dos letras."""
+        text = self.text
+        text.configure(autoseparators=False)  # con separadores automáticos, borrar e insertar serían dos pasos
+        text.edit_separator()
+        try:
+            change()
+        finally:
+            text.edit_separator()
+            text.configure(autoseparators=True)
+        self.highlight()
+        text.focus_set()
+        return "break"
+
+    def toggle_mark(self, mark):
+        """Envuelve la selección en <i>/<b>, o quita las marcas si ya la envuelven. Sin selección, deja las
+        marcas vacías con el cursor dentro. No cruza párrafos: la marca quedaría sin cerrar."""
+        text, opening, closing = self.text, f"<{mark}>", f"</{mark}>"
+        if not text.tag_ranges("sel"):
+            text.insert("insert", opening + closing)
+            text.mark_set("insert", f"insert-{len(closing)}c")
+            return
+        first, last = text.index("sel.first"), text.index("sel.last")
+        if first.split(".")[0] != last.split(".")[0]:
+            self.win.bell()
+            return
+        if (text.get(f"{first}-{len(opening)}c", first) == opening
+                and text.get(last, f"{last}+{len(closing)}c") == closing):
+            text.delete(last, f"{last}+{len(closing)}c")
+            text.delete(f"{first}-{len(opening)}c", first)
+        else:
+            text.insert(last, closing)
+            text.insert(first, opening)
+
+    def toggle_heading(self):
+        """Pone o quita "# " delante de la línea del cursor. No en una línea vacía: "# " solo se leería
+        como el separador "#"."""
+        text = self.text
+        if text.get("insert linestart", "insert linestart+2c") == "# ":
+            text.delete("insert linestart", "insert linestart+2c")
+        elif _is_paragraph(text.get("insert linestart", "insert lineend")):
+            text.insert("insert linestart", "# ")
+        else:
+            self.win.bell()
+
+    def insert_break(self):
+        """Separador de escena escrito, como párrafo propio tras la línea del cursor."""
+        end = self.text.index("insert lineend")
+        self.text.insert(end, "\n\n* * *")
+        self.text.mark_set("insert", f"{end}+7c")
+
+    def join_next(self):
+        """Une el párrafo del cursor con el siguiente: arregla un párrafo partido por un salto de página."""
+        text = self.text
+        n = int(text.index("insert").split(".")[0])
+        last = int(text.index("end-1c").split(".")[0])
+        following = next((m for m in range(n + 1, last + 1) if text.get(f"{m}.0", f"{m}.end").strip()), None)
+        line = text.get(f"{n}.0", f"{n}.end")
+        if following is None or not _is_paragraph(line) or not _is_paragraph(
+                text.get(f"{following}.0", f"{following}.end")):
+            self.win.bell()
+            return
+        nxt = text.get(f"{following}.0", f"{following}.end")
+        end = f"{n}.{len(line.rstrip())}"
+        text.delete(end, f"{following}.{len(nxt) - len(nxt.lstrip())}")
+        text.insert(end, " ")
+        text.mark_set("insert", f"{end}+1c")
+
+    def split_here(self):
+        """Parte el párrafo en el cursor. Una cursiva o negrita abierta se cierra y se vuelve a abrir: si no,
+        cada mitad quedaría con una marca suelta y edit_section la quitaría."""
+        text = self.text
+        if not _is_paragraph(text.get("insert linestart", "insert lineend")):
+            self.win.bell()
+            return
+        while text.get("insert-1c") == " ":
+            text.delete("insert-1c")
+        while text.get("insert") == " ":
+            text.delete("insert")
+        before = text.get("insert linestart", "insert")
+        opened = [m for m in "ib" if before.count(f"<{m}>") > before.count(f"</{m}>")]
+        text.insert("insert", "".join(f"</{m}>" for m in reversed(opened)) + "\n\n"
+                    + "".join(f"<{m}>" for m in opened))
 
     def highlight(self):
         """Pone los tags de aspecto según las marcas. Solo cambia tags, no texto: no entra en deshacer."""
