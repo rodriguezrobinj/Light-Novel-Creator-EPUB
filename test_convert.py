@@ -1910,6 +1910,33 @@ def test_text_editor_opens_section_and_saves_only_changes():
     assert len(answers) == 1 and kept and closed, (answers, kept, closed)
 
 
+def test_text_editor_highlights_marks():
+    """Títulos, cursivas, negritas, marcas de ilustración y separadores se distinguen de un vistazo."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    editor = app.TextEditor(window, "1", 0, len(window.book.blocks))  # todo el libro: ilustración incluida
+    text = editor.text
+    content = text.get("1.0", "end-1c")
+
+    def tags(needle):
+        return set(text.tag_names(f"1.0+{content.index(needle)}c"))
+
+    found = {"título": "heading" in tags("# Capitulo 1"), "ilustración": "token" in tags("[Ilustración 0]"),
+             "marca": "mark" in tags("<i>que"), "marca sin cursiva": "italic" not in tags("<i>que"),
+             "cursiva": "italic" in tags("que era"), "texto normal": not {"italic", "heading"} & tags("Ella")}
+    text.insert("end", "\n\n<b>uno <i>dos</i></b>\n\n* * *")
+    editor.highlight()
+    content = text.get("1.0", "end-1c")
+    found["negrita"] = "bold" in tags("uno")
+    found["negrita y cursiva"] = "bolditalic" in tags("dos</i>")
+    found["separador escrito"] = "scene" in tags("* * *")
+    window.close()  # con el editor abierto: sus after pendientes no deben dar errores
+    assert all(found.values()), found
+
+
 def test_window_find_moves_previews_to_the_match():
     root, window = visible_window()
     window.pdf = make_group_pdf()

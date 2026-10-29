@@ -61,6 +61,11 @@ THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe cong
 MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
 MARK = re.compile(r"</?[ib]>")  # marcas de cursiva y negrita del editor de texto
+# Aspecto de las marcas en el editor de texto. En este orden de prioridad: si dos tags fijan lo mismo, manda el último
+EDITOR_TAGS = {"italic": {}, "bold": {}, "bolditalic": {}, "heading": {"foreground": "#1f6fd1"},
+               "mark": {"foreground": "#a8a8a8"}, "token": {"background": "#e3efe5", "foreground": "#2e7d32"},
+               "scene": {"foreground": "#7a5c00", "justify": "center"}}
+STYLE_TAGS = {1: "italic", 2: "bold", 3: "bolditalic"}  # cursiva suma 1 y negrita 2: Tk no mezcla dos fuentes
 
 
 def _log(text):
@@ -1735,6 +1740,17 @@ class TextEditor:
         text.configure(yscrollcommand=self.scroll.set)
         self.scroll.pack(side="right", fill="y")
         text.pack(side="left", fill="both", expand=True)
+        family = tkfont.nametofont("TkDefaultFont").actual("family")
+        self.fonts = {name: tkfont.Font(root=win, family=family, **options) for name, options in (
+            ("text", {"size": 11}), ("heading", {"size": 14, "weight": "bold"}),
+            ("italic", {"size": 11, "slant": "italic"}), ("bold", {"size": 11, "weight": "bold"}),
+            ("bolditalic", {"size": 11, "weight": "bold", "slant": "italic"}))}  # referencias: sin ellas, Tk las borra
+        text.configure(font=self.fonts["text"], spacing1=2, spacing3=2, padx=8)
+        for tag, options in EDITOR_TAGS.items():
+            text.tag_configure(tag, **options, **({"font": self.fonts[tag]} if tag in self.fonts else {}))
+        self.pending = {}  # trabajo diferido: nombre -> id de after
+        text.bind("<<Modified>>", self.on_modified)
+        win.bind("<Destroy>", self.on_destroy)
         # Cada bloque con su tag src<k>: los tags se mueven con el texto y dicen de qué bloque viene cada línea
         for k in range(start, end):
             if k > start:
@@ -1743,6 +1759,54 @@ class TextEditor:
         self.original = text.get("1.0", "end-1c")
         text.edit_reset()
         text.focus()
+        self.highlight()
+
+    def later(self, name, ms, fn):
+        """Ejecuta fn tras ms milisegundos sin otro aviso del mismo nombre: no repinta en cada tecla."""
+        if name in self.pending:
+            self.win.after_cancel(self.pending[name])
+        self.pending[name] = self.win.after(ms, lambda: (self.pending.pop(name, None), fn()))
+
+    def on_modified(self, _=None):
+        if self.text.edit_modified():
+            self.text.edit_modified(False)  # rearma el aviso para el siguiente cambio
+            self.later("refresh", 300, self.refresh)
+
+    def on_destroy(self, event):
+        if event.widget is self.win:  # <Destroy> llega también por cada hijo
+            for job in self.pending.values():
+                self.win.after_cancel(job)
+            self.pending.clear()
+
+    def refresh(self):
+        self.highlight()
+
+    def highlight(self):
+        """Pone los tags de aspecto según las marcas. Solo cambia tags, no texto: no entra en deshacer."""
+        text = self.text
+        for tag in EDITOR_TAGS:
+            text.tag_remove(tag, "1.0", "end")
+        for n, line in enumerate(text.get("1.0", "end-1c").split("\n"), start=1):
+            bare = line.strip()
+            if bare.startswith("# "):
+                text.tag_add("heading", f"{n}.0", f"{n}.end")
+            elif convert.TOKEN.fullmatch(bare):
+                text.tag_add("token", f"{n}.0", f"{n}.end")
+            elif bare and convert.SCENE_BREAK.fullmatch(bare):
+                text.tag_add("scene", f"{n}.0", f"{n}.end")
+            flags = [0] * len(line)
+            for flag, mark in ((1, "i"), (2, "b")):
+                for m in re.finditer(rf"<{mark}>(.*?)</{mark}>", line):
+                    for c in range(m.start(1), m.end(1)):
+                        flags[c] |= flag
+            run = 0
+            for c in range(1, len(line) + 1):
+                if c == len(line) or flags[c] != flags[run]:
+                    if flags[run]:
+                        text.tag_add(STYLE_TAGS[flags[run]], f"{n}.{run}", f"{n}.{c}")
+                    run = c
+            for m in MARK.finditer(line):
+                text.tag_add("mark", f"{n}.{m.start()}", f"{n}.{m.end()}")
 
     def dirty(self):
         return self.text.get("1.0", "end-1c") != self.original
