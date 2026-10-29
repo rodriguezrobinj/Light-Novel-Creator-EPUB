@@ -473,6 +473,23 @@ def test_image_info_matches_pymupdf_xrefs():
             assert ours == theirs and all(x for _, x in ours), (ours, theirs)
 
 
+def test_rotated_full_page_illustration_is_not_cropped():
+    """Re Zero 8: ilustración doble en una página girada 90°. Las imágenes vienen en coordenadas sin
+    girar; mezcladas con las de la página girada, el recorte la dejaba en un cuadrado."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"), (92, 140, "Texto del capitulo.", 11, "cour")])
+    p = doc.new_page(width=595, height=842)
+    art = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 85), False)
+    art.clear_with(180)
+    p.insert_image(p.rect, pixmap=art, keep_proportion=False)
+    p.set_rotation(90)
+    path = TMP / "girada.pdf"
+    doc.save(path)
+    image = next(b.image for b in convert.analyze(path).blocks if b.kind == "image" and b.page == 2)
+    pix = pymupdf.Pixmap(image)
+    assert pix.width > pix.height * 1.3, (pix.width, pix.height)  # apaisada entera, no un cuadrado
+
+
 def test_scene_breaks_keep_their_original_form():
     """Cada separador guarda lo que traía el PDF: el texto de un separador escrito, la imagen de un adorno."""
     text_breaks = [b for b in convert.analyze(make_novel()).blocks if b.kind == "break"]

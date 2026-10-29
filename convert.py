@@ -346,16 +346,20 @@ def _title(rows):
 
 def _image_info(page, digests):
     """Imágenes dibujadas en la página, con su xref. get_image_info(xrefs=True) decodifica cada imagen
-    de la página en cada llamada para sacar su huella; digests (xref -> huella) la guarda para todo el PDF."""
-    infos = page.get_image_info(hashes=True)
+    de la página en cada llamada para sacar su huella; digests (xref -> huella) la guarda para todo el PDF.
+    Copias, con bbox en coordenadas de la página girada: PyMuPDF guarda las suyas para _render."""
     by_digest = {}
     for xref, *_ in page.get_images():
         if xref not in digests:
             digests[xref] = pymupdf.Pixmap(page.parent, xref).digest
         by_digest[digests[xref]] = xref
-    for info in infos:
-        info["xref"] = by_digest.get(info["digest"], 0)
-    return infos
+    return [dict(info, bbox=tuple(_shown(page, info)), xref=by_digest.get(info["digest"], 0))
+            for info in page.get_image_info(hashes=True)]
+
+
+def _shown(page, info):
+    """bbox de una imagen tal como se ve: get_image_info lo da sin girar y page.rect va girado (Re Zero 8)."""
+    return pymupdf.Rect(info["bbox"]) * page.rotation_matrix
 
 
 def _image_coverage(page, infos):
@@ -428,7 +432,7 @@ def _render(page, crop=False):
     if crop:
         art = pymupdf.Rect()
         for info in page.get_image_info():
-            art |= pymupdf.Rect(info["bbox"]) & page.rect
+            art |= _shown(page, info) & page.rect
         if abs(art) >= 0.5 * abs(page.rect):
             clip = art + (1, 1, -1, -1)
     return page.get_pixmap(dpi=150, clip=clip).tobytes("jpg", jpg_quality=85)
