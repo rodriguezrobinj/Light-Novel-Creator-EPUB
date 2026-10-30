@@ -1131,11 +1131,10 @@ def analyze(pdf_path, progress=None):
             rows, notes = _footnotes(rows, body, page.rect.height)
             start = len(blocks)
             normal = [r for r in rows if not r.heading]
-            # Ilustración con el texto de la novela encima: se guardan las dos cosas. El párrafo abierto
-            # sigue abierto, así que su continuación se une a él aunque la imagen quede en medio.
+            # Ilustración con el texto de la novela encima: se guardan las dos cosas, la imagen tras el texto
+            # de la página (es la escena que se lee ahí, Maryoku 5). El párrafo abierto sigue abierto, así que
+            # su continuación se une a él aunque la imagen quede en medio.
             art = _illustration(images, uses) if normal else None
-            if art:
-                blocks.append(Block("image", num, image=_extract(doc, art)))
             left = min((r.x0 for r in normal), default=0)
             right = max((r.x1 for r in normal), default=0)
             prev = None
@@ -1186,6 +1185,8 @@ def analyze(pdf_path, progress=None):
                 prev = r
             # Desde el párrafo que venía abierto de la página anterior: también puede llevar llamadas de esta
             _attach_notes(blocks[max(start - 1, 0):], notes)
+            if art:
+                blocks.append(Block("image", num, image=_extract(doc, art)))
             # Imágenes que no entran solas, apuntadas como descartadas para poder recuperarlas en la
             # ventana: las de dentro del texto y el fondo de una página de título. Los fondos y barras
             # que se repiten en muchas páginas y las diminutas no: serían ruido.

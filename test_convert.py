@@ -791,6 +791,9 @@ def test_illustration_under_text_is_kept():
     picture = pymupdf.Pixmap(images[0].image)
     assert (picture.width, picture.height) == (60, 85), (picture.width, picture.height)  # la original, no la página
     assert sum(1 for b in book.blocks if b.kind == "p" and b.page == 2) == 1
+    # El texto de la página va antes: la imagen sale al acabar la página (Maryoku 5, página 47)
+    kinds = [b.kind for b in book.blocks if b.page == 2]
+    assert kinds == ["p", "image"], kinds
 
 
 def test_indented_lowercase_line_continues_unfinished_paragraph():
