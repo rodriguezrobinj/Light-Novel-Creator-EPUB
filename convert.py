@@ -1254,6 +1254,38 @@ def _xhtml(title, body, lang):
             f'<body>\n{body}\n</body>\n</html>\n')
 
 
+KOBO_BLOCK = re.compile(r"(<(p|h1|h2)\b[^>]*>)(.*?)(</\2>)", re.S)
+
+
+def _sentences(text):
+    """Trozos de text, cada uno una frase con su espacio final: juntos dan text sin cambios."""
+    return [s for s in re.findall(r"[^.!?…]*(?:[.!?…]+[»\"”’)\]]*\s*|$)", text) if s]
+
+
+def _kepub(xhtml):
+    """Sección en formato Kobo (KEPUB): cada frase en un koboSpan, con el que el Kobo cuenta páginas,
+    tiempo de lectura y subraya, y el cuerpo en los div que espera su motor (como kepubify).
+    Solo se envuelven nodos de texto: las etiquetas quedan igual y el anidado sigue siendo válido."""
+    paragraph = 0
+
+    def wrap(m):
+        nonlocal paragraph
+        paragraph += 1
+        n, out = 0, []
+        for piece in re.split(r"(<[^>]+>)", m[3]):
+            if piece.startswith("<") or not piece.strip():
+                out.append(piece)
+                continue
+            for s in _sentences(piece):
+                n += 1
+                out.append(f'<span class="koboSpan" id="kobo.{paragraph}.{n}">{s}</span>')
+        return m[1] + "".join(out) + m[4]
+
+    body = KOBO_BLOCK.sub(wrap, xhtml)
+    return (body.replace("<body>\n", '<body>\n<div id="book-columns"><div id="book-inner">\n', 1)
+            .replace("\n</body>", "\n</div></div>\n</body>", 1))
+
+
 def _separator(block, index, style, choice, images):
     """XHTML de un separador de escena según la opción elegida (SEPARATOR_CHOICES). Con "Original del
     PDF" usa el adorno dibujado o el texto que traía; si no trae nada, el del estilo."""
@@ -1285,7 +1317,7 @@ STATUS = re.compile(r"\s*[【\[].*[】\]]\s*")  # "【Habilidad adquirida】", "
 
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
-               breaks=(), trim=False, font="", epub2=False, reading=False):
+               breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -1300,6 +1332,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     breaks: títulos que se escriben como separador de escena ("Parte 1" sin nombre).
     trim: recorta el margen blanco de las ilustraciones (_trim). font: una de FONTS, incrustada.
     epub2: paquete EPUB 2 para lectores antiguos. reading: minutos de lectura en la página "Contenido".
+    kepub: secciones en formato Kobo (_kepub); el archivo debe acabar en .kepub.epub.
     Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número."""
     rules = _rules(replacements)
     typo = (lambda s, dashes=False: _typography(s, dashes)) if typography else (lambda s, dashes=False: s)
@@ -1521,7 +1554,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             z.writestr("OEBPS/cover.xhtml", cover)
             z.writestr("OEBPS/cover.jpg", _shrink(book.cover, limit) if limit and book.cover else book.cover)
             for name, text in files.items():
-                z.writestr(f"OEBPS/{name}", text)
+                z.writestr(f"OEBPS/{name}", _kepub(text) if kepub else text)
             for src, data in images.items():
                 data = _trim(data) if trim else data
                 data = _gray(data) if gray else data

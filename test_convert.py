@@ -2205,6 +2205,29 @@ def test_gray_illustrations_keep_color_cover():
     assert (art.n, cover.n) == (1, 3), (art.n, cover.n)
 
 
+def test_kepub_wraps_sentences_and_keeps_text():
+    book = convert.Book("Libro", "", jpeg(60, 80), [
+        convert.Block("heading", 1, "Capítulo 1: Inicio"),
+        convert.Block("p", 1, "Hola. ¿Vienes? Tom &amp; Jerry <i>dijo algo. Y más</i> fin"),
+        convert.Block("p", 1, "Sin punto final")], [0])
+    plain, kobo = TMP / "normal.epub", TMP / "kobo.kepub.epub"
+    convert.write_epub(book, [(0, "Capítulo 1: Inicio")], plain)
+    convert.write_epub(book, [(0, "Capítulo 1: Inicio")], kobo, kepub=True)
+    assert convert.check_epub(kobo) == [], convert.check_epub(kobo)
+    with zipfile.ZipFile(plain) as a, zipfile.ZipFile(kobo) as b:
+        before, after = a.read("OEBPS/sec001.xhtml").decode(), b.read("OEBPS/sec001.xhtml").decode()
+    text = lambda s: " ".join(html.unescape(re.sub(r"<[^>]+>", " ", s)).split())
+    assert text(before) == text(after), (before, after)
+    ids = re.findall(r'class="koboSpan" id="(kobo\.\d+\.\d+)"', after)
+    assert len(ids) == len(set(ids)) >= 6, ids
+    assert '<span class="koboSpan" id="kobo.2.1">Hola. </span>' in after, after
+    assert re.search(r'<i><span class="koboSpan" id="kobo\.2\.\d+">dijo algo\. </span>', after), after
+    assert 'id="book-columns"' in after and 'id="book-inner"' in after, after
+    assert all("koboSpan" in p for p in re.findall(r"<p[^>]*>.*?</p>", after)), after
+    assert convert._sentences("Uno. Dos... ¿Tres? «Cuatro.» cinco") == ["Uno. ", "Dos... ", "¿Tres? ",
+                                                                        "«Cuatro.» ", "cinco"]
+
+
 def test_check_epub_reports_problems():
     out = TMP / "revisar.epub"
     convert.write_epub(sectioned_book(), [(0, "Cap 1"), (6, "Cap 2")], out)
@@ -2753,6 +2776,43 @@ def test_window_warns_when_the_review_cannot_be_saved():
     window.close()
     assert "No se pudo guardar la revisión" in status, status
     assert not list(TMP.glob("*.json.tmp")), "quedó un temporal"
+
+
+def test_kepub_option_profiles_and_names():
+    import app
+
+    assert app._epub_name("C:/x/Libro", True) == "C:/x/Libro.kepub.epub"
+    assert app._epub_name("C:/x/Libro.epub", True) == "C:/x/Libro.kepub.epub"
+    assert app._epub_name("C:/x/Libro.KEPUB.epub", False) == "C:/x/Libro.epub"
+    assert app._epub_name("Vol. 1", False) == "Vol. 1.epub"
+    assert app.PROFILES["Kobo"]["kepub"] and not app.PROFILES["Kindle"]["kepub"]
+    assert app.PROFILES["Kindle"]["shrink_size"] == 1600 and not app.PROFILES["Kindle"]["gray"]
+    assert all("kepub" in p for name, p in app.PROFILES.items() if name != "Personalizado")
+    assert app._write_options({"kepub": True})["kepub"] and not app._write_options({})["kepub"]
+    assert "kepub" in app.INHERITED and "kepub" in app.PREFS
+
+
+def test_batch_with_kobo_writes_kepub():
+    import app
+
+    pdf = TMP / "lote-kobo" / "Mi Novela - Volumen 1.pdf"
+    pdf.parent.mkdir(exist_ok=True)
+    make_novel().replace(pdf)
+    results = app._batch([str(pdf)], {"kepub": True})
+    assert results[0][1] == "", results
+    assert pdf.with_name("Mi Novela - Volumen 1.kepub.epub").is_file(), list(pdf.parent.iterdir())
+
+
+def test_reader_kind_and_size_text():
+    import app
+
+    kindle, kobo, usb = (TMP / f"unidad-{name}" for name in ("kindle", "kobo", "usb"))
+    for folder in (kindle / "documents", kindle / "system", kobo / ".kobo", usb):
+        folder.mkdir(parents=True, exist_ok=True)
+    assert [app._reader_kind(r) for r in (kindle, kobo, usb)] == ["kindle", "kobo", "usb"]
+    assert app._size_text(18_400_000) == "18,4 MB" and app._size_text(51_000_000) == "51,0 MB"
+    assert app.KINDLE_MAIL == 50_000_000
+    assert all(len(root) == 3 and root.endswith(":\\") for root, _ in app._drives())
 
 
 def test_install_quotes_paths_with_apostrophes_for_powershell():

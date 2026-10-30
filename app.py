@@ -1,4 +1,5 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
+import ctypes
 import html
 import json
 import multiprocessing
@@ -12,6 +13,7 @@ import tempfile
 import tkinter as tk
 import tkinter.font as tkfont
 import traceback
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -36,20 +38,24 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "epub2", "reading", "credits",
-             "profile", "replacements")
+             "profile", "replacements", "kepub")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
-         "epub2", "reading", "profile", "autocase")
+         "epub2", "reading", "profile", "autocase", "kepub")
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
 # Perfil de salida -> opciones que fija (los demás perfiles dejan las opciones como estén)
 PROFILES = {"Personalizado": {},
-            "Celular": {"gray": False, "shrink": True, "shrink_size": 1200, "epub2": False},
-            "E-reader de tinta": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False},
-            "Tablet": {"gray": False, "shrink": True, "shrink_size": 2000, "epub2": False},
-            "Lector antiguo (EPUB 2)": {"gray": False, "shrink": True, "shrink_size": 1400, "epub2": True}}
+            "Celular": {"gray": False, "shrink": True, "shrink_size": 1200, "epub2": False, "kepub": False},
+            "E-reader de tinta": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": False},
+            "Tablet": {"gray": False, "shrink": True, "shrink_size": 2000, "epub2": False, "kepub": False},
+            # Kindle en color: Amazon convierte el EPUB y la app del celular y el Colorsoft lo muestran
+            "Kindle": {"gray": False, "shrink": True, "shrink_size": 1600, "epub2": False, "kepub": False},
+            "Kobo": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": True},
+            "Lector antiguo (EPUB 2)": {"gray": False, "shrink": True, "shrink_size": 1400, "epub2": True,
+                                        "kepub": False}}
 FONT_CHOICES = ["Del lector"] + list(convert.FONTS)
 KIND_COLOR = {"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a", "image": "#2e7d32", "dropped": "#8a8a8a",
               "separator": "#7a5c00"}
@@ -129,13 +135,49 @@ def _write_options(state, breaks=()):
             "replacements": [tuple(rule) for rule in state.get("replacements", [])],
             "credits": bool(state.get("credits")), "gray": bool(state.get("gray")), "trim": bool(state.get("trim")),
             "font": state.get("font") if state.get("font") in convert.FONTS else "",
-            "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "breaks": list(breaks)}
+            "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
+            "breaks": list(breaks)}
 
 
 def _write_checked(book, chapters, out, removed, options):
     """write_epub y, en el mismo proceso de trabajo, check_epub: devuelve los problemas del EPUB."""
     convert.write_epub(book, chapters, out, removed=removed, **options)
     return convert.check_epub(out)
+
+
+def _epub_name(path, kepub):
+    """Nombre del EPUB: el Kobo solo usa su motor KEPUB si el archivo acaba en .kepub.epub."""
+    return re.sub(r"(\.kepub)?\.epub$", "", str(path), flags=re.I) + (".kepub.epub" if kepub else ".epub")
+
+
+KINDLE_MAIL = 50_000_000  # límite de Send to Kindle por correo; la web admite hasta 200 MB
+
+
+def _size_text(size):
+    """Tamaño en MB decimales, como da Amazon sus límites, con coma decimal."""
+    return f"{size / 1e6:.1f} MB".replace(".", ",")
+
+
+def _reader_kind(root):
+    """"kindle", "kobo" o "usb" según las carpetas de la unidad."""
+    root = Path(root)
+    if (root / "documents").is_dir() and (root / "system").is_dir():
+        return "kindle"
+    return "kobo" if (root / ".kobo").is_dir() else "usb"
+
+
+def _drives():
+    """Unidades extraíbles con disco: [(raíz, etiqueta)]. Los lectores MTP no tienen letra y no salen;
+    un lector de tarjetas vacío falla en GetVolumeInformationW y se salta."""
+    k32 = ctypes.windll.kernel32
+    mask, found = k32.GetLogicalDrives(), []
+    for n in range(26):
+        root = f"{chr(65 + n)}:\\"
+        if mask >> n & 1 and k32.GetDriveTypeW(root) == 2:  # DRIVE_REMOVABLE
+            label = ctypes.create_unicode_buffer(261)
+            if k32.GetVolumeInformationW(root, label, 261, None, None, None, None, 0):
+                found.append((root, label.value or "USB"))
+    return found
 
 
 # La revisión (tipos, títulos editados, datos del libro y opciones) se guarda junto al PDF en un
@@ -304,8 +346,9 @@ def _batch(pdfs, options, progress=None):
     for n, pdf in enumerate(pdfs):
         try:
             book, chapters, removed, state = _prepare(pdf, options)
-            problems = _write_checked(book, chapters, Path(pdf).with_suffix(".epub"), removed,
-                                      _write_options(state, state["_breaks"]))
+            written = _write_options(state, state["_breaks"])
+            problems = _write_checked(book, chapters, _epub_name(Path(pdf).with_suffix(""), written["kepub"]),
+                                      removed, written)
             results.append((Path(pdf).name, "", problems))
         except Exception as e:
             results.append((Path(pdf).name, str(e) or type(e).__name__, []))
@@ -531,7 +574,7 @@ class App:
         options = ttk.Frame(root, padding=(8, 0))
         options.pack(side="bottom", fill="x")
         ttk.Label(options, text="Perfil:").pack(side="left", padx=(0, 4))
-        self.profile_var = tk.StringVar(value="Personalizado")  # fija gris, tamaño de imagen y EPUB 2
+        self.profile_var = tk.StringVar(value="Personalizado")  # fija gris, tamaño de imagen, EPUB 2 y KEPUB
         profile = ttk.Combobox(options, textvariable=self.profile_var, values=list(PROFILES), width=21,
                                state="readonly")
         profile.pack(side="left")
@@ -561,6 +604,7 @@ class App:
         self.credits_var = tk.BooleanVar(value=False)
         self.reading_var = tk.BooleanVar(value=False)
         self.epub2_var = tk.BooleanVar(value=False)
+        self.kepub_var = tk.BooleanVar(value=False)
         extras = ttk.Menubutton(options, text="Opciones")
         menu = tk.Menu(extras, tearoff=False)
         for label, var in (("Limpieza tipográfica", self.typography_var), ("Imágenes en gris", self.gray_var),
@@ -568,7 +612,8 @@ class App:
                                                                     self.trim_var),
                            ("Página de créditos", self.credits_var),
                            ("Minutos de lectura en el índice", self.reading_var),
-                           ("EPUB 2 (lectores antiguos)", self.epub2_var)):
+                           ("EPUB 2 (lectores antiguos)", self.epub2_var),
+                           ("Formato Kobo (KEPUB)", self.kepub_var)):
             menu.add_checkbutton(label=label, variable=var, command=self.update_preview)
         extras.configure(menu=menu)
         extras.pack(side="left", padx=(12, 0))
@@ -1159,9 +1204,11 @@ class App:
 
     def generate(self):
         out = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[("EPUB", "*.epub")],
-                                           initialdir=self.pdf.parent, initialfile=self.pdf.stem + ".epub")
+                                           initialdir=self.pdf.parent,
+                                           initialfile=_epub_name(self.pdf.stem, self.kepub_var.get()))
         if not out:
             return
+        out = _epub_name(out, self.kepub_var.get())
         for name in BOOK_FIELDS:
             if hasattr(self, f"{name}_var"):
                 setattr(self.book, name, getattr(self, f"{name}_var").get().strip())
@@ -1197,15 +1244,46 @@ class App:
         win = tk.Toplevel(self.root)
         win.title("EPUB listo")
         win.transient(self.root)
-        ttk.Label(win, text=str(out), padding=10).pack()
+        is_file, kindle = Path(out).is_file(), self.profile_var.get() == "Kindle"
+        text = str(out)
+        if is_file:
+            size = Path(out).stat().st_size
+            text += f"\n{_size_text(size)}"
+            if kindle and size > KINDLE_MAIL:
+                text += "\nPasa de 50 MB: por correo no llega al Kindle; usa la web de Send to Kindle (hasta 200 MB)."
+        ttk.Label(win, text=text, padding=10).pack()
         row = ttk.Frame(win, padding=(10, 0, 10, 10))
         row.pack()
-        if Path(out).is_file():
+        if is_file:
             ttk.Button(row, text="Abrir EPUB", command=lambda: self.open_external(out, win)).pack(side="left", padx=4)
         ttk.Button(row, text="Abrir carpeta", command=lambda: self.open_external(out, win, folder=True)).pack(side="left",
                                                                                                          padx=4)
+        if is_file:
+            for root, label in _drives():
+                if _reader_kind(root) == "kindle":  # el Kindle no lee EPUB por USB: solo por Send to Kindle
+                    kindle = True
+                    ttk.Label(win, text=f"{label} ({root[:2]}) es un Kindle: no lee EPUB por USB. "
+                                        "Usa «Enviar a Kindle…».", padding=(10, 0, 10, 10)).pack()
+                    continue
+                ttk.Button(row, text=f"Copiar a {label} ({root[:2]})",
+                           command=lambda r=root: self.copy_to(out, r, win)).pack(side="left", padx=4)
+            if kindle:
+                ttk.Button(row, text="Enviar a Kindle…", command=lambda: self.send_to_kindle(out, win)).pack(side="left",
+                                                                                                          padx=4)
         ttk.Button(row, text="Cerrar", command=win.destroy).pack(side="left", padx=4)
         self.result_window = win
+
+    def copy_to(self, out, root, win):
+        """Copia el EPUB al lector, en Books/ si la tiene, en el proceso de trabajo (USB lento)."""
+        folder = Path(root) / "Books" if (Path(root) / "Books").is_dir() else Path(root)
+        if self.run(shutil.copy2, (str(out), str(folder)),
+                    lambda dest: messagebox.showinfo("Copiado", f"EPUB copiado en:\n{dest}"), busy="Copiando…"):
+            win.destroy()
+
+    def send_to_kindle(self, out, win):
+        """Send to Kindle no tiene API pública: se abre su web y el archivo, seleccionado, para arrastrarlo."""
+        webbrowser.open("https://www.amazon.com/sendtokindle")
+        self.open_external(out, win, folder=True)
 
     def open_external(self, path, win=None, folder=False):
         try:
@@ -1401,7 +1479,7 @@ class App:
             return
         self.save_review()  # el PDF abierto también se convierte con lo revisado hasta ahora
         pdfs = sorted(Path(folder).glob("*.pdf"))
-        existing = [p for p in pdfs if p.with_suffix(".epub").exists()]
+        existing = [p for p in pdfs if p.with_suffix(".epub").exists() or p.with_suffix(".kepub.epub").exists()]
         if existing:
             answer = messagebox.askyesnocancel(
                 "Convertir carpeta", f"{len(existing)} de {len(pdfs)} PDF ya tienen su EPUB.\n\n"
@@ -1623,9 +1701,11 @@ class App:
             return
         pdfs = sorted(paths)
         out = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[("EPUB", "*.epub")],
-                                           initialdir=Path(pdfs[0]).parent, initialfile="Recopilatorio.epub")
+                                           initialdir=Path(pdfs[0]).parent,
+                                           initialfile=_epub_name("Recopilatorio", self.kepub_var.get()))
         if not out:
             return
+        out = _epub_name(out, self.kepub_var.get())
         self.save_review()  # el tomo abierto entra con lo revisado hasta ahora
         options = {name: self.fields()[name].get() for name in PREFS}
         options["replacements"] = self.replacements
@@ -1728,7 +1808,7 @@ class App:
                 "typography": self.typography_var, "shrink": self.shrink_var, "shrink_size": self.shrink_size_var,
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
-                "autocase": self.autocase_var}
+                "autocase": self.autocase_var, "kepub": self.kepub_var}
 
     def rows(self):
         return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title")] for item in self.tree.get_children()}
