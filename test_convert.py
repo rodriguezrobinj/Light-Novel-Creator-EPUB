@@ -2205,6 +2205,78 @@ def test_gray_illustrations_keep_color_cover():
     assert (art.n, cover.n) == (1, 3), (art.n, cover.n)
 
 
+def test_typography_dash_at_paragraph_end():
+    """Kage 5: la portadilla "- Kage no Jitsuryokusha ni Naritakute! -" como párrafo rompía la tipografía."""
+    assert convert._typography("- Kage no Jitsuryokusha ni Naritakute! -") == "—Kage no Jitsuryokusha ni Naritakute! —"
+    assert convert._typography("-") == "—"
+
+
+def test_footnotes_leave_body_and_keep_reference_place():
+    """Re Zero: llamada elevada en letra pequeña tras una palabra y, al pie, la nota en letra menor que
+    empieza por ese número. La llamada se quedaba al principio del párrafo o suelta, y la nota, en el cuerpo."""
+    doc = pymupdf.open()
+    cw = 11 * 0.6  # ancho de una letra de Courier a 11 pt
+    x = 92 + cw * len("Pero estaba grabada en piedra")
+    m = 92 + cw * len("Media tres m")
+    add_page(doc, 1, [
+        (72, 100, "Capitulo 1: Inicio", 20, "helv"),
+        (92, 154, "Pero estaba grabada en piedra", 11, "cour"),
+        (x, 151, "2", 7, "cour"),            # llamada elevada 3 pt
+        (x + 7 * 0.6, 154, ". Fin.", 11, "cour"),
+        (92, 182, "Media tres m", 11, "cour"),
+        (m, 179, "2", 7, "cour"),            # exponente sin nota: «m2» sigue siendo texto
+        (m + 7 * 0.6, 182, " de alto.", 11, "cour"),
+        (92, 240, "Un tic", 11, "cour"),
+        (92 + cw * 6, 237, "4", 7, "cour"),
+        (92 + cw * 6 + 7 * 0.6, 240, " raro.", 11, "cour"),
+        (72, 720, "4 Un gesto involuntario.", 9, "cour"),  # Re Zero 3: el número va en el span de la nota
+        (72, 737, "2", 7, "cour"),           # la nota al pie, en letra menor
+        (72 + 7 * 0.6 + 0.8, 740, "Su respuesta permanecia firme y", 9, "cour"),
+        (72, 752, "no cambio", 9, "coit"),
+        (72 + 9 * 0.6 * 9, 752, ".", 9, "cour"),
+    ])
+    for number in (2, 3):
+        add_page(doc, number, [(92, 140, line("Otra pagina con texto normal de la novela", 57), 11, "cour"),
+                               (72, 154, "y su final.", 11, "cour")])
+    path = TMP / "notas-al-pie.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    note = next(b for b in book.blocks if "piedra" in b.html)
+    assert note.html == ('Pero estaba grabada en piedra<span class="nota">Su respuesta permanecia firme y '
+                         '<i>no cambio</i>.</span>. Fin.'), note.html
+    assert any(b.html == "Media tres m2 de alto." for b in book.blocks), [b.html for b in book.blocks]
+    assert any(b.html == 'Un tic<span class="nota">Un gesto involuntario.</span> raro.' for b in book.blocks), \
+        [b.html for b in book.blocks]
+    assert not any("permanecia" in b.html for b in book.blocks if b is not note), [b.html for b in book.blocks]
+
+
+def test_footnotes_become_popup_notes():
+    book = convert.Book("Libro", "", jpeg(60, 80), [
+        convert.Block("heading", 1, "Capitulo 1"),
+        convert.Block("p", 1, 'Hola<span class="nota">Nota <i>uno</i>.</span>. Fin.'),
+        convert.Block("heading", 2, "Capitulo 2"),
+        convert.Block("p", 2, 'Adios<span class="nota">Nota dos.</span>.')], [0, 2])
+    chapters = [(0, "Capitulo 1"), (2, "Capitulo 2")]
+    out, old, kobo = TMP / "notas.epub", TMP / "notas2.epub", TMP / "notas.kepub.epub"
+    convert.write_epub(book, chapters, out)
+    convert.write_epub(book, chapters, old, epub2=True)
+    convert.write_epub(book, chapters, kobo, kepub=True)
+    for path in (out, old, kobo):
+        assert convert.check_epub(path) == [], (path, convert.check_epub(path))
+    first, second = epub_file(out, "OEBPS/sec001.xhtml"), epub_file(out, "OEBPS/sec002.xhtml")
+    assert 'Hola<a class="nref" epub:type="noteref" href="#nota1" id="ref1">1</a>. Fin.' in first, first
+    assert ('<aside epub:type="footnote" class="nota" id="nota1"><p><a href="#ref1">1</a>. Nota <i>uno</i>.</p>'
+            '</aside>') in first, first
+    assert 'href="#nota2"' in second and 'id="nota2"' in second, second  # numeración seguida en el libro
+    epub2 = epub_file(old, "OEBPS/sec001.xhtml")
+    assert '<div class="nota" id="nota1">' in epub2 and "epub:type" not in epub2.split("<body>")[1], epub2
+    text = convert.section_text(book, 1, 2)
+    assert text == "Hola[Nota: Nota <i>uno</i>.]. Fin.", text
+    convert.edit_section(book, 1, 2, text + "\n\nNuevo[Nota: Otra.] y [Nota: <i>mal]</i>")
+    assert book.blocks[1].html == 'Hola<span class="nota">Nota <i>uno</i>.</span>. Fin.', book.blocks[1].html
+    assert book.blocks[2].html == 'Nuevo<span class="nota">Otra.</span> y [Nota: <i>mal]</i>', book.blocks[2].html
+
+
 def test_kepub_wraps_sentences_and_keeps_text():
     book = convert.Book("Libro", "", jpeg(60, 80), [
         convert.Block("heading", 1, "Capítulo 1: Inicio"),

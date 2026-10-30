@@ -105,7 +105,8 @@ def _dashes(chunks):
     opened = False
 
     def put(n, s):
-        chunks[chars[n][1]][chars[n][2]] = s
+        if n < len(chars):  # tras un guion al final del párrafo, el espacio siguiente es imaginario
+            chunks[chars[n][1]][chars[n][2]] = s
 
     for n, (c, _, _) in enumerate(chars):
         if c not in "-–—":
@@ -183,11 +184,31 @@ def _italic(s):
     return bool(s["flags"] & pymupdf.TEXT_FONT_ITALIC) or "italic" in font or "oblique" in font
 
 
+REF = re.compile(r"\d{1,3}|\*{1,3}|[†‡]")  # llamada de nota: número o asterisco en letra pequeña
+REF_MARK = re.compile(r'<sup class="ref">([^<]+)</sup>')  # llamada en una fila, hasta saber si hay nota
+NOTE = re.compile(r'<span class="nota">(.*?)</span>')  # nota al pie dentro de su párrafo
+
+
+def _ref(s, spans):
+    """Llamada de nota: span de cifras pegado a una palabra en letra mayor y elevado sobre su línea.
+    Toma la línea base de esa palabra, porque elevado caería en otra fila. Si no lo es, s tal cual."""
+    near = [t for t in spans if t is not s and t["size"] >= s["size"] * 1.25
+            and -1 <= t["origin"][1] - s["origin"][1] <= t["size"] * 0.6
+            and min(abs(s["bbox"][0] - t["bbox"][2]), abs(t["bbox"][0] - s["bbox"][2])) < t["size"]]
+    if not near:
+        return s
+    t = min(near, key=lambda t: abs(t["origin"][1] - s["origin"][1]))
+    return {**s, "origin": (s["origin"][0], t["origin"][1]), "ref": True}
+
+
 def _row(spans):
     spans.sort(key=lambda s: s["origin"][0])
     texts, parts = [], []
     for k, (prev, s) in enumerate(zip([None] + spans, spans)):
         t = BAD_XML.sub("", s["text"])
+        if s.get("ref"):  # fuera del texto plano: no cuenta para títulos ni párrafos
+            parts.append(f'<sup class="ref">{html.escape(t.strip())}</sup>')
+            continue
         if k == len(spans) - 1 and t.rstrip().endswith(SOFT_HYPHEN):
             t = t.rstrip()[:-1] + "-"
         t = t.replace(SOFT_HYPHEN, "")
@@ -217,6 +238,7 @@ def _rows(page):
     flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
     spans = [s for b in page.get_text("dict", flags=flags)["blocks"] for line in b.get("lines", [])
              if abs(line["dir"][0]) > 0.9 for s in line["spans"] if s["text"].strip()]
+    spans = [_ref(s, spans) if REF.fullmatch(s["text"].strip()) else s for s in spans]
     rows, group = [], []
     for s in sorted(spans, key=lambda s: s["origin"][1]):
         if group and abs(s["origin"][1] - group[0]["origin"][1]) > 2:
@@ -226,6 +248,46 @@ def _rows(page):
     if group:
         rows.append(_row(group))
     return rows
+
+
+def _footnotes(rows, body, height):
+    """Separa las notas al pie de una página: filas de la mitad inferior, en letra menor que el cuerpo,
+    que empiezan por una llamada; las filas siguientes en esa letra las continúan. El número puede venir
+    en el mismo span que la nota («5 Los tics…», Re Zero 3): vale si la página tiene esa llamada.
+    Devuelve (filas del cuerpo, {número: html de la nota})."""
+    refs = {n for r in rows for n in REF_MARK.findall(r.html)}
+    kept, notes, current = [], {}, None
+    for r in rows:
+        m = REF_MARK.match(r.html) or re.match(r"(\d{1,3}|\*{1,3}|[†‡])\s+", r.html)
+        small = not r.heading and r.size < body - 0.5 and r.y > height / 2
+        if small and m and (m[0].startswith("<") or m[1] in refs):
+            current = m[1]
+            notes[current] = r.html[m.end():].strip()
+        elif small and current is not None:
+            notes[current] = _join(notes[current], r.html)
+        else:
+            current = None
+            kept.append(r)
+    return kept, notes
+
+
+def _attach_notes(blocks, notes):
+    """Cambia cada llamada de los bloques por su nota (dentro del párrafo, así sobrevive a editar y
+    mover secciones). Una llamada sin nota vuelve a ser texto («m²»); una nota sin llamada va al final
+    del último párrafo, para no perderla."""
+    used = set()
+
+    def note(m):
+        if m[1] not in notes or m[1] in used:  # cada nota, una vez: el segundo «2» es un exponente
+            return m[1]
+        used.add(m[1])
+        return f'<span class="nota">{notes[m[1]]}</span>'
+
+    for b in blocks:
+        b.html = REF_MARK.sub(note, b.html)
+    last = next((b for b in reversed(blocks) if b.kind == "p"), None)
+    if last is not None:
+        last.html += "".join(f'<span class="nota">{text}</span>' for num, text in notes.items() if num not in used)
 
 
 def _norm(text):
@@ -580,6 +642,7 @@ def count_matches(book, replacements):
 
 TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
 INLINE = re.compile(r"&lt;(/?)([ib])&gt;")
+NOTE_MARK = re.compile(r"\[Nota: (.+?)\]")  # nota al pie en el editor de texto
 
 
 def section_text(book, start, end):
@@ -592,23 +655,29 @@ def section_text(book, start, end):
 def _line(b, k):
     """Línea de section_text del bloque b, que es el número k del libro."""
     if b.kind == "p":
-        return html.unescape(b.html)
+        return html.unescape(NOTE.sub(r"[Nota: \1]", b.html))
     if b.kind == "heading":
         return "# " + html.unescape(b.html)
     return f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]"
 
 
-def _inline(text):
-    """Línea escrita por el usuario a XHTML: escapada, salvo <i> y <b>, que se conservan si están bien
-    cerradas; si no, se quitan para no romper el EPUB."""
-    out = INLINE.sub(r"<\1\2>", html.escape(text, quote=False))
+def _balanced(out):
     stack = []
     for close, tag in re.findall(r"<(/?)([ib])>", out):
         if not close:
             stack.append(tag)
         elif not stack or stack.pop() != tag:
-            return TAGS.sub("", out)
-    return TAGS.sub("", out) if stack else out
+            return False
+    return not stack
+
+
+def _inline(text):
+    """Línea escrita por el usuario a XHTML: escapada, salvo <i> y <b>, que se conservan si están bien
+    cerradas; si no, se quitan para no romper el EPUB. "[Nota: …]" vuelve a ser la nota al pie, si
+    dentro las etiquetas también cierran (si no, cruzarían el límite de la nota)."""
+    out = INLINE.sub(r"<\1\2>", html.escape(text, quote=False))
+    out = out if _balanced(out) else TAGS.sub("", out)
+    return NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
 
 
 def edit_section(book, start, end, text):
@@ -1059,6 +1128,7 @@ def analyze(pdf_path, progress=None):
                     skipped.append((num, dropped, "títulos repetidos de una página de título, omitidos"))
                 rows = kept
             rows = _join_labels(rows)
+            rows, notes = _footnotes(rows, body, page.rect.height)
             start = len(blocks)
             normal = [r for r in rows if not r.heading]
             # Ilustración con el texto de la novela encima: se guardan las dos cosas. El párrafo abierto
@@ -1114,6 +1184,8 @@ def analyze(pdf_path, progress=None):
                     short = r.x1 < right - (right - left) * 0.2
                     last_text = r.text
                 prev = r
+            # Desde el párrafo que venía abierto de la página anterior: también puede llevar llamadas de esta
+            _attach_notes(blocks[max(start - 1, 0):], notes)
             # Imágenes que no entran solas, apuntadas como descartadas para poder recuperarlas en la
             # ventana: las de dentro del texto y el fondo de una página de título. Los fondos y barras
             # que se repiten en muchas páginas y las diminutas no: serían ruido.
@@ -1201,6 +1273,9 @@ p.status { text-indent: 0; text-align: center; font-family: sans-serif; font-siz
   padding: 0.4em; border: 1px solid #888888; }
 p.status + p.status { margin-top: -0.85em; border-top: 0; }
 span.min { font-size: 0.8em; color: #777777; }
+a.nref { font-size: 0.75em; vertical-align: super; line-height: 0; text-decoration: none; }
+.nota { font-size: 0.85em; margin-top: 1.5em; }
+.nota p { text-indent: 0; }
 """
 STYLES = {  # nombre en la ventana -> CSS propio del estilo
     "Clásico": """body { font-family: serif; }
@@ -1359,10 +1434,19 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     files, images = {}, {}
     subtitles = {}  # archivo -> [(ancla, título escapado)]: subentradas del índice
     pages, marked = [], set()  # [(archivo, página)] de la lista de páginas; páginas ya marcadas
+    noted = 0  # notas al pie escritas: numeración seguida en todo el libro, ids únicos
     for n, (title, is_chapter, blocks) in enumerate(sections, 1):
         name = f"sec{n:03d}.xhtml"
         parts = [_chapter_heading(fix(html.escape(title)))] if is_chapter else []
         pending = None  # página que empieza en este tramo: su marca va en el siguiente párrafo o título
+        notes = []  # (número, html) de las notas de esta sección: van al final, tras el texto
+
+        def noteref(m):
+            nonlocal noted
+            noted += 1
+            notes.append((noted, m[1]))
+            kind = "" if epub2 else ' epub:type="noteref"'
+            return f'<a class="nref"{kind} href="#nota{noted}" id="ref{noted}">{noted}</a>'
 
         def mark():
             nonlocal pending
@@ -1390,7 +1474,12 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             else:
                 css = "status" if STATUS.fullmatch(_plain(b)) else "center" if b.align else ""
                 attr = f' class="{css}"' if css else ""
-                parts.append(f"<p{attr}>{mark()}{fix(b.html, dashes=True)}</p>")
+                parts.append(f"<p{attr}>{mark()}{NOTE.sub(noteref, fix(b.html, dashes=True))}</p>")
+        # Los lectores con notas emergentes (Kobo, Kindle, Apple Books) ocultan el aside y lo muestran
+        # al tocar la llamada; los demás lo dejan al final de la sección, con enlace de vuelta.
+        tag, kind = ("div", "") if epub2 else ("aside", ' epub:type="footnote"')
+        parts += [f'<{tag}{kind} class="nota" id="nota{k}"><p><a href="#ref{k}">{k}</a>. {text}</p></{tag}>'
+                  for k, text in notes]
         files[name] = _xhtml(title, "\n".join(parts), lang)
 
     uid = f"urn:uuid:{uuid.uuid4()}"
