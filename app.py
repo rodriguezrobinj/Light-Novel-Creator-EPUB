@@ -228,10 +228,38 @@ def _inherited(pdf, series):
                 found.append((path.stat().st_mtime, path.name, state))
         except (OSError, ValueError, AttributeError):
             continue
-    if not found:
-        return {}
-    state = max(found, key=lambda f: f[:2])[2]
+    if found:
+        state = max(found, key=lambda f: f[:2])[2]
+    else:  # tomo en otra carpeta: lo guardado al revisar otro tomo de la serie (_remember_series)
+        state = _series_store().get(series.strip().lower(), {}) if series else {}
     return {name: state[name] for name in INHERITED if name in state}
+
+
+def _series_path():
+    return SETTINGS.with_suffix(".series.json")  # junto a las preferencias: vale para cualquier carpeta
+
+
+def _series_store():
+    try:
+        store = json.loads(_series_path().read_text(encoding="utf-8"))
+        return store if isinstance(store, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_series(state):
+    """Guarda lo que comparten los tomos (INHERITED) con el nombre de la serie, para heredarlo aunque
+    el siguiente tomo esté en otra carpeta."""
+    series = str(state.get("series", "")).strip().lower()
+    if not series:
+        return
+    store = _series_store()
+    store[series] = {name: state[name] for name in INHERITED if name in state}
+    try:
+        _series_path().parent.mkdir(parents=True, exist_ok=True)
+        _write_json(_series_path(), store)
+    except OSError:
+        pass  # sin esto solo se hereda en la misma carpeta, como antes
 
 
 def _replay(book, state):
@@ -355,6 +383,26 @@ def _batch(pdfs, options, progress=None):
         if progress:
             progress(n + 1, len(pdfs))
     return results
+
+
+WATCH_MS = 10_000  # cada cuánto se mira la carpeta vigilada
+
+
+def _ready(folder, sizes, skip):
+    """PDF de la carpeta vigilada listos para convertir: sin EPUB, fuera de skip y con el mismo tamaño
+    que en la vuelta anterior (si cambia, aún se está copiando o descargando).
+    Devuelve (listos, {pdf: tamaño} para la vuelta siguiente)."""
+    ready, now = [], {}
+    for pdf in sorted(Path(folder).glob("*.pdf")):
+        if str(pdf) in skip or pdf.with_suffix(".epub").exists() or pdf.with_suffix(".kepub.epub").exists():
+            continue
+        try:
+            now[str(pdf)] = size = pdf.stat().st_size
+        except OSError:
+            continue
+        if size and sizes.get(str(pdf)) == size:
+            ready.append(str(pdf))
+    return ready, now
 
 
 def _omnibus(pdfs, out, options, progress=None):
@@ -512,6 +560,7 @@ class App:
         menu.add_command(label="Informe de calidad…", command=self.quality)
         menu.add_command(label="Panel de serie…", command=self.series_panel)
         menu.add_command(label="Volumen recopilatorio…", command=self.omnibus)
+        menu.add_command(label="Vigilar una carpeta…", command=self.watch_folder)
         menu.add_separator()
         menu.add_command(label="Instalar en este equipo", command=self.install)
         menu.add_command(label="Desinstalar", command=self.uninstall)
@@ -685,6 +734,12 @@ class App:
         self.redraw()
         self.load_settings()
         root.after(100, self.poll)
+        # Carpeta vigilada de la sesión anterior: lo llegado con la ventana cerrada también se convierte
+        self.watch, self.watch_sizes, self.watch_skip = "", {}, set()
+        watch = self.settings.get("watch")
+        if isinstance(watch, str) and watch and Path(watch).is_dir():  # Path("") sería la carpeta actual
+            self.watch = watch
+        root.after(WATCH_MS, self.poll_watch)
 
     def run(self, work, args, done, report=False, busy="Analizando…"):
         """Ejecuta work(*args) en otro proceso y llama a done(resultado) en la ventana.
@@ -1511,6 +1566,51 @@ class App:
         if folder:
             self.result_buttons(folder)
 
+    def watch_folder(self):
+        """Activa o desactiva la carpeta vigilada; se recuerda entre sesiones."""
+        if self.watch:
+            if messagebox.askyesno("Carpeta vigilada", f"Se está vigilando:\n{self.watch}\n\n¿Dejar de vigilarla?"):
+                self.set_watch("")
+            return
+        folder = filedialog.askdirectory(initialdir=self.settings.get("folder"), title="Carpeta que vigilar")
+        if folder:
+            self.set_watch(folder)
+            messagebox.showinfo("Carpeta vigilada", f"Mientras esta ventana esté abierta, cada PDF nuevo de\n{folder}\n"
+                                "se convierte solo, junto al PDF, con su revisión, los datos de su serie o las "
+                                "opciones actuales.\n\nLos PDF que ya están en la carpeta no: para esos, "
+                                "«Convertir carpeta…».")
+
+    def set_watch(self, folder):
+        # Lo que ya hay al activarla no se toca: solo lo que llegue después
+        self.watch, self.watch_sizes = folder, {}
+        self.watch_skip = {str(p) for p in Path(folder).glob("*.pdf")} if folder else set()
+        self.settings["watch"] = folder
+        self.status.configure(text=f"Vigilando {folder}" if folder else "Carpeta vigilada desactivada")
+
+    def poll_watch(self):
+        """Convierte los PDF nuevos de la carpeta vigilada, salvo si la ventana está ocupada con otro trabajo."""
+        self.root.after(WATCH_MS, self.poll_watch)
+        if not self.watch or self.done or not Path(self.watch).is_dir():
+            return
+        ready, self.watch_sizes = _ready(self.watch, self.watch_sizes, self.watch_skip)
+        if ready:
+            self.watch_skip.update(ready)  # un PDF que falla no se reintenta en cada vuelta
+            fields = self.fields()
+            options = {name: fields[name].get() for name in PREFS}
+            self.run(_batch, (ready, options), self.watch_done, report=True, busy="Carpeta vigilada:")
+
+    def watch_done(self, results):
+        """Sin ventanas emergentes: la conversión pasa sola, quizá con el usuario en otra cosa."""
+        self.progress.configure(value=0)
+        failed = [name for name, error, _ in results if error]
+        warned = [name for name, error, problems in results if problems and not error]
+        text = f"Carpeta vigilada: {len(results) - len(failed)} EPUB nuevo(s) ({datetime.now():%H:%M})"
+        if warned:
+            text += " · con avisos: " + ", ".join(warned)
+        if failed:
+            text += " · no se pudo: " + ", ".join(failed)
+        self.status.configure(text=text)
+
     def set_cover(self, choice):
         """Cambia la portada (ver _cover_image)."""
         kind, value = choice
@@ -1822,6 +1922,7 @@ class App:
         try:
             state["pdf"] = _fingerprint(self.pdf)
             _write_json(_review_path(self.pdf), state)
+            _remember_series(state)
         except OSError as e:  # PDF borrado, carpeta de solo lectura, OneDrive bloqueándolo: el trabajo en curso sigue
             self.status.configure(text=f"No se pudo guardar la revisión: {e.strerror or e}")
 

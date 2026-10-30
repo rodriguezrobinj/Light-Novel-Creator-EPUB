@@ -1774,6 +1774,53 @@ def review_volume_one(folder):
     window.close()
 
 
+def test_series_data_is_inherited_from_another_folder():
+    """El tomo 2 en otra carpeta que el 1: hereda reemplazos y datos de la serie guardados al revisar el 1."""
+    import app
+
+    app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"
+    other = TMP / f"otra-{time_ns()}"
+    other.mkdir()
+    assert app._inherited(other / "Saga X - Volumen 2.pdf", "Saga X") == {}
+    app._remember_series({"series": "Saga X ", "translator": "Ana", "replacements": [["Primera", "Inicial"]],
+                          "title": "Solo del tomo 1", "kepub": True})
+    got = app._inherited(other / "Saga X - Volumen 2.pdf", "saga x")
+    assert got == {"translator": "Ana", "replacements": [["Primera", "Inicial"]], "kepub": True}, got
+    assert app._inherited(other / "Otra - Volumen 2.pdf", "Otra") == {}
+
+
+def test_watched_folder_converts_new_pdfs_once():
+    import time
+
+    import app
+
+    folder = TMP / f"vigilada-{time_ns()}"
+    folder.mkdir()
+    make_novel().replace(folder / "Ya estaba.pdf")
+    root, window = visible_window()
+    window.set_watch(str(folder))  # lo que había al activarla no se convierte
+    make_novel().replace(folder / "Mi Serie - Volumen 05.pdf")
+    (folder / "roto.pdf").write_bytes(b"no es un pdf")
+    runs = []
+    original = window.run
+    window.run = lambda *args, **kwargs: runs.append(args[1][0]) or original(*args, **kwargs)
+    try:
+        window.poll_watch()  # primera vuelta: apunta tamaños (podría estar copiándose)
+        assert not runs, runs
+        window.poll_watch()
+        deadline = time.time() + 120
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+        window.poll_watch()  # el roto no se reintenta; el convertido ya tiene EPUB
+        status = window.status.cget("text")
+    finally:
+        window.close()
+    assert [sorted(Path(p).name for p in r) for r in runs] == [["Mi Serie - Volumen 05.pdf", "roto.pdf"]], runs
+    assert (folder / "Mi Serie - Volumen 05.epub").is_file() and not (folder / "Ya estaba.epub").exists()
+    assert "Carpeta vigilada" in status and "roto.pdf" in status, status
+
+
 def test_window_new_volume_inherits_series_data():
     folder = series_folder()
     review_volume_one(folder)
