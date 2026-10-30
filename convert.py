@@ -1226,6 +1226,13 @@ def analyze(pdf_path, progress=None):
             heads = [k for k, b in enumerate(blocks) if b.kind == "heading"]
             first = next((k for k in heads if KEYWORDS.match(html.unescape(blocks[k].html))), None)
             candidates = [k for k in heads if first is None or k >= first]
+            # "El lado de Beretta" justo bajo "Capítulo 21: …" (Maryoku 6) es un subtítulo: como capítulo dejaba
+            # vacío el 21. Con él, los títulos del libro que empiezan igual ("El lado de Selene").
+            text = lambda k: html.unescape(blocks[k].html)
+            lead = lambda k: " ".join(text(k).lower().split()[:2])
+            under = {lead(k) for k in candidates if k - 1 in candidates and KEYWORDS.match(text(k - 1))
+                     and not KEYWORDS.match(text(k))}
+            candidates = [k for k in candidates if KEYWORDS.match(text(k)) or lead(k) not in under]
         # "Parte 1", "Parte 2"… sin nombre y con la numeración que vuelve a empezar en cada capítulo
         # (Re Zero) son apartados del capítulo: subtítulos. "Parte uno: Stifled Shadow" sí es una parte.
         bare = [k for k in candidates if SUBPART.fullmatch(html.unescape(blocks[k].html).strip())]

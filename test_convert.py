@@ -648,6 +648,21 @@ def chapter_page(doc, number, title_lines):
     ])
 
 
+def test_point_of_view_titles_under_chapter_are_subtitles_without_bookmarks():
+    """Maryoku 6, sin marcadores: "El lado de Beretta" justo bajo "Capítulo 21: …" era otro capítulo y
+    dejaba el 21 vacío. Es subtítulo, y también los demás "El lado de…" del libro."""
+    doc = pymupdf.open()
+    chapter_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"), (72, 140, "El lado de Beretta", 16, "helv")])
+    chapter_page(doc, 2, [(72, 100, "El lado de Selene", 16, "helv")])
+    chapter_page(doc, 3, [(72, 100, "Capitulo 2: Final", 20, "helv")])
+    chapter_page(doc, 4, [(72, 100, "Palabras del autor", 20, "helv")])
+    path = TMP / "el-lado-de.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [book.blocks[k].html for k in book.candidates]
+    assert titles == ["Capitulo 1: Inicio", "Capitulo 2: Final", "Palabras del autor"], titles
+
+
 def test_index_with_credit_line_and_dashed_leaders_is_skipped():
     """Índice con una línea de créditos encima del título y líneas "| Capítulo 1 | ---- Pág. 3"."""
     doc = pymupdf.open()
