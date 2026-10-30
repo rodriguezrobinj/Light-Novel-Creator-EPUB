@@ -2,6 +2,7 @@
 import collections
 import functools
 import html
+import io
 import os
 import re
 import unicodedata
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pymupdf
+from PIL import Image
 
 BAND = 0.12     # franja superior/inferior (fracción de la altura) donde viven encabezados y pies
 REPEAT = 0.30   # fracción de páginas en que una línea debe repetirse para ser encabezado o pie
@@ -210,9 +212,11 @@ def _row(spans):
 def _rows(page):
     """Agrupa los spans por línea base: el texto justificado parte una línea en varios spans.
     Las líneas que no van en horizontal se saltan: son el encabezado y el pie de una página girada
-    para una ilustración apaisada (Re Zero 6), que quedarían en mitad de la página como títulos."""
-    spans = [s for b in page.get_text("dict")["blocks"] for line in b.get("lines", []) if abs(line["dir"][0]) > 0.9
-             for s in line["spans"] if s["text"].strip()]
+    para una ilustración apaisada (Re Zero 6), que quedarían en mitad de la página como títulos.
+    Sin TEXT_PRESERVE_IMAGES: el dict copiaba los bytes de cada imagen y aquí solo cuenta el texto (Maryoku 1: 1,5 s)."""
+    flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
+    spans = [s for b in page.get_text("dict", flags=flags)["blocks"] for line in b.get("lines", [])
+             if abs(line["dir"][0]) > 0.9 for s in line["spans"] if s["text"].strip()]
     rows, group = [], []
     for s in sorted(spans, key=lambda s: s["origin"][1]):
         if group and abs(s["origin"][1] - group[0]["origin"][1]) > 2:
@@ -392,6 +396,18 @@ def _ornaments(page, rows, infos):
     return sorted(found)  # [(posición vertical, xref)], de arriba abajo
 
 
+def _jpeg(pix, quality):
+    """JPEG de un pixmap sin transparencia. Con Pillow (libjpeg-turbo): el codificador de MuPDF tardaba 270–600 ms
+    por página-ilustración, casi la mitad del análisis (Kage 6). CMYK y otros raros, con MuPDF."""
+    mode = {1: "L", 3: "RGB"}.get(pix.n)
+    if mode is None or pix.alpha:
+        return pix.tobytes("jpg", jpg_quality=quality)
+    out = io.BytesIO()
+    Image.frombuffer(mode, (pix.width, pix.height), pix.samples_mv, "raw", mode, pix.stride, 1).save(
+        out, "JPEG", quality=quality)
+    return out.getvalue()
+
+
 def _rgb(pix, alpha=True):
     """Pixmap en gris o RGB: CMYK u otros pasan a RGB. Con alpha=False, sin transparencia."""
     if pix.alpha and not alpha:
@@ -422,7 +438,7 @@ def _extract(doc, xref):
     pix = _rgb(pix)
     if pix.alpha:
         return pix.tobytes("png")
-    return pix.tobytes("jpg", jpg_quality=85)
+    return _jpeg(pix, 85)
 
 
 def _illustration(images, uses):
@@ -444,7 +460,7 @@ def _render(page, crop=False):
             art |= _shown(page, info) & page.rect
         if abs(art) >= 0.5 * abs(page.rect):
             clip = art + (1, 1, -1, -1)
-    return page.get_pixmap(dpi=150, clip=clip).tobytes("jpg", jpg_quality=85)
+    return _jpeg(page.get_pixmap(dpi=150, clip=clip), 85)
 
 
 def load_cover(path):
@@ -456,7 +472,7 @@ def load_cover(path):
         pix = pymupdf.Pixmap(data)
     except Exception as e:
         raise ValueError(f"No se pudo abrir la imagen: {e}") from e
-    return _rgb(pix, alpha=False).tobytes("jpg", jpg_quality=90)
+    return _jpeg(_rgb(pix, alpha=False), 90)
 
 
 SHRINK = 1400  # lado mayor de las imágenes reducidas, en píxeles: de sobra para un celular o un e-reader
@@ -469,7 +485,7 @@ def _shrink(data, limit=SHRINK):
     scale = limit / max(pix.width, pix.height)
     if scale < 1:
         pix = pymupdf.Pixmap(pix, round(pix.width * scale), round(pix.height * scale), None)
-    small = pix.tobytes("png") if pix.alpha else pix.tobytes("jpg", jpg_quality=75)
+    small = pix.tobytes("png") if pix.alpha else _jpeg(pix, 75)
     return small if len(small) < len(data) else data
 
 
@@ -479,7 +495,7 @@ def _gray(data):
     if pix.n - pix.alpha == 1:
         return data
     pix = pymupdf.Pixmap(pymupdf.csGRAY, pix)
-    return pix.tobytes("png") if pix.alpha else pix.tobytes("jpg", jpg_quality=85)
+    return pix.tobytes("png") if pix.alpha else _jpeg(pix, 85)
 
 
 @functools.lru_cache(maxsize=256)  # la lista lo pregunta en cada edición: decodificar costaba 2 s (Kage 5)
@@ -499,9 +515,9 @@ def _spread(data, layout):
         page.insert_image(page.rect, stream=data)
         if layout == "rotate":
             page.set_rotation(90)
-            return [page.get_pixmap().tobytes("jpg", jpg_quality=90)]
+            return [_jpeg(page.get_pixmap(), 90)]
         w, h = page.rect.width, page.rect.height
-        return [page.get_pixmap(clip=pymupdf.Rect(x0, 0, x0 + w / 2, h)).tobytes("jpg", jpg_quality=90)
+        return [_jpeg(page.get_pixmap(clip=pymupdf.Rect(x0, 0, x0 + w / 2, h)), 90)
                 for x0 in (w / 2, 0)]
 
 
@@ -877,7 +893,7 @@ def _trim(data):
     with pymupdf.open() as doc:
         page = doc.new_page(width=w, height=h)
         page.insert_image(page.rect, stream=data)
-        return page.get_pixmap(clip=pymupdf.Rect(left, top, right, bottom)).tobytes("jpg", jpg_quality=90)
+        return _jpeg(page.get_pixmap(clip=pymupdf.Rect(left, top, right, bottom)), 90)
 
 
 def quality_report(book):
@@ -953,7 +969,10 @@ def analyze(pdf_path, progress=None):
         if not any(pages):
             raise ValueError("El PDF no tiene texto (parece escaneado). Hace falta OCR, que no está soportado.")
 
-        sizes = collections.Counter(r.size for rows in pages for r in rows for _ in r.text)
+        sizes = collections.Counter()  # tamaño de letra -> caracteres
+        for rows in pages:
+            for r in rows:
+                sizes[r.size] += len(r.text)
         body = sizes.most_common(1)[0][0]
         gaps = collections.Counter()
         indents = total = 0

@@ -473,6 +473,30 @@ def test_image_info_matches_pymupdf_xrefs():
             assert ours == theirs and all(x for _, x in ours), (ours, theirs)
 
 
+def test_jpeg_encoder_is_fast_and_keeps_the_picture():
+    """Las páginas-ilustración se codifican con Pillow: el JPEG de MuPDF tardaba 270–600 ms por página, casi la
+    mitad del análisis (Kage 6). La imagen conserva tamaño, color y gris."""
+    import time
+
+    color = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 1240, 1754), False)
+    color.clear_with(200)
+    color.set_rect(pymupdf.IRect(0, 0, 620, 877), (200, 30, 30))
+    gray = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.IRect(0, 0, 40, 30), False)
+    gray.clear_with(90)
+    convert._jpeg(gray, 85)  # el primer uso carga el codificador
+    start = time.process_time()
+    data = convert._jpeg(color, 85)
+    took = time.process_time() - start
+    start = time.process_time()
+    color.tobytes("jpg", jpg_quality=85)
+    mupdf = time.process_time() - start
+    back, back_gray = pymupdf.Pixmap(data), pymupdf.Pixmap(convert._jpeg(gray, 85))
+    assert data[:3] == b"\xff\xd8\xff" and (back.width, back.height) == (1240, 1754), (back.width, back.height)
+    assert all(abs(a - b) < 8 for a, b in zip(back.pixel(100, 100), (200, 30, 30))), back.pixel(100, 100)
+    assert back_gray.n == 1 and abs(back_gray.pixel(5, 5)[0] - 90) < 4, back_gray.pixel(5, 5)
+    assert took * 3 < mupdf, f"{took:.3f} s frente a {mupdf:.3f} s de MuPDF"
+
+
 def test_rotated_full_page_illustration_is_not_cropped():
     """Re Zero 8: ilustración doble en una página girada 90°. Las imágenes vienen en coordenadas sin
     girar; mezcladas con las de la página girada, el recorte la dejaba en un cuadrado."""
