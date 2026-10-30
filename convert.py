@@ -350,9 +350,19 @@ def _title(rows):
 
 
 def _image_info(page, digests):
-    """Imágenes dibujadas en la página, con su xref. get_image_info(xrefs=True) decodifica cada imagen
-    de la página en cada llamada para sacar su huella; digests (xref -> huella) la guarda para todo el PDF.
-    Copias, con bbox en coordenadas de la página girada: PyMuPDF guarda las suyas para _render."""
+    """Imágenes dibujadas en la página, con su xref y el bbox en coordenadas de la página girada.
+    La xref sale del tamaño en píxeles y los bits por componente, que no obligan a decodificar. Si dos imágenes
+    de la página coinciden en eso (tiras de Re Zero 8), de la huella MD5, como get_image_info(xrefs=True):
+    decodificarlas todas era un tercio del análisis de Kage 6. digests (xref -> huella) vale para todo el PDF."""
+    sizes = collections.defaultdict(list)
+    for xref, _, width, height, bpc, *_ in page.get_images():
+        sizes[(width, height, bpc)].append(xref)
+    if all(len(xrefs) == 1 for xrefs in sizes.values()):
+        # shortcut: una imagen incrustada en el contenido (sin xref) del mismo tamaño que otra de la página
+        # tomaría su xref; con huella saldría 0. No se ha visto en ningún PDF.
+        return [dict(info, bbox=tuple(_shown(page, info)),
+                     xref=sizes.get((info["width"], info["height"], info["bpc"]), [0])[0])
+                for info in page.get_image_info()]
     by_digest = {}
     for xref, *_ in page.get_images():
         if xref not in digests:

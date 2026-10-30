@@ -497,6 +497,45 @@ def test_jpeg_encoder_is_fast_and_keeps_the_picture():
     assert took * 3 < mupdf, f"{took:.3f} s frente a {mupdf:.3f} s de MuPDF"
 
 
+def make_strips_pdf():
+    """Una ilustración cortada en 6 tiras del mismo tamaño en píxeles, de arriba abajo (Re Zero 8, pág. 8)."""
+    doc = pymupdf.open()
+    page = add_page(doc, 1, [])
+    height = page.rect.height / 6
+    for n in range(6):
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 10), False)
+        pix.clear_with(30 * n + 10)
+        page.insert_image(pymupdf.Rect(0, n * height, page.rect.width, (n + 1) * height), pixmap=pix,
+                          keep_proportion=False)
+    path = TMP / "tiras.pdf"
+    doc.save(path)
+    return path
+
+
+def test_image_info_finds_xrefs_without_decoding():
+    """Saber qué xref es cada imagen dibujada decodificaba todas las imágenes para su huella MD5: un tercio del
+    análisis de Kage 6. Si el tamaño en píxeles no se repite en la página basta con él; si se repite (tiras
+    iguales), la huella."""
+    for path, decodes in ((make_ornament_pdf(), 0), (make_strips_pdf(), None)):
+        with pymupdf.open(path) as doc:
+            original, made = pymupdf.Pixmap, []
+
+            class Counted(original):
+                def __init__(self, *args):
+                    made.append(args)
+                    super().__init__(*args)
+
+            pymupdf.Pixmap = Counted
+            try:
+                digests = {}
+                ours = [[(i["bbox"], i["xref"]) for i in convert._image_info(page, digests)] for page in doc]
+            finally:
+                pymupdf.Pixmap = original
+            theirs = [[(tuple(i["bbox"]), i["xref"]) for i in page.get_image_info(xrefs=True)] for page in doc]
+        assert ours == theirs, (path.name, ours, theirs)
+        assert decodes is None or len(made) == decodes, (path.name, len(made))
+
+
 def test_rotated_full_page_illustration_is_not_cropped():
     """Re Zero 8: ilustración doble en una página girada 90°. Las imágenes vienen en coordenadas sin
     girar; mezcladas con las de la página girada, el recorte la dejaba en un cuadrado."""
