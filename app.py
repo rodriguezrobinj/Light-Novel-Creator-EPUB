@@ -13,6 +13,7 @@ import tempfile
 import tkinter as tk
 import tkinter.font as tkfont
 import traceback
+import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -383,6 +384,55 @@ def _batch(pdfs, options, progress=None):
         if progress:
             progress(n + 1, len(pdfs))
     return results
+
+
+ANILIST = "https://graphql.anilist.co"  # API pública, sin clave
+ANILIST_QUERY = """query ($q: String) { Page(perPage: 6) { media(search: $q, type: MANGA, format: NOVEL) {
+  title { romaji english native } startDate { year } genres description(asHtml: false)
+  staff(perPage: 10) { edges { role node { name { full } } } } } } }"""
+GENRES = {"Action": "Acción", "Adventure": "Aventura", "Comedy": "Comedia", "Drama": "Drama", "Ecchi": "Ecchi",
+          "Fantasy": "Fantasía", "Horror": "Terror", "Mahou Shoujo": "Mahō shōjo", "Mecha": "Mecha",
+          "Music": "Música", "Mystery": "Misterio", "Psychological": "Psicológico", "Romance": "Romance",
+          "Sci-Fi": "Ciencia ficción", "Slice of Life": "Recuentos de la vida", "Sports": "Deportes",
+          "Supernatural": "Sobrenatural", "Thriller": "Suspense"}  # los géneros de AniList, en español
+
+
+def _lookup(series):
+    """Busca la serie entre las novelas ligeras de AniList (_anilist_results). En el proceso de trabajo:
+    la red puede tardar y la ventana no debe quedarse colgada."""
+    body = json.dumps({"query": ANILIST_QUERY, "variables": {"q": series}}).encode()
+    request = urllib.request.Request(ANILIST, body, {"Content-Type": "application/json", "Accept": "application/json",
+                                                     "User-Agent": "PDF a EPUB"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.load(response)
+    except (OSError, ValueError) as e:
+        raise ValueError(f"No se pudo consultar AniList: {e}") from e
+    return _anilist_results(data)
+
+
+def _anilist_results(data):
+    """Respuesta de AniList -> [{name, author, illustrator, original_title, subjects, description}].
+    La sinopsis de AniList está en inglés; se le quitan las etiquetas y la nota "(Source: …)"."""
+    found = []
+    for m in (((data.get("data") or {}).get("Page") or {}).get("media") or []):
+        title = m.get("title") or {}
+        staff = [(edge.get("role") or "", ((edge.get("node") or {}).get("name") or {}).get("full") or "")
+                 for edge in (m.get("staff") or {}).get("edges") or []]
+        author = next((n for role, n in staff if re.search(r"story|original", role, re.I)), "")
+        illustrator = next((n for role, n in staff if re.search(r"\b(art|illustration)\b", role, re.I)
+                            and not re.search(r"story", role, re.I)), "")
+        name = title.get("romaji") or title.get("english") or ""
+        year = (m.get("startDate") or {}).get("year")
+        english = title.get("english") or ""
+        text = re.sub(r"<br\s*/?>", "\n", m.get("description") or "", flags=re.I)
+        text = html.unescape(re.sub(r"<[^>]+>", "", text))
+        text = re.sub(r"\(Source:[^)]*\)\s*$", "", text.strip()).strip()
+        found.append({"name": name + (f" ({year})" if year else "") + (f" · {english}" if english and english != name else ""),
+                      "author": author, "illustrator": illustrator, "original_title": title.get("native") or "",
+                      "subjects": ", ".join(GENRES.get(g, g) for g in m.get("genres") or []),
+                      "description": re.sub(r"\n{3,}", "\n\n", text)})
+    return found
 
 
 WATCH_MS = 10_000  # cada cuánto se mira la carpeta vigilada
@@ -1676,6 +1726,8 @@ class App:
         win = tk.Toplevel(self.root)
         win.title("Más datos del libro")
         win.transient(self.root)
+        ttk.Button(win, text="Buscar en internet (AniList)…",
+                   command=lambda: (win.destroy(), self.search_online())).pack(anchor="w", padx=10, pady=(10, 0))
         grid = ttk.Frame(win, padding=10)
         grid.pack(fill="both")
         for n, (label, var) in enumerate((("Ilustraciones:", self.illustrator_var), ("Corrección:", self.proofreader_var),
@@ -1685,6 +1737,61 @@ class App:
             ttk.Label(grid, text=label).grid(row=n, column=0, sticky="w", pady=2)
             ttk.Entry(grid, textvariable=var, width=50).grid(row=n, column=1, padx=(8, 0), pady=2)
         ttk.Button(win, text="Aceptar", command=win.destroy).pack(pady=(0, 10))
+
+    def search_online(self):
+        series = (self.series_var.get() or self.title_var.get()).strip()
+        if not series:
+            messagebox.showinfo("Buscar en internet", "Escribe primero la serie o el título del libro.")
+            return
+        if self.run(_lookup, (series,), lambda found: self.pick_online(found, series), busy="Buscando…"):
+            self.status.configure(text=f"Buscando «{series}» en AniList…")
+
+    def pick_online(self, found, series):
+        """Lista de lo que encontró AniList: doble clic o Aceptar rellena los campos vacíos (apply_online)."""
+        self.status.configure(text="")
+        if not found:
+            messagebox.showinfo("Buscar en internet", f"AniList no encontró «{series}» entre las novelas ligeras.\n\n"
+                                "Prueba a escribir en Serie el nombre en japonés romanizado o en inglés.")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Resultados de AniList")
+        win.transient(self.root)
+        ttk.Label(win, text=f"«{series}»: elige la serie", padding=(10, 10, 10, 4)).pack(anchor="w")
+        box = tk.Listbox(win, width=90, height=len(found), activestyle="none")
+        for item in found:
+            box.insert("end", item["name"])
+        box.selection_set(0)
+        box.pack(padx=10, fill="x")
+
+        def pick(_=None):
+            chosen = box.curselection()
+            if chosen:
+                win.destroy()
+                self.apply_online(found[chosen[0]])
+
+        box.bind("<Double-1>", pick)
+        ttk.Button(win, text="Aceptar", command=pick).pack(pady=10)
+
+    def apply_online(self, item):
+        """Solo rellena lo vacío: lo escrito a mano o leído del PDF no se pisa."""
+        fill = [(label, var, item[key]) for key, label, var in (
+            ("author", "Autor", self.author_var), ("illustrator", "Ilustraciones", self.illustrator_var),
+            ("original_title", "Título original", self.original_title_var), ("subjects", "Géneros", self.subjects_var))
+            if item[key] and not var.get().strip()]
+        description = item["description"] if item["description"] and not self.description.strip() else ""
+        if not fill and not description:
+            messagebox.showinfo("Datos de AniList", "No hay nada que rellenar: esos datos ya están en la ventana.")
+            return
+        lines = [f"{label}: {value}" for label, _, value in fill]
+        if description:
+            lines.append(f"Sinopsis (en inglés, puedes cambiarla en «Sinopsis…»): {description[:100]}…")
+        if not messagebox.askyesno("Datos de AniList", "Se rellenarán los campos vacíos:\n\n" + "\n".join(lines)):
+            return
+        for _, var, value in fill:
+            var.set(value)
+        if description:
+            self.description = description
+        self.status.configure(text="Datos tomados de AniList")
 
     def retitle(self, change, done):
         """Cambia el título de las filas de título según change(título) -> título nuevo; un solo Ctrl+Z

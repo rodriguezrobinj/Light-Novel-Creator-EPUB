@@ -1821,6 +1821,49 @@ def test_watched_folder_converts_new_pdfs_once():
     assert "Carpeta vigilada" in status and "roto.pdf" in status, status
 
 
+ANILIST_SAMPLE = {"data": {"Page": {"media": [{
+    "title": {"romaji": "Maryoku Cheat na Majo ni Narimashita", "english": "I Became a Witch with Cheat Mana",
+              "native": "魔力チートな魔女になりました"},
+    "startDate": {"year": 2019}, "genres": ["Fantasy", "Slice of Life", "Raro"],
+    "description": "Chise was an office worker.<br><br>Now she is a <i>witch</i> &amp; more.\n(Source: J-Novel Club)",
+    "staff": {"edges": [{"role": "Illustration", "node": {"name": {"full": "Kei"}}},
+                        {"role": "Story", "node": {"name": {"full": "Aloha Zaregoto"}}}]}}]}}}
+
+
+def test_anilist_results_and_fill_only_empty_fields():
+    import app
+
+    found = app._anilist_results(ANILIST_SAMPLE)
+    assert found == [{"name": "Maryoku Cheat na Majo ni Narimashita (2019) · I Became a Witch with Cheat Mana",
+                      "author": "Aloha Zaregoto", "illustrator": "Kei", "original_title": "魔力チートな魔女になりました",
+                      "subjects": "Fantasía, Recuentos de la vida, Raro",
+                      "description": "Chise was an office worker.\n\nNow she is a witch & more."}], found
+    assert app._anilist_results({"errors": [{"message": "x"}]}) == []
+    original = app.urllib.request.urlopen
+    app.urllib.request.urlopen = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("sin red"))
+    try:
+        app._lookup("Maryoku")
+        raise AssertionError("sin red debía fallar")
+    except ValueError as e:
+        assert "No se pudo consultar AniList" in str(e) and "sin red" in str(e), e
+    finally:
+        app.urllib.request.urlopen = original
+    root, window = visible_window()
+    asked = []
+    original = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda title, message: asked.append(message) or True
+    try:
+        window.author_var.set("Autor del PDF")
+        window.apply_online(found[0])
+        got = (window.author_var.get(), window.illustrator_var.get(), window.subjects_var.get(), window.description)
+    finally:
+        app.messagebox.askyesno = original
+        window.close()
+    assert got == ("Autor del PDF", "Kei", "Fantasía, Recuentos de la vida, Raro",
+                   "Chise was an office worker.\n\nNow she is a witch & more."), got
+    assert "Aloha" not in asked[0] and "Ilustraciones: Kei" in asked[0] and "en inglés" in asked[0], asked
+
+
 def test_window_new_volume_inherits_series_data():
     folder = series_folder()
     review_volume_one(folder)
