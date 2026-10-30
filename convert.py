@@ -333,8 +333,8 @@ def _key(text):
 
 def _rect(rows):
     """Rectángulo que abarca unas líneas: la caja del span no sirve (Cambria la estira), así que
-    se calcula desde la línea base y el tamaño de letra."""
-    boxes = [r.box or (r.x0, r.y - r.size, r.x1, r.y + r.size * 0.3) for r in rows]
+    se calcula desde la línea base y el tamaño de letra. Un Block aporta su rect: así crece línea a línea."""
+    boxes = [r.rect if isinstance(r, Block) else r.box or (r.x0, r.y - r.size, r.x1, r.y + r.size * 0.3) for r in rows]
     return (min(b[0] for b in boxes), min(b[1] for b in boxes),
             max(b[2] for b in boxes), max(b[3] for b in boxes))
 
@@ -592,21 +592,25 @@ def edit_section(book, start, end, text):
     bloques que siguen en el libro (los párrafos se sustituyen: no están)."""
     old = book.blocks
     page = old[start - 1].page if start else 1
-    # Una línea sin cambios conserva la página de su párrafo; la cambiada o nueva, la del anterior
-    pages = {}
+    # Un párrafo o título sin cambios sigue igual (página, recuadro, centrado); lo cambiado o nuevo toma
+    # la página del anterior
+    same = {}
     for k in range(start, end):
-        pages.setdefault(_line(old[k], k).strip(), old[k].page)
+        if old[k].kind in ("p", "heading"):
+            same.setdefault(_line(old[k], k).strip(), old[k])
     new, kept = [], {}
     for line in (line.strip() for line in text.splitlines()):
         if not line:
             continue
-        page = pages.get(line, page)
         m = TOKEN.fullmatch(line)
         k = int(m.group(2)) if m else -1
         if m and start <= k < end and k not in kept and old[k].kind == ("image" if m.group(1) == "Ilustración" else "break"):
             kept[k] = start + len(new)
             new.append(old[k])
             page = old[k].page
+        elif line in same:
+            new.append(replace(same[line]))  # copia: la línea puede estar dos veces
+            page = same[line].page
         elif line.startswith("# ") and line[2:].strip():
             new.append(Block("heading", page, _inline(line[2:].strip())))
         elif SCENE_BREAK.fullmatch(line):
@@ -1049,8 +1053,7 @@ def analyze(pdf_path, progress=None):
                     if (prev is not None and prev.heading and abs(prev.size - r.size) < 0.5
                             and r.y - prev.y < 2 * r.size and not r.starts):
                         blocks[-1].html += " " + html.escape(r.text)
-                        a, b = blocks[-1].rect, _rect([r])  # el rectángulo abarca todas sus líneas
-                        blocks[-1].rect = (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+                        blocks[-1].rect = _rect([blocks[-1], r])  # el rectángulo abarca todas sus líneas
                     else:
                         blocks.append(Block("heading", num, html.escape(r.text), rect=_rect([r])))
                     para = None
@@ -1073,10 +1076,12 @@ def analyze(pdf_path, progress=None):
                     if new and para is not None and r.text[:1].islower() and not last_text.endswith(END_PUNCT):
                         new = False  # algunos PDF ponen con sangría el final de una frase sin acabar
                     if new:
-                        para = Block("p", num, r.html, align="center" if centered else "")
+                        para = Block("p", num, r.html, align="center" if centered else "", rect=_rect([r]))
                         blocks.append(para)
                     else:
                         para.html = _join(para.html, r.html)
+                        if para.page == num:  # el recuadro, solo en la página donde empieza el párrafo
+                            para.rect = _rect([para, r])
                     short = r.x1 < right - (right - left) * 0.2
                     last_text = r.text
                 prev = r

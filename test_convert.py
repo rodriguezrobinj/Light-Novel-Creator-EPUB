@@ -2579,6 +2579,31 @@ def test_edit_section_keeps_pages_of_unchanged_paragraphs():
     assert pages == [1, 1, 3, 3], pages
 
 
+def test_paragraph_box_covers_all_its_lines_and_survives_edits():
+    """El recuadro del editor sale del análisis, no de buscar el texto: la búsqueda solo cubría la primera línea
+    de las últimas palabras y fallaba con "─" en vez de raya (Kage 6, pág. 15). Lo que no se toca lo conserva."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"),
+                      (92, 140, line("─Primera linea del parrafo", 57), 11, "cour"),
+                      (72, 154, line("Segunda linea del parrafo", 60), 11, "cour"),
+                      (72, 168, "fin del parrafo.", 11, "cour"),
+                      (92, 196, "Otro parrafo distinto y completo.", 11, "cour")])
+    path = TMP / "recuadro.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    start = book.candidates[0] + 1
+    first, second = book.blocks[start:start + 2]
+    box = pymupdf.Rect(first.rect)
+    assert box.y0 < 140 - 8 and 168 < box.y1 < 196 - 8 and box.x0 <= 72 and box.x1 > 400, box
+    import app  # sin recuadro (párrafo editado), se busca: las últimas palabras cruzan de línea
+    edited = convert.Block("p", 1, line("Segunda linea del parrafo", 60) + " fin del parrafo.")
+    found = app.TextEditor.find_box(pymupdf.open(path)[0], edited)
+    assert found and found.y0 < 154 < 168 < found.y1, found
+    text = convert.section_text(book, start, len(book.blocks)).replace("distinto", "nuevo")
+    convert.edit_section(book, start, len(book.blocks), text)
+    assert book.blocks[start].rect == first.rect and not book.blocks[start + 1].rect, book.blocks[start + 1]
+
+
 def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
     """Si el análisis cambia (otra versión del programa), la revisión vieja no se pisa al cerrar: queda en .bak."""
     import json

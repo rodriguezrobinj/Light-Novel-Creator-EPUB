@@ -1980,7 +1980,11 @@ class TextEditor:
             return None
         box = hits[0]
         tail = [r for r in page.search_for(" ".join(words[-6:])) if r.y0 >= box.y0]
-        return box | tail[0] if tail else box
+        for n, r in enumerate(tail):  # unas palabras que cruzan de línea dan una pieza por línea
+            if n and r.y0 > box.y1 + r.height:  # otra aparición más abajo
+                break
+            box |= r
+        return box
 
     def update_status(self):
         """«Página 34 del PDF · párrafo 12 de 80 · 3.412 palabras»."""
