@@ -28,7 +28,7 @@ hoy: no se añade ninguna salvo soltar un PDF sobre la ventana.
   revisado, sin revisar; el mismo cálculo que el panel de serie). Con libro: la barra inferior dice qué
   falta («1 aviso grave: revísalo antes de generar» + «Ver informe») y «Generar EPUB» siempre a la
   derecha.
-- **Ventanas secundarias.**
+- **Ventanas secundarias** (siguen siendo métodos de `App`).
   - Dentro de la ventana: Buscar (Ctrl+F) es una barra sobre la lista con los resultados debajo.
     Sinopsis y Más datos pasan al panel «Editar datos». El aviso de guardado y «EPUB listo» son un solo
     diálogo con avisos, tamaño y Abrir / Carpeta / Copiar al lector / Enviar a Kindle.
@@ -42,16 +42,15 @@ hoy: no se añade ninguna salvo soltar un PDF sobre la ventana.
 
 ## Código
 
-- `app.py`: las funciones sin ventana (`_prepare`, `_batch`, `_replay`, `_worker`, `_install`…) y el
-  arranque (`QApplication`, `freeze_support`, PDF de `sys.argv`). Los tests que las usan no cambian.
-- `window.py`: `App`, la ventana principal.
-- `rows.py`: `RowList`, una capa delgada sobre `QTreeWidget` con la API de `ttk.Treeview` que usa el
-  código (`get_children`, `set`, `item`, `selection`, `selection_set`, `exists`, `see`, `delete`,
-  `insert`, `index`). Así la lógica de tipos, deshacer, mover, retitular y la revisión guardada se porta
-  casi tal cual, y los tests que leen `window.tree` siguen valiendo.
-- `dialogs.py`: informe de calidad, panel de serie, portada, reemplazos, AniList, resultado.
-- `editor.py`: `TextEditor` sobre `QTextEdit` (mismas marcas `<i>`/`<b>`, colores por tag, página del
-  PDF al lado, deshacer).
+- `app.py` sigue con las funciones sin ventana, `App` (ventana principal y sus diálogos) y `TextEditor`.
+  No se parte en más módulos: los tests sustituyen globales de `app` (`SETTINGS`, `messagebox`,
+  `urllib.request`) y, con la ventana en otro módulo, esas sustituciones dejarían de llegarle sin que
+  ningún test lo note.
+- `qtk.py`: adaptadores Qt con la API de Tk que ya usa el código, para portar la lógica casi tal cual:
+  `RowList` (`QTreeWidget` con `get_children`, `set`, `item`, `selection`, `selection_set`, `exists`,
+  `see`, `delete`, `insert`, `index`, `bbox`), `TextBox` (`QPlainTextEdit` con índices `"L.C"`,
+  `insert`/`end`/`sel.first`, `+Nc`, `linestart`/`lineend`, tags y deshacer agrupado), y `messagebox` y
+  `filedialog` sobre `QMessageBox`/`QFileDialog` con botones en español.
 - `theme.py`: paletas, QSS, seguimiento del modo de Windows.
 - `convert.py` no cambia.
 - El proceso de trabajo y su cola no cambian; un `QTimer` de 100 ms sustituye a `root.after`. Las páginas
