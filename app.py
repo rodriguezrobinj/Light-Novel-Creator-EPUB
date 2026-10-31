@@ -1,5 +1,7 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
+import collections
 import ctypes
+import difflib
 import html
 import json
 import multiprocessing
@@ -75,6 +77,21 @@ EDITOR_TAGS = {"italic": {}, "bold": {}, "bolditalic": {}, "heading": {"foregrou
                "scene": {"foreground": "#7a5c00", "justify": "center"},
                "broken": {"foreground": "#c62828", "underline": True}}  # lo que edit_section quitaría
 STYLE_TAGS = {1: "italic", 2: "bold", 3: "bolditalic"}  # cursiva suma 1 y negrita 2: Tk no mezcla dos fuentes
+LEVEL_COLOR = {"Grave": "#c62828", "Revisar": "#e65100", "Menor": "#607d8b"}  # avisos del informe de calidad
+LEVEL_PLURAL = {"Grave": "graves", "Revisar": "por revisar", "Menor": "menores"}
+
+
+def _quality_summary(report):
+    """"2 graves · 5 por revisar" de un informe de calidad, o "" si no hay avisos."""
+    counts = collections.Counter(i.level for i in report)
+    return " · ".join(f"{counts[level]} {LEVEL_PLURAL[level]}" for level in convert.LEVELS if counts[level])
+
+
+def _diff_spans(before, after):
+    """Tramos que cambian entre la vista previa de antes y la de después: ([(i, j) en before], [(i, j) en after])."""
+    ops = difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes()
+    return ([(i1, i2) for op, i1, i2, _, _ in ops if op in ("replace", "delete")],
+            [(j1, j2) for op, _, _, j1, j2 in ops if op in ("replace", "insert")])
 
 
 def _log(text):
@@ -669,6 +686,11 @@ class App:
         self.status.pack(side="left", padx=8)
         self.gen_btn = ttk.Button(bottom, text="Generar EPUB…", command=self.generate, state="disabled")
         self.gen_btn.pack(side="right")
+        # Avisos del informe de calidad a la vista: abre el informe (tk.Button: ttk no deja cambiar el color)
+        self.quality_btn = tk.Button(bottom, text="Calidad", command=self.quality, state="disabled",
+                                     relief="groove", padx=8)
+        self.quality_btn.pack(side="right", padx=8)
+        self.quality_ink = self.quality_btn.cget("fg")
         # Opciones del EPUB en su propia fila; las casillas, en el menú "Opciones" (no caben a 1366 px)
         options = ttk.Frame(root, padding=(8, 0))
         options.pack(side="bottom", fill="x")
@@ -1239,6 +1261,7 @@ class App:
             mark, title = rows.get(str(i), (mark, title))
             reading = f"{minutes[i]} min" if minutes.get(i) else ""
             self.tree.insert("", "end", iid=str(i), values=(mark, title, reading, block.page), tags=(KIND_TAG[mark],))
+        self.update_quality()
 
     def is_image(self, item):
         return self.book is not None and self.book.blocks[int(item)].kind == "image"
@@ -1514,14 +1537,20 @@ class App:
         return TextEditor(self, item, start, end)
 
     def apply_edit(self, edit, item):
-        """Aplica un texto editado: cambia los bloques, renumera la lista conservando los tipos elegidos
-        y lo apunta para la revisión. Guarda una copia de antes para deshacerlo con Ctrl+Z."""
+        self.apply_edits([edit], item)
+
+    def apply_edits(self, edits, item):
+        """Aplica textos editados: cambia los bloques, renumera la lista conservando los tipos elegidos
+        y los apunta para la revisión. Guarda una copia de antes para deshacerlos de una vez con Ctrl+Z.
+        Varios cambios van de atrás adelante: así los índices de los siguientes siguen valiendo."""
         rows = self.rows()
         self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})  # edit_section crea listas nuevas
-        mapping = convert.edit_section(self.book, *edit)
-        self.edits.append(edit)
-        self.fill_tree({str(mapping[int(k)]): v for k, v in rows.items() if int(k) in mapping})
+        for edit in edits:
+            mapping = convert.edit_section(self.book, *edit)
+            self.edits.append(list(edit))
+            rows = {str(mapping[int(k)]): v for k, v in rows.items() if int(k) in mapping}
+        self.fill_tree(rows)
         self.tree.selection_set(item)
         self.tree.see(item)
         self.update_preview()
@@ -1842,32 +1871,151 @@ class App:
             self.fields()[name].set(value)
         self.update_preview()
 
+    def update_quality(self):
+        """Botón de la barra inferior con los avisos del informe de calidad: rojo si hay alguno grave."""
+        report = convert.quality_report(self.book) if self.book else []
+        summary = _quality_summary(report)
+        graves = any(i.level == "Grave" for i in report)
+        self.quality_btn.configure(text=f"⚠ {summary}" if summary else "✓ Sin avisos" if self.book else "Calidad",
+                                   fg=LEVEL_COLOR["Grave"] if graves else self.quality_ink if report else "#2e7d32",
+                                   state="normal" if self.book else "disabled")
+
     def quality(self):
-        """Informe de calidad (convert.quality_report): al elegir una línea, las vistas previas van a ella."""
+        """Informe de calidad (convert.quality_report): los avisos por gravedad y, del elegido, el problema,
+        la solución, la vista previa de antes y después y el botón que lo arregla. Al elegir un aviso, las
+        vistas previas de la ventana principal van a él."""
         if not self.book:
             return
-        report = convert.quality_report(self.book)
         win = tk.Toplevel(self.root)
-        win.title(f"Informe de calidad · {len(report)} avisos")
+        win.title("Informe de calidad")
         win.transient(self.root)
-        if not report:
-            ttk.Label(win, text="No se encontró nada sospechoso.", padding=20).pack()
-            return
-        results = tk.Listbox(win, width=110, height=22)
-        results.pack(fill="both", expand=True, padx=8, pady=8)
-        for k, page, why, text in report:
-            results.insert("end", f"pág. {page} · {why}" + (f" · {text[:70]}" if text else ""))
+        win.geometry("1060x600")
+        top = ttk.Frame(win, padding=(8, 8, 8, 0))
+        top.pack(fill="x")
+        summary = tk.Label(top, font=self.fonts["chapter"])
+        summary.pack(side="left")
+        ink = summary.cget("fg")  # color normal del texto, para los avisos que no son graves
+        show = tk.StringVar(value="Todos")
+        shown = ttk.Combobox(top, textvariable=show, state="readonly", width=14,
+                             values=["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS])
+        shown.pack(side="right")
+        ttk.Label(top, text="Mostrar:").pack(side="right", padx=(0, 4))
+        panes = ttk.PanedWindow(win, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=8, pady=8)
+        left = ttk.Frame(panes)
+        table = ttk.Treeview(left, columns=("level", "page", "title"), show="headings", selectmode="browse")
+        for col, text, width in (("level", "Gravedad", 90), ("page", "Pág.", 50), ("title", "Aviso", 260)):
+            table.heading(col, text=text)
+            table.column(col, width=width, anchor="w" if col == "title" else "center", stretch=col == "title")
+        for level, color in LEVEL_COLOR.items():
+            table.tag_configure(level, foreground=color)
+        bar = ttk.Scrollbar(left, command=table.yview)
+        table.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        table.pack(fill="both", expand=True)
+        panes.add(left, weight=2)
+        right = ttk.Frame(panes, padding=(12, 0, 0, 0))
+        panes.add(right, weight=3)
+        heading = tk.Label(right, font=self.fonts["chapter"], anchor="w", justify="left")
+        heading.pack(fill="x")
+        texts = {}
+        for name, caption in (("problem", "Problema"), ("solution", "Solución")):
+            ttk.Label(right, text=caption, foreground="#555555").pack(anchor="w", pady=(8, 0))
+            texts[name] = ttk.Label(right, wraplength=560, justify="left")
+            texts[name].pack(anchor="w", fill="x")
+        previews = {}
+        for name, caption in (("before", "Ahora"), ("after", "Con el arreglo")):
+            ttk.Label(right, text=caption, foreground="#555555").pack(anchor="w", pady=(10, 2))
+            box = tk.Text(right, height=5, wrap="word", relief="solid", borderwidth=1, padx=6, pady=4,
+                          font=tkfont.nametofont("TkDefaultFont"))
+            box.tag_configure("old", background="#f8d7da", foreground="#8a1c1c", overstrike=True)
+            box.tag_configure("new", background="#d4edda", foreground="#1b5e20")
+            box.tag_configure("note", foreground="#777777")
+            box.pack(fill="x")
+            previews[name] = box
+        buttons = ttk.Frame(right)
+        buttons.pack(fill="x", pady=(12, 0))
+        fix_btn = ttk.Button(buttons, text="Arreglar")
+        fix_btn.pack(side="left")
+        all_btn = ttk.Button(buttons, text="Arreglar todos")
+        all_btn.pack(side="left", padx=6)
+        ttk.Button(buttons, text="Editar texto…", command=lambda: self.edit_text()).pack(side="left")
+        state = {"report": []}
+
+        def fill(select=0):
+            report = convert.quality_report(self.book)
+            summary.configure(text=_quality_summary(report) or "No se encontró nada sospechoso.",
+                              fg=LEVEL_COLOR["Grave"] if any(i.level == "Grave" for i in report) else ink)
+            wanted = next((level for level in convert.LEVELS if LEVEL_PLURAL[level].capitalize() == show.get()), None)
+            state["report"] = [i for i in report if wanted in (None, i.level)]
+            win.title(f"Informe de calidad · {len(report)} avisos")
+            table.delete(*table.get_children())
+            for n, issue in enumerate(state["report"]):
+                table.insert("", "end", iid=str(n), values=(f"● {issue.level}", issue.page, issue.title),
+                             tags=(issue.level,))
+            if state["report"]:
+                item = str(min(select, len(state["report"]) - 1))
+                table.selection_set(item)
+                table.see(item)
+            else:
+                pick()
+
+        def preview(box, text, spans, tag, empty):
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            if text:
+                box.insert("1.0", text)
+                for i, j in spans:
+                    box.tag_add(tag, f"1.0+{i}c", f"1.0+{j}c")
+            else:
+                box.insert("1.0", empty, "note")
+            box.configure(state="disabled")
+
+        def same_kind(issue):
+            return [i for i in state["report"] if i.kind == issue.kind and i.edit]
 
         def pick(_=None):
-            if results.curselection():
-                k, page, why, text = report[results.curselection()[0]]
-                term = " ".join(text.split()[:6])
-                if k is None or not term:
-                    self.show_found(page, term)
+            chosen = table.selection()
+            issue = state["report"][int(chosen[0])] if chosen else None
+            heading.configure(text=issue.title if issue else "", fg=LEVEL_COLOR[issue.level] if issue else ink)
+            texts["problem"].configure(text=issue.problem if issue else "")
+            texts["solution"].configure(text=issue.solution if issue else "")
+            old, new = _diff_spans(issue.before, issue.after) if issue and issue.after else ([], [])
+            if issue and issue.edit and not issue.after:  # el arreglo quita el párrafo entero
+                old = [(0, len(issue.before))]
+            preview(previews["before"], issue.before if issue else "", old, "old",
+                    f"(texto de la página {issue.page} del PDF: míralo en la vista previa)" if issue else "")
+            preview(previews["after"], issue.after if issue else "", new, "new",
+                    "(se quita)" if issue and issue.edit else "Sin arreglo automático: sigue la solución.")
+            fix_btn.state(["!disabled"] if issue and issue.edit else ["disabled"])
+            count = len(same_kind(issue)) if issue and issue.edit else 0
+            all_btn.configure(text=f"Arreglar todos los de este tipo ({count})")
+            all_btn.state(["!disabled"] if count > 1 else ["disabled"])
+            if issue:
+                term = " ".join(issue.text.split()[:6])
+                if issue.block is None or not term:
+                    self.show_found(issue.page, term)
                 else:
-                    self.show_match(k, page, term)
+                    self.show_match(issue.block, issue.page, term)
 
-        results.bind("<<ListboxSelect>>", pick)
+        def apply(issues):
+            # De atrás adelante, y sin pisarse: un arreglo que toca lo que otro ya cambió se deja para luego
+            edits, limit = [], len(self.book.blocks) + 1
+            for issue in sorted(issues, key=lambda i: -i.edit[0]):
+                if issue.edit[1] <= limit:
+                    edits.append(issue.edit)
+                    limit = issue.edit[0]
+            item = next((str(j) for j in range(edits[-1][0], -1, -1)
+                         if self.tree.exists(str(j)) and not self.is_image(str(j))), None)
+            self.apply_edits(edits, item or self.tree.get_children()[0])
+            self.status.configure(text=f"{len(edits)} avisos arreglados · Ctrl+Z para deshacer")
+            fill(int(table.selection()[0]) if table.selection() else 0)
+
+        fix_btn.configure(command=lambda: apply([state["report"][int(table.selection()[0])]]))
+        all_btn.configure(command=lambda: apply(same_kind(state["report"][int(table.selection()[0])])))
+        table.bind("<<TreeviewSelect>>", pick)
+        shown.bind("<<ComboboxSelected>>", lambda _: fill())
+        fill()
 
     def series_panel(self):
         """Los tomos de la carpeta con su estado; doble clic abre uno."""

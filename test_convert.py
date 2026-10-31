@@ -2638,9 +2638,86 @@ def test_quality_report():
               ("p", "Visítanos en https://grupo.com"), ("heading", "Cap 2"), ("p", "Corto.")]
     book = convert.Book("Libro", "", b"", [convert.Block(k, 2, h) for k, h in blocks], [0, 4],
                         skipped=[(1, 400, "se omitió como índice del PDF")])
-    report = [(k, why.split(" (")[0]) for k, page, why, text in convert.quality_report(book)]
-    assert report == [(None, "Texto no incluido: se omitió como índice del PDF"), (2, "Empieza en minúscula"),
-                      (3, "Enlace o red social"), (4, "Capítulo muy corto")], report
+    report = [(i.block, i.kind, i.level) for i in convert.quality_report(book)]
+    assert report == [(None, "skipped", "Grave"), (2, "lower", "Revisar"), (3, "link", "Menor"),
+                      (4, "short", "Revisar")], report
+    # El párrafo anterior ya acaba en punto: unirlos podría mezclar texto desordenado, sin arreglo automático
+    assert convert.quality_report(book)[1].edit is None
+
+
+def test_quality_report_explains_previews_and_fixes():
+    """Cada aviso trae problema, solución y vista previa; los que se pueden arreglar solos traen el
+    cambio para edit_section, y aplicarlo deja el libro como dice la vista previa."""
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella abrió la puerta y dijo que"),
+              B("image", 2, image=b"x"), B("p", 2, "nadie <i>vendría</i> esa noche."),
+              B("p", 2, "37"), B("p", 3, "Repetido sin punto final"), B("p", 3, "Otra vez la misma frase larga."),
+              B("p", 3, "Otra vez la misma frase larga."), B("p", 3, "La canciÃ³n de la maÃ±ana."),
+              B("heading", 4, "Capítulo 3"), B("p", 4, "Texto. " * 60), B("p", 5, "Repetido sin punto final"),
+              B("p", 6, "Repetido sin punto final")]
+    book = convert.Book("Libro", "", b"", blocks, [0, 9])
+    report = convert.quality_report(book)
+    kinds = {i.kind: i for i in report}
+    assert set(kinds) == {"lower", "number", "repeated", "duplicate", "broken", "gap", "short"}, [i.kind for i in report]
+    assert all(i.problem and i.solution and i.level in convert.LEVELS for i in report)
+    lower = kinds["lower"]
+    assert lower.before == "Ella abrió la puerta y dijo que ¶\nnadie vendría esa noche.", lower.before
+    assert lower.after == "Ella abrió la puerta y dijo que nadie vendría esa noche.", lower.after
+    assert kinds["broken"].after == "La canción de la mañana." and kinds["broken"].level == "Grave"
+    assert kinds["gap"].title == "Falta el capítulo 2" and kinds["gap"].edit is None
+    assert kinds["number"].edit == (4, 5, "") and kinds["duplicate"].block == 7
+    # Se aplican de atrás adelante, como «Arreglar todos»: los índices de delante no cambian
+    for issue in sorted((i for i in report if i.edit), key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    text = [(b.kind, b.html) for b in book.blocks]
+    assert text[:3] == [("heading", "Capítulo 1"), ("p", "Ella abrió la puerta y dijo que nadie <i>vendría</i> esa noche."),
+                        ("image", "")], text
+    assert ("p", "37") not in text and text.count(("p", "Otra vez la misma frase larga.")) == 1, text
+    assert ("p", "La canción de la mañana.") in text and ("p", "Repetido sin punto final") not in text, text
+    assert book.candidates == [0, 5], book.candidates
+
+
+def test_window_quality_report_previews_fixes_and_undo():
+    """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
+    página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""
+    import tkinter as tk
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella abrió la puerta y dijo que"), B("p", 2, "nadie vendría."),
+              B("p", 2, "12"), B("p", 3, "Texto. " * 60), B("p", 3, "13")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    button = window.quality_btn.cget("text")
+    window.quality()
+    root.update()
+    win = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+
+    def widgets(w, cls):
+        return [w] * (w.winfo_class() == cls) + [c for k in w.winfo_children() for c in widgets(k, cls)]
+
+    table = widgets(win, "Treeview")[0]
+    before, after = widgets(win, "Text")
+    listed = [table.set(i, "title") for i in table.get_children()]
+    shown = (before.get("1.0", "end").strip(), after.get("1.0", "end").strip(),
+             [before.get(*r) for r in zip(*[iter(before.tag_ranges("old"))] * 2)])
+    table.selection_set("1")  # el primer número de página
+    root.update()
+    fix_all = next(b for b in widgets(win, "TButton") if b.cget("text").startswith("Arreglar todos"))
+    label = fix_all.cget("text")
+    fix_all.invoke()
+    root.update()
+    fixed = ([b.html for b in window.book.blocks], [table.set(i, "title") for i in table.get_children()],
+             window.quality_btn.cget("text"))
+    window.undo()
+    undone = [b.html for b in window.book.blocks]
+    window.close()
+    assert button == "⚠ 3 por revisar", button
+    assert listed == ["Párrafo partido", "Número suelto", "Número suelto"], listed
+    assert shown == ("Ella abrió la puerta y dijo que ¶\nnadie vendría.",
+                     "Ella abrió la puerta y dijo que nadie vendría.", ["¶\n"]), shown
+    assert label == "Arreglar todos los de este tipo (2)", label
+    assert "12" not in fixed[0] and "13" not in fixed[0] and fixed[1] == ["Párrafo partido"], fixed
+    assert fixed[2] == "⚠ 1 por revisar", fixed
+    assert undone == [b.html for b in blocks], undone
 
 
 def test_regex_replacements_and_counts():

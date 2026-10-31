@@ -975,34 +975,146 @@ def _trim(data):
         return _jpeg(page.get_pixmap(clip=pymupdf.Rect(left, top, right, bottom)), 90)
 
 
+LEVELS = ("Grave", "Revisar", "Menor")  # gravedad de un aviso del informe de calidad, de más a menos
+MOJIBAKE = re.compile(r"Ã[\x80-\xbf]|Â[\xa0-\xbf]|â€")  # UTF-8 leído como Windows-1252: "canciÃ³n"
+
+
+@dataclass
+class Issue:
+    """Un aviso del informe de calidad, con lo que hace falta para entenderlo y arreglarlo."""
+    kind: str                # tipo de aviso ("lower", "number"…): "Arreglar todos" junta los del mismo tipo
+    block: int | None        # índice del bloque, o None si es texto que no llegó al libro
+    page: int
+    level: str               # uno de LEVELS
+    title: str               # qué pasa, en una línea
+    problem: str             # por qué es sospechoso
+    solution: str            # qué hacer
+    before: str = ""         # vista previa del texto ahora
+    after: str = ""          # y con el arreglo ("" si el arreglo quita el párrafo)
+    edit: tuple | None = None  # arreglo automático: (inicio, fin, texto) para edit_section
+    text: str = ""           # texto que buscar en las vistas previas
+
+
+def _cut(text, n=160, tail=False):
+    """El principio (o el final) de un texto largo, para la vista previa."""
+    if len(text) <= n:
+        return text
+    return "…" + text[-n:].lstrip() if tail else text[:n].rstrip() + "…"
+
+
+def _around(text, start, end, n=70):
+    """El texto alrededor de start..end, para la vista previa."""
+    a, b = max(0, start - n), min(len(text), end + n)
+    return ("…" if a else "") + text[a:b] + ("…" if b < len(text) else "")
+
+
+def _remojibake(text):
+    """Deshace "canciÃ³n" -> "canción", o None si no se puede sin perder nada."""
+    try:
+        return text.encode("cp1252").decode("utf-8")
+    except UnicodeError:
+        return None
+
+
 def quality_report(book):
-    """Lo sospechoso del libro, para revisarlo: [(índice de bloque o None, página, motivo, texto)]."""
-    report = [(None, page, f"Texto no incluido: {why} ({letters} letras)", "")
+    """Lo sospechoso del libro, para revisarlo: [Issue], por página. Cada aviso dice el problema, la
+    solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa."""
+    blocks = book.blocks
+    report = [Issue("skipped", None, page, "Grave", f"Texto no incluido ({letters} letras)",
+                    f"La página {page} tiene texto que no entró en el libro: {why}.",
+                    "Mira la página en la vista previa del PDF. Si era texto de la novela, cópialo en su "
+                    "capítulo con «Editar texto…» (tecla E). Si era un índice o créditos, ignora el aviso.")
               for page, letters, why in book.skipped if letters >= 20]
-    lines = collections.Counter(_plain(b).strip() for b in book.blocks if b.kind == "p")
-    heads = [k for k, b in enumerate(book.blocks) if b.kind == "heading"] + [len(book.blocks)]
-    for k, b in enumerate(book.blocks):
+    lines = collections.Counter(_plain(b).strip() for b in blocks if b.kind == "p")
+    heads = [k for k, b in enumerate(blocks) if b.kind == "heading"] + [len(blocks)]
+    drop = (lambda k: (k, k + 1, ""))
+    prev_text = None
+    for k, b in enumerate(blocks):
         if b.kind != "p":
+            prev_text = None if b.kind == "heading" else prev_text
             continue
         text = _plain(b).strip()
         if text[:1].islower():
-            report.append((k, b.page, "Empieza en minúscula (¿párrafo partido?)", text))
+            # El párrafo anterior, saltando ilustraciones y separadores (la página se cortó con una imagen)
+            j = next((j for j in range(k - 1, -1, -1) if blocks[j].kind in ("p", "heading")), None)
+            head = _plain(blocks[j]).strip() if j is not None and blocks[j].kind == "p" else ""
+            before = _cut(head, tail=True) + " ¶\n" + _cut(text) if head else _cut(text)
+            problem = ("Empieza en minúscula: suele ser el final de la frase del párrafo anterior, cortada por "
+                       "un cambio de página o una ilustración.")
+            if head and not head.endswith(END_PUNCT):
+                between = [_line(blocks[i], i) for i in range(j + 1, k)]  # se quedan tras el párrafo unido
+                edit = (j, k + 1, "\n\n".join([_line(blocks[j], j).rstrip() + " " + _line(b, k).lstrip()] + between))
+                report.append(Issue("lower", k, b.page, "Revisar", "Párrafo partido", problem,
+                                    "Unirlo al párrafo anterior.", before,
+                                    _cut(head, tail=True) + " " + _cut(text), edit, text))
+            else:  # Maryoku 9: el anterior ya acaba la frase; unirlos a ciegas mezclaría texto desordenado
+                report.append(Issue("lower", k, b.page, "Revisar", "Párrafo partido", problem + (
+                                    " Pero el párrafo anterior ya termina la frase: puede faltar texto o estar "
+                                    "desordenado." if head else " Pero va justo tras un título."),
+                                    "Compáralo con la página del PDF y corrígelo con «Editar texto…» (tecla E): "
+                                    "busca de dónde viene el principio de la frase.", before, text=text))
         if len(text) > 3000:
-            report.append((k, b.page, "Párrafo muy largo (¿párrafos unidos?)", text))
+            report.append(Issue("long", k, b.page, "Revisar", f"Párrafo muy largo ({len(text)} caracteres)",
+                                "Un párrafo tan largo suele ser varios unidos: el PDF no marcaba bien dónde "
+                                "empieza cada uno.",
+                                "Ábrelo con «Editar texto…» (tecla E) y deja una línea en blanco donde empiece "
+                                "cada párrafo.", _cut(text, 400), text=text))
         if re.fullmatch(r"\W*\d+\W*", text):
-            report.append((k, b.page, "Número suelto (¿número de página?)", text))
+            report.append(Issue("number", k, b.page, "Revisar", "Número suelto",
+                                "Un párrafo que solo es un número suele ser el número de página del PDF.",
+                                "Quitarlo.", text, "", drop(k), text))
         elif len(text) < 60 and lines[text] >= 3 and text[:1].isalnum() and not text.endswith(END_PUNCT):
             # "Einherjar Project" sí; un diálogo repetido ("¿Eh?", "Ya veo.") empieza con signo o acaba en punto
-            report.append((k, b.page, f"Línea repetida {lines[text]} veces (¿encabezado o pie?)", text))
+            report.append(Issue("repeated", k, b.page, "Revisar", f"Línea repetida {lines[text]} veces",
+                                "Una línea corta que se repite por todo el libro suele ser el encabezado o el "
+                                "pie de página del PDF.", "Quitarla (con «Arreglar todos» se quitan todas).",
+                                text, "", drop(k), text))
+        elif text == prev_text and len(text) >= 20:
+            report.append(Issue("duplicate", k, b.page, "Revisar", "Párrafo duplicado",
+                                "Es igual que el párrafo anterior: el PDF lo repetía o se pegó dos veces.",
+                                "Quitar la copia.", _cut(text), "", drop(k), text))
         if LINKS.search(text):
-            report.append((k, b.page, "Enlace o red social", text))
+            short = len(text) < 200  # un aviso del grupo; uno largo puede ser texto de la novela con un nombre
+            report.append(Issue("link", k, b.page, "Menor", "Enlace o red social",
+                                "Enlaces y redes del grupo de traducción: en un lector no se pueden abrir.",
+                                "Quitarlo." if short else "Quita el enlace con «Editar texto…» (tecla E).",
+                                _cut(text), "", drop(k) if short else None, text))
+        if "�" in text or MOJIBAKE.search(text):
+            m = MOJIBAKE.search(text) or re.search("�", text)
+            fixed = _remojibake(_line(b, k)) if MOJIBAKE.search(text) else None
+            report.append(Issue("broken", k, b.page, "Grave", "Caracteres rotos",
+                                "Hay letras que el PDF guardó mal (tildes o eñes cambiadas por símbolos).",
+                                "Corregirlas." if fixed else "Corrígelas con «Editar texto…» (tecla E) o con "
+                                "«Reemplazos…» si se repiten en todo el libro.",
+                                _around(text, m.start(), m.end()),
+                                _around(_remojibake(text) or "", m.start(), m.end()) if fixed else "",
+                                (k, k + 1, fixed) if fixed else None, text))
+        prev_text = text
+    last = None
     for k, end in zip(heads, heads[1:]):
-        if k in book.candidates:
-            nxt = next((j for j in heads if j > k and j in book.candidates), len(book.blocks))
-            letters = sum(_letters(_plain(b)) for b in book.blocks[k + 1:nxt] if b.kind == "p")
-            if letters < 300 and not PART_TITLE.match(_plain(book.blocks[k])):
-                report.append((k, book.blocks[k].page, f"Capítulo muy corto ({letters} letras)", _plain(book.blocks[k])))
-    return sorted(report, key=lambda r: (r[1], r[0] if r[0] is not None else -1))
+        if k not in book.candidates:
+            continue
+        title = _plain(blocks[k]).strip()
+        nxt = next((j for j in heads if j > k and j in book.candidates), len(blocks))
+        letters = sum(_letters(_plain(b)) for b in blocks[k + 1:nxt] if b.kind == "p")
+        if letters < 300 and not PART_TITLE.match(title):
+            report.append(Issue("short", k, blocks[k].page, "Revisar", f"Capítulo muy corto ({letters} letras)",
+                                f"«{title}» casi no tiene texto: puede ser un título mal detectado (una cita, "
+                                "un cartel) o un capítulo cuyo texto quedó en otro.",
+                                "Si no es un capítulo, cámbialo a Subtítulo (tecla S) o quítalo (tecla Q) en la "
+                                "lista.", _cut(title + "\n" + " ".join(_plain(b) for b in blocks[k + 1:nxt]
+                                                                      if b.kind == "p")), text=title))
+        m = re.match(r"Cap[ií]tulo (\d+)\b", numbered(title), re.I)
+        if m:
+            n = int(m[1])
+            if last is not None and n > last + 1:  # menor o igual: otra parte que vuelve a empezar
+                missing = str(last + 1) if n == last + 2 else f"{last + 1} a {n - 1}"
+                report.append(Issue("gap", k, blocks[k].page, "Grave", f"Falta el capítulo {missing}",
+                                    f"Tras el capítulo {last} viene «{title}».",
+                                    "Busca su título en el PDF (Ctrl+F) y márcalo como Capítulo (tecla C). Si "
+                                    "el PDF tampoco lo tiene, ignora el aviso.", title, text=title))
+            last = n
+    return sorted(report, key=lambda r: (r.page, r.block if r.block is not None else -1))
 
 
 def combine(parts, title):
