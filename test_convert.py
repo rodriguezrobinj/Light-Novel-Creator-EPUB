@@ -3143,7 +3143,8 @@ def test_theme_light_dark_and_bad_setting():
     window_light = q.palette().window().color().lightness()
     fallback = theme.apply(q, "Morado")
     assert dark and not light and window_dark < 80 and window_light > 200, (window_dark, window_light)
-    assert fallback in (True, False) and q.style().name().lower() == "fusion"
+    system = q.styleHints().colorScheme() == theme.Qt.ColorScheme.Dark
+    assert fallback == system and "border-radius" in q.styleSheet()
     assert theme.kind_colors(True)["subtitle"] != theme.kind_colors(False)["subtitle"]
     assert set(theme.editor_tags(True)) == set(theme.editor_tags(False))
     theme.apply(q, "Claro")
