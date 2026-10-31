@@ -1,5 +1,6 @@
 """Pruebas de convert.py con PDFs sintéticos. Ejecutar: python test_convert.py"""
 import html
+import os
 import re
 import sys
 import tempfile
@@ -11,6 +12,8 @@ from pathlib import Path
 import pymupdf
 
 import convert
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # las ventanas Qt de las pruebas no salen en pantalla
 
 HEADER = "Mi Novela - Volumen 1"
 FOOTER = "Grupo Traductor"
@@ -3082,6 +3085,56 @@ def test_install_quotes_paths_with_apostrophes_for_powershell():
     out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Write-Output {app._ps_quote(path)}"],
                          capture_output=True, text=True, check=True).stdout.strip()
     assert out == path, out
+
+
+def test_qtk_rowlist_works_like_treeview():
+    import qtk
+
+    qtk.app()
+    tree = qtk.RowList(("inc", "title"), {"inc": "Tipo", "title": "Título"}, {"inc": 80, "title": 200})
+    for k, title in ((0, "Uno"), (3, "Dos"), (5, "Tres")):
+        tree.insert("", "end", iid=str(k), values=("Capítulo", title), tags=("chapter",))
+    tree.set("3", "title", "Dos bis")
+    tree.selection_set("5")
+    seen = (tree.get_children(), tree.set("3", "title"), tree.selection(), tree.index("5"), tree.exists("4"),
+            tree.item("3")["tags"])
+    tree.delete("0")
+    assert seen == (("0", "3", "5"), "Dos bis", ("5",), 2, False, ("chapter",)), seen
+    assert tree.get_children() == ("3", "5")
+    tree.delete(*tree.get_children())
+    assert tree.get_children() == () and not tree.exists("3")
+
+
+def test_qtk_textbox_understands_tk_indices():
+    import qtk
+
+    qtk.app()
+    text = qtk.TextBox()
+    text.insert("end", "uno dos\n\ntres", ("src4",))
+    text.mark_set("insert", "3.2")
+    seen = [text.get("1.0", "end-1c"), text.index("insert"), text.get("insert linestart", "insert lineend"),
+            text.get("1.4", "1.end"), text.index("end-1c"), "src4" in text.tag_names("3.1"),
+            text.search("dos", "1.0"), text.get("1.0", "end"), text.index("insert linestart+2c")]
+    with text.group():
+        text.delete("1.0", "1.4")
+        text.insert("1.0", "UNO ")
+    text.edit_undo()
+    seen.append(text.get("1.0", "1.end"))
+    text.tag_add("sel", "1.0", "1.3")
+    seen.append((text.index("sel.first"), text.index("sel.last"), text.tag_ranges("sel")))
+    text.tag_add("italic", "1.4", "1.7")
+    text.insert("1.0", "xx")  # los tags siguen al texto
+    seen.append("italic" in text.tag_names("1.6") and "italic" not in text.tag_names("1.2"))
+    text.tag_remove("italic", "1.0", "end")
+    seen.append(text.tag_names("1.6"))
+    assert seen == ["uno dos\n\ntres", "3.2", "tres", "dos", "3.4", True, "1.4", "uno dos\n\ntres\n", "3.2",
+                    "uno dos", ("1.0", "1.3", ("1.0", "1.3")), True, ("src4",)], seen
+
+
+def test_qtk_dialog_filters():
+    import qtk
+
+    assert qtk.filters([("PDF", "*.pdf"), ("Imagen", "*.jpg *.png")]) == "PDF (*.pdf);;Imagen (*.jpg *.png)"
 
 
 if __name__ == "__main__":
