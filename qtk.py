@@ -3,10 +3,12 @@ import os
 import re
 from contextlib import contextmanager
 
+import pymupdf
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor, QTextFormat
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHeaderView, QMessageBox,
-                               QPlainTextEdit, QTextEdit, QTreeWidget, QTreeWidgetItem)
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QTextCharFormat, QTextCursor, QTextFormat
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
+                               QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QTextEdit, QTreeWidget,
+                               QTreeWidgetItem, QWidget)
 
 IID = Qt.ItemDataRole.UserRole       # fila -> su iid (el índice del bloque, como texto)
 TAGS = Qt.ItemDataRole.UserRole + 1  # fila -> sus tags de aspecto
@@ -147,7 +149,21 @@ class RowList(QTreeWidget):
             self.headerItem().setTextAlignment(n, Qt.AlignmentFlag.AlignLeft if col == stretch
                                                else Qt.AlignmentFlag.AlignCenter)
         self.stretch = stretch
+        self.keys = {}  # (tecla, modificadores) -> función, antes que la búsqueda por teclado de Qt
         self.itemSelectionChanged.connect(self.selected)
+
+    def bind_key(self, key, fn, modifiers=Qt.KeyboardModifier.NoModifier):
+        self.keys[(key, modifiers)] = fn
+
+    def keyPressEvent(self, event):
+        mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        fn = self.keys.get((event.key(), mods))
+        if fn is None and mods == Qt.KeyboardModifier.ShiftModifier:  # con Mayús o Bloq Mayús: la misma letra
+            fn = self.keys.get((event.key(), Qt.KeyboardModifier.NoModifier))
+        if fn:
+            fn()
+        else:
+            super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
@@ -179,13 +195,18 @@ class RowList(QTreeWidget):
         return iid
 
     def delete(self, *iids):
+        # Qt avisa del cambio de selección a mitad del borrado, con la fila a medio quitar: se avisa al final
+        before = self.selection()
+        self.blockSignals(True)
         if len(iids) == len(self.rows):  # vaciar la lista: de golpe, no fila a fila
             self.rows.clear()
             self.clear()
-            return
-        for iid in iids:
-            item = self.rows.pop(iid)
-            self.takeTopLevelItem(self.indexOfTopLevelItem(item))
+        else:
+            for iid in iids:
+                self.takeTopLevelItem(self.indexOfTopLevelItem(self.rows.pop(iid)))
+        self.blockSignals(False)
+        if self.selection() != before:
+            self.selected.emit()
 
     def get_children(self, _=""):
         return tuple(self.topLevelItem(n).data(0, IID) for n in range(self.topLevelItemCount()))
@@ -243,6 +264,185 @@ class RowList(QTreeWidget):
     def identify_column(self, x):
         n = self.header().logicalIndexAt(x)
         return f"#{n + 1}" if n >= 0 else ""
+
+
+class Var:
+    """tk.StringVar/BooleanVar/IntVar: un valor con get/set que mantiene al día los controles enlazados.
+    set con un valor del tipo que no toca (ajustes.json escrito a mano) da ValueError o TypeError."""
+
+    def __init__(self, value=""):
+        self.value, self.type = value, type(value)
+        self.setters = []    # (control, función que le pone el valor)
+        self.listeners = []  # funciones a llamar tras cada cambio
+
+    def get(self):
+        return self.value
+
+    def set(self, value, origin=None):
+        if self.type is bool:
+            if not isinstance(value, (bool, int)):
+                raise TypeError(f"se esperaba sí o no: {value!r}")
+            value = bool(value)
+        else:
+            value = self.type(value)
+        if value == self.value:
+            return
+        self.value = value
+        for widget, setter in self.setters:
+            if widget is not origin:  # al control que escribe no se le devuelve: movería su cursor
+                widget.blockSignals(True)
+                setter(value)
+                widget.blockSignals(False)
+        for listener in self.listeners:
+            listener()
+
+    def entry(self, widget):
+        widget.setText(str(self.value))
+        self.setters.append((widget, lambda v: widget.setText(str(v))))
+        widget.textChanged.connect(lambda text: self.set(text, widget))
+        return widget
+
+    def combo(self, widget):
+        widget.setCurrentText(str(self.value))
+        self.setters.append((widget, lambda v: widget.setCurrentText(str(v))))
+        widget.currentTextChanged.connect(lambda text: self.set(text, widget))
+        return widget
+
+    def check(self, widget):
+        """QCheckBox o QAction marcable."""
+        widget.setChecked(self.value)
+        self.setters.append((widget, widget.setChecked))
+        widget.toggled.connect(lambda on: self.set(on, widget))
+        return widget
+
+
+def qimage(pix):
+    """Pixmap de PyMuPDF -> QImage (copia: la memoria del pixmap se libera con él)."""
+    if pix.alpha:
+        pix = pymupdf.Pixmap(pix, 0)
+    if pix.n not in (1, 3):
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+    form = QImage.Format.Format_Grayscale8 if pix.n == 1 else QImage.Format.Format_RGB888
+    return QImage(pix.samples, pix.width, pix.height, pix.stride, form).copy()
+
+
+class Preview(QLabel):
+    """Hoja de tamaño fijo con una página centrada, o en blanco con un aviso tenue."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        # La hoja no impone tamaño a la ventana: se dibuja a la medida del sitio que le dejan (App.box_size)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.image, self.message, self.sheet, self.marks = None, "", False, []
+        self.size_ = (0, 0)
+
+    def show_blank(self, size, text, colors):
+        width, height = size
+        pixmap = QPixmap(width, height)
+        pixmap.fill(QColor(colors["sheet"]))
+        painter = QPainter(pixmap)
+        painter.setPen(QColor(colors["sheet_line"]))
+        painter.drawRect(0, 0, width - 1, height - 1)
+        painter.setPen(QColor(colors["hint"]))
+        painter.drawText(pixmap.rect().adjusted(20, 0, -20, 0),
+                         Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, text)
+        painter.end()
+        self.setPixmap(pixmap)
+        self.size_ = size
+        self.image, self.message, self.sheet, self.marks = None, text, True, []
+
+    def show_image(self, size, image, marks=()):
+        """image centrada; marks: [(QRectF en píxeles de la imagen, color)]. Devuelve el desplazamiento."""
+        width, height = size
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        x, y = (width - image.width()) // 2, (height - image.height()) // 2
+        painter = QPainter(pixmap)
+        painter.drawImage(x, y, image)
+        for rect, color in marks:
+            painter.setPen(QPen(QColor(color), 2))
+            painter.drawRect(rect.translated(x, y))
+        painter.end()
+        self.setPixmap(pixmap)
+        self.size_ = size
+        self.image, self.message, self.sheet, self.marks = image, "", False, list(marks)
+        return x, y
+
+
+class Strip(QScrollArea):
+    """Tira horizontal de miniaturas del PDF con un borde de color por página."""
+    clicked = Signal(int)
+
+    def __init__(self, height):
+        super().__init__()
+        self.height_ = height
+        self.setWidgetResizable(True)
+        self.setFixedHeight(height + 30)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        self.row = QHBoxLayout(inner)
+        self.row.setContentsMargins(4, 4, 4, 4)
+        self.row.setSpacing(6)
+        self.row.addStretch(1)
+        self.setWidget(inner)
+        self.labels, self.colors, self.current, self.blanks = {}, {}, None, []
+
+    def clear(self):
+        for label in list(self.labels.values()) + self.blanks:
+            label.deleteLater()
+        self.labels, self.colors, self.current, self.blanks = {}, {}, None, []
+
+    def placeholders(self, count, width, color):
+        """Rectángulos tenues mientras no hay miniaturas: la tira no queda como un hueco."""
+        if self.labels or self.blanks:
+            return
+        for _ in range(count):
+            label = QLabel()
+            label.setFixedSize(width, self.height_)
+            label.setStyleSheet(f"background: {color}; border-radius: 3px;")
+            self.row.insertWidget(self.row.count() - 1, label)
+            self.blanks.append(label)
+
+    def add(self, n, image, color):
+        for label in self.blanks:
+            label.deleteLater()
+        self.blanks = []
+        label = QLabel()
+        label.setPixmap(QPixmap.fromImage(image))
+        label.setFixedSize(image.width() + 6, image.height() + 6)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.mousePressEvent = lambda _, n=n: self.clicked.emit(n)
+        label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.row.insertWidget(self.row.count() - 1, label)
+        self.labels[n], self.colors[n] = label, color
+        self._border(n)
+
+    def _border(self, n):
+        color = "#f08c00" if n == self.current else self.colors[n]
+        self.labels[n].setStyleSheet(f"border: 3px solid {color or 'transparent'}; border-radius: 3px;")
+
+    def mark(self, n):
+        """Destaca la miniatura de la página que muestra la vista previa."""
+        old, self.current = self.current, n
+        for page in (old, n):
+            if page in self.labels:
+                self._border(page)
+        if n in self.labels:
+            self.ensureWidgetVisible(self.labels[n])
+
+    def outline(self, n):
+        return self.colors.get(n, "")
+
+
+class Box(QWidget):
+    """QWidget que avisa al cambiar de tamaño (el <Configure> de Tk)."""
+    resized = Signal()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
 
 
 BASE = re.compile(r"(\d+)\.(\d+|end)|insert|end|sel\.first|sel\.last")

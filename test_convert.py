@@ -824,18 +824,48 @@ def first_title(window):
     return next(i for i in window.tree.get_children() if not window.is_image(i))
 
 
-def visible_window():
-    """Ventana mapeada pero transparente: el Treeview solo calcula posiciones si está en pantalla."""
-    import tkinter as tk
+class Root:
+    """Lo que las pruebas usan de la ventana principal, con los nombres de Tk que ya tenían."""
 
+    def __init__(self, window):
+        self.window = window
+
+    def update(self):
+        import qtk
+        qtk.pump()
+
+    def geometry(self, spec):
+        size, x, y = spec.split("+")
+        width, height = size.split("x")
+        self.window.root.setGeometry(int(x), int(y), int(width), int(height))
+        self.update()
+
+    def winfo_exists(self):
+        import shiboken6
+        return shiboken6.isValid(self.window.root) and self.window.root.isVisible()
+
+    def destroy(self):
+        if self.winfo_exists():
+            self.window.root.on_close = None
+            self.window.close()
+
+    def dialogs(self):
+        """Ventanas secundarias abiertas (los Toplevel de Tk)."""
+        from PySide6.QtWidgets import QDialog
+        return [w for w in self.window.root.findChildren(QDialog) if w.isVisible()]
+
+
+def visible_window():
+    """Ventana Qt sin pantalla (QT_QPA_PLATFORM=offscreen), con su tamaño: la lista calcula posiciones."""
     import app
 
     app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"  # cada ventana sin preferencias de otra prueba
-    root = tk.Tk()
-    root.attributes("-alpha", 0.0)
+    window = app.App(app.Window())
+    window.theme_var.set("Claro")
+    window.apply_theme()
+    root = Root(window)
+    window.root.show()
     root.geometry("780x560+0+0")
-    window = app.App(root)
-    root.update()
     return root, window
 
 
@@ -976,7 +1006,7 @@ def test_window_previews_pdf_page_and_epub_for_selected_title():
     window.tree.selection_set(first_title(window))  # Capitulo 1: Inicio, página 3
     root.update()
     widths = [view.image.width() if view.image else 0 for view in (window.pdf_view, window.epub_view)]
-    caption = window.pdf_caption.cget("text")
+    caption = window.pdf_caption.text()
     window.close()
     assert widths[0] > 0, "sin vista previa del PDF"
     assert widths[1] > 0, "sin vista previa del EPUB"
@@ -991,12 +1021,30 @@ def test_window_bottom_bar_stays_visible_with_previews():
     window.show_book(convert.analyze(window.pdf))
     window.tree.selection_set(first_title(window))
     root.update()
-    bottom = window.root.winfo_rooty() + window.root.winfo_height()
-    shown = [(w.winfo_ismapped(), w.winfo_rooty() + w.winfo_height() <= bottom) for w in (window.gen_btn, window.progress)]
+    from PySide6.QtCore import QPoint
+
+    bottom = window.root.height()
+    shown = [(w.isVisible(), w.mapTo(window.root, QPoint(0, w.height())).y() <= bottom)
+             for w in (window.gen_btn, window.progress, window.quality_btn)]
     image_height = window.pdf_view.image.height() if window.pdf_view.image else 0
+    fits = window.root.minimumSizeHint().height() <= 600 and window.root.height() == 600  # no crece por debajo
     window.close()
-    assert shown == [(1, True), (1, True)], shown
+    assert shown == [(True, True)] * 3, shown
     assert 0 < image_height < 560, image_height  # se ajustó al alto disponible
+    assert fits, window.root.minimumSizeHint()
+
+
+def test_window_fits_the_free_screen_area():
+    """Al abrir, la ventana cabe en la pantalla sin la barra de tareas (1366×768: «Generar EPUB» a la vista)."""
+    import app
+
+    app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"
+    window = app.App(app.Window())
+    area = window.root.screen().availableGeometry()
+    inside = area.contains(window.root.geometry())
+    window.root.on_close = None
+    window.close()
+    assert inside, (area, window.root.geometry())
 
 
 def test_window_epub_preview_follows_include_mark():
@@ -1064,7 +1112,7 @@ def test_window_removed_section_preview_and_epub():
     root.update()
     window.tree.set(item, "inc", app.CUT)
     window.update_preview()
-    preview = (window.epub_view.itemcget("message", "text"), window.epub_view.image)
+    preview = (window.epub_view.message, window.epub_view.image)
     out = TMP / "quitado-desde-ventana.epub"
     originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
     app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
@@ -1133,9 +1181,9 @@ def test_window_highlights_detected_title_on_pdf_preview():
     window.tree.selection_set(first_title(window))
     root.update()
     canvas = window.pdf_view
-    boxes = canvas.find_withtag("title")
-    coords = canvas.coords(boxes[0]) if boxes else []
-    size = (int(canvas.cget("width")), int(canvas.cget("height")))  # el marco donde va centrada la página
+    boxes = [rect for rect, _ in canvas.marks]
+    coords = [boxes[0].left(), boxes[0].top(), boxes[0].right(), boxes[0].bottom()] if boxes else []
+    size = (canvas.image.width(), canvas.image.height())  # la página sobre la que va el recuadro
     window.close()
     assert coords, "sin recuadro sobre el título"
     assert 0 <= coords[0] < coords[2] <= size[0] and 0 <= coords[1] < coords[3] <= size[1], (coords, size)
@@ -1148,12 +1196,12 @@ def test_window_preview_page_navigation():
     window.tree.selection_set(first_title(window))
     root.update()
     window.pdf_step(1)
-    pdf_caption = window.pdf_caption.cget("text")
-    first = window.epub_caption.cget("text")
+    pdf_caption = window.pdf_caption.text()
+    first = window.epub_caption.text()
     window.epub_step(1)
-    second = window.epub_caption.cget("text")
+    second = window.epub_caption.text()
     window.epub_step(-5)  # no baja de la primera
-    back = window.epub_caption.cget("text")
+    back = window.epub_caption.text()
     window.close()
     assert "página 2" in pdf_caption, pdf_caption
     assert "1/" in first and "2/" in second and "1/" in back, (first, second, back)
@@ -1168,10 +1216,10 @@ def test_window_list_styles_follow_type():
     item = first_title(window)
     root.update()
     x, y, w, h = window.tree.bbox(item, "inc")
-    styles = [window.tree.item(item, "tags")]
+    styles = [window.tree.item(item)["tags"]]
     for _ in range(3):
         window.on_click(SimpleNamespace(x=x + w // 2, y=y + h // 2))
-        styles.append(window.tree.item(item, "tags"))
+        styles.append(window.tree.item(item)["tags"])
     window.close()
     assert [tuple(s) for s in styles] == [("chapter",), ("subtitle",), ("separator",), ("cut",)], styles
 
@@ -1187,10 +1235,10 @@ def test_window_device_preview_and_dark_mode():
         window.device_var.set(device)
         window.draw_epub()
         shapes[device] = window.epub_view.image.height() / window.epub_view.image.width()
-    light = sum(window.epub_view.image.get(2, 2))
+    light = sum(window.epub_view.image.pixelColor(2, 2).getRgb()[:3])
     window.dark_var.set(True)
     window.draw_epub()
-    dark = sum(window.epub_view.image.get(2, 2))
+    dark = sum(window.epub_view.image.pixelColor(2, 2).getRgb()[:3])
     window.close()
     assert shapes["Celular"] > shapes["Tablet"], shapes  # el celular es más alargado
     assert light > 600 and dark < 150, (light, dark)
@@ -1207,10 +1255,10 @@ def test_window_thumbnail_strip():
         root.update()
         time.sleep(0.02)
     count = len(window.thumbs)
-    marks = {n: window.strip.itemcget(f"b{n}", "outline") for n in (1, 2, 4)}  # páginas 2, 3 y 5
+    marks = {n: window.strip.outline(n) for n in (1, 2, 4)}  # páginas 2, 3 y 5
     window.jump(3)  # página 4: tiene "Capitulo 2: Final"
     root.update()
-    caption = window.pdf_caption.cget("text")
+    caption = window.pdf_caption.text()
     selected = window.tree.set(window.tree.selection()[0], "title") if window.tree.selection() else ""
     window.close()
     assert count == 5, count
@@ -1227,9 +1275,9 @@ def test_window_starts_with_blank_canvases():
     """Al iniciar, las vistas previas y la tira muestran una hoja en blanco, no un hueco vacío."""
     root, window = visible_window()
     root.update()
-    message = window.pdf_view.itemcget("message", "text")
-    sheets = [len(view.find_withtag("sheet")) for view in (window.pdf_view, window.epub_view)]
-    placeholders = len(window.strip.find_withtag("placeholder"))
+    message = window.pdf_view.message
+    sheets = [int(view.sheet) for view in (window.pdf_view, window.epub_view)]
+    placeholders = len(window.strip.blanks)
     window.close()
     assert sheets == [1, 1] and "Abre un PDF" in message, (sheets, message)
     assert placeholders > 0
@@ -1248,8 +1296,7 @@ def test_window_device_change_keeps_layout():
         window.device_var.set(device)
         window.draw_epub()
         root.update()
-        sizes.add((window.views.winfo_width(), window.epub_view.winfo_width(), window.epub_view.winfo_height(),
-                   window.tree.winfo_width()))
+        sizes.add((window.views.width(), window.epub_view.size_[0], window.epub_view.size_[1], window.tree.width()))
     window.close()
     assert len(sizes) == 1, sizes
 
@@ -1278,7 +1325,7 @@ def test_window_reviews_illustrations():
     click(art)    # Ilustración -> Quitar
     window.tree.selection_set(art)
     root.update()
-    message = window.epub_view.itemcget("message", "text")
+    message = window.epub_view.message
     out = TMP / "ilustraciones-elegidas.epub"
     originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
     app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
@@ -1398,8 +1445,9 @@ def test_window_double_click_on_include_toggles_twice():
 
 def test_window_title_editor_closes_on_scroll():
     """El cuadro de edición no sigue al scroll: al desplazarse se guarda y se cierra."""
-    from tkinter import ttk
     from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QLineEdit
 
     import app
 
@@ -1409,13 +1457,13 @@ def test_window_title_editor_closes_on_scroll():
     root.update()
     x, y, w, h = window.tree.bbox("0", "title")
     window.on_double_click(SimpleNamespace(x=x + w // 2, y=y + h // 2))
-    editor = [c for c in window.tree.winfo_children() if isinstance(c, ttk.Entry)]
+    editor = window.tree.viewport().findChildren(QLineEdit)
     assert len(editor) == 1
-    editor[0].delete(0, "end")
-    editor[0].insert(0, "Nuevo titulo")
-    window.tree.yview_moveto(1.0)
+    editor[0].setText("Nuevo titulo")
+    bar = window.tree.verticalScrollBar()
+    bar.setValue(bar.maximum())
     root.update()
-    left = [c for c in window.tree.winfo_children() if isinstance(c, ttk.Entry)]
+    left = [c for c in window.tree.viewport().findChildren(QLineEdit) if c.isVisible()]
     title = window.tree.set("0", "title")
     root.destroy()
     assert not left and title == "Nuevo titulo", (left, title)
@@ -1430,9 +1478,9 @@ def test_window_error_resets_progress_bar():
     try:
         window.report(5, 10)
         window.poll()
-        assert float(window.progress.cget("value")) == 5
+        assert window.progress.value() == 5
         window.finish(("error", "fallo"))
-        value = float(window.progress.cget("value"))
+        value = window.progress.value()
     finally:
         app.messagebox.showerror = original
         root.destroy()
@@ -1469,13 +1517,9 @@ def test_window_runs_work_in_another_process():
     """PyMuPDF retiene el GIL: en un hilo traba la ventana, así que el trabajo va en otro proceso."""
     import os
     import time
-    import tkinter as tk
-
     import app
 
-    root = tk.Tk()
-    root.withdraw()
-    window = app.App(root)
+    root, window = visible_window()
     result = []
     window.run(os.getpid, (), result.append)
     deadline = time.time() + 30
@@ -1490,13 +1534,9 @@ def test_window_reports_worker_crash():
     """Si el proceso de trabajo muere sin avisar, la ventana muestra el error y se desbloquea."""
     import os
     import time
-    import tkinter as tk
-
     import app
 
-    root = tk.Tk()
-    root.withdraw()
-    window = app.App(root)
+    root, window = visible_window()
     shown = []
     original = app.messagebox.showerror
     app.messagebox.showerror = lambda title, message: shown.append(message)
@@ -1506,7 +1546,7 @@ def test_window_reports_worker_crash():
         while not shown and time.time() < deadline:
             root.update()
             time.sleep(0.05)
-        unlocked = window.open_btn.instate(["!disabled"])
+        unlocked = window.open_btn.isEnabled()
     finally:
         app.messagebox.showerror = original
         root.destroy()
@@ -1573,12 +1613,15 @@ def test_window_keyboard_shortcuts_change_type():
     window.show_book(convert.analyze(window.pdf))
     title = first_title(window)
     image = next(i for i in window.tree.get_children() if window.is_image(i))
-    window.tree.focus_force()  # Tk entrega las teclas al widget con el foco
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
     seen = []
     for item, key in ((title, "s"), (title, "Q"), (title, "i"), (title, "c"), (image, "q"), (image, "s"), (image, "i")):
         window.tree.selection_set(item)
         root.update()
-        window.tree.event_generate(f"<KeyPress-{key}>")
+        shift = Qt.KeyboardModifier.ShiftModifier if key.isupper() else Qt.KeyboardModifier.NoModifier
+        QTest.keyClick(window.tree, getattr(Qt.Key, f"Key_{key.upper()}"), shift)  # Q: con Bloq Mayús
         root.update()
         seen.append(window.tree.set(item, "inc"))
     window.close()
@@ -1606,7 +1649,7 @@ def test_window_review_is_restored_when_reopening_the_pdf():
     window.pdf = TMP / "novela.pdf"
     window.show_book(convert.analyze(window.pdf))
     restored = (window.tree.set(item, "inc"), window.tree.set(item, "title"), window.publisher_var.get(),
-                window.style_var.get(), window.description, window.cover_choice, window.status.cget("text"))
+                window.style_var.get(), window.description, window.cover_choice, window.status.text())
     window.close()
     assert restored == (app.OFF, "Capítulo uno", "Grupo X", "Moderno", "Sinopsis.", ["page", 2],
                         "Revisión anterior recuperada"), restored
@@ -1638,7 +1681,7 @@ def test_window_metadata_cover_and_shrink_reach_the_epub():
     app.messagebox.showinfo = lambda *args: None
     try:
         window.cover_from_file()
-        label = window.cover_label.cget("text")
+        label = window.cover_label.text()
         window.generate()
         deadline = time.time() + 60
         while window.done and time.time() < deadline:
@@ -1741,7 +1784,9 @@ def test_window_undo_restores_type_and_title():
     window.set_kind("2", app.ON)
     window.history.append([window.row_state("2")])
     window.tree.set("2", "title", "Lado A editado")  # como hace el cuadro de edición
-    bound = window.tree.bind("<Control-z>")  # el atajo; pulsarlo de verdad depende del foco de la ventana
+    from PySide6.QtCore import Qt
+
+    bound = window.tree.keys.get((Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier))  # el atajo Ctrl+Z
     window.undo()
     after_title = (window.tree.set("2", "inc"), window.tree.set("2", "title"))
     window.undo()
@@ -1819,7 +1864,7 @@ def test_watched_folder_converts_new_pdfs_once():
             root.update()
             time.sleep(0.05)
         window.poll_watch()  # el roto no se reintenta; el convertido ya tiene EPUB
-        status = window.status.cget("text")
+        status = window.status.text()
     finally:
         window.close()
     assert [sorted(Path(p).name for p in r) for r in runs] == [["Mi Serie - Volumen 05.pdf", "roto.pdf"]], runs
@@ -1878,7 +1923,7 @@ def test_window_new_volume_inherits_series_data():
     window.show_book(convert.analyze(window.pdf))
     got = (window.publisher_var.get(), window.translator_var.get(), window.style_var.get(), window.replacements,
            window.description, window.volume_var.get(), window.tree.set(first_title(window), "title"))
-    status = window.status.cget("text")
+    status = window.status.text()
     window.close()
     assert got == ("Grupo X", "Ana", "Moderno", [["Primera", "Inicial"]], "", "2", "Capitulo 1: Inicio"), got
     assert "otro tomo" in status, status
@@ -1927,7 +1972,7 @@ def test_window_convert_folder_skips_existing_epubs_on_no():
     finally:
         (app.filedialog.askdirectory, app.messagebox.askyesnocancel, app.messagebox.showinfo,
          app.messagebox.showwarning) = originals
-        status = window.status.cget("text")
+        status = window.status.text()
         window.close()
     assert asked and "1 de 2" in asked[0], asked
     assert (folder / "Mi Serie - Volumen 01.epub").read_bytes() == b"mio"  # "No": no se reemplaza
@@ -2015,7 +2060,7 @@ def test_window_proposes_removing_group_sections():
     window.pdf = make_group_pdf()
     window.show_book(convert.analyze(window.pdf))
     rows = {window.tree.set(i, "title"): window.tree.set(i, "inc") for i in window.tree.get_children()}
-    status = window.status.cget("text")
+    status = window.status.text()
     window.close()
     assert rows == {"Capitulo 1: Inicio": app.ON, "Agradecimientos": app.CUT, "Capitulo 2: Final": app.ON}, rows
     assert "1 secciones del grupo en Quitar" in status, status
@@ -2065,7 +2110,7 @@ def test_text_editor_opens_section_and_saves_only_changes():
     editor = window.edit_text()
     shown = editor.text.get("1.0", "end-1c") == convert.section_text(window.book, 2, 6)
     sources = [t for t in editor.text.tag_names("1.0") if t.startswith("src")]
-    grabbed = editor.win.grab_status() == "local"  # la lista no cambia por debajo mientras se edita
+    grabbed = editor.win.isModal()  # la lista no cambia por debajo mientras se edita
     editor.text.insert("end", "\n\n  ")  # líneas en blanco: no es un cambio (aceptar re-paginaría la sección)
     blank_only = not editor.dirty()
     editor.save()
@@ -2076,10 +2121,10 @@ def test_text_editor_opens_section_and_saves_only_changes():
     try:
         app.messagebox.askyesno = lambda *args, **kwargs: answers.append(args) or False
         editor.cancel()
-        kept = bool(editor.win.winfo_exists())
+        kept = editor.win.isVisible()
         app.messagebox.askyesno = lambda *args, **kwargs: True
         editor.cancel()
-        closed = not editor.win.winfo_exists()
+        closed = not editor.win.isVisible()
     finally:
         app.messagebox.askyesno = original
     window.close()
@@ -2169,9 +2214,8 @@ def test_text_editor_actions_and_undo():
     text.mark_set("insert", "1.0")
     editor.step(editor.insert_break)
     seen.append(line(3))
-    bound = all(text.bind(key) for key in ("<Control-i>", "<Control-b>", "<Control-t>", "<Control-j>",
-                                           "<Control-Return>"))
-    editor.win.destroy()  # sin pasar por la pregunta de cambios sin guardar
+    bound = all(key in editor.shortcuts for key in ("Ctrl+I", "Ctrl+B", "Ctrl+T", "Ctrl+J", "Ctrl+Return"))
+    editor.win.done(0)  # sin pasar por la pregunta de cambios sin guardar
     window.close()
     assert seen == ["<i>Fin</i>.", "Fin.", ("Fin.", "Dijo <i>hola</i>, y se fue."), "# Fin.", "# Fin.",
                     "Fin. Dijo <i>hola</i>, y se fue.", ("Fin.", "Dijo <i>hola</i>, y se fue."),
@@ -2223,7 +2267,7 @@ def test_text_editor_never_breaks_marks():
     copy = content.rindex("[Ilustración 0]")
     seen.append(set(text.tag_names(f"1.0+{copy}c")) & {"token", "broken"})
     seen.append("broken" in text.tag_names(f"1.0+{content.index('<i>mal')}c"))
-    editor.win.destroy()
+    editor.win.done(0)
     window.close()
     with pymupdf.open() as doc:  # una línea corta repetida en la página: no se sabe cuál es, sin recuadro
         page = doc.new_page()
@@ -2257,7 +2301,7 @@ def test_text_editor_shows_source_page_and_illustration():
     seen += [editor.shown, at("Ella penso")]
     text.insert(text.index(f"{text.search('Fin.', '1.0')} lineend"), "\n\nParrafo nuevo")
     seen.append(at("Parrafo nuevo"))
-    status = editor.status.cget("text")
+    status = editor.status.text()
     empty = app.TextEditor(window, "6", 7, 7)  # título sin texto debajo: muestra la página del título
     empty.draw_source()
     seen.append(empty.shown)
@@ -2265,8 +2309,8 @@ def test_text_editor_shows_source_page_and_illustration():
     at("Fin.")
     seen.append(editor.shown)
     window.pdf_doc = doc
-    editor.win.destroy()
-    empty.win.destroy()
+    editor.win.done(0)
+    empty.win.done(0)
     window.close()
     assert seen == [("page", 4), True, ("image", 0), ("page", 3), ("page", 3), ("page", 4), ("page", 4), None], seen
     assert status.startswith("Página 4 del PDF · párrafo "), status
@@ -2281,7 +2325,7 @@ def test_window_find_moves_previews_to_the_match():
     window.show_match(k, 3, "final de la historia")
     root.update()
     selected = window.tree.set(window.tree.selection()[0], "title")
-    caption = window.pdf_caption.cget("text")
+    caption = window.pdf_caption.text()
     window.find()  # el cuadro de búsqueda se abre sin errores
     root.update()
     window.close()
@@ -2487,17 +2531,21 @@ def test_window_remembers_settings_and_recent_pdfs():
         root.update()
         time.sleep(0.05)
     loaded = window.book is not None
+    window.theme_var.set("Oscuro")
     window.close()
     app.SETTINGS = settings
-    import tkinter as tk
-    root = tk.Tk()
-    root.withdraw()
-    window = app.App(root)
-    got = (window.style_var.get(), window.gray_var.get(), window.recent_menu.entrycget(0, "label"),
-           window.settings["folder"])
-    root.destroy()
+    window = app.App(app.Window())
+    got = (window.style_var.get(), window.gray_var.get(), window.recent_menu.actions()[0].text(),
+           window.settings["folder"], window.theme_var.get(), window.dark)
+    recent = window.recent_list.item(0).text()  # pantalla vacía: el tomo y su estado
+    window.root.on_close = None
+    window.close()
+    import qtk
+    import theme
+    theme.apply(qtk.app(), "Claro")  # las demás pruebas, en claro
     assert loaded
-    assert got == ("Moderno", True, "novela.pdf", str(pdf.parent.resolve())), got
+    assert got == ("Moderno", True, "novela.pdf", str(pdf.parent.resolve()), "Oscuro", True), got
+    assert recent.startswith("novela") and ("Revisado" in recent or "EPUB" in recent), recent
 
 
 def test_window_epub_preview_continues_into_next_section():
@@ -2683,33 +2731,28 @@ def test_quality_report_explains_previews_and_fixes():
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
     página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""
-    import tkinter as tk
     B = convert.Block
     blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella abrió la puerta y dijo que"), B("p", 2, "nadie vendría."),
               B("p", 2, "12"), B("p", 3, "Texto. " * 60), B("p", 3, "13")]
     root, window = visible_window()
     window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
-    button = window.quality_btn.cget("text")
+    button = window.quality_btn.text()
     window.quality()
     root.update()
-    win = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
-
-    def widgets(w, cls):
-        return [w] * (w.winfo_class() == cls) + [c for k in w.winfo_children() for c in widgets(k, cls)]
-
-    table = widgets(win, "Treeview")[0]
-    before, after = widgets(win, "Text")
+    parts = root.dialogs()[-1].parts
+    table = parts["table"]
+    before, after = parts["previews"]["before"], parts["previews"]["after"]
     listed = [table.set(i, "title") for i in table.get_children()]
     shown = (before.get("1.0", "end").strip(), after.get("1.0", "end").strip(),
              [before.get(*r) for r in zip(*[iter(before.tag_ranges("old"))] * 2)])
     table.selection_set("1")  # el primer número de página
     root.update()
-    fix_all = next(b for b in widgets(win, "TButton") if b.cget("text").startswith("Arreglar todos"))
-    label = fix_all.cget("text")
-    fix_all.invoke()
+    fix_all = parts["all"]
+    label = fix_all.text()
+    fix_all.click()
     root.update()
     fixed = ([b.html for b in window.book.blocks], [table.set(i, "title") for i in table.get_children()],
-             window.quality_btn.cget("text"))
+             window.quality_btn.text())
     window.undo()
     undone = [b.html for b in window.book.blocks]
     window.close()
@@ -2864,15 +2907,15 @@ def test_window_cover_from_illustration_quality_and_series_panel():
     window.show_book(convert.analyze(window.pdf))
     image = next(i for i in window.tree.get_children() if window.is_image(i))
     window.set_cover(("image", int(image)))
-    label = window.cover_label.cget("text")
+    label = window.cover_label.text()
     same = window.book.cover == window.book.blocks[int(image)].image
     window.choose_cover()
     window.quality()
     window.series_panel()
     root.update()
-    panels = [w for w in root.winfo_children() if isinstance(w, __import__("tkinter").Toplevel)]
-    tables = [c for p in panels for c in p.winfo_children() if c.winfo_class() == "Treeview"]
-    states = [tables[0].set(i, "state") for i in tables[0].get_children()] if tables else []
+    panels = root.dialogs()
+    table = window.series_window[1]
+    states = [table.set(i, "state") for i in table.get_children()]
     window.close()
     assert label.startswith("Portada: ilustración de la página") and same, label
     assert len(panels) == 3, panels
@@ -2969,7 +3012,7 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
     root, window = visible_window()
     window.pdf = TMP / "novela.pdf"
     window.show_book(convert.analyze(window.pdf))
-    status = window.status.cget("text")
+    status = window.status.text()
     window.close()
     backup = review.with_name(review.name + ".bak")
     assert backup.is_file() and json.loads(backup.read_text(encoding="utf-8")) == state, "se perdió la revisión vieja"
@@ -3030,7 +3073,7 @@ def test_window_warns_when_the_review_cannot_be_saved():
     review.mkdir()  # en su sitio, una carpeta: el reemplazo falla
     try:
         window.save_review()
-        status = window.status.cget("text")
+        status = window.status.text()
     finally:
         review.rmdir()
     window.close()
@@ -3150,14 +3193,118 @@ def test_theme_light_dark_and_bad_setting():
     theme.apply(q, "Claro")
 
 
+def test_window_empty_screen_and_dropped_pdf():
+    """Sin PDF: la pantalla vacía con los recientes. Soltar archivos sobre la ventana abre el primer .pdf y
+    no hace nada si no hay ninguno."""
+    from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl
+    from PySide6.QtGui import QDropEvent
+
+    import app
+
+    root, window = visible_window()
+    empty = (window.stack.currentIndex(), window.recent_list.item(0).text())
+    notes = TMP / "notas.txt"
+    notes.write_text("no es un pdf", encoding="utf-8")
+    pdf = make_novel()
+
+    def mime(*paths):
+        data = QMimeData()
+        data.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+        return data
+
+    picked = (app._dropped_pdf(mime(notes)), app._dropped_pdf(mime(notes, pdf)))
+    opened = []
+    window.root.on_drop = opened.append
+    for data in (mime(notes), mime(notes, pdf)):
+        window.root.dropEvent(QDropEvent(QPointF(20, 20), Qt.DropAction.CopyAction, data,
+                                         Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    window.pdf = pdf
+    window.show_book(convert.analyze(pdf))
+    book_page = window.stack.currentIndex()
+    window.close()
+    assert empty == (0, "Aún no has abierto ningún PDF"), empty
+    assert picked == (None, str(pdf).replace("\\", "/")) or picked == (None, str(pdf)), picked
+    assert len(opened) == 1 and Path(opened[0]) == pdf, opened
+    assert book_page == 1
+
+
+def test_window_find_bar_and_result_dialog():
+    """Ctrl+F abre la barra sobre la lista; elegir un resultado lleva la vista previa a su página. Al generar,
+    un solo diálogo con los avisos, el tamaño y los botones."""
+    from PySide6.QtWidgets import QPlainTextEdit, QPushButton
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.find()
+    shown = window.find_bar.isVisible()
+    window.find_entry.setText("hola")
+    window.search_book()
+    found = (window.find_count.text(), window.find_results.count())
+    window.find_results.setCurrentRow(0)
+    page = window.pdf_page
+    window.close_find()
+    hidden = not window.find_bar.isVisible() and not window.find_results.isVisible()
+    out = TMP / "resultado.epub"
+    out.write_bytes(b"x" * 2_000_000)
+    window.result_dialog(str(out), ["sec1.xhtml: algo raro"])
+    dialog = window.result_window
+    texts = [w.toPlainText() for w in dialog.findChildren(QPlainTextEdit)]
+    buttons = [b.text() for b in dialog.findChildren(QPushButton)]
+    title = dialog.windowTitle()
+    window.close()
+    assert shown and found[1] >= 1 and found[0].startswith(f"{found[1]} resultado"), found
+    assert page == window.book.blocks[window.matches[0][0]].page - 1 and hidden, page
+    assert title == "EPUB guardado con avisos" and texts == ["sec1.xhtml: algo raro"], (title, texts)
+    assert buttons[:2] == ["Abrir EPUB", "Abrir carpeta"] and buttons[-1] == "Cerrar", buttons
+
+
+def test_window_guide_names_serious_warnings_and_colors_follow_theme():
+    """La barra inferior dice qué falta antes de generar («1 aviso grave…», en singular), y los colores de
+    la lista cambian con el tema: en oscuro, sin grises de fondo claro."""
+    from types import SimpleNamespace
+
+    import app
+    import theme
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto con letras rotas � aquí."), B("heading", 2, "Lado B"),
+              B("p", 2, "Más texto.")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    guide = window.quality_btn.text()
+    light = window.tree.rows["2"].foreground(0).color().name()
+    window.theme_var.set("Oscuro")
+    window.apply_theme()
+    dark = window.tree.rows["2"].foreground(0).color().name()
+    window.close()
+    theme.apply(__import__("qtk").app(), "Claro")
+    one = app._quality_summary([SimpleNamespace(level="Grave")])
+    two = app._quality_summary([SimpleNamespace(level="Grave")] * 2 + [SimpleNamespace(level="Menor")])
+    assert guide.startswith("⚠ 1 aviso grave: revísalo antes de generar"), guide
+    assert (light, dark) == (theme.kind_colors(False)["subtitle"], theme.kind_colors(True)["subtitle"]), (light, dark)
+    assert one == "1 grave" and two == "2 graves · 1 menor", (one, two)
+
+
 def test_qtk_dialog_filters():
     import qtk
 
     assert qtk.filters([("PDF", "*.pdf"), ("Imagen", "*.jpg *.png")]) == "PDF (*.pdf);;Imagen (*.jpg *.png)"
 
 
+def no_modal_dialogs():
+    """Sin pantalla, un aviso modal bloquearía la prueba: los que ninguna prueba espera se apuntan y responden «No»."""
+    import qtk
+
+    def show(icon, title, message, buttons, parent):
+        print("aviso no previsto:", title, "·", (message or "").splitlines()[:1])
+
+    qtk._MessageBox._show = staticmethod(show)
+
+
 if __name__ == "__main__":
     failed = 0
+    no_modal_dialogs()
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         TMP = Path(tmp)
         import app

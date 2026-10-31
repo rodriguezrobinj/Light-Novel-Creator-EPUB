@@ -49,6 +49,8 @@ QToolButton::menu-indicator {{ image: none; width: 0; }}
 QPushButton#primary {{ background: {acc}; border-color: {acc}; color: {acc_ink}; font-weight: 600; padding: 6px 18px; }}
 QPushButton#primary:hover {{ background: {acc_hover}; }}
 QPushButton#primary:disabled {{ background: {line}; border-color: {line}; color: {hint}; }}
+QPushButton#warn {{ color: {warn}; font-weight: 600; }}
+QPushButton#ok {{ color: {ok}; }}
 QPushButton#link {{ border: 0; background: transparent; color: {acc}; text-decoration: underline; padding: 0; }}
 QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QListWidget {{ border: 1px solid {line}; border-radius: 5px;
     background: {base}; selection-background-color: {acc}; selection-color: {acc_ink}; }}
@@ -56,6 +58,8 @@ QLineEdit, QComboBox, QSpinBox {{ padding: 3px 6px; }}
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus {{ border: 1px solid {acc}; }}
 QComboBox QAbstractItemView {{ background: {card}; border: 1px solid {line}; selection-background-color: {sel};
     selection-color: {ink}; }}
+QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {muted}; border-radius: 3px; background: {base}; }}
+QCheckBox::indicator:checked {{ background: {acc}; border-color: {acc}; }}
 QFrame#card {{ background: {card}; border: 1px solid {line}; border-radius: 8px; }}
 QFrame#bar {{ background: {card}; border: 0; }}
 QFrame#drop {{ background: {drop}; border: 2px dashed {drop_line}; border-radius: 12px; }}
@@ -130,6 +134,9 @@ def apply(app, choice):
     # Lo elegido manda aunque la plataforma no acepte el cambio (sin pantalla, en las pruebas, no lo acepta)
     dark = scheme == Qt.ColorScheme.Dark or (scheme == Qt.ColorScheme.Unknown
                                              and hints.colorScheme() == Qt.ColorScheme.Dark)
+    if app.property("theme_dark") == dark:  # rehacer el QSS repinta todas las ventanas: solo si cambia
+        return dark
+    app.setProperty("theme_dark", dark)
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 9))
     app.setPalette(palette(dark))
