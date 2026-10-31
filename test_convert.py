@@ -3131,6 +3131,24 @@ def test_qtk_textbox_understands_tk_indices():
                     "uno dos", ("1.0", "1.3", ("1.0", "1.3")), True, ("src4",)], seen
 
 
+def test_theme_light_dark_and_bad_setting():
+    """Claro y oscuro con Fusion en los dos Windows; un tema mal escrito en ajustes.json sigue al sistema."""
+    import qtk
+    import theme
+
+    q = qtk.app()
+    dark = theme.apply(q, "Oscuro")
+    window_dark = q.palette().window().color().lightness()
+    light = theme.apply(q, "Claro")
+    window_light = q.palette().window().color().lightness()
+    fallback = theme.apply(q, "Morado")
+    assert dark and not light and window_dark < 80 and window_light > 200, (window_dark, window_light)
+    assert fallback in (True, False) and q.style().name().lower() == "fusion"
+    assert theme.kind_colors(True)["subtitle"] != theme.kind_colors(False)["subtitle"]
+    assert set(theme.editor_tags(True)) == set(theme.editor_tags(False))
+    theme.apply(q, "Claro")
+
+
 def test_qtk_dialog_filters():
     import qtk
 

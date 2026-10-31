@@ -1,0 +1,142 @@
+"""Aspecto Fluent claro y oscuro. Fusion dibuja todos los controles él mismo: así la ventana se ve igual en
+Windows 10 y 11 (el estilo nativo de Qt en Windows 10 es el antiguo)."""
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont, QPalette
+
+CHOICES = ("Sistema", "Claro", "Oscuro")
+
+LIGHT = {"bg": "#f3f3f3", "card": "#ffffff", "base": "#ffffff", "line": "#e1e1e1", "ink": "#1b1b1b",
+         "muted": "#6b6b6b", "acc": "#2f6fdb", "acc_hover": "#285fbd", "acc_ink": "#ffffff", "sel": "#dce8fc",
+         "hover": "#ececec", "press": "#e2e2e2", "warn": "#c62828", "ok": "#2e7d32", "drop": "#f5f8fe",
+         "drop_line": "#b9c8e8", "sheet": "#ffffff", "sheet_line": "#d4d4d4", "hint": "#9a9a9a"}
+DARK = {"bg": "#202020", "card": "#2b2b2b", "base": "#1f1f1f", "line": "#3d3d3d", "ink": "#ececec",
+        "muted": "#a0a0a0", "acc": "#4c7ef0", "acc_hover": "#5b8cff", "acc_ink": "#ffffff", "sel": "#2f3d5c",
+        "hover": "#353535", "press": "#3d3d3d", "warn": "#ff6b6b", "ok": "#7bc47f", "drop": "#262a33",
+        "drop_line": "#4a5a7a", "sheet": "#1a1a1a", "sheet_line": "#3d3d3d", "hint": "#7a7a7a"}
+
+# Colores de los tipos de fila de la lista ("" = el del texto normal)
+KINDS = {False: {"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a", "image": "#2e7d32", "dropped": "#8a8a8a",
+                 "separator": "#7a5c00"},
+         True: {"chapter": "", "subtitle": "#b0b0b8", "cut": "#77777f", "image": "#7bc47f", "dropped": "#85858d",
+                "separator": "#d9b54a"}}
+LEVELS = {False: {"Grave": "#c62828", "Revisar": "#e65100", "Menor": "#607d8b"},
+          True: {"Grave": "#ff6b6b", "Revisar": "#ffa94d", "Menor": "#9aaab4"}}
+# Aspecto de las marcas en el editor de texto, en orden de prioridad (si dos fijan lo mismo, manda el último)
+EDITOR = {False: {"italic": {"italic": True}, "bold": {"weight": "bold"},
+                  "bolditalic": {"italic": True, "weight": "bold"},
+                  "heading": {"foreground": "#1f6fd1", "weight": "bold", "size": 14},
+                  "mark": {"foreground": "#a8a8a8"}, "token": {"background": "#e3efe5", "foreground": "#2e7d32"},
+                  "scene": {"foreground": "#7a5c00"}, "broken": {"foreground": "#c62828", "underline": True}},
+          True: {"italic": {"italic": True}, "bold": {"weight": "bold"},
+                 "bolditalic": {"italic": True, "weight": "bold"},
+                 "heading": {"foreground": "#7aa7ff", "weight": "bold", "size": 14},
+                 "mark": {"foreground": "#6f6f78"}, "token": {"background": "#24352a", "foreground": "#8fd694"},
+                 "scene": {"foreground": "#d9b54a"}, "broken": {"foreground": "#ff6b6b", "underline": True}}}
+# Vista previa del informe de calidad: lo que se quita y lo que entra
+DIFF = {False: {"old": {"background": "#f8d7da", "foreground": "#8a1c1c", "overstrike": True},
+                "new": {"background": "#d4edda", "foreground": "#1b5e20"}, "note": {"foreground": "#777777"}},
+        True: {"old": {"background": "#4a1f24", "foreground": "#ffb3b8", "overstrike": True},
+               "new": {"background": "#1f3d27", "foreground": "#a6e3b0"}, "note": {"foreground": "#8a8a8a"}}}
+
+QSS = """
+QWidget {{ font-family: "Segoe UI"; font-size: 9pt; color: {ink}; }}
+QMainWindow, QDialog {{ background: {bg}; }}
+QPushButton, QToolButton {{ border: 1px solid {line}; border-radius: 6px; padding: 4px 12px; background: {card}; }}
+QPushButton:hover, QToolButton:hover {{ background: {hover}; }}
+QPushButton:pressed, QToolButton:pressed {{ background: {press}; }}
+QPushButton:disabled, QToolButton:disabled {{ color: {hint}; }}
+QToolButton::menu-indicator {{ image: none; width: 0; }}
+QPushButton#primary {{ background: {acc}; border-color: {acc}; color: {acc_ink}; font-weight: 600; padding: 6px 18px; }}
+QPushButton#primary:hover {{ background: {acc_hover}; }}
+QPushButton#primary:disabled {{ background: {line}; border-color: {line}; color: {hint}; }}
+QPushButton#link {{ border: 0; background: transparent; color: {acc}; text-decoration: underline; padding: 0; }}
+QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QListWidget {{ border: 1px solid {line}; border-radius: 5px;
+    background: {base}; selection-background-color: {acc}; selection-color: {acc_ink}; }}
+QLineEdit, QComboBox, QSpinBox {{ padding: 3px 6px; }}
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus {{ border: 1px solid {acc}; }}
+QComboBox QAbstractItemView {{ background: {card}; border: 1px solid {line}; selection-background-color: {sel};
+    selection-color: {ink}; }}
+QFrame#card {{ background: {card}; border: 1px solid {line}; border-radius: 8px; }}
+QFrame#bar {{ background: {card}; border: 0; }}
+QFrame#drop {{ background: {drop}; border: 2px dashed {drop_line}; border-radius: 12px; }}
+QTreeWidget {{ background: {card}; border: 1px solid {line}; border-radius: 8px; alternate-background-color: {card};
+    selection-background-color: {sel}; selection-color: {ink}; outline: 0; }}
+QTreeWidget::item {{ padding: 2px 0; }}
+QTreeWidget::item:selected {{ background: {sel}; color: {ink}; }}
+QListWidget::item:selected {{ background: {sel}; color: {ink}; }}
+QHeaderView::section {{ background: {card}; border: 0; border-bottom: 1px solid {line}; padding: 4px 6px;
+    color: {muted}; }}
+QTabBar::tab {{ padding: 4px 12px; border: 0; border-bottom: 2px solid transparent; color: {muted};
+    background: transparent; }}
+QTabBar::tab:selected {{ color: {acc}; border-bottom-color: {acc}; font-weight: 600; }}
+QMenu {{ background: {card}; border: 1px solid {line}; padding: 4px; }}
+QMenu::item {{ padding: 5px 24px 5px 22px; border-radius: 4px; }}
+QMenu::item:selected {{ background: {sel}; color: {ink}; }}
+QMenu::separator {{ height: 1px; background: {line}; margin: 4px 8px; }}
+QProgressBar {{ border: 0; background: {line}; border-radius: 3px; max-height: 6px; min-height: 6px; }}
+QProgressBar::chunk {{ background: {acc}; border-radius: 3px; }}
+QLabel#muted {{ color: {muted}; }}
+QLabel#warn {{ color: {warn}; font-weight: 600; }}
+QLabel#ok {{ color: {ok}; }}
+QLabel#title {{ font-size: 11pt; font-weight: 600; }}
+QLabel#big {{ font-size: 13pt; font-weight: 600; }}
+QSplitter::handle {{ background: transparent; }}
+QScrollArea {{ border: 0; background: transparent; }}
+"""
+
+
+def colors(dark):
+    return DARK if dark else LIGHT
+
+
+def kind_colors(dark):
+    return KINDS[bool(dark)]
+
+
+def level_colors(dark):
+    return LEVELS[bool(dark)]
+
+
+def editor_tags(dark):
+    return EDITOR[bool(dark)]
+
+
+def diff_tags(dark):
+    return DIFF[bool(dark)]
+
+
+def palette(dark):
+    c = colors(dark)
+    pal = QPalette()
+    for role, key in ((QPalette.ColorRole.Window, "bg"), (QPalette.ColorRole.WindowText, "ink"),
+                      (QPalette.ColorRole.Base, "base"), (QPalette.ColorRole.AlternateBase, "card"),
+                      (QPalette.ColorRole.Text, "ink"), (QPalette.ColorRole.Button, "card"),
+                      (QPalette.ColorRole.ButtonText, "ink"), (QPalette.ColorRole.Highlight, "acc"),
+                      (QPalette.ColorRole.HighlightedText, "acc_ink"), (QPalette.ColorRole.ToolTipBase, "card"),
+                      (QPalette.ColorRole.ToolTipText, "ink"), (QPalette.ColorRole.PlaceholderText, "hint"),
+                      (QPalette.ColorRole.Link, "acc"), (QPalette.ColorRole.Mid, "line")):
+        pal.setColor(role, QColor(c[key]))
+    for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText):
+        pal.setColor(QPalette.ColorGroup.Disabled, role, QColor(c["hint"]))
+    return pal
+
+
+def apply(app, choice):
+    """Pone el tema elegido (CHOICES; otro valor, como un ajustes.json escrito a mano, es «Sistema»).
+    Devuelve True si queda oscuro."""
+    hints = app.styleHints()
+    scheme = {"Claro": Qt.ColorScheme.Light, "Oscuro": Qt.ColorScheme.Dark}.get(choice, Qt.ColorScheme.Unknown)
+    hints.setColorScheme(scheme)  # también la barra de título: Windows la pinta oscura
+    # Lo elegido manda aunque la plataforma no acepte el cambio (sin pantalla, en las pruebas, no lo acepta)
+    dark = scheme == Qt.ColorScheme.Dark or (scheme == Qt.ColorScheme.Unknown
+                                             and hints.colorScheme() == Qt.ColorScheme.Dark)
+    app.setStyle("Fusion")
+    app.setFont(QFont("Segoe UI", 9))
+    app.setPalette(palette(dark))
+    app.setStyleSheet(QSS.format(**colors(dark)))
+    return dark
+
+
+def follow(app, callback):
+    """callback() cuando Windows cambia entre modo claro y oscuro."""
+    app.styleHints().colorSchemeChanged.connect(lambda _: callback())
