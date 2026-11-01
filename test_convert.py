@@ -2940,17 +2940,90 @@ def test_window_add_page_change_image_and_reviewed():
     changed = pymupdf.Pixmap(window.book.blocks[int(image)].image).width
     window.book.blocks.pop()  # la ilustración no es del PDF: al reabrir no estaría
     window.edits.pop()
+    window.words, window.ignored = ["golem"], [["number", "12"]]
     window.save_review()
     window.close()
     root, again = visible_window()
     again.pdf = pdf
     again.show_book(convert.analyze(pdf))
-    reopened = (again.tree.set(str(first), "inc"), again.tree.set(str(first), "title"), again.tree.set(heads[0], "ok"))
+    reopened = (again.tree.set(str(first), "inc"), again.tree.set(str(first), "title"), again.tree.set(heads[0], "ok"),
+                again.words, again.ignored)
     again.close()
     assert added == (app.ON, "Créditos del grupo", ["Créditos del grupo", "Traducción: Grupo.", "Gracias por leer."]), added
     assert jumped == (heads[1],) and header == f"✓ 1/{len(heads)}", (jumped, header)
     assert changed == 30, changed
-    assert reopened == (app.ON, "Créditos del grupo", "✓"), reopened
+    assert reopened == (app.ON, "Créditos del grupo", "✓", ["golem"], [["number", "12"]]), reopened
+
+
+def test_window_change_double_image_for_single():
+    """Una ilustración doble en «Dividida» cambiada por una imagen vertical vuelve a «Ilustración»: si no, el
+    EPUB la partiría por la mitad."""
+    import app
+
+    wide = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 10), False).tobytes("jpg")
+    picture = TMP / "vertical.png"
+    pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 30, 40), False).save(picture)
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                     convert.Block("image", 1, image=wide)], [0]))
+    window.tree.selection_set("1")
+    window.shortcut(app.SPLIT)
+    split = window.tree.set("1", "inc")
+    original = app.filedialog.askopenfilename
+    app.filedialog.askopenfilename = lambda **kwargs: str(picture)
+    try:
+        window.change_image()
+    finally:
+        app.filedialog.askopenfilename = original
+    kind = window.tree.set("1", "inc")
+    window.close()
+    assert (split, kind) == (app.SPLIT, app.IMG), (split, kind)
+
+
+def test_window_replace_in_book_without_titles():
+    """Un libro sin títulos ni ilustraciones deja la lista vacía: reemplazar y deshacer funcionan igual."""
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Ella dijó que sí.")], []))
+    window.find()
+    window.find_entry.setText("dijó")
+    window.search_book()
+    window.replace_entry.setText("dijo")
+    window.replace_found(every=True)
+    fixed = window.book.blocks[0].html
+    window.undo()
+    undone = window.book.blocks[0].html
+    window.close()
+    assert (fixed, undone) == ("Ella dijo que sí.", "Ella dijó que sí."), (fixed, undone)
+
+
+def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
+    """Ortografía y «Añadir página» se cierran al abrir otro PDF (si no, cambiarían el libro nuevo); con un
+    trabajo en curso, «Ortografía…» lo dice en vez de no hacer nada."""
+    import time
+
+    pdf = TMP / "Otra - Volumen 1.pdf"
+    make_novel().replace(pdf)
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                     convert.Block("p", 1, "Ella dijó que sí.")], [0]))
+    window.done = lambda result: None  # un trabajo en curso
+    window.spelling()
+    busy = window.status.text()
+    window.done = None
+    window.spelling_dialog([("dijó", 1, ["dijo"])])
+    window.add_page()
+    root.update()
+    opened = len(root.dialogs())
+    window.open_path(str(pdf))
+    root.update()
+    left = len(root.dialogs())
+    deadline = time.time() + 60
+    while window.done and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    window.close()
+    assert busy == "Espera a que termine el trabajo en curso", busy
+    assert (opened, left) == (2, 0), (opened, left)
 
 
 def test_replay_image_and_page_at_start():

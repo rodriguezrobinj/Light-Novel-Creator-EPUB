@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pymupdf
 import segno
+import shiboken6
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -1453,7 +1454,6 @@ class App:
         self.history.append([self.row_state(item)])
         self.tree.set(item, "inc", kind)
         self.tree.item(item, tags=(KIND_TAG[kind],))
-        self.update_reviewed()
 
     def update_reviewed(self):
         """Cabecera de la columna ✓: capítulos revisados de los que hay («✓ 12/30»)."""
@@ -1490,6 +1490,8 @@ class App:
             self.book.blocks, self.book.candidates = change["blocks"], change["candidates"]
             del self.edits[change["edits"]:]
             self.fill_tree(change["rows"])
+            if change["item"] is None:  # lista vacía: no hay fila que volver a seleccionar
+                return
             change = [self.row_state(change["item"])]
         for item, kind, title in change:
             self.tree.set(item, "inc", kind)
@@ -1519,6 +1521,9 @@ class App:
             messagebox.showerror("Error", f"No se encuentra el archivo:\n{path}")
             return
         self.save_review()
+        for win in (getattr(self, "spelling_window", None), getattr(self, "page_window", None)):
+            if win and shiboken6.isValid(win):  # sin cerrar, cambiarían el libro nuevo con datos del anterior
+                win.close()
         path = str(Path(path).resolve())
         self.settings["folder"] = str(Path(path).parent)
         self.settings["recent"] = [path] + [p for p in self.settings.get("recent", []) if p != path][:RECENT - 1]
@@ -1559,6 +1564,7 @@ class App:
             twins = convert.duplicate_images(book)
         for k in twins:
             self.set_kind(str(k), DROPPED)
+        self.update_reviewed()  # una vez, no por fila: recorre la lista entera
         heads = [i for i in self.tree.get_children() if not self.is_image(i)]
         if self.autocase_var.get() and _all_caps([self.tree.set(i, "title") for i in heads]):
             self.fix_case()
@@ -1629,6 +1635,7 @@ class App:
         column = self.tree.identify_column(event.x)
         if item and column == "#1":
             self.set_kind(item, self.cycle(item)[self.tree.set(item, "inc")])
+            self.update_reviewed()
             self.update_preview()
         self.drag_source = item if item and column == "#2" else None  # on_drop decide si se movió
 
@@ -1649,6 +1656,7 @@ class App:
         item = selected[0]
         if kind in self.cycle(item) and kind != self.tree.set(item, "inc"):
             self.set_kind(item, kind)
+            self.update_reviewed()
             self.update_preview()
 
     def edit_title(self, item):
@@ -1967,8 +1975,9 @@ class App:
             self.edits.append(list(edit))
             rows = {str(mapping[int(k)]): v for k, v in rows.items() if int(k) in mapping}
         self.fill_tree(rows)
-        self.tree.selection_set(item)
-        self.tree.see(item)
+        if item is not None:  # None: libro sin títulos ni ilustraciones, la lista está vacía
+            self.tree.selection_set(item)
+            self.tree.see(item)
         self.update_preview()
 
     def apply_fixes(self, edits, message):
@@ -1977,7 +1986,7 @@ class App:
         edits = sorted(edits, key=lambda e: -e[0])
         item = next((str(j) for j in range(edits[-1][0], -1, -1)
                      if self.tree.exists(str(j)) and not self.is_image(str(j))), None)
-        self.apply_edits(edits, item or self.tree.get_children()[0])
+        self.apply_edits(edits, item or next(iter(self.tree.get_children()), None))
         self.status.setText(message)
 
     def replace_found(self, every=False):
@@ -2007,6 +2016,8 @@ class App:
         texts = [convert._plain(b) for b in self.book.blocks if b.kind == "p"]
         if self.run(convert.unknown_words, (texts, self.words), self.spelling_dialog):
             self.status.setText("Revisando la ortografía…")
+        else:  # el menú no se desactiva como los botones
+            self.status.setText("Espera a que termine el trabajo en curso")
 
     def spelling_dialog(self, found):
         """Palabras que no están en el diccionario (convert.unknown_words): dónde salen, cambiarlas en todo el
@@ -2158,6 +2169,8 @@ class App:
                              "edits": len(self.edits), "item": item})
         _swap_image(self.book, int(item), data)
         self.edits.append(["image", int(item), path])
+        if rows[item][0] in (SPLIT, ROTATED) and not convert.is_wide(data):  # si no, el EPUB la partiría en dos
+            rows[item] = [IMG] + rows[item][1:]
         self.fill_tree(rows)
         self.tree.selection_set(item)
         self.tree.see(item)
@@ -2426,6 +2439,7 @@ class App:
                 self.tree.item(item, tags=(KIND_TAG[SEP],))
         if changed:
             self.history.append(changed)
+            self.update_reviewed()
             self.update_preview()
         self.status.setText(f"{len(changed)} apartados como separador")
 
