@@ -26,12 +26,14 @@ EDITOR = {False: {"italic": {"italic": True}, "bold": {"weight": "bold"},
                   "bolditalic": {"italic": True, "weight": "bold"},
                   "heading": {"foreground": "#1f6fd1", "weight": "bold", "size": 14},
                   "mark": {"foreground": "#a8a8a8"}, "token": {"background": "#e3efe5", "foreground": "#2e7d32"},
-                  "scene": {"foreground": "#7a5c00"}, "broken": {"foreground": "#c62828", "underline": True}},
+                  "scene": {"foreground": "#7a5c00"}, "broken": {"foreground": "#c62828", "underline": True},
+                  "spell": {"background": "#fde2e1", "underline": True}},
           True: {"italic": {"italic": True}, "bold": {"weight": "bold"},
                  "bolditalic": {"italic": True, "weight": "bold"},
                  "heading": {"foreground": "#7aa7ff", "weight": "bold", "size": 14},
                  "mark": {"foreground": "#6f6f78"}, "token": {"background": "#24352a", "foreground": "#8fd694"},
-                 "scene": {"foreground": "#d9b54a"}, "broken": {"foreground": "#ff6b6b", "underline": True}}}
+                 "scene": {"foreground": "#d9b54a"}, "broken": {"foreground": "#ff6b6b", "underline": True},
+                 "spell": {"background": "#4a1f24", "underline": True}}}
 # Vista previa del informe de calidad: lo que se quita y lo que entra
 DIFF = {False: {"old": {"background": "#f8d7da", "foreground": "#8a1c1c", "overstrike": True},
                 "new": {"background": "#d4edda", "foreground": "#1b5e20"}, "note": {"foreground": "#777777"}},

@@ -1,6 +1,7 @@
 """Convierte PDFs de novelas ligeras en EPUB con texto fluido."""
 import collections
 import colorsys
+import difflib
 import functools
 import html
 import io
@@ -662,6 +663,27 @@ def count_matches(book, replacements):
     return counts
 
 
+SAFE = re.compile(r"(</?[ib]>|\[Nota: )")  # marcas del editor que un reemplazo no debe romper
+
+
+def replace_text(book, find, new, word=False, blocks=None):
+    """Arreglos para edit_section que cambian find por new en los párrafos (todos o los índices blocks).
+    Sin distinguir mayúsculas, pero si lo encontrado empieza en mayúscula el reemplazo también ("Dijó" ->
+    "Dijo"). word: solo palabras completas. Los títulos no: su texto es el de la lista."""
+    body = re.escape(find)
+    pattern = re.compile(rf"(?<!\w){body}(?!\w)" if word else body, re.I)
+    swap = (lambda m: new[:1].upper() + new[1:] if m[0][:1].isupper() else new)
+    edits = []
+    for k in range(len(book.blocks)) if blocks is None else blocks:
+        if book.blocks[k].kind != "p":
+            continue
+        line = _line(book.blocks[k], k)
+        fixed = "".join(p if n % 2 else pattern.sub(swap, p) for n, p in enumerate(SAFE.split(line)))
+        if fixed != line:
+            edits.append((k, k + 1, fixed))
+    return edits
+
+
 TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
 INLINE = re.compile(r"&lt;(/?)([ib])&gt;")
 NOTE_MARK = re.compile(r"\[Nota: (.+?)\]")  # nota al pie en el editor de texto
@@ -771,6 +793,44 @@ def name_variants(book):
     found = [sorted(g, key=lambda f: -g[f]) for g in groups.values()
              if len(g) > 1 and any(_fold(re.split(r"[- ]", f)[0]) in proper for f in g)]
     return sorted(found, key=lambda g: -sum(forms[f] for f in g))
+
+
+SPELL_DIR = Path(__file__).parent / "dict"  # Hunspell es_ES de LibreOffice (RLA-ES); en el .exe, junto a los módulos
+
+
+@functools.lru_cache(maxsize=1)
+def _hunspell():
+    from spylls.hunspell import Dictionary  # tarda unos 4 s: solo cuando se pide la ortografía
+    return Dictionary.from_files(str(SPELL_DIR / "es_ES"))
+
+
+def unknown_words(texts, known=()):
+    """Palabras de texts que no están en el diccionario: [(palabra, veces, [sugerencias])], las más repetidas
+    primero. Solo en minúscula y de 3 letras o más: con mayúscula suelen ser nombres. No cuentan known (el
+    diccionario de la serie), los honoríficos ni las onomatopeyas ("aaah"). Se sugieren palabras correctas
+    del propio libro, primero la que solo cambia en tildes: las de Hunspell tardan ~1 s cada una."""
+    words = collections.Counter(w for t in texts for w in re.findall(r"[^\W\d_]+", unicodedata.normalize("NFC", t)))
+    skip = {w.lower() for w in known} | HONORIFICS
+    spell, good, bad = _hunspell(), [], []
+    for w, n in words.items():
+        if w[:1].islower() and len(w) >= 3 and w not in skip and not re.search(r"(.)\1\1", w):
+            (good if spell.lookup(w) else bad).append(w)
+    folded = {_fold(w): w for w in sorted(good, key=lambda w: words[w])}  # la más usada gana
+    found = []
+    for w in bad:
+        accents = [v for v in _accents(w) if v != w and spell.lookup(v)]
+        near = difflib.get_close_matches(w, [g for g in good if abs(len(g) - len(w)) <= 2], 4, 0.75)
+        same = [folded[_fold(w)]] if _fold(w) in folded else []
+        found.append((w, words[w], list(dict.fromkeys(accents + same + near))[:4]))
+    return sorted(found, key=lambda f: (-f[1], f[0]))
+
+
+def _accents(word):
+    """La palabra sin tildes y con una tilde en cada vocal ("dijó" -> "dijo", "tambien" -> "también"): la
+    errata más común, y pocas consultas al diccionario. La ñ y la ü se conservan."""
+    bare = unicodedata.normalize("NFC", unicodedata.normalize("NFD", word).replace("́", ""))
+    marks = {"a": "á", "e": "é", "i": "í", "o": "ó", "u": "ú"}
+    return [bare] + [bare[:n] + marks[c] + bare[n + 1:] for n, c in enumerate(bare) if c in marks]
 
 
 def body_words(book):
@@ -1062,17 +1122,24 @@ def _opening_marks(line):
     return SENTENCE.sub(fix, line) if "?" in line or "!" in line else line  # sin signos, nada que recorrer
 
 
-TYPOS = (  # (tipo, título, arreglo de la línea, por qué): erratas típicas de las traducciones fan
+# "(N.T.: …)", "[NdT: …]", "(Nota del traductor: …)" dentro del párrafo; sin paréntesis dentro de la nota
+INLINE_NOTE = re.compile(r"\s*[(\[]\s*(?:N\.\s?T\.?|N/T|NdT|T/N|Nota del? traductor)\s*[:.\-–—]?\s*([^()\[\]]+?)\s*[)\]]",
+                         re.I)
+
+TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas típicas de las traducciones fan
     ("opening", "Falta el signo de apertura", _opening_marks,
-     "En español las preguntas y exclamaciones llevan signo de apertura (¿ ¡) además del de cierre."),
+     "En español las preguntas y exclamaciones llevan signo de apertura (¿ ¡) además del de cierre.", "Corregirlo."),
     ("doubled", "Palabra repetida", lambda s: DOUBLED.sub(r"\1", s),
-     "La misma palabra dos veces seguidas suele ser un error al escribir."),
+     "La misma palabra dos veces seguidas suele ser un error al escribir.", "Corregirlo."),
     ("aver", "«Haber si» en vez de «a ver si»",
      lambda s: re.sub(r"(^|[¿¡—«“\"(.…]\s*)([Hh])aber si\b",
                       lambda m: m[1] + ("A" if m[2] == "H" else "a") + " ver si", s),
-     "«A ver si» (del verbo ver) se confunde a menudo con «haber»."),
+     "«A ver si» (del verbo ver) se confunde a menudo con «haber».", "Corregirlo."),
     ("porque", "«¿Porque» en vez de «¿por qué»", lambda s: re.sub(r"¿([Pp])orque\b", r"¿\1or qué", s),
-     "En una pregunta va «por qué», separado y con tilde."),
+     "En una pregunta va «por qué», separado y con tilde.", "Corregirlo."),
+    ("note", "Nota del traductor en el texto", lambda s: INLINE_NOTE.sub(lambda m: f"[Nota: {m[1]}]", s),
+     "Una nota entre paréntesis corta la lectura; como nota emergente se lee al tocar la llamada.",
+     "Convertirla en nota emergente."),
 )
 
 
@@ -1157,12 +1224,12 @@ def quality_report(book):
                                 "grupo.", "Tradúcelo o quítalo con «Editar texto…» (tecla E).", _cut(text),
                                 text=text))
         line = _line(b, k)
-        for kind, title, rule, why in TYPOS if not LINKS.search(text) else ():
+        for kind, title, rule, why, solution in TYPOS if not LINKS.search(text) else ():
             fixed = rule(line)
             if fixed != line:
                 before, after = TAGS.sub("", line), TAGS.sub("", fixed)
                 n = len(os.path.commonprefix([before, after]))
-                report.append(Issue(kind, k, b.page, "Menor", title, why, "Corregirlo.",
+                report.append(Issue(kind, k, b.page, "Menor", title, why, solution,
                                     _around(before, n, n), _around(after, n, n + len(after) - len(before)),
                                     (k, k + 1, fixed), text))
         prev_text = text

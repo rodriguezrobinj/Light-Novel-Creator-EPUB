@@ -1,6 +1,7 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
 import collections
 import ctypes
+import dataclasses
 import difflib
 import html
 import http.server
@@ -53,7 +54,7 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
-             "credits", "profile", "replacements", "kepub")
+             "credits", "profile", "replacements", "kepub", "words")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
@@ -91,7 +92,7 @@ LEVEL_NAMES = {"Grave": ("grave", "graves"), "Revisar": ("por revisar", "por rev
                "Menor": ("menor", "menores")}  # singular y plural: «1 grave», «2 graves»
 LEVEL_PLURAL = {level: names[1] for level, names in LEVEL_NAMES.items()}
 SHORTCUTS = ("Clic en Tipo, o teclas C (capítulo), S (subtítulo), X (separador), Q (quitar), I (ilustración),"
-             " D/G (doble: dividir o girar)\nDoble clic o F2: editar título · E: editar texto\n"
+             " D/G (doble: dividir o girar)\nDoble clic o F2: editar título · E: editar texto · R: revisado\n"
              "Arrastrar o Alt+↑/↓: mover · Ctrl+F: buscar · Ctrl+Z: deshacer")
 
 
@@ -100,6 +101,16 @@ def _quality_summary(report):
     counts = collections.Counter(i.level for i in report)
     return " · ".join(f"{counts[level]} {LEVEL_NAMES[level][counts[level] != 1]}" for level in convert.LEVELS
                       if counts[level])
+
+
+def _issue_key(issue):
+    """Cómo se recuerda un aviso ignorado: por su tipo y su texto (o su página); el bloque cambia al editar."""
+    return [issue.kind, issue.text or issue.page]
+
+
+def _swap_image(book, k, data):
+    """Cambia la imagen del bloque k en una lista nueva: la de antes queda intacta para deshacer."""
+    book.blocks = book.blocks[:k] + [dataclasses.replace(book.blocks[k], image=data)] + book.blocks[k + 1:]
 
 
 def _diff_spans(before, after):
@@ -299,11 +310,22 @@ def _remember_series(state):
 
 def _replay(book, state):
     """Vuelve a aplicar al libro recién analizado los cambios de bloques de una revisión, en su orden
-    (cada uno cuenta los bloques tal como los dejó el anterior): textos editados [inicio, fin, texto]
-    y secciones movidas ["move", inicio, fin, destino]. Devuelve los aplicados."""
+    (cada uno cuenta los bloques tal como los dejó el anterior): textos editados [inicio, fin, texto],
+    secciones movidas ["move", inicio, fin, destino] e ilustraciones cambiadas ["image", bloque, archivo].
+    Devuelve los aplicados."""
     done = []
     for edit in state.get("edits", []):
         try:
+            if edit[0] == "image":
+                k, path = int(edit[1]), str(edit[2])
+                if not (0 <= k < len(book.blocks) and book.blocks[k].kind == "image"):
+                    break
+                try:
+                    _swap_image(book, k, convert.load_cover(path))
+                except ValueError:
+                    pass  # la imagen ya no está: se queda la del PDF, y el cambio se recuerda por si vuelve
+                done.append(["image", k, path])
+                continue
             if edit[0] == "move":
                 start, end, dest = int(edit[1]), int(edit[2]), int(edit[3])
                 if not (0 <= start < end <= len(book.blocks) and 0 <= dest <= len(book.blocks)) or start <= dest < end:
@@ -312,7 +334,7 @@ def _replay(book, state):
                 done.append(["move", start, end, dest])
                 continue
             start, end, text = int(edit[0]), int(edit[1]), str(edit[2])
-            if not 0 < start <= end <= len(book.blocks):
+            if not 0 <= start <= end <= len(book.blocks):  # 0: página propia o arreglo al principio del libro
                 break
         except (TypeError, ValueError, IndexError):
             break  # el .json se puede editar a mano
@@ -325,7 +347,7 @@ def _plan(book, rows):
     """Capítulos, secciones quitadas y títulos que van como separador según los tipos de la lista
     ({fila: (tipo, título)}); marca también qué ilustraciones entran y cómo."""
     chapters, removed, breaks = [], [], []
-    for item, (kind, title) in rows.items():
+    for item, (kind, title, *_) in rows.items():  # el tercer valor, si está, es la marca de revisado
         k = int(item)
         if book.blocks[k].kind == "image":
             book.blocks[k].keep = kind in (IMG, SPLIT, ROTATED)
@@ -756,6 +778,9 @@ class App:
         self.closed = False                    # ventana cerrada: lo diferido (miniaturas, repintar) ya no se hace
         self._description = ""                 # sinopsis (propiedad description)
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
+        self.words = []                        # diccionario de la serie: palabras que la ortografía da por buenas
+        self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
+        self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
         self.cover_choice = None
         self.device_var, self.dark_var = qtk.Var('E-reader 6"'), qtk.Var(False)
@@ -805,6 +830,10 @@ class App:
         tools = QMenu(root)
         tools.addAction("Buscar en el libro…  (Ctrl+F)", self.find)
         tools.addAction("Informe de calidad…", self.quality)
+        tools.addAction("Ortografía…", self.spelling)
+        tools.addAction("Añadir página…", self.add_page)
+        tools.addAction("Cambiar ilustración…", self.change_image)
+        tools.addSeparator()
         tools.addAction("Panel de serie…", self.series_panel)
         tools.addAction("Volumen recopilatorio…", self.omnibus)
         tools.addAction("Vigilar una carpeta…", self.watch_folder)
@@ -867,17 +896,23 @@ class App:
         self.find_entry = QLineEdit(placeholderText="Buscar en el libro (Intro)")
         self.find_count = _label("", "muted")
         self.find_bar = QFrame(objectName="card")
-        self.find_bar.setLayout(_row(self.find_entry, self.find_count, _button("✕", self.close_find),
-                                     margins=(6, 4, 6, 4)))
+        self.replace_entry = QLineEdit(placeholderText="Reemplazar por")
+        bar = QVBoxLayout(self.find_bar)
+        bar.setContentsMargins(6, 4, 6, 4)
+        bar.setSpacing(4)
+        bar.addLayout(_row(self.find_entry, self.find_count, _button("✕", self.close_find)))
+        bar.addLayout(_row(self.replace_entry, _button("Reemplazar", self.replace_found),
+                           _button("Todos", lambda: self.replace_found(every=True)),
+                           _button("Guardar como regla", self.save_rule)))
         self.find_results = QListWidget()
         self.find_results.setMaximumHeight(160)
         self.find_bar.hide()
         self.find_results.hide()
         column.addWidget(self.find_bar)
         column.addWidget(self.find_results)
-        self.tree = qtk.RowList(("inc", "title", "min", "page"),
-                                {"inc": "Tipo", "title": "Título", "min": "Lectura", "page": "Página"},
-                                {"inc": 92, "min": 64, "page": 60})
+        self.tree = qtk.RowList(("inc", "title", "min", "page", "ok"),
+                                {"inc": "Tipo", "title": "Título", "min": "Lectura", "page": "Página", "ok": "✓"},
+                                {"inc": 92, "min": 64, "page": 60, "ok": 64})
         self.tree.setToolTip(SHORTCUTS)
         column.addWidget(self.tree, 1)
         split.addWidget(left)
@@ -960,6 +995,7 @@ class App:
         self.tree.bind_key(Qt.Key.Key_Up, lambda: self.move_selected(-1), Qt.KeyboardModifier.AltModifier)
         self.tree.bind_key(Qt.Key.Key_Down, lambda: self.move_selected(1), Qt.KeyboardModifier.AltModifier)
         self.tree.bind_key(Qt.Key.Key_E, self.edit_text)
+        self.tree.bind_key(Qt.Key.Key_R, self.toggle_reviewed)
         self.find_entry.returnPressed.connect(self.search_book)
         self.find_results.currentRowChanged.connect(self.pick_found)
         QShortcut(QKeySequence("Escape"), self.find_bar, self.close_find,
@@ -1417,6 +1453,32 @@ class App:
         self.history.append([self.row_state(item)])
         self.tree.set(item, "inc", kind)
         self.tree.item(item, tags=(KIND_TAG[kind],))
+        self.update_reviewed()
+
+    def update_reviewed(self):
+        """Cabecera de la columna ✓: capítulos revisados de los que hay («✓ 12/30»)."""
+        chapters = [i for i in self.tree.get_children() if self.tree.set(i, "inc") == ON]
+        done = sum(bool(self.tree.set(i, "ok")) for i in chapters)
+        self.tree.headerItem().setText(self.tree.columns.index("ok"), f"✓ {done}/{len(chapters)}" if chapters else "✓")
+        return done, len(chapters)
+
+    def toggle_reviewed(self):
+        """R: marca el título elegido como revisado y pasa al siguiente capítulo sin revisar; si ya lo estaba,
+        lo desmarca."""
+        selected = self.tree.selection()
+        if not self.book or not selected or self.is_image(selected[0]):
+            return
+        item = selected[0]
+        mark = "" if self.tree.set(item, "ok") else "✓"
+        self.tree.set(item, "ok", mark)
+        done, total = self.update_reviewed()
+        self.status.setText(f"Capítulos revisados: {done} de {total}")
+        items = self.tree.get_children()
+        following = next((i for i in items[items.index(item) + 1:]
+                          if self.tree.set(i, "inc") == ON and not self.tree.set(i, "ok")), None)
+        if mark and following:
+            self.tree.selection_set(following)
+            self.tree.see(following)
 
     def undo(self, _=None):
         """Ctrl+Z: deshace el último cambio: tipo o título de una fila, títulos corregidos de golpe o
@@ -1433,6 +1495,7 @@ class App:
             self.tree.set(item, "inc", kind)
             self.tree.item(item, tags=(KIND_TAG[kind],))
             self.tree.set(item, "title", title)
+        self.update_reviewed()
         self.tree.selection_set(change[-1][0])
         self.tree.see(change[-1][0])
         self.update_preview()
@@ -1484,6 +1547,7 @@ class App:
         self.description = book.description
         self.last_problems = None  # avisos del último EPUB generado (para el panel de serie)
         self.replacements = []  # son de la serie: llegan con la revisión o heredados de otro tomo
+        self.words, self.ignored, self.unknown = [], [], set()
         self.cover_choice = None
         self.cover_label.setText("Portada: la del PDF")
         self.edits, self.analyzed = [], len(book.blocks)
@@ -1550,9 +1614,11 @@ class App:
                 mark, title = (IMG if block.keep else DROPPED), f"Ilustración{double} · página {block.page}"
             else:
                 continue
-            mark, title = rows.get(str(i), (mark, title))
+            mark, title, *done = rows.get(str(i), (mark, title))
             reading = f"{minutes[i]} min" if minutes.get(i) else ""
-            self.tree.insert("", "end", iid=str(i), values=(mark, title, reading, block.page), tags=(KIND_TAG[mark],))
+            self.tree.insert("", "end", iid=str(i), values=(mark, title, reading, block.page, done[0] if done else ""),
+                             tags=(KIND_TAG[mark],))
+        self.update_reviewed()
         self.update_quality()
 
     def is_image(self, item):
@@ -1905,6 +1971,199 @@ class App:
         self.tree.see(item)
         self.update_preview()
 
+    def apply_fixes(self, edits, message):
+        """Arreglos de un bloque cada uno, de una vez (Ctrl+Z los deshace juntos), con la sección del primero
+        seleccionada."""
+        edits = sorted(edits, key=lambda e: -e[0])
+        item = next((str(j) for j in range(edits[-1][0], -1, -1)
+                     if self.tree.exists(str(j)) and not self.is_image(str(j))), None)
+        self.apply_edits(edits, item or self.tree.get_children()[0])
+        self.status.setText(message)
+
+    def replace_found(self, every=False):
+        """Cambia lo buscado por «Reemplazar por» en el párrafo del resultado elegido o en todos los párrafos."""
+        term, new, row = self.find_entry.text().strip(), self.replace_entry.text().strip(), self.find_results.currentRow()
+        if not self.book or len(term) < 2 or not (every or 0 <= row < len(self.matches)):
+            return
+        edits = convert.replace_text(self.book, term, new, blocks=None if every else [self.matches[row][0]])
+        if not edits:
+            self.status.setText("Nada que reemplazar en los párrafos: los títulos se cambian en la lista (F2)")
+            return
+        self.apply_fixes(edits, f"{len(edits)} párrafos cambiados · Ctrl+Z para deshacer")
+        self.search_book()
+
+    def save_rule(self):
+        """Lo buscado y su reemplazo como regla de «Reemplazos»: vale para todos los tomos de la serie."""
+        rule = [self.find_entry.text().strip(), self.replace_entry.text().strip()]
+        if rule[0] and rule not in self.replacements:
+            self.replacements.append(rule)
+            self.status.setText(f"Regla «{rule[0]} -> {rule[1]}» guardada en Reemplazos: vale para toda la serie")
+            self.update_preview()
+
+    def spelling(self):
+        """Revisa la ortografía en el proceso de trabajo: cargar el diccionario tarda unos segundos."""
+        if not self.book:
+            return
+        texts = [convert._plain(b) for b in self.book.blocks if b.kind == "p"]
+        if self.run(convert.unknown_words, (texts, self.words), self.spelling_dialog):
+            self.status.setText("Revisando la ortografía…")
+
+    def spelling_dialog(self, found):
+        """Palabras que no están en el diccionario (convert.unknown_words): dónde salen, cambiarlas en todo el
+        libro o añadirlas al diccionario de la serie. El editor de texto las subraya."""
+        self.unknown = {w for w, _, _ in found}
+        self.status.setText(f"Ortografía: {len(found)} palabras que no están en el diccionario")
+        win, column = self.dialog("Ortografía")
+        win.resize(900, 520)
+        column.addWidget(_label("Palabras que no están en el diccionario, las más repetidas primero. Las que empiezan "
+                                "en mayúscula no se revisan: suelen ser nombres.", "muted"))
+        panes = QSplitter(Qt.Orientation.Horizontal)
+        column.addWidget(panes, 1)
+        table = qtk.RowList(("word", "count"), {"word": "Palabra", "count": "Veces"}, {"count": 60}, stretch="word")
+        panes.addWidget(table)
+        right = QWidget()
+        side = QVBoxLayout(right)
+        side.setContentsMargins(12, 0, 0, 0)
+        side.addWidget(_label("Dónde sale (clic: verlo en las vistas previas)", "muted"))
+        places = QListWidget()
+        side.addWidget(places, 1)
+        side.addWidget(_label("Cambiar por", "muted"))
+        fix = QComboBox()
+        fix.setEditable(True)
+        side.addWidget(fix)
+        change_btn = _button("Cambiar todas", lambda: change(), "primary")
+        add_btn = _button("Añadir al diccionario", lambda: add())
+        side.addLayout(_row(change_btn, add_btn, 1))
+        panes.addWidget(right)
+        panes.setSizes([300, 600])
+        state = {"found": list(found), "places": []}
+
+        def fill(select=0):
+            table.delete(*table.get_children())
+            for n, (word, count, _) in enumerate(state["found"]):
+                table.insert("", "end", iid=str(n), values=(word, count))
+            win.setWindowTitle(f"Ortografía · {len(state['found'])} palabras")
+            if state["found"]:
+                item = str(min(select, len(state["found"]) - 1))
+                table.selection_set(item)
+                table.see(item)
+            else:
+                pick()
+
+        def chosen():
+            selected = table.selection()
+            return state["found"][int(selected[0])] if selected else None
+
+        def pick():
+            entry = chosen()
+            places.clear()
+            fix.clear()
+            state["places"] = []
+            change_btn.setEnabled(bool(entry))
+            add_btn.setEnabled(bool(entry))
+            if not entry:
+                return
+            word, _, suggestions = entry
+            fix.addItems(suggestions or [word])
+            pattern = re.compile(rf"(?<!\w){re.escape(word)}(?!\w)", re.I)
+            for k, block in enumerate(self.book.blocks):
+                plain = convert._plain(block) if block.kind == "p" else ""
+                m = pattern.search(plain)
+                if m and len(state["places"]) < 200:
+                    state["places"].append((k, block.page, word))
+                    places.addItem(f"pág. {block.page} · …{plain[max(0, m.start() - 40):m.end() + 50]}…")
+
+        def done(word, message):
+            self.unknown.discard(word)
+            n = int(table.selection()[0])
+            del state["found"][n]
+            fill(n)
+            self.status.setText(message)
+
+        def change():
+            word, new = chosen()[0], fix.currentText().strip()
+            edits = convert.replace_text(self.book, word, new, word=True) if new and new != word else []
+            if edits:
+                self.apply_fixes(edits, "")
+            done(word, f"«{word}» cambiada por «{new}» en {len(edits)} párrafos · Ctrl+Z para deshacer")
+
+        def add():
+            word = chosen()[0]
+            self.words.append(word)
+            done(word, f"«{word}» añadida al diccionario de la serie")
+
+        table.selected.connect(pick)
+        places.currentRowChanged.connect(lambda row: 0 <= row < len(state["places"])
+                                         and self.show_match(*state["places"][row]))
+        fill()
+        win.show()
+        win.parts = {"table": table, "places": places, "fix": fix, "change": change_btn, "add": add_btn}
+        self.spelling_window = win
+
+    def add_page(self):
+        """Página propia (créditos del grupo, agradecimientos, nota del traductor) como capítulo nuevo, antes
+        del primer capítulo o al final. Luego se edita con «Editar texto…» y se deshace con Ctrl+Z."""
+        if not self.book:
+            return
+        win, column = self.dialog("Añadir página")
+        title = QLineEdit("Nota del traductor")
+        body = QPlainTextEdit()
+        body.setPlaceholderText("Un párrafo por línea. <i>cursiva</i> y <b>negrita</b>, como en «Editar texto…».")
+        body.setMinimumSize(520, 220)
+        where = qtk.Var("Antes del primer capítulo")
+        column.addWidget(_label("Título", "muted"))
+        column.addWidget(title)
+        column.addWidget(_label("Texto", "muted"))
+        column.addWidget(body, 1)
+
+        def save():
+            name = title.text().strip()
+            if not name:
+                messagebox.showerror("Añadir página", "Escribe un título.", parent=win)
+                return
+            first = next((int(i) for i in self.tree.get_children() if self.tree.set(i, "inc") == ON), None)
+            at = first if first is not None and where.get().startswith("Antes") else len(self.book.blocks)
+            lines = [f"# {name}"] + [line.strip() for line in body.toPlainText().splitlines() if line.strip()]
+            self.apply_edits([(at, at, "\n\n".join(lines))], str(at))
+            self.tree.set(str(at), "inc", ON)  # sin entrada propia en deshacer: Ctrl+Z quita la página entera
+            self.tree.item(str(at), tags=(KIND_TAG[ON],))
+            self.update_reviewed()
+            self.update_preview()
+            self.status.setText(f"Página «{name}» añadida · E para editarla · Ctrl+Z para quitarla")
+            win.close()
+
+        column.addLayout(_row(_label("Dónde:"), _combo(where, ["Antes del primer capítulo", "Al final del libro"], 22),
+                              1, _button("Añadir", save, "primary")))
+        win.show()
+        win.parts = {"title": title, "body": body, "where": where, "save": save}
+        self.page_window = win
+
+    def change_image(self):
+        """Cambia la ilustración elegida en la lista por una imagen de archivo (mejor calidad, otra versión).
+        Se apunta en la revisión como ["image", bloque, archivo]."""
+        selected = self.tree.selection()
+        if not self.book or not selected or not self.is_image(selected[0]):
+            messagebox.showinfo("Cambiar ilustración", "Elige primero una ilustración en la lista.")
+            return
+        path = filedialog.askopenfilename(filetypes=[("Imagen", "*.jpg *.jpeg *.png *.webp")])
+        if not path:
+            return
+        try:
+            data = convert.load_cover(path)
+        except ValueError as e:
+            messagebox.showerror("Error", str(e))
+            return
+        item, rows = selected[0], self.rows()
+        self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
+                             "edits": len(self.edits), "item": item})
+        _swap_image(self.book, int(item), data)
+        self.edits.append(["image", int(item), path])
+        self.fill_tree(rows)
+        self.tree.selection_set(item)
+        self.tree.see(item)
+        self.update_preview()
+        self.status.setText(f"Ilustración cambiada por {Path(path).name} · Ctrl+Z para deshacer")
+
     def find(self, _=None):
         """Ctrl+F: barra de búsqueda sobre la lista; al elegir un resultado, las vistas previas van a él."""
         if not self.book:
@@ -2196,7 +2455,7 @@ class App:
     def update_quality(self):
         """Botón de la barra inferior con los avisos del informe de calidad: dice qué falta antes de generar,
         en rojo si hay algo grave."""
-        report = convert.quality_report(self.book) if self.book else []
+        report = [i for i in convert.quality_report(self.book) if _issue_key(i) not in self.ignored] if self.book else []
         graves = sum(i.level == "Grave" for i in report)
         rest = _quality_summary([i for i in report if i.level != "Grave"])
         if graves:
@@ -2221,8 +2480,8 @@ class App:
         levels = theme.level_colors(self.dark)
         summary = _label("", "title")
         show = qtk.Var("Todos")
-        shown = _combo(show, ["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS], 12,
-                       changed=lambda: fill())
+        shown = _combo(show, ["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS] + ["Ignorados"],
+                       12, changed=lambda: fill())
         column.addLayout(_row(summary, 1, QLabel("Mostrar:"), shown))
         panes = QSplitter(Qt.Orientation.Horizontal)
         column.addWidget(panes, 1)
@@ -2255,19 +2514,24 @@ class App:
             previews[name] = box
         fix_btn = _button("Arreglar", lambda: apply([state["report"][int(table.selection()[0])]]), "primary")
         all_btn = _button("Arreglar todos", lambda: apply(same_kind(state["report"][int(table.selection()[0])])))
-        side.addLayout(_row(fix_btn, all_btn, _button("Editar texto…", lambda: self.edit_text()), 1))
+        ignore_btn = _button("Ignorar", lambda: ignore(state["report"][int(table.selection()[0])]))
+        side.addLayout(_row(fix_btn, all_btn, _button("Editar texto…", lambda: self.edit_text()), 1, ignore_btn))
         side.addStretch(1)
         panes.addWidget(right)
         panes.setSizes([420, 640])
         state = {"report": []}
 
         def fill(select=0):
-            report = convert.quality_report(self.book)
-            summary.setText(_quality_summary(report) or "No se encontró nada sospechoso.")
+            everything = convert.quality_report(self.book)
+            ignored = [i for i in everything if _issue_key(i) in self.ignored]
+            report = [i for i in everything if _issue_key(i) not in self.ignored]
+            summary.setText((_quality_summary(report) or "No se encontró nada sospechoso.")
+                            + (f" · {len(ignored)} ignorados" if ignored else ""))
             graves = any(i.level == "Grave" for i in report)
             summary.setStyleSheet(f"color: {levels['Grave']};" if graves else "")
             wanted = next((level for level in convert.LEVELS if LEVEL_PLURAL[level].capitalize() == show.get()), None)
-            state["report"] = [i for i in report if wanted in (None, i.level)]
+            state["report"] = ignored if show.get() == "Ignorados" else [i for i in report if wanted in (None, i.level)]
+            ignore_btn.setText("No ignorar" if show.get() == "Ignorados" else "Ignorar")
             win.setWindowTitle(f"Informe de calidad · {len(report)} avisos")
             table.delete(*table.get_children())
             for n, issue in enumerate(state["report"]):
@@ -2311,6 +2575,7 @@ class App:
             preview(previews["after"], issue.after if issue else "", new, "new",
                     "(se quita)" if issue and issue.edit else "Sin arreglo automático: sigue la solución.")
             fix_btn.setEnabled(bool(issue and issue.edit))
+            ignore_btn.setEnabled(bool(issue))
             count = len(same_kind(issue)) if issue and issue.edit else 0
             all_btn.setText(f"Arreglar todos los de este tipo ({count})")
             all_btn.setEnabled(count > 1)
@@ -2328,17 +2593,21 @@ class App:
                 if issue.edit[1] <= limit:
                     edits.append(issue.edit)
                     limit = issue.edit[0]
-            item = next((str(j) for j in range(edits[-1][0], -1, -1)
-                         if self.tree.exists(str(j)) and not self.is_image(str(j))), None)
-            self.apply_edits(edits, item or self.tree.get_children()[0])
-            self.status.setText(f"{len(edits)} avisos arreglados · Ctrl+Z para deshacer")
+            self.apply_fixes(edits, f"{len(edits)} avisos arreglados · Ctrl+Z para deshacer")
+            fill(int(table.selection()[0]) if table.selection() else 0)
+
+        def ignore(issue):
+            """Ignorar (o volver a mostrar) un aviso: se recuerda en la revisión."""
+            key = _issue_key(issue)
+            self.ignored = [k for k in self.ignored if k != key] if key in self.ignored else self.ignored + [key]
+            self.update_quality()
             fill(int(table.selection()[0]) if table.selection() else 0)
 
         table.selected.connect(pick)
         fill()
         win.show()
         win.parts = {"table": table, "summary": summary, "heading": heading, "texts": texts, "previews": previews,
-                     "fix": fix_btn, "all": all_btn, "show": show, "fill": fill}
+                     "fix": fix_btn, "all": all_btn, "ignore": ignore_btn, "show": show, "fill": fill}
         self.quality_window = win
 
     def series_panel(self):
@@ -2483,14 +2752,16 @@ class App:
                 "autocase": self.autocase_var, "kepub": self.kepub_var}
 
     def rows(self):
-        return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title")] for item in self.tree.get_children()}
+        return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title"), self.tree.set(item, "ok")]
+                for item in self.tree.get_children()}
 
     def save_review(self):
         if not (self.book and self.pdf):
             return
         state = {name: var.get() for name, var in self.fields().items()}
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
-                     replacements=self.replacements, rows=self.rows(), problems=self.last_problems)
+                     replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
+                     ignored=self.ignored)
         try:
             state["pdf"] = _fingerprint(self.pdf)
             _write_json(_review_path(self.pdf), state)
@@ -2520,6 +2791,8 @@ class App:
             self.replacements = [[str(a), str(b)] for a, b in state["replacements"]]
         except (KeyError, TypeError, ValueError):
             pass  # sin reemplazos guardados, o mal escritos a mano
+        if isinstance(state.get("words"), list):
+            self.words = [str(w) for w in state["words"]]
 
     def load_review(self):
         """Recupera la revisión guardada de este PDF. False si no hay o si el PDF cambió desde entonces."""
@@ -2528,18 +2801,22 @@ class App:
             return False
         self.edits = _replay(self.book, state)
         self.fill_tree({})
-        for item, (kind, title) in state["rows"].items():
+        for item, (kind, title, *done) in state["rows"].items():
             if self.tree.exists(item) and kind in self.cycle(item):
                 self.set_kind(item, kind)
                 self.tree.set(item, "title", title)
+                self.tree.set(item, "ok", done[0] if done else "")
+        self.update_reviewed()
         self.apply_state(state)
         self.description = state.get("description", "")
         self.last_problems = state.get("problems")
+        self.ignored = state["ignored"] if isinstance(state.get("ignored"), list) else []
         if state.get("cover"):
             try:
                 self.set_cover(state["cover"])
             except Exception:
                 pass  # la imagen de portada ya no existe: se queda la del PDF
+        self.update_quality()  # sin los avisos ignorados
         return True
 
     def search_book(self):
@@ -2865,6 +3142,9 @@ class TextEditor:
         text, blocks, used = self.text, self.app.book.blocks, set()
         for tag in EDITOR_TAGS:
             text.tag_remove(tag, "1.0", "end")
+        # Palabras desconocidas de la última revisión ortográfica (Herramientas → Ortografía…)
+        unknown = self.app.unknown and re.compile(
+            r"(?<!\w)(?:" + "|".join(map(re.escape, sorted(self.app.unknown, key=len, reverse=True))) + r")(?!\w)", re.I)
         for n, line in enumerate(text.get("1.0", "end-1c").split("\n"), start=1):
             bare = line.strip()
             token = convert.TOKEN.fullmatch(bare)
@@ -2893,6 +3173,8 @@ class TextEditor:
             broken = not _balanced(line)
             for m in MARK.finditer(line):
                 text.tag_add("broken" if broken else "mark", f"{n}.{m.start()}", f"{n}.{m.end()}")
+            for m in unknown.finditer(line) if unknown and not token else ():
+                text.tag_add("spell", f"{n}.{m.start()}", f"{n}.{m.end()}")
 
     def dirty(self):
         """¿Cambió algo que edit_section lea? Líneas en blanco y espacios sobrantes no cuentan."""
