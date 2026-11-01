@@ -2900,6 +2900,8 @@ class TextEditor:
         text.setFont(QFont("Segoe UI", 11))
         self.canvas = qtk.Preview()
         self.canvas.setFixedSize(*self.panel)
+        # Preview ignora su tamaño para las vistas grandes; aquí el layout le daría alto 0 y ◀ ▶ la taparía
+        self.canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.page_label = _label("", "muted")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         side = QVBoxLayout()
