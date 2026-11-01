@@ -1020,6 +1020,39 @@ def _remojibake(text):
         return None
 
 
+# Una oración que acaba en ? o !, desde el corte anterior. Los puntos suspensivos y la raya no cortan:
+# «¿El grupo que... los fundó?», «¿Conoces este país —el reino— ahora?» (Re Zero 2, Nageki 1)
+SENTENCE = re.compile(r"((?:\.{2,}|[^.!?»])*?)([?!]+)")
+LEAD = re.compile(r"(?:\s|[«“\"'(—–-]|</?[ib]>)*")   # lo que va antes de la primera palabra
+DOUBLED = re.compile(r"\b(de|la|el|que|en|y|los|las|un|una|por|con|se|lo) \1\b", re.I)
+
+
+def _opening_marks(line):
+    """Pone ¿ o ¡ al principio de las oraciones que solo llevan el signo de cierre ("Qué haces?")."""
+    def fix(m):
+        body, close = m[1], m[2]
+        lead = LEAD.match(body).end()
+        # Tras «?, me pregunto» la oración sigue: no empieza otra
+        if "¿" in body or "¡" in body or not any(c.isalpha() for c in body) or body[lead:lead + 1] in ",;:":
+            return m[0]
+        return body[:lead] + ("¿" if close[0] == "?" else "¡") + body[lead:] + close
+    return SENTENCE.sub(fix, line)
+
+
+TYPOS = (  # (tipo, título, arreglo de la línea, por qué): erratas típicas de las traducciones fan
+    ("opening", "Falta el signo de apertura", _opening_marks,
+     "En español las preguntas y exclamaciones llevan signo de apertura (¿ ¡) además del de cierre."),
+    ("doubled", "Palabra repetida", lambda s: DOUBLED.sub(r"\1", s),
+     "La misma palabra dos veces seguidas suele ser un error al escribir."),
+    ("aver", "«Haber si» en vez de «a ver si»",
+     lambda s: re.sub(r"(^|[¿¡—«“\"(.…]\s*)([Hh])aber si\b",
+                      lambda m: m[1] + ("A" if m[2] == "H" else "a") + " ver si", s),
+     "«A ver si» (del verbo ver) se confunde a menudo con «haber»."),
+    ("porque", "«¿Porque» en vez de «¿por qué»", lambda s: re.sub(r"¿([Pp])orque\b", r"¿\1or qué", s),
+     "En una pregunta va «por qué», separado y con tilde."),
+)
+
+
 def quality_report(book):
     """Lo sospechoso del libro, para revisarlo: [Issue], por página. Cada aviso dice el problema, la
     solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa."""
@@ -1100,6 +1133,15 @@ def quality_report(book):
                                 "El párrafo parece estar en inglés: el traductor se lo saltó o es una nota del "
                                 "grupo.", "Tradúcelo o quítalo con «Editar texto…» (tecla E).", _cut(text),
                                 text=text))
+        line = _line(b, k)
+        for kind, title, rule, why in TYPOS if not LINKS.search(text) else ():
+            fixed = rule(line)
+            if fixed != line:
+                before, after = TAGS.sub("", line), TAGS.sub("", fixed)
+                n = len(os.path.commonprefix([before, after]))
+                report.append(Issue(kind, k, b.page, "Menor", title, why, "Corregirlo.",
+                                    _around(before, n, n), _around(after, n, n + len(after) - len(before)),
+                                    (k, k + 1, fixed), text))
         prev_text = text
     last = None
     for k, end in zip(heads, heads[1:]):
