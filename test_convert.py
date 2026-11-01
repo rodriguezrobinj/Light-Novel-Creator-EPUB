@@ -2956,6 +2956,24 @@ def test_window_cover_from_illustration_quality_and_series_panel():
     assert "Sin revisar" in states or "Revisado, sin EPUB" in states, states
 
 
+def test_text_cover():
+    """Portada dibujada: JPEG de 1200×1800, otro color con otra serie, y un título larguísimo no falla."""
+    book = convert.Book("Re:Zero", "Tappei Nagatsuki", b"", [], [], series="Re:Zero", volume="3")
+    cover = convert.text_cover(book)
+    pix = pymupdf.Pixmap(cover)
+    other = convert.text_cover(convert.Book("Re:Zero", "Tappei Nagatsuki", b"", [], [], series="Otra", volume="3"))
+    long = convert.text_cover(convert.Book("Título " * 45, "", b"", [], []))
+    assert cover[:3] == b"\xff\xd8\xff" and (pix.width, pix.height) == (1200, 1800), (pix.width, pix.height)
+    assert other != cover and long[:3] == b"\xff\xd8\xff"
+    root, window = visible_window()
+    window.pdf = make_covers()
+    window.show_book(convert.analyze(window.pdf))
+    window.set_cover(("text", ""))
+    label, drawn = window.cover_label.text(), window.book.cover
+    window.close()
+    assert label == "Portada: con título" and drawn[:3] == b"\xff\xd8\xff", label
+
+
 def test_window_error_is_logged_and_shown():
     import app
 

@@ -1,5 +1,6 @@
 """Convierte PDFs de novelas ligeras en EPUB con texto fluido."""
 import collections
+import colorsys
 import functools
 import html
 import io
@@ -9,6 +10,7 @@ import unicodedata
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -546,6 +548,25 @@ def load_cover(path):
         raise ValueError(f"No se pudo abrir la imagen: {e}") from e
     return _jpeg(_rgb(pix, alpha=False), 90)
 
+
+def text_cover(book):
+    """Portada dibujada con serie, volumen, título y autor, para cuando el PDF no trae una buena. El color
+    del fondo sale de la serie: todos los tomos de una serie comparten color."""
+    hue = zlib.crc32((book.series or book.title).encode()) % 360 / 360
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=600, height=900)
+        page.draw_rect(page.rect, color=None, fill=colorsys.hls_to_rgb(hue, 0.22, 0.45))
+        page.insert_font("bold", fontfile=str(FONT_DIR / "literata-700-normal.ttf"))
+        page.insert_font("text", fontfile=str(FONT_DIR / "literata-400-normal.ttf"))
+        top = " · ".join(filter(None, [book.series, book.volume and f"Volumen {book.volume}"]))
+        for rect, text, font, size in (((50, 110, 550, 260), top, "text", 30),
+                                       ((50, 300, 550, 680), book.title, "bold", 64),
+                                       ((50, 740, 550, 850), book.author, "text", 28)):
+            while text and size > 10 and page.insert_textbox(rect, text, fontname=font, fontsize=size,
+                                                             color=(1, 1, 1), align=1) < 0:
+                size -= 4  # no cabe: nada se escribió, se prueba más pequeño
+        page.draw_line((200, 285), (400, 285), color=(1, 1, 1), width=1.5)
+        return _jpeg(page.get_pixmap(matrix=pymupdf.Matrix(2, 2)), 90)
 
 SHRINK = 1400  # lado mayor de las imágenes reducidas, en píxeles: de sobra para un celular o un e-reader
 

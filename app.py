@@ -333,8 +333,10 @@ def _plan(book, rows):
 
 def _cover_image(doc, choice, book=None):
     """Portada elegida: ("page", n) es una página del PDF (desde 0); ("file", ruta), una imagen;
-    ("image", k), la ilustración del bloque k."""
+    ("image", k), la ilustración del bloque k; ("text", ""), la dibujada con los datos del libro."""
     kind, value = choice
+    if kind == "text":
+        return convert.text_cover(book)
     if kind == "page":
         return convert._render(doc[value], crop=True)
     if kind == "image":
@@ -705,7 +707,7 @@ class App:
         self.closed = False                    # ventana cerrada: lo diferido (miniaturas, repintar) ya no se hace
         self._description = ""                 # sinopsis (propiedad description)
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
-        self.cover_choice = None  # ("page", n), ("file", ruta), ("image", k) o None: la que eligió el análisis
+        self.cover_choice = None  # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
         self.device_var, self.dark_var = qtk.Var('E-reader 6"'), qtk.Var(False)
         self.theme_var = qtk.Var("Sistema")
         self.title_var, self.author_var, self.series_var, self.volume_var = (qtk.Var() for _ in range(4))
@@ -1580,6 +1582,8 @@ class App:
                 setattr(self.book, name, getattr(self, f"{name}_var").get().strip())
         self.book.title = self.book.title or self.pdf.stem
         self.book.description = self.description
+        if self.cover_choice and self.cover_choice[0] == "text":  # con el título y la serie de ahora
+            self.book.cover = convert.text_cover(self.book)
         self.save_review()
         chapters, removed, breaks = _plan(self.book, self.rows())
         self.status.setText("Generando EPUB…")
@@ -1912,7 +1916,8 @@ class App:
         self.book.cover = _cover_image(self.pdf_doc, choice, self.book)
         self.cover_choice = [kind, value]
         labels = {"page": lambda: f"Portada: página {value + 1}", "image": lambda: f"Portada: ilustración de la "
-                  f"página {self.book.blocks[int(value)].page}", "file": lambda: f"Portada: {Path(value).name}"}
+                  f"página {self.book.blocks[int(value)].page}", "file": lambda: f"Portada: {Path(value).name}",
+                  "text": lambda: "Portada: con título"}
         self.cover_label.setText(labels[kind]())
         self.update_cover()
         self.update_preview()
@@ -1959,7 +1964,8 @@ class App:
         column.addWidget(grid, 1)
         column.addLayout(_row(_button(f"Página mostrada del PDF ({self.pdf_page + 1})",
                                       lambda: (self.cover_from_page(), win.close())),
-                              _button("Imagen de un archivo…", lambda: (win.close(), self.cover_from_file())), 1))
+                              _button("Imagen de un archivo…", lambda: (win.close(), self.cover_from_file())),
+                              _button("Portada con título", lambda: (self.set_cover(("text", "")), win.close())), 1))
         win.show()
         self.cover_window = win, grid
 
