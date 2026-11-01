@@ -2728,6 +2728,17 @@ def test_quality_report_explains_previews_and_fixes():
     assert book.candidates == [0, 5], book.candidates
 
 
+def test_quality_report_finds_untranslated_text():
+    """Un párrafo en inglés se avisa; uno español con palabras inglesas sueltas, no."""
+    texts = ["The castle stood on the hill above the village, and its towers were dark.",
+             "I don't know what you are talking about, he said.",
+             "Subaru dijo OK y el juego terminó con un game over para todos.", "—Hola, ¿qué tal estás hoy?"]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    found = [(i.block, i.level, i.edit) for i in convert.quality_report(book) if i.kind == "english"]
+    assert found == [(1, "Revisar", None), (2, "Revisar", None)], found
+
+
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
     página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""

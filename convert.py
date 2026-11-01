@@ -977,6 +977,10 @@ def _trim(data):
 
 LEVELS = ("Grave", "Revisar", "Menor")  # gravedad de un aviso del informe de calidad, de más a menos
 MOJIBAKE = re.compile(r"Ã[\x80-\xbf]|Â[\xa0-\xbf]|â€")  # UTF-8 leído como Windows-1252: "canciÃ³n"
+ENGLISH = set("the and you is are was were of to that it its this what with for on in at be have has had "
+              "not but my your his her he she they we i i'm don't it's can will would there their about "
+              "from as an".split())  # palabras vacías: en un texto inglés son una de cada tres o más
+SPANISH = set("el la los las de que y en un una es por con se lo su para al del me te le mi tu".split())
 
 
 @dataclass
@@ -1089,6 +1093,13 @@ def quality_report(book):
                                 _around(text, m.start(), m.end()),
                                 _around(_remojibake(text) or "", m.start(), m.end()) if fixed else "",
                                 (k, k + 1, fixed) if fixed else None, text))
+        words = re.findall(r"[a-záéíóúñü']+", text.lower())
+        english = sum(w in ENGLISH for w in words)
+        if len(words) >= 6 and english >= 0.35 * len(words) and sum(w in SPANISH for w in words) < english:
+            report.append(Issue("english", k, b.page, "Revisar", "Texto sin traducir",
+                                "El párrafo parece estar en inglés: el traductor se lo saltó o es una nota del "
+                                "grupo.", "Tradúcelo o quítalo con «Editar texto…» (tecla E).", _cut(text),
+                                text=text))
         prev_text = text
     last = None
     for k, end in zip(heads, heads[1:]):
