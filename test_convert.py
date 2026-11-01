@@ -3394,6 +3394,33 @@ def test_window_find_bar_and_result_dialog():
     assert buttons[:2] == ["Abrir EPUB", "Abrir carpeta"] and buttons[-1] == "Cerrar", buttons
 
 
+def test_window_result_dialog_phone_and_calibre():
+    """«Enviar al móvil» siempre; «Añadir a Calibre» solo si Calibre está instalado, y lo abre con el EPUB."""
+    import app
+    from PySide6.QtWidgets import QPushButton
+
+    out = TMP / "calibre.epub"
+    out.write_bytes(b"x")
+    root, window = visible_window()
+    calibre, popen = app._calibre, app.subprocess.Popen
+    launched, seen = [], []
+    try:
+        app.subprocess.Popen = lambda args, **kw: launched.append(args)
+        for found in (None, "C:/Calibre2/calibre.exe"):
+            app._calibre = lambda: found
+            window.result_dialog(str(out))
+            buttons = {b.text(): b for b in window.result_window.findChildren(QPushButton)}
+            seen.append(("Enviar al móvil" in buttons, "Añadir a Calibre" in buttons))
+            if "Añadir a Calibre" in buttons:
+                buttons["Añadir a Calibre"].click()
+            window.result_window.close()
+    finally:
+        app._calibre, app.subprocess.Popen = calibre, popen
+    window.close()
+    assert seen == [(True, False), (True, True)], seen
+    assert launched == [["C:/Calibre2/calibre.exe", str(out)]], launched
+
+
 def test_window_guide_names_serious_warnings_and_colors_follow_theme():
     """La barra inferior dice qué falta antes de generar («1 aviso grave…», en singular), y los colores de
     la lista cambian con el tema: en oscuro, sin grises de fondo claro."""

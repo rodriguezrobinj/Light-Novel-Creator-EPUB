@@ -542,6 +542,15 @@ def _serve(path, host):
     return server
 
 
+def _calibre():
+    """calibre.exe si está instalado: en el PATH o en su carpeta de siempre."""
+    found = shutil.which("calibre")
+    for var in ("ProgramFiles", "ProgramFiles(x86)"):
+        if not found and os.environ.get(var) and (Path(os.environ[var]) / "Calibre2" / "calibre.exe").is_file():
+            found = str(Path(os.environ[var]) / "Calibre2" / "calibre.exe")
+    return found
+
+
 def _install_paths():
     """Dónde queda instalado el .exe y su acceso directo del menú Inicio (solo para este usuario)."""
     base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Programs" / "PDF a EPUB"
@@ -1686,6 +1695,8 @@ class App:
         buttons.append(_button("Abrir carpeta", lambda: self.open_external(out, win, folder=True)))
         if is_file:
             buttons.append(_button("Enviar al móvil", lambda: self.send_to_phone(out)))
+            if _calibre():
+                buttons.append(_button("Añadir a Calibre", lambda: self.add_to_calibre(out)))
             for root, label in _drives():
                 if _reader_kind(root) == "kindle":  # el Kindle no lee EPUB por USB: solo por Send to Kindle
                     kindle = True
@@ -1739,6 +1750,15 @@ class App:
         win.finished.connect(lambda _: (server.shutdown(), server.server_close()))
         win.show()
         self.phone_window = win, server
+
+    def add_to_calibre(self, out):
+        """calibre.exe con un libro lo añade a su biblioteca, también si Calibre ya está abierto."""
+        try:
+            subprocess.Popen([_calibre(), str(out)])
+        except OSError as e:
+            messagebox.showerror("Añadir a Calibre", f"No se pudo abrir Calibre: {e.strerror or e}")
+            return
+        self.status.setText("Enviado a Calibre: lo añade a su biblioteca.")
 
     def send_to_kindle(self, out, win):
         """Send to Kindle no tiene API pública: se abre su web y el archivo, seleccionado, para arrastrarlo."""
