@@ -2766,6 +2766,211 @@ def test_quality_report_fixes_fansub_typos():
                                                   "<i>¿Qué haces?</i>", "«¿Qué?» ¡Ven aquí!"], [b.html for b in book.blocks]
 
 
+def test_quality_report_finds_inline_notes():
+    """Una nota del traductor entre paréntesis dentro del texto se propone como nota emergente; un paréntesis
+    normal no."""
+    texts = ["Comió un onigiri (N.T.: bola de arroz) enorme.", "Dijo [NdT: en japonés] adiós.",
+             "Ella (Nota del traductor: es su hermana) sonrió.", "(No te preocupes) dijo.", "Era (N.T.: a (b) c) así."]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    report = [i for i in convert.quality_report(book) if i.kind == "note"]
+    assert [i.block for i in report] == [1, 2, 3], [(i.block, i.after) for i in report]
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    assert [b.html for b in book.blocks[1:4]] == ['Comió un onigiri<span class="nota">bola de arroz</span> enorme.',
+                                                  'Dijo<span class="nota">en japonés</span> adiós.',
+                                                  'Ella<span class="nota">es su hermana</span> sonrió.'], book.blocks
+
+
+def test_replace_text():
+    """Reemplazar en los párrafos: sin distinguir mayúsculas pero respetando la del principio, palabra completa
+    si se pide, sin romper <i>, <b> ni las notas, y solo en los bloques pedidos. Los títulos no se tocan."""
+    B = convert.Block
+    blocks = [B("heading", 1, "Dijó"), B("p", 1, "Dijó que <i>dijó</i> algo."),
+              B("p", 1, convert._inline("Nota: dijó[Nota: dijó]")), B("p", 1, "Contradijó."), B("p", 1, "Nada.")]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    edits = convert.replace_text(book, "dijó", "dijo", word=True)
+    assert [e[:2] for e in edits] == [(1, 2), (2, 3)], edits
+    assert edits[0][2] == "Dijo que <i>dijo</i> algo." and edits[1][2] == "Nota: dijo[Nota: dijo]", edits
+    loose = convert.replace_text(book, "dijó", "dijo", blocks=[3, 4])
+    assert loose == [(3, 4, "Contradijo.")], loose
+    assert convert.replace_text(book, "nota", "aviso") == [(2, 3, "Aviso: dijó[Nota: dijó]")]
+
+
+def test_unknown_words():
+    """Ortografía con el diccionario Hunspell: una errata se avisa con su sugerencia del propio libro; los
+    nombres con mayúscula, honoríficos, onomatopeyas, palabras cortas y las del diccionario de la serie, no."""
+    texts = ["Subaru dijo que la casa estaba lejos.", "Ella dijó que no. Dijo que sí, kun.",
+             "¡Aaaah! La ciudd estaba en la ciudad. Fuuuh.", "El mob atacó otra vez al mob."]
+    found = convert.unknown_words(texts, known=["Mob"])
+    words = {w: (n, s) for w, n, s in found}
+    assert set(words) == {"dijó", "ciudd"}, found
+    assert words["dijó"][1][0] == "dijo" and "ciudad" in words["ciudd"][1], found
+
+
+def test_window_ignore_warning():
+    """«Ignorar» quita el aviso del informe y del botón de la barra; en «Ignorados» se puede recuperar."""
+    B = convert.Block
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto " * 60),
+                                                     B("p", 2, "12")], [0]))
+    before = window.quality_btn.text()
+    window.quality()
+    root.update()
+    parts = root.dialogs()[-1].parts
+    parts["ignore"].click()
+    root.update()
+    ignored = (window.quality_btn.text(), window.ignored, parts["table"].get_children())
+    parts["show"].set("Ignorados")
+    parts["fill"]()
+    listed = (parts["table"].get_children(), parts["ignore"].text())
+    parts["ignore"].click()
+    root.update()
+    after = (window.quality_btn.text(), window.ignored)
+    window.close()
+    assert before == "⚠ 1 por revisar" and ignored == ("✓ Sin avisos", [["number", "12"]], ()), (before, ignored)
+    assert listed == (("0",), "No ignorar") and after == ("⚠ 1 por revisar", []), (listed, after)
+
+
+def test_window_find_and_replace():
+    """La barra de búsqueda reemplaza en el resultado elegido o en todos, Ctrl+Z lo deshace, y «Guardar como
+    regla» lo pasa a los reemplazos de la serie."""
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella dijó que sí."), B("p", 2, "Dijó que no.")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.find()
+    window.find_entry.setText("dijó")
+    window.search_book()
+    window.replace_entry.setText("dijo")
+    window.find_results.setCurrentRow(0)
+    window.replace_found()
+    one = [b.html for b in window.book.blocks]
+    window.replace_found(every=True)
+    every = [b.html for b in window.book.blocks]
+    window.undo()
+    undone = [b.html for b in window.book.blocks]
+    window.save_rule()
+    rules = window.replacements
+    window.close()
+    assert one == ["Capítulo 1", "Ella dijo que sí.", "Dijó que no."], one
+    assert every == ["Capítulo 1", "Ella dijo que sí.", "Dijo que no."], every
+    assert undone == one and rules == [["dijó", "dijo"]], (undone, rules)
+
+
+def test_window_spelling():
+    """Ortografía: la revisión corre en el proceso de trabajo; «Cambiar todas» corrige el libro, «Añadir al
+    diccionario» la guarda para la serie, y el editor subraya las que quedan."""
+    import time
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella dijó que la ciudd estaba lejos."),
+              B("p", 1, "Él dijó que la ciudad era grande y el golem también.")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.spelling()
+    deadline = time.time() + 120
+    while window.done and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    parts = root.dialogs()[-1].parts
+    words = [parts["table"].set(i, "word") for i in parts["table"].get_children()]
+    first = (parts["fix"].currentText(), parts["places"].count())
+    parts["change"].click()  # «dijó», la más repetida, por su sugerencia «dijo»
+    root.update()
+    fixed = [b.html for b in window.book.blocks]
+    rest = [parts["table"].set(i, "word") for i in parts["table"].get_children()]
+    parts["table"].selection_set(str(rest.index("golem")))
+    parts["add"].click()
+    root.update()
+    window.tree.selection_set("0")
+    window.pdf_doc = None  # libro sin PDF: el panel del editor queda en blanco
+    editor = window.edit_text()
+    root.update()
+    marked = [editor.text.get(*r) for r in zip(*[iter(editor.text.tag_ranges("spell"))] * 2)]
+    editor.win.done(0)
+    state = (window.words, sorted(window.unknown))
+    window.close()
+    assert words[0] == "dijó" and set(words) == {"dijó", "ciudd", "golem"}, words
+    assert first == ("dijo", 2), first
+    assert fixed[1:] == ["Ella dijo que la ciudd estaba lejos.", "Él dijo que la ciudad era grande y el golem también."], fixed
+    assert state == (["golem"], ["ciudd"]) and marked == ["ciudd"], (state, marked)
+
+
+def test_window_add_page_change_image_and_reviewed():
+    """«Añadir página» crea un capítulo antes del primero; «Cambiar ilustración» cambia la imagen de la fila;
+    R marca revisado y salta al siguiente capítulo. Todo vuelve al reabrir el PDF."""
+    import app
+
+    pdf = TMP / "Pagina - Volumen 1.pdf"
+    make_novel().replace(pdf)
+    picture = TMP / "nueva.png"
+    pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 30, 40), False).save(picture)
+    root, window = visible_window()
+    window.pdf = pdf
+    book = convert.analyze(pdf)
+    window.show_book(book)
+    chapters = [i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON]
+    window.add_page()
+    root.update()
+    page = root.dialogs()[-1].parts
+    page["title"].setText("Créditos del grupo")
+    page["body"].setPlainText("Traducción: Grupo.\n\nGracias por leer.")
+    page["save"]()
+    root.update()
+    first = chapters and int(chapters[0])
+    added = (window.tree.set(str(first), "inc"), window.tree.set(str(first), "title"),
+             [b.html for b in window.book.blocks[first:first + 3]])
+    heads = [i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON]
+    window.tree.selection_set(heads[0])
+    window.toggle_reviewed()
+    jumped = window.tree.selection()
+    header = window.tree.headerItem().text(window.tree.columns.index("ok"))
+    # Una ilustración sintética al final para cambiarla
+    original = app.filedialog.askopenfilename
+    app.filedialog.askopenfilename = lambda **kwargs: str(picture)
+    try:
+        window.book.blocks.append(convert.Block("image", 1, image=JPEG))
+        window.fill_tree(window.rows())
+        image = str(len(window.book.blocks) - 1)
+        window.tree.selection_set(image)
+        window.change_image()
+    finally:
+        app.filedialog.askopenfilename = original
+    changed = pymupdf.Pixmap(window.book.blocks[int(image)].image).width
+    window.book.blocks.pop()  # la ilustración no es del PDF: al reabrir no estaría
+    window.edits.pop()
+    window.save_review()
+    window.close()
+    root, again = visible_window()
+    again.pdf = pdf
+    again.show_book(convert.analyze(pdf))
+    reopened = (again.tree.set(str(first), "inc"), again.tree.set(str(first), "title"), again.tree.set(heads[0], "ok"))
+    again.close()
+    assert added == (app.ON, "Créditos del grupo", ["Créditos del grupo", "Traducción: Grupo.", "Gracias por leer."]), added
+    assert jumped == (heads[1],) and header == f"✓ 1/{len(heads)}", (jumped, header)
+    assert changed == 30, changed
+    assert reopened == (app.ON, "Créditos del grupo", "✓"), reopened
+
+
+def test_replay_image_and_page_at_start():
+    """La revisión repite una ilustración cambiada (o deja la del PDF si el archivo ya no está) y una página
+    añadida en el bloque 0."""
+    import app
+
+    picture = TMP / "repetida.png"
+    pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 20, 10), False).save(picture)
+    blocks = [convert.Block("heading", 1, "Capítulo 1"), convert.Block("image", 1, image=JPEG),
+              convert.Block("image", 2, image=JPEG)]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    state = {"edits": [["image", 1, str(picture)], ["image", 2, str(TMP / "no-existe.png")], [0, 0, "# Créditos\n\nGracias."]]}
+    done = app._replay(book, state)
+    assert done == state["edits"], done
+    assert [b.kind for b in book.blocks] == ["heading", "p", "heading", "image", "image"], book.blocks
+    assert pymupdf.Pixmap(book.blocks[3].image).width == 20 and book.blocks[4].image == JPEG, book.blocks
+    assert book.candidates == [2], book.candidates
+
+
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
     página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""
