@@ -51,7 +51,7 @@ INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "la
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
-         "epub2", "reading", "profile", "autocase", "kepub")
+         "font_file", "epub2", "reading", "profile", "autocase", "kepub")
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
@@ -65,7 +65,7 @@ PROFILES = {"Personalizado": {},
             "Kobo": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": True},
             "Lector antiguo (EPUB 2)": {"gray": False, "shrink": True, "shrink_size": 1400, "epub2": True,
                                         "kepub": False}}
-FONT_CHOICES = ["Del lector"] + list(convert.FONTS)
+FONT_CHOICES = ["Del lector"] + list(convert.FONTS) + ["Otra…"]  # «Otra…» pide un archivo
 APP_NAME = "Light Novel Creator"  # nombre visible; el .exe y la carpeta de ajustes siguen siendo «PDF a EPUB»
 KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro, theme.kind_colors(True)
 PREVIEW_BOX = (480, 640)  # ancho y alto máximos de cada vista previa, en píxeles
@@ -154,6 +154,7 @@ def _ps_quote(text):
 def _write_options(state, breaks=()):
     """Opciones de write_epub a partir de una revisión, de los campos de la ventana o de lo heredado."""
     lang, style = str(state.get("lang", "es")).strip(), state.get("style")
+    font, path = state.get("font"), str(state.get("font_file") or "")
     return {"lang": lang if LANG.fullmatch(lang) else "es",
             "typography": bool(state.get("typography", True)),
             "style": style if style in convert.STYLES else "Clásico",
@@ -161,7 +162,8 @@ def _write_options(state, breaks=()):
             "shrink": int(state.get("shrink_size") or convert.SHRINK) if state.get("shrink", True) else False,
             "replacements": [tuple(rule) for rule in state.get("replacements", [])],
             "credits": bool(state.get("credits")), "gray": bool(state.get("gray")), "trim": bool(state.get("trim")),
-            "font": state.get("font") if state.get("font") in convert.FONTS else "",
+            "font": font if font in convert.FONTS else path if path and Path(path).name == font and Path(path).is_file()
+            else "",
             "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
             "breaks": list(breaks)}
 
@@ -720,7 +722,9 @@ class App:
         self.profile_var = qtk.Var("Personalizado")  # fija gris, tamaño de imagen, EPUB 2 y KEPUB
         self.separator_var = qtk.Var("Según el estilo")  # cómo se ven los separadores de escena
         self.style_var = qtk.Var("Clásico")  # aspecto del EPUB: letra, párrafos e inicio de capítulo
-        self.font_var = qtk.Var("Del lector")  # tipografía incrustada (convert.FONTS)
+        self.font_var = qtk.Var("Del lector")  # tipografía incrustada (convert.FONTS) o nombre de la propia
+        self.font_file_var = qtk.Var("")  # ruta de la fuente propia
+        self.font_last = "Del lector"  # a la que se vuelve si «Otra…» no elige archivo
         self.typography_var = qtk.Var(True)  # comillas «», puntos suspensivos, raya, espacios
         self.gray_var = qtk.Var(False)  # para e-readers de tinta: pesa menos y se ve igual
         self.shrink_var = qtk.Var(True)  # las imágenes son casi todo el peso del EPUB
@@ -875,6 +879,7 @@ class App:
             action.setCheckable(True)
             var.check(action)
             action.triggered.connect(lambda _: self.update_preview())
+        self.font_box = _combo(self.font_var, FONT_CHOICES, 8, changed=self.font_changed)
         self.quality_btn = _button("Calidad", self.quality)
         self.quality_btn.setEnabled(False)
         self.gen_btn = _button("Generar EPUB…", self.generate, "primary")
@@ -884,7 +889,7 @@ class App:
                                                          changed=self.update_preview),
                             _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
                                                       changed=self.update_preview),
-                            _label("Letra:"), _combo(self.font_var, FONT_CHOICES, 8, changed=self.update_preview),
+                            _label("Letra:"), self.font_box,
                             _menu_button("Opciones", extras), 1, self.gen_btn))
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
@@ -2072,6 +2077,23 @@ class App:
             self.update_preview()
         self.status.setText(f"{len(changed)} apartados como separador")
 
+    def font_changed(self):
+        """«Otra…» pide un archivo de fuente; sin elegir ninguno, se queda la letra de antes."""
+        if self.font_var.get() == "Otra…":
+            path = filedialog.askopenfilename(filetypes=[("Fuente", "*.ttf *.otf")])
+            if path:
+                self.font_file_var.set(path)
+                self.show_font(Path(path).name)
+            self.font_var.set(Path(path).name if path else self.font_last)
+        self.font_last = self.font_var.get()
+        self.update_preview()
+
+    def show_font(self, name):
+        """Pone la fuente propia en el combo, antes de «Otra…», y la deja elegida."""
+        if self.font_box.findText(name) < 0:
+            self.font_box.insertItem(self.font_box.count() - 1, name)
+        self.font_box.setCurrentText(name)
+
     def apply_profile(self):
         """El perfil fija las opciones que importan para ese lector (PROFILES)."""
         for name, value in PROFILES.get(self.profile_var.get(), {}).items():
@@ -2363,7 +2385,7 @@ class App:
                 "original_title": self.original_title_var, "subjects": self.subjects_var, "date": self.date_var,
                 "lang": self.lang_var, "style": self.style_var, "separator": self.separator_var,
                 "typography": self.typography_var, "shrink": self.shrink_var, "shrink_size": self.shrink_size_var,
-                "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
+                "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var, "font_file": self.font_file_var,
                 "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var}
 
@@ -2393,8 +2415,14 @@ class App:
                     pass  # valor mal escrito a mano en el .json
         if self.style_var.get() not in convert.STYLES:  # el .json se puede editar a mano
             self.style_var.set("Clásico")
-        if self.font_var.get() not in FONT_CHOICES:
-            self.font_var.set("Del lector")
+        font, path = self.font_var.get(), Path(self.font_file_var.get())
+        if font not in FONT_CHOICES or font == "Otra…":
+            if self.font_file_var.get() and path.name == font and path.is_file():
+                self.show_font(font)
+            else:
+                self.font_var.set("Del lector")
+                self.status.setText(f"No se encontró la fuente {font}: se usa la del lector.")
+        self.font_last = self.font_var.get()
         try:
             self.replacements = [[str(a), str(b)] for a, b in state["replacements"]]
         except (KeyError, TypeError, ValueError):

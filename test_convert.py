@@ -2956,6 +2956,42 @@ def test_window_cover_from_illustration_quality_and_series_panel():
     assert "Sin revisar" in states or "Revisado, sin EPUB" in states, states
 
 
+def test_custom_font_is_embedded():
+    """Una fuente propia (.ttf/.otf) va dentro del EPUB; si el archivo desaparece, la ventana vuelve a la del
+    lector y lo dice."""
+    import shutil
+    font = TMP / "Mi Letra.ttf"
+    shutil.copy(convert.FONT_DIR / "bitter-400-normal.ttf", font)
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno.")], [0])
+    out = TMP / "fuente.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, font=str(font))
+    css = epub_file(out, "OEBPS/style.css")
+    with zipfile.ZipFile(out) as z:
+        names = [n for n in z.namelist() if n.startswith("OEBPS/fonts/")]
+    assert names == ["OEBPS/fonts/propia.ttf"] and css.count("@font-face") == 1, (names, css)
+    assert 'font-family: "Mi Letra"' in css and convert.check_epub(out) == [], css
+    root, window = visible_window()
+    window.apply_state({"font": "Mi Letra.ttf", "font_file": str(font)})
+    shown, option = window.font_box.currentText(), window.write_options()["font"]
+    window.apply_state({"font": "Otra.ttf", "font_file": str(TMP / "Otra.ttf")})
+    fallback, status = window.font_var.get(), window.status.text()
+    import app
+    original = app.filedialog.askopenfilename
+    try:
+        picked = []
+        for answer in (str(font), ""):  # elegir el archivo; después, cancelar: se queda la anterior
+            app.filedialog.askopenfilename = lambda **kw: answer
+            window.font_box.setCurrentText("Otra…")
+            window.font_changed()
+            picked.append((window.font_var.get(), window.font_box.currentText()))
+    finally:
+        app.filedialog.askopenfilename = original
+    window.close()
+    assert picked == [("Mi Letra.ttf", "Mi Letra.ttf")] * 2, picked
+    assert shown == "Mi Letra.ttf" and option == str(font), (shown, option)
+    assert fallback == "Del lector" and "Otra.ttf" in status, (fallback, status)
+
+
 def test_text_cover():
     """Portada dibujada: JPEG de 1200×1800, otro color con otra serie, y un título larguísimo no falla."""
     book = convert.Book("Re:Zero", "Tappei Nagatsuki", b"", [], [], series="Re:Zero", volume="3")

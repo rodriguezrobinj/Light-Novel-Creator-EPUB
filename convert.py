@@ -1599,7 +1599,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     credits: añade tras la portada una página "Créditos" con los datos del libro.
     gray: ilustraciones en escala de grises (la portada no: en la biblioteca del lector se ve en color).
     breaks: títulos que se escriben como separador de escena ("Parte 1" sin nombre).
-    trim: recorta el margen blanco de las ilustraciones (_trim). font: una de FONTS, incrustada.
+    trim: recorta el margen blanco de las ilustraciones (_trim). font: una de FONTS o la ruta de un .ttf/.otf, incrustada.
     epub2: paquete EPUB 2 para lectores antiguos. reading: minutos de lectura en la página "Contenido".
     kepub: secciones en formato Kobo (_kepub); el archivo debe acabar en .kepub.epub.
     Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número."""
@@ -1737,6 +1737,10 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             css += (f'@font-face {{ font-family: "{font}"; font-weight: {weight}; font-style: {slant}; '
                     f'src: url("fonts/{FONTS[font]}-{weight}-{slant}.ttf"); }}\n')
         css += f'body {{ font-family: "{font}", serif; }}\n'
+    elif font and Path(font).is_file():  # fuente propia: un solo archivo, el lector simula negrita y cursiva
+        src, family = f"fonts/propia{Path(font).suffix.lower()}", re.sub(r'["\\]', "", Path(font).stem)
+        fonts[src] = Path(font)  # nombre fijo: el del usuario puede llevar espacios o tildes, que rompen el href
+        css += f'@font-face {{ font-family: "{family}"; src: url("{src}"); }}\nbody {{ font-family: "{family}", serif; }}\n'
     manifest += [f'<item id="f{k}" href="{src}" media-type="application/vnd.ms-opentype"/>' for k, src in enumerate(fonts)]
     spine = ['<itemref idref="cover"/>'] + [f'<itemref idref="s{k}"/>' for k in range(len(files))]
     toc_page = "contents.xhtml" if contents else "nav.xhtml"
