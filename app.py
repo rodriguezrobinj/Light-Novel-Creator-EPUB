@@ -52,8 +52,8 @@ LANGUAGES = ["es", "en", "pt", "fr", "it", "ja"]     # idioma del EPUB: lo usan 
 LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual en el XML del EPUB
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
-             "typography", "shrink", "shrink_size", "gray", "trim", "font", "epub2", "reading", "credits",
-             "profile", "replacements", "kepub")
+             "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
+             "credits", "profile", "replacements", "kepub")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
@@ -168,8 +168,8 @@ def _write_options(state, breaks=()):
             "shrink": int(state.get("shrink_size") or convert.SHRINK) if state.get("shrink", True) else False,
             "replacements": [tuple(rule) for rule in state.get("replacements", [])],
             "credits": bool(state.get("credits")), "gray": bool(state.get("gray")), "trim": bool(state.get("trim")),
-            "font": font if font in convert.FONTS else path if path and Path(path).name == font and Path(path).is_file()
-            else "",
+            "font": font if font in convert.FONTS
+            else path if path and Path(path).name == font and Path(path).is_file() else "",
             "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
             "breaks": list(breaks)}
 
@@ -756,7 +756,8 @@ class App:
         self.closed = False                    # ventana cerrada: lo diferido (miniaturas, repintar) ya no se hace
         self._description = ""                 # sinopsis (propiedad description)
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
-        self.cover_choice = None  # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
+        # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
+        self.cover_choice = None
         self.device_var, self.dark_var = qtk.Var('E-reader 6"'), qtk.Var(False)
         self.theme_var = qtk.Var("Sistema")
         self.title_var, self.author_var, self.series_var, self.volume_var = (qtk.Var() for _ in range(4))
@@ -2477,8 +2478,8 @@ class App:
                 "original_title": self.original_title_var, "subjects": self.subjects_var, "date": self.date_var,
                 "lang": self.lang_var, "style": self.style_var, "separator": self.separator_var,
                 "typography": self.typography_var, "shrink": self.shrink_var, "shrink_size": self.shrink_size_var,
-                "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var, "font_file": self.font_file_var,
-                "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
+                "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
+                "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var}
 
     def rows(self):

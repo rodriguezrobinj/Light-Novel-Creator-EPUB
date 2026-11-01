@@ -568,6 +568,7 @@ def text_cover(book):
         page.draw_line((200, 285), (400, 285), color=(1, 1, 1), width=1.5)
         return _jpeg(page.get_pixmap(matrix=pymupdf.Matrix(2, 2)), 90)
 
+
 SHRINK = 1400  # lado mayor de las imágenes reducidas, en píxeles: de sobra para un celular o un e-reader
 
 
@@ -1057,7 +1058,7 @@ def _opening_marks(line):
         if "¿" in body or "¡" in body or not any(c.isalpha() for c in body) or body[lead:lead + 1] in ",;:":
             return m[0]
         return body[:lead] + ("¿" if close[0] == "?" else "¡") + body[lead:] + close
-    return SENTENCE.sub(fix, line)
+    return SENTENCE.sub(fix, line) if "?" in line or "!" in line else line  # sin signos, nada que recorrer
 
 
 TYPOS = (  # (tipo, título, arreglo de la línea, por qué): erratas típicas de las traducciones fan

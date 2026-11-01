@@ -1834,9 +1834,11 @@ def test_series_data_is_inherited_from_another_folder():
     other.mkdir()
     assert app._inherited(other / "Saga X - Volumen 2.pdf", "Saga X") == {}
     app._remember_series({"series": "Saga X ", "translator": "Ana", "replacements": [["Primera", "Inicial"]],
-                          "title": "Solo del tomo 1", "kepub": True})
+                          "title": "Solo del tomo 1", "kepub": True, "font": "Mi Letra.ttf",
+                          "font_file": "C:/Fuentes/Mi Letra.ttf"})
     got = app._inherited(other / "Saga X - Volumen 2.pdf", "saga x")
-    assert got == {"translator": "Ana", "replacements": [["Primera", "Inicial"]], "kepub": True}, got
+    assert got == {"translator": "Ana", "replacements": [["Primera", "Inicial"]], "kepub": True,
+                   "font": "Mi Letra.ttf", "font_file": "C:/Fuentes/Mi Letra.ttf"}, got
     assert app._inherited(other / "Otra - Volumen 2.pdf", "Otra") == {}
 
 
