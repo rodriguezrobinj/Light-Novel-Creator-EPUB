@@ -2745,23 +2745,25 @@ def test_quality_report_fixes_fansub_typos():
     """Signo de apertura que falta, palabra repetida, «haber si» y «¿porque»: avisos con arreglo; lo que
     ya está bien escrito o es «haber» de verdad no salta."""
     texts = ["Qué haces? —preguntó. Ven aquí!", "Lo vi de de lejos.", "Haber si llegas pronto.",
-             "¿Porque lo hiciste?", "<i>Qué haces?</i>", "Oye, ¿qué haces?", "¡¿En serio?!", "No, no, no.",
+             "¿Porque lo hiciste?", "<i>Qué haces?</i>", "«¿Qué?» Ven aquí!", "Oye, ¿qué haces?", "¡¿En serio?!", "No, no, no.",
              "Mañana va a haber fiesta.", "Tiene que haber sitio si vienes.",
              # Re Zero 2, Nageki 1: puntos suspensivos o incisos con raya dentro de la pregunta
              "«¿El grupo que... los fundó?» Rhuda parpadeó.", "¿Conoces este país —el reino de Lugunica— ahora?",
-             "¡Pensé que debían vestirse así… pero me gusta!", "— ¡¿Qué estás haciendo?, me pregunto!"]
+             "¡Pensé que debían vestirse así… pero me gusta!", "— ¡¿Qué estás haciendo?, me pregunto!",
+             # Maryoku: una cita entre comillas dentro de la pregunta no la corta
+             "“Oh, idiota. ¿Desde cuándo el concepto de «hacer trampa» se aplica a la Reina Lich?”"]
     blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
     book = convert.Book("Libro", "", b"", blocks, [0])
     report = [i for i in convert.quality_report(book) if i.kind in ("opening", "doubled", "aver", "porque")]
     assert [(i.block, i.kind, i.level) for i in report] == [
         (1, "opening", "Menor"), (2, "doubled", "Menor"), (3, "aver", "Menor"), (4, "porque", "Menor"),
-        (5, "opening", "Menor")], [(i.block, i.kind) for i in report]
+        (5, "opening", "Menor"), (6, "opening", "Menor")], [(i.block, i.kind) for i in report]
     assert report[0].after.startswith("¿Qué haces?"), report[0].after
     for issue in sorted(report, key=lambda i: -i.edit[0]):
         convert.edit_section(book, *issue.edit)
-    assert [b.html for b in book.blocks[1:6]] == ["¿Qué haces? —preguntó. ¡Ven aquí!", "Lo vi de lejos.",
+    assert [b.html for b in book.blocks[1:7]] == ["¿Qué haces? —preguntó. ¡Ven aquí!", "Lo vi de lejos.",
                                                   "A ver si llegas pronto.", "¿Por qué lo hiciste?",
-                                                  "<i>¿Qué haces?</i>"], [b.html for b in book.blocks]
+                                                  "<i>¿Qué haces?</i>", "«¿Qué?» ¡Ven aquí!"], [b.html for b in book.blocks]
 
 
 def test_window_quality_report_previews_fixes_and_undo():
