@@ -3026,6 +3026,24 @@ def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
     assert (opened, left) == (2, 0), (opened, left)
 
 
+def test_editor_page_buttons_below_the_page():
+    """Los botones de hojear el PDF del editor van debajo de la página, no encima tapándola."""
+    import qtk
+
+    root, window = visible_window()
+    window.pdf = TMP / "Hojear - Volumen 1.pdf"
+    make_novel().replace(window.pdf)
+    window.show_book(convert.analyze(window.pdf))
+    window.tree.selection_set(first_title(window))
+    editor = window.edit_text()
+    editor.win.resize(1250, 700)
+    qtk.pump()
+    page, label = editor.canvas.geometry(), editor.page_label.geometry()
+    editor.win.done(0)
+    window.close()
+    assert label.top() > page.bottom(), (page, label)
+
+
 def test_replay_image_and_page_at_start():
     """La revisión repite una ilustración cambiada (o deja la del PDF si el archivo ya no está) y una página
     añadida en el bloque 0."""
