@@ -3,22 +3,28 @@ import collections
 import ctypes
 import difflib
 import html
+import http.server
+import io
 import json
 import multiprocessing
 import os
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
+import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 
 import pymupdf
+import segno
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -46,12 +52,12 @@ LANGUAGES = ["es", "en", "pt", "fr", "it", "ja"]     # idioma del EPUB: lo usan 
 LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual en el XML del EPUB
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
-             "typography", "shrink", "shrink_size", "gray", "trim", "font", "epub2", "reading", "credits",
-             "profile", "replacements", "kepub")
+             "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
+             "credits", "profile", "replacements", "kepub")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
-         "epub2", "reading", "profile", "autocase", "kepub")
+         "font_file", "epub2", "reading", "profile", "autocase", "kepub")
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
@@ -65,7 +71,7 @@ PROFILES = {"Personalizado": {},
             "Kobo": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": True},
             "Lector antiguo (EPUB 2)": {"gray": False, "shrink": True, "shrink_size": 1400, "epub2": True,
                                         "kepub": False}}
-FONT_CHOICES = ["Del lector"] + list(convert.FONTS)
+FONT_CHOICES = ["Del lector"] + list(convert.FONTS) + ["Otra…"]  # «Otra…» pide un archivo
 APP_NAME = "Light Novel Creator"  # nombre visible; el .exe y la carpeta de ajustes siguen siendo «PDF a EPUB»
 KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro, theme.kind_colors(True)
 PREVIEW_BOX = (480, 640)  # ancho y alto máximos de cada vista previa, en píxeles
@@ -154,6 +160,7 @@ def _ps_quote(text):
 def _write_options(state, breaks=()):
     """Opciones de write_epub a partir de una revisión, de los campos de la ventana o de lo heredado."""
     lang, style = str(state.get("lang", "es")).strip(), state.get("style")
+    font, path = state.get("font"), str(state.get("font_file") or "")
     return {"lang": lang if LANG.fullmatch(lang) else "es",
             "typography": bool(state.get("typography", True)),
             "style": style if style in convert.STYLES else "Clásico",
@@ -161,7 +168,8 @@ def _write_options(state, breaks=()):
             "shrink": int(state.get("shrink_size") or convert.SHRINK) if state.get("shrink", True) else False,
             "replacements": [tuple(rule) for rule in state.get("replacements", [])],
             "credits": bool(state.get("credits")), "gray": bool(state.get("gray")), "trim": bool(state.get("trim")),
-            "font": state.get("font") if state.get("font") in convert.FONTS else "",
+            "font": font if font in convert.FONTS
+            else path if path and Path(path).name == font and Path(path).is_file() else "",
             "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
             "breaks": list(breaks)}
 
@@ -333,8 +341,10 @@ def _plan(book, rows):
 
 def _cover_image(doc, choice, book=None):
     """Portada elegida: ("page", n) es una página del PDF (desde 0); ("file", ruta), una imagen;
-    ("image", k), la ilustración del bloque k."""
+    ("image", k), la ilustración del bloque k; ("text", ""), la dibujada con los datos del libro."""
     kind, value = choice
+    if kind == "text":
+        return convert.text_cover(book)
     if kind == "page":
         return convert._render(doc[value], crop=True)
     if kind == "image":
@@ -498,6 +508,47 @@ def _omnibus(pdfs, out, options, progress=None):
     if progress:
         progress(len(pdfs) + 1, len(pdfs) + 1)
     return problems
+
+
+def _lan_ip():
+    """IP de este equipo en la red local: la de la ruta por defecto. Conectar un socket UDP no envía nada."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+
+def _serve(path, host):
+    """Sirve el EPUB por HTTP (cualquier ruta lo devuelve) en un puerto libre, desde un hilo: solo lee un
+    archivo, no usa PyMuPDF. server.shutdown() lo para."""
+    data, name = Path(path).read_bytes(), Path(path).name
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/epub+zip")
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{urllib.parse.quote(name)}")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass  # el .exe no tiene consola: escribir en stderr (None) fallaría
+
+    server = http.server.ThreadingHTTPServer((host, 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _calibre():
+    """calibre.exe si está instalado: en el PATH o en su carpeta de siempre."""
+    found = shutil.which("calibre")
+    for var in ("ProgramFiles", "ProgramFiles(x86)"):
+        if not found and os.environ.get(var) and (Path(os.environ[var]) / "Calibre2" / "calibre.exe").is_file():
+            found = str(Path(os.environ[var]) / "Calibre2" / "calibre.exe")
+    return found
 
 
 def _install_paths():
@@ -705,7 +756,8 @@ class App:
         self.closed = False                    # ventana cerrada: lo diferido (miniaturas, repintar) ya no se hace
         self._description = ""                 # sinopsis (propiedad description)
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
-        self.cover_choice = None  # ("page", n), ("file", ruta), ("image", k) o None: la que eligió el análisis
+        # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
+        self.cover_choice = None
         self.device_var, self.dark_var = qtk.Var('E-reader 6"'), qtk.Var(False)
         self.theme_var = qtk.Var("Sistema")
         self.title_var, self.author_var, self.series_var, self.volume_var = (qtk.Var() for _ in range(4))
@@ -718,7 +770,9 @@ class App:
         self.profile_var = qtk.Var("Personalizado")  # fija gris, tamaño de imagen, EPUB 2 y KEPUB
         self.separator_var = qtk.Var("Según el estilo")  # cómo se ven los separadores de escena
         self.style_var = qtk.Var("Clásico")  # aspecto del EPUB: letra, párrafos e inicio de capítulo
-        self.font_var = qtk.Var("Del lector")  # tipografía incrustada (convert.FONTS)
+        self.font_var = qtk.Var("Del lector")  # tipografía incrustada (convert.FONTS) o nombre de la propia
+        self.font_file_var = qtk.Var("")  # ruta de la fuente propia
+        self.font_last = "Del lector"  # a la que se vuelve si «Otra…» no elige archivo
         self.typography_var = qtk.Var(True)  # comillas «», puntos suspensivos, raya, espacios
         self.gray_var = qtk.Var(False)  # para e-readers de tinta: pesa menos y se ve igual
         self.shrink_var = qtk.Var(True)  # las imágenes son casi todo el peso del EPUB
@@ -873,6 +927,7 @@ class App:
             action.setCheckable(True)
             var.check(action)
             action.triggered.connect(lambda _: self.update_preview())
+        self.font_box = _combo(self.font_var, FONT_CHOICES, 8, changed=self.font_changed)
         self.quality_btn = _button("Calidad", self.quality)
         self.quality_btn.setEnabled(False)
         self.gen_btn = _button("Generar EPUB…", self.generate, "primary")
@@ -882,7 +937,7 @@ class App:
                                                          changed=self.update_preview),
                             _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
                                                       changed=self.update_preview),
-                            _label("Letra:"), _combo(self.font_var, FONT_CHOICES, 8, changed=self.update_preview),
+                            _label("Letra:"), self.font_box,
                             _menu_button("Opciones", extras), 1, self.gen_btn))
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
@@ -1580,6 +1635,8 @@ class App:
                 setattr(self.book, name, getattr(self, f"{name}_var").get().strip())
         self.book.title = self.book.title or self.pdf.stem
         self.book.description = self.description
+        if self.cover_choice and self.cover_choice[0] == "text":  # con el título y la serie de ahora
+            self.book.cover = convert.text_cover(self.book)
         self.save_review()
         chapters, removed, breaks = _plan(self.book, self.rows())
         self.status.setText("Generando EPUB…")
@@ -1638,6 +1695,9 @@ class App:
             buttons.append(_button("Abrir EPUB", lambda: self.open_external(out, win), "primary"))
         buttons.append(_button("Abrir carpeta", lambda: self.open_external(out, win, folder=True)))
         if is_file:
+            buttons.append(_button("Enviar al móvil", lambda: self.send_to_phone(out)))
+            if _calibre():
+                buttons.append(_button("Añadir a Calibre", lambda: self.add_to_calibre(out)))
             for root, label in _drives():
                 if _reader_kind(root) == "kindle":  # el Kindle no lee EPUB por USB: solo por Send to Kindle
                     kindle = True
@@ -1658,6 +1718,48 @@ class App:
         if self.run(shutil.copy2, (str(out), str(folder)),
                     lambda dest: messagebox.showinfo("Copiado", f"EPUB copiado en:\n{dest}"), busy="Copiando…"):
             win.close()
+
+    def send_to_phone(self, out, ip=None):
+        """Sirve el EPUB a la red local y muestra su QR: el móvil lo descarga sin cable. Al cerrar la
+        ventana se apaga el servidor. ip: solo para las pruebas (127.0.0.1 no es una red local)."""
+        if not ip and _lan_ip().startswith("127."):
+            messagebox.showerror("Enviar al móvil", "No hay red local: conecta el equipo a la Wi-Fi.")
+            return
+        ip = ip or _lan_ip()
+        try:
+            server = _serve(out, ip)
+        except OSError as e:
+            messagebox.showerror("Enviar al móvil", f"No se pudo enviar: {e.strerror or e}")
+            return
+        url = f"http://{ip}:{server.server_port}/{urllib.parse.quote(Path(out).name)}"
+        png = io.BytesIO()
+        segno.make(url).save(png, kind="png", scale=8, border=4)
+        pixmap = QPixmap()
+        pixmap.loadFromData(png.getvalue(), "PNG")
+        win, column = self.dialog("Enviar al móvil")
+        qr = QLabel()
+        qr.setPixmap(pixmap)
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        column.addWidget(qr)
+        link = _label(url, "title")
+        link.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        column.addWidget(link)
+        column.addWidget(_label("Escanea el código con el móvil conectado a la misma Wi-Fi, o escribe la dirección\n"
+                                "en su navegador. Si Windows pregunta en el Firewall, permite el acceso.\n"
+                                "Al cerrar esta ventana deja de enviarse.", "muted"))
+        column.addLayout(_row(1, _button("Cerrar", win.close)))
+        win.finished.connect(lambda _: (server.shutdown(), server.server_close()))
+        win.show()
+        self.phone_window = win, server
+
+    def add_to_calibre(self, out):
+        """calibre.exe con un libro lo añade a su biblioteca, también si Calibre ya está abierto."""
+        try:
+            subprocess.Popen([_calibre(), str(out)])
+        except OSError as e:
+            messagebox.showerror("Añadir a Calibre", f"No se pudo abrir Calibre: {e.strerror or e}")
+            return
+        self.status.setText("Enviado a Calibre: lo añade a su biblioteca.")
 
     def send_to_kindle(self, out, win):
         """Send to Kindle no tiene API pública: se abre su web y el archivo, seleccionado, para arrastrarlo."""
@@ -1912,7 +2014,8 @@ class App:
         self.book.cover = _cover_image(self.pdf_doc, choice, self.book)
         self.cover_choice = [kind, value]
         labels = {"page": lambda: f"Portada: página {value + 1}", "image": lambda: f"Portada: ilustración de la "
-                  f"página {self.book.blocks[int(value)].page}", "file": lambda: f"Portada: {Path(value).name}"}
+                  f"página {self.book.blocks[int(value)].page}", "file": lambda: f"Portada: {Path(value).name}",
+                  "text": lambda: "Portada: con título"}
         self.cover_label.setText(labels[kind]())
         self.update_cover()
         self.update_preview()
@@ -1959,7 +2062,8 @@ class App:
         column.addWidget(grid, 1)
         column.addLayout(_row(_button(f"Página mostrada del PDF ({self.pdf_page + 1})",
                                       lambda: (self.cover_from_page(), win.close())),
-                              _button("Imagen de un archivo…", lambda: (win.close(), self.cover_from_file())), 1))
+                              _button("Imagen de un archivo…", lambda: (win.close(), self.cover_from_file())),
+                              _button("Portada con título", lambda: (self.set_cover(("text", "")), win.close())), 1))
         win.show()
         self.cover_window = win, grid
 
@@ -2065,6 +2169,23 @@ class App:
             self.history.append(changed)
             self.update_preview()
         self.status.setText(f"{len(changed)} apartados como separador")
+
+    def font_changed(self):
+        """«Otra…» pide un archivo de fuente; sin elegir ninguno, se queda la letra de antes."""
+        if self.font_var.get() == "Otra…":
+            path = filedialog.askopenfilename(filetypes=[("Fuente", "*.ttf *.otf")])
+            if path:
+                self.font_file_var.set(path)
+                self.show_font(Path(path).name)
+            self.font_var.set(Path(path).name if path else self.font_last)
+        self.font_last = self.font_var.get()
+        self.update_preview()
+
+    def show_font(self, name):
+        """Pone la fuente propia en el combo, antes de «Otra…», y la deja elegida."""
+        if self.font_box.findText(name) < 0:
+            self.font_box.insertItem(self.font_box.count() - 1, name)
+        self.font_box.setCurrentText(name)
 
     def apply_profile(self):
         """El perfil fija las opciones que importan para ese lector (PROFILES)."""
@@ -2358,7 +2479,7 @@ class App:
                 "lang": self.lang_var, "style": self.style_var, "separator": self.separator_var,
                 "typography": self.typography_var, "shrink": self.shrink_var, "shrink_size": self.shrink_size_var,
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
-                "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
+                "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var}
 
     def rows(self):
@@ -2387,8 +2508,14 @@ class App:
                     pass  # valor mal escrito a mano en el .json
         if self.style_var.get() not in convert.STYLES:  # el .json se puede editar a mano
             self.style_var.set("Clásico")
-        if self.font_var.get() not in FONT_CHOICES:
-            self.font_var.set("Del lector")
+        font, path = self.font_var.get(), Path(self.font_file_var.get())
+        if font not in FONT_CHOICES or font == "Otra…":
+            if self.font_file_var.get() and path.name == font and path.is_file():
+                self.show_font(font)
+            else:
+                self.font_var.set("Del lector")
+                self.status.setText(f"No se encontró la fuente {font}: se usa la del lector.")
+        self.font_last = self.font_var.get()
         try:
             self.replacements = [[str(a), str(b)] for a, b in state["replacements"]]
         except (KeyError, TypeError, ValueError):

@@ -1,5 +1,6 @@
 """Convierte PDFs de novelas ligeras en EPUB con texto fluido."""
 import collections
+import colorsys
 import functools
 import html
 import io
@@ -9,6 +10,7 @@ import unicodedata
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -547,6 +549,26 @@ def load_cover(path):
     return _jpeg(_rgb(pix, alpha=False), 90)
 
 
+def text_cover(book):
+    """Portada dibujada con serie, volumen, título y autor, para cuando el PDF no trae una buena. El color
+    del fondo sale de la serie: todos los tomos de una serie comparten color."""
+    hue = zlib.crc32((book.series or book.title).encode()) % 360 / 360
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=600, height=900)
+        page.draw_rect(page.rect, color=None, fill=colorsys.hls_to_rgb(hue, 0.22, 0.45))
+        page.insert_font("bold", fontfile=str(FONT_DIR / "literata-700-normal.ttf"))
+        page.insert_font("text", fontfile=str(FONT_DIR / "literata-400-normal.ttf"))
+        top = " · ".join(filter(None, [book.series, book.volume and f"Volumen {book.volume}"]))
+        for rect, text, font, size in (((50, 110, 550, 260), top, "text", 30),
+                                       ((50, 300, 550, 680), book.title, "bold", 64),
+                                       ((50, 740, 550, 850), book.author, "text", 28)):
+            while text and size > 10 and page.insert_textbox(rect, text, fontname=font, fontsize=size,
+                                                             color=(1, 1, 1), align=1) < 0:
+                size -= 4  # no cabe: nada se escribió, se prueba más pequeño
+        page.draw_line((200, 285), (400, 285), color=(1, 1, 1), width=1.5)
+        return _jpeg(page.get_pixmap(matrix=pymupdf.Matrix(2, 2)), 90)
+
+
 SHRINK = 1400  # lado mayor de las imágenes reducidas, en píxeles: de sobra para un celular o un e-reader
 
 
@@ -977,6 +999,10 @@ def _trim(data):
 
 LEVELS = ("Grave", "Revisar", "Menor")  # gravedad de un aviso del informe de calidad, de más a menos
 MOJIBAKE = re.compile(r"Ã[\x80-\xbf]|Â[\xa0-\xbf]|â€")  # UTF-8 leído como Windows-1252: "canciÃ³n"
+ENGLISH = set("the and you is are was were of to that it its this what with for on in at be have has had "
+              "not but my your his her he she they we i i'm don't it's can will would there their about "
+              "from as an".split())  # palabras vacías: en un texto inglés son una de cada tres o más
+SPANISH = set("el la los las de que y en un una es por con se lo su para al del me te le mi tu".split())
 
 
 @dataclass
@@ -1014,6 +1040,39 @@ def _remojibake(text):
         return text.encode("cp1252").decode("utf-8")
     except UnicodeError:
         return None
+
+
+# Una oración que acaba en ? o !, desde el corte anterior. Los puntos suspensivos y la raya no cortan:
+# «¿El grupo que... los fundó?», «¿Conoces este país —el reino— ahora?» (Re Zero 2, Nageki 1)
+SENTENCE = re.compile(r"((?:\.{2,}|[^.!?»])*?)([?!]+)")
+LEAD = re.compile(r"(?:\s|[«“\"'(—–-]|</?[ib]>)*")   # lo que va antes de la primera palabra
+DOUBLED = re.compile(r"\b(de|la|el|que|en|y|los|las|un|una|por|con|se|lo) \1\b", re.I)
+
+
+def _opening_marks(line):
+    """Pone ¿ o ¡ al principio de las oraciones que solo llevan el signo de cierre ("Qué haces?")."""
+    def fix(m):
+        body, close = m[1], m[2]
+        lead = LEAD.match(body).end()
+        # Tras «?, me pregunto» la oración sigue: no empieza otra
+        if "¿" in body or "¡" in body or not any(c.isalpha() for c in body) or body[lead:lead + 1] in ",;:":
+            return m[0]
+        return body[:lead] + ("¿" if close[0] == "?" else "¡") + body[lead:] + close
+    return SENTENCE.sub(fix, line) if "?" in line or "!" in line else line  # sin signos, nada que recorrer
+
+
+TYPOS = (  # (tipo, título, arreglo de la línea, por qué): erratas típicas de las traducciones fan
+    ("opening", "Falta el signo de apertura", _opening_marks,
+     "En español las preguntas y exclamaciones llevan signo de apertura (¿ ¡) además del de cierre."),
+    ("doubled", "Palabra repetida", lambda s: DOUBLED.sub(r"\1", s),
+     "La misma palabra dos veces seguidas suele ser un error al escribir."),
+    ("aver", "«Haber si» en vez de «a ver si»",
+     lambda s: re.sub(r"(^|[¿¡—«“\"(.…]\s*)([Hh])aber si\b",
+                      lambda m: m[1] + ("A" if m[2] == "H" else "a") + " ver si", s),
+     "«A ver si» (del verbo ver) se confunde a menudo con «haber»."),
+    ("porque", "«¿Porque» en vez de «¿por qué»", lambda s: re.sub(r"¿([Pp])orque\b", r"¿\1or qué", s),
+     "En una pregunta va «por qué», separado y con tilde."),
+)
 
 
 def quality_report(book):
@@ -1089,6 +1148,22 @@ def quality_report(book):
                                 _around(text, m.start(), m.end()),
                                 _around(_remojibake(text) or "", m.start(), m.end()) if fixed else "",
                                 (k, k + 1, fixed) if fixed else None, text))
+        words = re.findall(r"[a-záéíóúñü']+", text.lower())
+        english = sum(w in ENGLISH for w in words)
+        if len(words) >= 6 and english >= 0.35 * len(words) and sum(w in SPANISH for w in words) < english:
+            report.append(Issue("english", k, b.page, "Revisar", "Texto sin traducir",
+                                "El párrafo parece estar en inglés: el traductor se lo saltó o es una nota del "
+                                "grupo.", "Tradúcelo o quítalo con «Editar texto…» (tecla E).", _cut(text),
+                                text=text))
+        line = _line(b, k)
+        for kind, title, rule, why in TYPOS if not LINKS.search(text) else ():
+            fixed = rule(line)
+            if fixed != line:
+                before, after = TAGS.sub("", line), TAGS.sub("", fixed)
+                n = len(os.path.commonprefix([before, after]))
+                report.append(Issue(kind, k, b.page, "Menor", title, why, "Corregirlo.",
+                                    _around(before, n, n), _around(after, n, n + len(after) - len(before)),
+                                    (k, k + 1, fixed), text))
         prev_text = text
     last = None
     for k, end in zip(heads, heads[1:]):
@@ -1525,7 +1600,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     credits: añade tras la portada una página "Créditos" con los datos del libro.
     gray: ilustraciones en escala de grises (la portada no: en la biblioteca del lector se ve en color).
     breaks: títulos que se escriben como separador de escena ("Parte 1" sin nombre).
-    trim: recorta el margen blanco de las ilustraciones (_trim). font: una de FONTS, incrustada.
+    trim: recorta el margen blanco de las ilustraciones (_trim). font: una de FONTS o la ruta de un .ttf/.otf, incrustada.
     epub2: paquete EPUB 2 para lectores antiguos. reading: minutos de lectura en la página "Contenido".
     kepub: secciones en formato Kobo (_kepub); el archivo debe acabar en .kepub.epub.
     Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número."""
@@ -1663,6 +1738,10 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             css += (f'@font-face {{ font-family: "{font}"; font-weight: {weight}; font-style: {slant}; '
                     f'src: url("fonts/{FONTS[font]}-{weight}-{slant}.ttf"); }}\n')
         css += f'body {{ font-family: "{font}", serif; }}\n'
+    elif font and Path(font).is_file():  # fuente propia: un solo archivo, el lector simula negrita y cursiva
+        src, family = f"fonts/propia{Path(font).suffix.lower()}", re.sub(r'["\\]', "", Path(font).stem)
+        fonts[src] = Path(font)  # nombre fijo: el del usuario puede llevar espacios o tildes, que rompen el href
+        css += f'@font-face {{ font-family: "{family}"; src: url("{src}"); }}\nbody {{ font-family: "{family}", serif; }}\n'
     manifest += [f'<item id="f{k}" href="{src}" media-type="application/vnd.ms-opentype"/>' for k, src in enumerate(fonts)]
     spine = ['<itemref idref="cover"/>'] + [f'<itemref idref="s{k}"/>' for k in range(len(files))]
     toc_page = "contents.xhtml" if contents else "nav.xhtml"

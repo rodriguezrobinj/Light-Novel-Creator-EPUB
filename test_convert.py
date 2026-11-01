@@ -1834,9 +1834,11 @@ def test_series_data_is_inherited_from_another_folder():
     other.mkdir()
     assert app._inherited(other / "Saga X - Volumen 2.pdf", "Saga X") == {}
     app._remember_series({"series": "Saga X ", "translator": "Ana", "replacements": [["Primera", "Inicial"]],
-                          "title": "Solo del tomo 1", "kepub": True})
+                          "title": "Solo del tomo 1", "kepub": True, "font": "Mi Letra.ttf",
+                          "font_file": "C:/Fuentes/Mi Letra.ttf"})
     got = app._inherited(other / "Saga X - Volumen 2.pdf", "saga x")
-    assert got == {"translator": "Ana", "replacements": [["Primera", "Inicial"]], "kepub": True}, got
+    assert got == {"translator": "Ana", "replacements": [["Primera", "Inicial"]], "kepub": True,
+                   "font": "Mi Letra.ttf", "font_file": "C:/Fuentes/Mi Letra.ttf"}, got
     assert app._inherited(other / "Otra - Volumen 2.pdf", "Otra") == {}
 
 
@@ -2728,6 +2730,40 @@ def test_quality_report_explains_previews_and_fixes():
     assert book.candidates == [0, 5], book.candidates
 
 
+def test_quality_report_finds_untranslated_text():
+    """Un párrafo en inglés se avisa; uno español con palabras inglesas sueltas, no."""
+    texts = ["The castle stood on the hill above the village, and its towers were dark.",
+             "I don't know what you are talking about, he said.",
+             "Subaru dijo OK y el juego terminó con un game over para todos.", "—Hola, ¿qué tal estás hoy?"]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    found = [(i.block, i.level, i.edit) for i in convert.quality_report(book) if i.kind == "english"]
+    assert found == [(1, "Revisar", None), (2, "Revisar", None)], found
+
+
+def test_quality_report_fixes_fansub_typos():
+    """Signo de apertura que falta, palabra repetida, «haber si» y «¿porque»: avisos con arreglo; lo que
+    ya está bien escrito o es «haber» de verdad no salta."""
+    texts = ["Qué haces? —preguntó. Ven aquí!", "Lo vi de de lejos.", "Haber si llegas pronto.",
+             "¿Porque lo hiciste?", "<i>Qué haces?</i>", "Oye, ¿qué haces?", "¡¿En serio?!", "No, no, no.",
+             "Mañana va a haber fiesta.", "Tiene que haber sitio si vienes.",
+             # Re Zero 2, Nageki 1: puntos suspensivos o incisos con raya dentro de la pregunta
+             "«¿El grupo que... los fundó?» Rhuda parpadeó.", "¿Conoces este país —el reino de Lugunica— ahora?",
+             "¡Pensé que debían vestirse así… pero me gusta!", "— ¡¿Qué estás haciendo?, me pregunto!"]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    report = [i for i in convert.quality_report(book) if i.kind in ("opening", "doubled", "aver", "porque")]
+    assert [(i.block, i.kind, i.level) for i in report] == [
+        (1, "opening", "Menor"), (2, "doubled", "Menor"), (3, "aver", "Menor"), (4, "porque", "Menor"),
+        (5, "opening", "Menor")], [(i.block, i.kind) for i in report]
+    assert report[0].after.startswith("¿Qué haces?"), report[0].after
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    assert [b.html for b in book.blocks[1:6]] == ["¿Qué haces? —preguntó. ¡Ven aquí!", "Lo vi de lejos.",
+                                                  "A ver si llegas pronto.", "¿Por qué lo hiciste?",
+                                                  "<i>¿Qué haces?</i>"], [b.html for b in book.blocks]
+
+
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
     página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""
@@ -2920,6 +2956,107 @@ def test_window_cover_from_illustration_quality_and_series_panel():
     assert label.startswith("Portada: ilustración de la página") and same, label
     assert len(panels) == 3, panels
     assert "Sin revisar" in states or "Revisado, sin EPUB" in states, states
+
+
+def test_custom_font_is_embedded():
+    """Una fuente propia (.ttf/.otf) va dentro del EPUB; si el archivo desaparece, la ventana vuelve a la del
+    lector y lo dice."""
+    import shutil
+    font = TMP / "Mi Letra.ttf"
+    shutil.copy(convert.FONT_DIR / "bitter-400-normal.ttf", font)
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno.")], [0])
+    out = TMP / "fuente.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, font=str(font))
+    css = epub_file(out, "OEBPS/style.css")
+    with zipfile.ZipFile(out) as z:
+        names = [n for n in z.namelist() if n.startswith("OEBPS/fonts/")]
+    assert names == ["OEBPS/fonts/propia.ttf"] and css.count("@font-face") == 1, (names, css)
+    assert 'font-family: "Mi Letra"' in css and convert.check_epub(out) == [], css
+    root, window = visible_window()
+    window.apply_state({"font": "Mi Letra.ttf", "font_file": str(font)})
+    shown, option = window.font_box.currentText(), window.write_options()["font"]
+    window.apply_state({"font": "Otra.ttf", "font_file": str(TMP / "Otra.ttf")})
+    fallback, status = window.font_var.get(), window.status.text()
+    import app
+    original = app.filedialog.askopenfilename
+    try:
+        picked = []
+        for answer in (str(font), ""):  # elegir el archivo; después, cancelar: se queda la anterior
+            app.filedialog.askopenfilename = lambda **kw: answer
+            window.font_box.setCurrentText("Otra…")
+            window.font_changed()
+            picked.append((window.font_var.get(), window.font_box.currentText()))
+    finally:
+        app.filedialog.askopenfilename = original
+    window.close()
+    assert picked == [("Mi Letra.ttf", "Mi Letra.ttf")] * 2, picked
+    assert shown == "Mi Letra.ttf" and option == str(font), (shown, option)
+    assert fallback == "Del lector" and "Otra.ttf" in status, (fallback, status)
+
+
+def test_serve_gives_the_epub_over_http():
+    """El servidor de «Enviar al móvil» da el EPUB en cualquier ruta y deja de hacerlo al cerrar la ventana."""
+    import urllib.error
+    import urllib.request
+
+    import app
+    from PySide6.QtWidgets import QLabel
+
+    epub = TMP / "Mi novela.epub"
+    epub.write_bytes(b"PK" + os.urandom(5000))
+    server = app._serve(epub, "127.0.0.1")
+    port = server.server_port
+    got = []
+    for path in ("x", "otra/ruta"):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/{path}", timeout=5) as r:
+            got.append((r.read() == epub.read_bytes(), r.headers["Content-Type"], r.headers["Content-Disposition"]))
+    server.shutdown()
+    server.server_close()
+    assert got == [(True, "application/epub+zip", "attachment; filename*=UTF-8''Mi%20novela.epub")] * 2, got
+    root, window = visible_window()
+    shown = []
+    original, lan = app.messagebox.showerror, app._lan_ip
+    try:
+        app.messagebox.showerror = lambda title, message: shown.append(message)
+        app._lan_ip = lambda: "127.0.0.1"
+        window.send_to_phone(epub)  # sin red local
+        window.send_to_phone(epub, ip="127.0.0.1")
+    finally:
+        app.messagebox.showerror, app._lan_ip = original, lan
+    win, server = window.phone_window
+    qr = [label for label in win.findChildren(QLabel) if label.pixmap() and not label.pixmap().isNull()]
+    texts = " ".join(label.text() for label in win.findChildren(QLabel))
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=5) as r:
+        served = r.read() == epub.read_bytes()
+    win.close()
+    root.update()
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=2)
+        stopped = False
+    except (urllib.error.URLError, OSError):
+        stopped = True
+    window.close()
+    assert shown == ["No hay red local: conecta el equipo a la Wi-Fi."], shown
+    assert len(qr) == 1 and served and stopped, (len(qr), served, stopped)
+    assert f"http://127.0.0.1:{server.server_port}/Mi%20novela.epub" in texts and "Firewall" in texts, texts
+
+
+def test_text_cover():
+    """Portada dibujada: JPEG de 1200×1800, otro color con otra serie, y un título larguísimo no falla."""
+    book = convert.Book("Re:Zero", "Tappei Nagatsuki", b"", [], [], series="Re:Zero", volume="3")
+    cover = convert.text_cover(book)
+    pix = pymupdf.Pixmap(cover)
+    other = convert.text_cover(convert.Book("Re:Zero", "Tappei Nagatsuki", b"", [], [], series="Otra", volume="3"))
+    long = convert.text_cover(convert.Book("Título " * 45, "", b"", [], []))
+    assert cover[:3] == b"\xff\xd8\xff" and (pix.width, pix.height) == (1200, 1800), (pix.width, pix.height)
+    assert other != cover and long[:3] == b"\xff\xd8\xff"
+    root, window = visible_window()
+    window.pdf = make_covers()
+    window.show_book(convert.analyze(window.pdf))
+    window.set_cover(("text", ""))
+    label, drawn = window.cover_label.text(), window.book.cover
+    window.close()
+    assert label == "Portada: con título" and drawn[:3] == b"\xff\xd8\xff", label
 
 
 def test_window_error_is_logged_and_shown():
@@ -3257,6 +3394,33 @@ def test_window_find_bar_and_result_dialog():
     assert page == window.book.blocks[window.matches[0][0]].page - 1 and hidden, page
     assert title == "EPUB guardado con avisos" and texts == ["sec1.xhtml: algo raro"], (title, texts)
     assert buttons[:2] == ["Abrir EPUB", "Abrir carpeta"] and buttons[-1] == "Cerrar", buttons
+
+
+def test_window_result_dialog_phone_and_calibre():
+    """«Enviar al móvil» siempre; «Añadir a Calibre» solo si Calibre está instalado, y lo abre con el EPUB."""
+    import app
+    from PySide6.QtWidgets import QPushButton
+
+    out = TMP / "calibre.epub"
+    out.write_bytes(b"x")
+    root, window = visible_window()
+    calibre, popen = app._calibre, app.subprocess.Popen
+    launched, seen = [], []
+    try:
+        app.subprocess.Popen = lambda args, **kw: launched.append(args)
+        for found in (None, "C:/Calibre2/calibre.exe"):
+            app._calibre = lambda: found
+            window.result_dialog(str(out))
+            buttons = {b.text(): b for b in window.result_window.findChildren(QPushButton)}
+            seen.append(("Enviar al móvil" in buttons, "Añadir a Calibre" in buttons))
+            if "Añadir a Calibre" in buttons:
+                buttons["Añadir a Calibre"].click()
+            window.result_window.close()
+    finally:
+        app._calibre, app.subprocess.Popen = calibre, popen
+    window.close()
+    assert seen == [(True, False), (True, True)], seen
+    assert launched == [["C:/Calibre2/calibre.exe", str(out)]], launched
 
 
 def test_window_guide_names_serious_warnings_and_colors_follow_theme():
