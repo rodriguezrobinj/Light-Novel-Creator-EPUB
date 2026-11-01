@@ -2992,6 +2992,53 @@ def test_custom_font_is_embedded():
     assert fallback == "Del lector" and "Otra.ttf" in status, (fallback, status)
 
 
+def test_serve_gives_the_epub_over_http():
+    """El servidor de «Enviar al móvil» da el EPUB en cualquier ruta y deja de hacerlo al cerrar la ventana."""
+    import urllib.error
+    import urllib.request
+
+    import app
+    from PySide6.QtWidgets import QLabel
+
+    epub = TMP / "Mi novela.epub"
+    epub.write_bytes(b"PK" + os.urandom(5000))
+    server = app._serve(epub, "127.0.0.1")
+    port = server.server_port
+    got = []
+    for path in ("x", "otra/ruta"):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/{path}", timeout=5) as r:
+            got.append((r.read() == epub.read_bytes(), r.headers["Content-Type"], r.headers["Content-Disposition"]))
+    server.shutdown()
+    server.server_close()
+    assert got == [(True, "application/epub+zip", "attachment; filename*=UTF-8''Mi%20novela.epub")] * 2, got
+    root, window = visible_window()
+    shown = []
+    original, lan = app.messagebox.showerror, app._lan_ip
+    try:
+        app.messagebox.showerror = lambda title, message: shown.append(message)
+        app._lan_ip = lambda: "127.0.0.1"
+        window.send_to_phone(epub)  # sin red local
+        window.send_to_phone(epub, ip="127.0.0.1")
+    finally:
+        app.messagebox.showerror, app._lan_ip = original, lan
+    win, server = window.phone_window
+    qr = [label for label in win.findChildren(QLabel) if label.pixmap() and not label.pixmap().isNull()]
+    texts = " ".join(label.text() for label in win.findChildren(QLabel))
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=5) as r:
+        served = r.read() == epub.read_bytes()
+    win.close()
+    root.update()
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=2)
+        stopped = False
+    except (urllib.error.URLError, OSError):
+        stopped = True
+    window.close()
+    assert shown == ["No hay red local: conecta el equipo a la Wi-Fi."], shown
+    assert len(qr) == 1 and served and stopped, (len(qr), served, stopped)
+    assert f"http://127.0.0.1:{server.server_port}/Mi%20novela.epub" in texts and "Firewall" in texts, texts
+
+
 def test_text_cover():
     """Portada dibujada: JPEG de 1200×1800, otro color con otra serie, y un título larguísimo no falla."""
     book = convert.Book("Re:Zero", "Tappei Nagatsuki", b"", [], [], series="Re:Zero", volume="3")

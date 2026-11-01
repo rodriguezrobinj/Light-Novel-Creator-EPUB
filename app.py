@@ -3,22 +3,28 @@ import collections
 import ctypes
 import difflib
 import html
+import http.server
+import io
 import json
 import multiprocessing
 import os
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
+import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 
 import pymupdf
+import segno
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -502,6 +508,38 @@ def _omnibus(pdfs, out, options, progress=None):
     if progress:
         progress(len(pdfs) + 1, len(pdfs) + 1)
     return problems
+
+
+def _lan_ip():
+    """IP de este equipo en la red local: la de la ruta por defecto. Conectar un socket UDP no envía nada."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+
+def _serve(path, host):
+    """Sirve el EPUB por HTTP (cualquier ruta lo devuelve) en un puerto libre, desde un hilo: solo lee un
+    archivo, no usa PyMuPDF. server.shutdown() lo para."""
+    data, name = Path(path).read_bytes(), Path(path).name
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/epub+zip")
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{urllib.parse.quote(name)}")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass  # el .exe no tiene consola: escribir en stderr (None) fallaría
+
+    server = http.server.ThreadingHTTPServer((host, 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def _install_paths():
@@ -1647,6 +1685,7 @@ class App:
             buttons.append(_button("Abrir EPUB", lambda: self.open_external(out, win), "primary"))
         buttons.append(_button("Abrir carpeta", lambda: self.open_external(out, win, folder=True)))
         if is_file:
+            buttons.append(_button("Enviar al móvil", lambda: self.send_to_phone(out)))
             for root, label in _drives():
                 if _reader_kind(root) == "kindle":  # el Kindle no lee EPUB por USB: solo por Send to Kindle
                     kindle = True
@@ -1667,6 +1706,39 @@ class App:
         if self.run(shutil.copy2, (str(out), str(folder)),
                     lambda dest: messagebox.showinfo("Copiado", f"EPUB copiado en:\n{dest}"), busy="Copiando…"):
             win.close()
+
+    def send_to_phone(self, out, ip=None):
+        """Sirve el EPUB a la red local y muestra su QR: el móvil lo descarga sin cable. Al cerrar la
+        ventana se apaga el servidor. ip: solo para las pruebas (127.0.0.1 no es una red local)."""
+        if not ip and _lan_ip().startswith("127."):
+            messagebox.showerror("Enviar al móvil", "No hay red local: conecta el equipo a la Wi-Fi.")
+            return
+        ip = ip or _lan_ip()
+        try:
+            server = _serve(out, ip)
+        except OSError as e:
+            messagebox.showerror("Enviar al móvil", f"No se pudo enviar: {e.strerror or e}")
+            return
+        url = f"http://{ip}:{server.server_port}/{urllib.parse.quote(Path(out).name)}"
+        png = io.BytesIO()
+        segno.make(url).save(png, kind="png", scale=8, border=4)
+        pixmap = QPixmap()
+        pixmap.loadFromData(png.getvalue(), "PNG")
+        win, column = self.dialog("Enviar al móvil")
+        qr = QLabel()
+        qr.setPixmap(pixmap)
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        column.addWidget(qr)
+        link = _label(url, "title")
+        link.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        column.addWidget(link)
+        column.addWidget(_label("Escanea el código con el móvil conectado a la misma Wi-Fi, o escribe la dirección\n"
+                                "en su navegador. Si Windows pregunta en el Firewall, permite el acceso.\n"
+                                "Al cerrar esta ventana deja de enviarse.", "muted"))
+        column.addLayout(_row(1, _button("Cerrar", win.close)))
+        win.finished.connect(lambda _: (server.shutdown(), server.server_close()))
+        win.show()
+        self.phone_window = win, server
 
     def send_to_kindle(self, out, win):
         """Send to Kindle no tiene API pública: se abre su web y el archivo, seleccionado, para arrastrarlo."""
