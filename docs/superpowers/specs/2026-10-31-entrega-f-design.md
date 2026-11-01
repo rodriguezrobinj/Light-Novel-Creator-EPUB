@@ -25,7 +25,7 @@ van aparte.
 
 ### 2. Texto sin traducir (`quality_report`)
 
-- Párrafo de 6 palabras o más donde al menos el 40 % son palabras vacías inglesas (`the`, `and`, `you`,
+- Párrafo de 6 palabras o más donde al menos el 35 % son palabras vacías inglesas (`the`, `and`, `you`,
   `is`, `of`…) y menos que esas son españolas: aviso «Revisar», «Texto sin traducir», sin arreglo
   automático. La solución dice que se traduzca o se quite con «Editar texto…».
 
