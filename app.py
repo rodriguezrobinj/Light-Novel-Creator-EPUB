@@ -31,7 +31,7 @@ from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit, QProgressBar,
-                               QPushButton, QSizePolicy, QSplitter, QStackedWidget, QTabBar, QToolButton,
+                               QPushButton, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTabBar, QToolButton,
                                QVBoxLayout, QWidget)
 
 import convert
@@ -446,9 +446,11 @@ def _batch(pdfs, options, progress=None):
 
 
 ANILIST = "https://graphql.anilist.co"  # API pública, sin clave
+ROLES = {"MAIN": "Principal", "SUPPORTING": "Secundario", "BACKGROUND": "De fondo"}  # papeles de AniList
 ANILIST_QUERY = """query ($q: String) { Page(perPage: 6) { media(search: $q, type: MANGA, format: NOVEL) {
   title { romaji english native } startDate { year } genres description(asHtml: false)
-  staff(perPage: 10) { edges { role node { name { full } } } } } } }"""
+  staff(perPage: 10) { edges { role node { name { full } } } }
+  characters(sort: [ROLE, RELEVANCE], perPage: 25) { edges { role node { name { full } } } } } } }"""
 GENRES = {"Action": "Acción", "Adventure": "Aventura", "Comedy": "Comedia", "Drama": "Drama", "Ecchi": "Ecchi",
           "Fantasy": "Fantasía", "Horror": "Terror", "Mahou Shoujo": "Mahō shōjo", "Mecha": "Mecha",
           "Music": "Música", "Mystery": "Misterio", "Psychological": "Psicológico", "Romance": "Romance",
@@ -471,7 +473,8 @@ def _lookup(series):
 
 
 def _anilist_results(data):
-    """Respuesta de AniList -> [{name, author, illustrator, original_title, subjects, description}].
+    """Respuesta de AniList -> [{name, author, illustrator, original_title, subjects, description, characters}],
+    characters: [(nombre, papel)] con papel una clave de ROLES, los principales primero.
     La sinopsis de AniList está en inglés; se le quitan las etiquetas y la nota "(Source: …)"."""
     found = []
     for m in (((data.get("data") or {}).get("Page") or {}).get("media") or []):
@@ -490,7 +493,10 @@ def _anilist_results(data):
         found.append({"name": name + (f" ({year})" if year else "") + (f" · {english}" if english and english != name else ""),
                       "author": author, "illustrator": illustrator, "original_title": title.get("native") or "",
                       "subjects": ", ".join(GENRES.get(g, g) for g in m.get("genres") or []),
-                      "description": re.sub(r"\n{3,}", "\n\n", text)})
+                      "description": re.sub(r"\n{3,}", "\n\n", text),
+                      "characters": [(edge["node"]["name"]["full"], edge.get("role") or "")
+                                     for edge in (m.get("characters") or {}).get("edges") or []
+                                     if ((edge.get("node") or {}).get("name") or {}).get("full")]})
     return found
 
 
@@ -833,6 +839,7 @@ class App:
         tools.addAction("Informe de calidad…", self.quality)
         tools.addAction("Ortografía…", self.spelling)
         tools.addAction("Añadir página…", self.add_page)
+        tools.addAction("Página de personajes…", self.character_page)
         tools.addAction("Cambiar ilustración…", self.change_image)
         tools.addSeparator()
         tools.addAction("Panel de serie…", self.series_panel)
@@ -2123,6 +2130,77 @@ class App:
         win.parts = {"table": table, "places": places, "fix": fix, "change": change_btn, "add": add_btn}
         self.spelling_window = win
 
+    def insert_page(self, name, lines, first=True):
+        """Capítulo nuevo con título name y un párrafo por línea, antes del primer capítulo o al final."""
+        start = next((int(i) for i in self.tree.get_children() if self.tree.set(i, "inc") == ON), None)
+        at = start if start is not None and first else len(self.book.blocks)
+        lines = [f"# {name}"] + [line.strip() for line in lines if line.strip()]
+        self.apply_edits([(at, at, "\n\n".join(lines))], str(at))
+        self.tree.set(str(at), "inc", ON)  # sin entrada propia en deshacer: Ctrl+Z quita la página entera
+        self.tree.item(str(at), tags=(KIND_TAG[ON],))
+        self.update_reviewed()
+        self.update_preview()
+        self.status.setText(f"Página «{name}» añadida · E para editarla · Ctrl+Z para quitarla")
+
+    def character_page(self):
+        """Página «Personajes» con los de la serie en AniList (character_dialog)."""
+        if self.book:
+            self.search_online(lambda item: self.character_dialog(item["characters"]))
+
+    def character_dialog(self, characters):
+        """Personajes de AniList con casilla, nombre y nota editables. Solo los principales vienen marcados: los
+        demás pueden destripar la historia. Cada fila cuenta cuántas veces sale el nombre en el libro: con 0 el
+        nombre no está escrito como en la traducción."""
+        if not characters:
+            messagebox.showinfo("Página de personajes", "AniList no tiene personajes de esta serie.")
+            return
+        win, column = self.dialog("Personajes")
+        column.addWidget(_label("Solo vienen marcados los principales: los demás pueden destripar la historia. "
+                                "Escribe los nombres como en la traducción: «0 veces» es que no salen así en el libro.",
+                                "muted"))
+        grid_box = QWidget()
+        grid = QGridLayout(grid_box)
+        for n, text in enumerate(("", "Nombre", "Nota (opcional)", "Papel", "En el libro")):
+            grid.addWidget(_label(text, "muted"), 0, n)
+        rows = []
+
+        def count(row):
+            name = row["name"].text().strip()
+            times = convert.count_matches(self.book, [(name, "")])[0][1] if name else 0
+            row["count"].setText(convert.counted(times, "vez", "veces") if name else "")
+
+        for n, (name, role) in enumerate(characters, 1):
+            row = {"check": QCheckBox(), "name": QLineEdit(name), "note": QLineEdit(), "count": QLabel()}
+            row["check"].setChecked(role == "MAIN")
+            row["name"].setMinimumWidth(220)
+            row["note"].setMinimumWidth(260)
+            row["name"].textChanged.connect(lambda _, row=row: count(row))
+            count(row)
+            for k, widget in enumerate((row["check"], row["name"], row["note"], QLabel(ROLES.get(role, role)),
+                                        row["count"])):
+                grid.addWidget(widget, n, k)
+            rows.append(row)
+        grid.setRowStretch(len(rows) + 1, 1)
+        scroll = QScrollArea()
+        scroll.setWidget(grid_box)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumSize(760, 360)
+        column.addWidget(scroll, 1)
+
+        def save():
+            chosen = [(r["name"].text().strip(), r["note"].text().strip()) for r in rows
+                      if r["check"].isChecked() and r["name"].text().strip()]
+            if not chosen:
+                messagebox.showerror("Página de personajes", "Marca al menos un personaje.", parent=win)
+                return
+            # Dos puntos y no raya: la limpieza tipográfica pegaría la raya a la nota, como en un diálogo
+            self.insert_page("Personajes", [f"<b>{name}</b>" + (f": {note}" if note else "") for name, note in chosen])
+            win.close()
+
+        column.addLayout(_row(1, _button("Añadir antes del primer capítulo", save, "primary")))
+        win.parts = {"rows": rows, "save": save}
+        win.show()
+
     def add_page(self):
         """Página propia (créditos del grupo, agradecimientos, nota del traductor) como capítulo nuevo, antes
         del primer capítulo o al final. Luego se edita con «Editar texto…» y se deshace con Ctrl+Z."""
@@ -2144,15 +2222,7 @@ class App:
             if not name:
                 messagebox.showerror("Añadir página", "Escribe un título.", parent=win)
                 return
-            first = next((int(i) for i in self.tree.get_children() if self.tree.set(i, "inc") == ON), None)
-            at = first if first is not None and where.get().startswith("Antes") else len(self.book.blocks)
-            lines = [f"# {name}"] + [line.strip() for line in body.toPlainText().splitlines() if line.strip()]
-            self.apply_edits([(at, at, "\n\n".join(lines))], str(at))
-            self.tree.set(str(at), "inc", ON)  # sin entrada propia en deshacer: Ctrl+Z quita la página entera
-            self.tree.item(str(at), tags=(KIND_TAG[ON],))
-            self.update_reviewed()
-            self.update_preview()
-            self.status.setText(f"Página «{name}» añadida · E para editarla · Ctrl+Z para quitarla")
+            self.insert_page(name, body.toPlainText().splitlines(), where.get().startswith("Antes"))
             win.close()
 
         column.addLayout(_row(_label("Dónde:"), _combo(where, ["Antes del primer capítulo", "Al final del libro"], 22),
@@ -2356,16 +2426,19 @@ class App:
         if not self.data_panel.isVisible():
             self.toggle_data()
 
-    def search_online(self):
+    def search_online(self, then=None):
+        """Busca la serie en AniList; la elegida va a then (por defecto, apply_online)."""
         series = (self.series_var.get() or self.title_var.get()).strip()
         if not series:
             messagebox.showinfo("Buscar en internet", "Escribe primero la serie o el título del libro.")
             return
-        if self.run(_lookup, (series,), lambda found: self.pick_online(found, series), busy="Buscando…"):
+        if self.run(_lookup, (series,), lambda found: self.pick_online(found, series, then), busy="Buscando…"):
             self.status.setText(f"Buscando «{series}» en AniList…")
 
-    def pick_online(self, found, series):
-        """Lista de lo que encontró AniList: doble clic o Aceptar rellena los campos vacíos (apply_online)."""
+    def pick_online(self, found, series, then=None):
+        """Lista de lo que encontró AniList: doble clic o Aceptar lleva la serie a then (apply_online: rellena
+        los campos vacíos)."""
+        then = then or self.apply_online
         self.status.setText("")
         if not found:
             messagebox.showinfo("Buscar en internet", f"AniList no encontró «{series}» entre las novelas ligeras.\n\n"
@@ -2383,7 +2456,7 @@ class App:
         def pick():
             if box.currentRow() >= 0:
                 win.close()
-                self.apply_online(found[box.currentRow()])
+                then(found[box.currentRow()])
 
         box.itemDoubleClicked.connect(lambda _: pick())
         column.addLayout(_row(1, _button("Aceptar", pick, "primary")))

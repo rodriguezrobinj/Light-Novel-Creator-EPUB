@@ -1887,7 +1887,10 @@ ANILIST_SAMPLE = {"data": {"Page": {"media": [{
     "startDate": {"year": 2019}, "genres": ["Fantasy", "Slice of Life", "Raro"],
     "description": "Chise was an office worker.<br><br>Now she is a <i>witch</i> &amp; more.\n(Source: J-Novel Club)",
     "staff": {"edges": [{"role": "Illustration", "node": {"name": {"full": "Kei"}}},
-                        {"role": "Story", "node": {"name": {"full": "Aloha Zaregoto"}}}]}}]}}}
+                        {"role": "Story", "node": {"name": {"full": "Aloha Zaregoto"}}}]},
+    "characters": {"edges": [{"role": "MAIN", "node": {"name": {"full": "Chise Itou"}}},
+                             {"role": "SUPPORTING", "node": {"name": {"full": None}}},
+                             {"role": "BACKGROUND", "node": {"name": {"full": "Teto"}}}]}}]}}}
 
 
 def test_anilist_results_and_fill_only_empty_fields():
@@ -1897,7 +1900,8 @@ def test_anilist_results_and_fill_only_empty_fields():
     assert found == [{"name": "Maryoku Cheat na Majo ni Narimashita (2019) · I Became a Witch with Cheat Mana",
                       "author": "Aloha Zaregoto", "illustrator": "Kei", "original_title": "魔力チートな魔女になりました",
                       "subjects": "Fantasía, Recuentos de la vida, Raro",
-                      "description": "Chise was an office worker.\n\nNow she is a witch & more."}], found
+                      "description": "Chise was an office worker.\n\nNow she is a witch & more.",
+                      "characters": [("Chise Itou", "MAIN"), ("Teto", "BACKGROUND")]}], found
     assert app._anilist_results({"errors": [{"message": "x"}]}) == []
     original = app.urllib.request.urlopen
     app.urllib.request.urlopen = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("sin red"))
@@ -1922,6 +1926,38 @@ def test_anilist_results_and_fill_only_empty_fields():
     assert got == ("Autor del PDF", "Kei", "Fantasía, Recuentos de la vida, Raro",
                    "Chise was an office worker.\n\nNow she is a witch & more."), got
     assert "Aloha" not in asked[0] and "Ilustraciones: Kei" in asked[0] and "en inglés" in asked[0], asked
+
+
+def test_window_character_page():
+    """«Página de personajes»: solo los principales vienen marcados, cada fila cuenta cuántas veces sale el
+    nombre en el libro (y se recalcula al escribir), la página va antes del primer capítulo y Ctrl+Z la quita."""
+    import app
+
+    pdf = TMP / "Personajes - Volumen 1.pdf"
+    make_novel().replace(pdf)
+    root, window = visible_window()
+    window.pdf = pdf
+    window.show_book(convert.analyze(pdf))
+    chapters = [i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON]
+    blocks = len(window.book.blocks)
+    window.character_dialog([("Tom Cat", "MAIN"), ("Jerry", "SUPPORTING")])
+    root.update()
+    rows = root.dialogs()[-1].parts["rows"]
+    checked = [row["check"].isChecked() for row in rows]
+    before = rows[0]["count"].text()
+    rows[0]["name"].setText("Tom")
+    after = rows[0]["count"].text()
+    rows[0]["note"].setText("el gato")
+    root.dialogs()[-1].parts["save"]()
+    root.update()
+    first = int(chapters[0])
+    page = [b.html for b in window.book.blocks[first:first + 2]], window.tree.set(str(first), "inc")
+    window.undo()
+    undone = len(window.book.blocks)
+    window.close()
+    assert checked == [True, False] and before == "0 veces" and after == "1 vez", (checked, before, after)
+    assert page == (["Personajes", "<b>Tom</b>: el gato"], app.ON), page
+    assert undone == blocks, (undone, blocks)
 
 
 def test_window_new_volume_inherits_series_data():
