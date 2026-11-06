@@ -858,6 +858,9 @@ class App:
                            _button("Buscar", self.find), margins=(10, 8, 10, 8)))
         outer.addWidget(top)
         QShortcut(QKeySequence("Ctrl+F"), root, self.find)
+        # En toda la ventana: tras «Editar texto…» o «Todos» el foco se queda en el botón, no en la lista.
+        # Un campo de texto con el foco se queda Ctrl+Z para deshacer lo escrito en él.
+        QShortcut(QKeySequence("Ctrl+Z"), root, self.undo)
 
         self.stack = QStackedWidget()
         outer.addWidget(self.stack, 1)
@@ -995,7 +998,6 @@ class App:
         for key, kind in KEYS.items():
             self.tree.bind_key(getattr(Qt.Key, f"Key_{key.upper()}"), lambda kind=kind: self.shortcut(kind))
         self.tree.bind_key(Qt.Key.Key_F2, lambda: self.tree.selection() and self.edit_title(self.tree.selection()[0]))
-        self.tree.bind_key(Qt.Key.Key_Z, self.undo, Qt.KeyboardModifier.ControlModifier)
         self.tree.bind_key(Qt.Key.Key_Up, lambda: self.move_selected(-1), Qt.KeyboardModifier.AltModifier)
         self.tree.bind_key(Qt.Key.Key_Down, lambda: self.move_selected(1), Qt.KeyboardModifier.AltModifier)
         self.tree.bind_key(Qt.Key.Key_E, self.edit_text)
@@ -1996,13 +1998,16 @@ class App:
         self.status.setText(message)
 
     def replace_found(self, every=False):
-        """Cambia lo buscado por «Reemplazar por» en el párrafo del resultado elegido o en todos los párrafos."""
+        """Cambia lo buscado por «Reemplazar por» en el párrafo del resultado elegido o en todos los párrafos.
+        Solo palabras completas, como las reglas: «Tino» no cambia dentro de «destino»."""
         term, new, row = self.find_entry.text().strip(), self.replace_entry.text().strip(), self.find_results.currentRow()
         if not self.book or len(term) < 2 or not (every or 0 <= row < len(self.matches)):
             return
-        edits = convert.replace_text(self.book, term, new, blocks=None if every else [self.matches[row][0]])
+        edits = convert.replace_text(self.book, term, new, word=True,
+                                     blocks=None if every else [self.matches[row][0]])
         if not edits:
-            self.status.setText("Nada que reemplazar en los párrafos: los títulos se cambian en la lista (F2)")
+            self.status.setText("Nada que reemplazar: solo se cambian palabras completas de los párrafos; "
+                                "los títulos, en la lista (F2)")
             return
         self.apply_fixes(edits, f"{convert.counted(len(edits), 'párrafo cambiado', 'párrafos cambiados')} · Ctrl+Z para deshacer")
         self.search_book()

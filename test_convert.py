@@ -1791,9 +1791,9 @@ def test_window_undo_restores_type_and_title():
     window.set_kind("2", app.ON)
     window.history.append([window.row_state("2")])
     window.tree.set("2", "title", "Lado A editado")  # como hace el cuadro de edición
-    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeySequence, QShortcut
 
-    bound = window.tree.keys.get((Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier))  # el atajo Ctrl+Z
+    bound = [sc for sc in window.root.findChildren(QShortcut) if sc.key() == QKeySequence("Ctrl+Z")]  # en toda la ventana
     window.undo()
     after_title = (window.tree.set("2", "inc"), window.tree.set("2", "title"))
     window.undo()
@@ -2839,6 +2839,35 @@ def test_window_replace_field_keeps_room_in_a_small_window():
     assert width >= 150, width
 
 
+def test_window_undo_works_with_focus_on_a_button():
+    """Ctrl+Z deshace con el foco en un botón («Editar texto…», «Todos»), no solo en la lista: el estado dice
+    «Ctrl+Z para deshacer» tras editar o reemplazar, y el foco se queda en el botón pulsado."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPushButton
+
+    import app
+
+    B = convert.Block
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."),
+                                                     B("heading", 2, "Capítulo 2"), B("p", 2, "Dos.")], [0, 2]))
+    item = window.tree.get_children()[1]
+    window.tree.selection_set(item)
+    window.tree.setFocus()
+    QTest.keyClick(window.tree, Qt.Key.Key_S)  # capítulo -> subtítulo
+    changed = window.tree.set(item, "inc")
+    button = next(b for b in window.root.findChildren(QPushButton) if b.text() == "Editar texto…")
+    window.root.activateWindow()
+    button.setFocus()
+    root.update()
+    QTest.keyClick(button, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    root.update()
+    undone = window.tree.set(item, "inc")
+    window.close()
+    assert (changed, undone) == (app.OFF, app.ON), (changed, undone)
+
+
 def test_window_ignore_warning():
     """«Ignorar» quita el aviso del informe y del botón de la barra; en «Ignorados» se puede recuperar."""
     B = convert.Block
@@ -2865,9 +2894,11 @@ def test_window_ignore_warning():
 
 def test_window_find_and_replace():
     """La barra de búsqueda reemplaza en el resultado elegido o en todos, Ctrl+Z lo deshace, y «Guardar como
-    regla» lo pasa a los reemplazos de la serie."""
+    regla» lo pasa a los reemplazos de la serie. Solo palabras completas, como las reglas: «Tino» por
+    «Rhuda» en todos dejaba «desRhuda» en «destino» (Nageki 1)."""
     B = convert.Block
-    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella dijó que sí."), B("p", 2, "Dijó que no.")]
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella dijó que sí."), B("p", 2, "Dijó que no."),
+              B("p", 3, "Tino vio su destino.")]
     root, window = visible_window()
     window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
     window.find()
@@ -2883,10 +2914,16 @@ def test_window_find_and_replace():
     undone = [b.html for b in window.book.blocks]
     window.save_rule()
     rules = window.replacements
+    window.find_entry.setText("Tino")
+    window.search_book()
+    window.replace_entry.setText("Rhuda")
+    window.replace_found(every=True)
+    name = window.book.blocks[3].html
     window.close()
-    assert one == ["Capítulo 1", "Ella dijo que sí.", "Dijó que no."], one
-    assert every == ["Capítulo 1", "Ella dijo que sí.", "Dijo que no."], every
+    assert one == ["Capítulo 1", "Ella dijo que sí.", "Dijó que no.", "Tino vio su destino."], one
+    assert every == ["Capítulo 1", "Ella dijo que sí.", "Dijo que no.", "Tino vio su destino."], every
     assert undone == one and rules == [["dijó", "dijo"]], (undone, rules)
+    assert name == "Rhuda vio su destino.", name
 
 
 def test_window_spelling():
@@ -3729,6 +3766,8 @@ def test_window_result_dialog_phone_and_calibre():
     """«Enviar al móvil» siempre; «Añadir a Calibre» solo si Calibre está instalado, y lo abre con el EPUB."""
     import app
     from PySide6.QtWidgets import QPushButton
+
+    import app
 
     out = TMP / "calibre.epub"
     out.write_bytes(b"x")
