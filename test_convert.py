@@ -3732,6 +3732,79 @@ def test_theme_light_dark_and_bad_setting():
     theme.apply(q, "Claro")
 
 
+def test_analyze_reads_epub():
+    """Un EPUB se lee como un PDF (PyMuPDF lo compone en páginas): mismos capítulos, cursiva e ilustración.
+    El número del capítulo, pequeño y sin negrita encima del nombre, vuelve a unirse al título."""
+    pdf = TMP / "Ida y vuelta - Volumen 2.pdf"
+    make_novel().replace(pdf)
+    book = convert.analyze(pdf)
+    epub = TMP / "Ida y vuelta - Volumen 2 (LNC).epub"
+    convert.write_epub(book, [(k, convert._plain(book.blocks[k])) for k in book.candidates], epub)
+    again = convert.analyze(epub)
+    titles = [convert._plain(again.blocks[k]) for k in again.candidates]
+    assert titles[-2:] == ["Capitulo 1: Inicio", "Capitulo 2: Final"], titles
+    assert "Ella penso <i>que era tarde.</i>" in [b.html for b in again.blocks], [b.html for b in again.blocks][:8]
+    assert any(b.kind == "image" for b in again.blocks)
+    assert not any(convert._plain(b) == "Capitulo 1" for b in again.blocks), "el número quedó como párrafo"
+
+
+def test_analyze_external_epub_long_toc_and_inline_image():
+    """EPUB de otro programa: su índice ocupa varias páginas al componerlo y solo la primera dice «Contenido»
+    (las demás son enlaces: también se omiten); una imagen en línea deja U+FFFC en el texto, que no debe
+    quedar como párrafo suelto."""
+    import zipfile
+
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 60), False)
+    pix.clear_with(120)
+    chapters = 60
+    places = ["bosque", "río", "ciudad", "torre", "puerto", "castillo", "mercado", "jardín", "desierto", "montaña"]
+    heads = {n: f"Capítulo {n}: El {places[n % 10]} y la {places[n // 10]}" for n in range(1, chapters + 1)}
+    toc = "".join(f'<p><a href="c{n}.xhtml">{heads[n]}</a></p>' for n in heads)
+    page = '<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body>{}</body></html>'
+    files = {"toc.xhtml": page.format("<h1>Contenido</h1>" + toc)}
+    for n in range(1, chapters + 1):
+        files[f"c{n}.xhtml"] = page.format(f'<h1>{heads[n]}</h1>'
+                                           f'<p><img src="a.png" alt=""/></p>'
+                                           f'<p>{"Texto del capítulo con varias palabras. " * 20}</p>')
+    manifest = "".join(f'<item id="{name[:-6]}" href="{name}" media-type="application/xhtml+xml"/>' for name in files)
+    spine = "".join(f'<itemref idref="{name[:-6]}"/>' for name in files)
+    opf = ('<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" '
+           'unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Externo</dc:title>'
+           '<dc:identifier id="id">x</dc:identifier><dc:language>es</dc:language></metadata><manifest>'
+           f'{manifest}<item id="a" href="a.png" media-type="image/png"/></manifest><spine>{spine}</spine></package>')
+    epub = TMP / "Externo - Volumen 3.epub"
+    with zipfile.ZipFile(epub, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml", '<?xml version="1.0"?><container version="1.0" '
+                   'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+                   '<rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+        z.writestr("content.opf", opf)
+        z.writestr("a.png", pix.tobytes("png"))
+        for name, text in files.items():
+            z.writestr(name, text)
+    assert pymupdf.open(epub)[1].get_text().startswith("Capítulo"), "el índice debía ocupar más de una página"
+    book = convert.analyze(epub)
+    titles = [convert._plain(book.blocks[k]) for k in book.candidates]
+    assert titles == list(heads.values()), titles[:3]
+    loose = [b.page for b in book.blocks[:book.candidates[0]] if b.kind == "p"]
+    assert not loose, f"restos del índice antes del capítulo 1, páginas {loose}"
+    assert not any("￼" in b.html or (b.kind == "p" and not convert._plain(b)) for b in book.blocks)
+
+
+def test_epub_sources_and_output_name():
+    """Un EPUB de entrada no se pisa: su salida lleva «(LNC)». En una carpeta, un EPUB que es la salida de
+    otro archivo (mismo nombre que un PDF, «(LNC)» o .kepub.epub) no es una entrada."""
+    import app
+
+    folder = TMP / f"fuentes-{time_ns()}"
+    folder.mkdir()
+    for name in ("A.pdf", "A.epub", "B.epub", "B (LNC).epub", "C.kepub.epub", "D.EPUB", "notas.txt"):
+        (folder / name).write_bytes(b"x")
+    assert [p.name for p in app._sources(folder)] == ["A.pdf", "B.epub", "D.EPUB"], app._sources(folder)
+    assert app._out(folder / "A.pdf") == folder / "A" and app._out(folder / "B.epub") == folder / "B (LNC)"
+    assert app._has_epub(folder / "B.epub") and app._has_epub(folder / "A.pdf") and not app._has_epub(folder / "D.EPUB")
+
+
 def test_window_empty_screen_and_dropped_pdf():
     """Sin PDF: la pantalla vacía con los recientes. Soltar archivos sobre la ventana abre el primer .pdf y
     no hace nada si no hay ninguno."""

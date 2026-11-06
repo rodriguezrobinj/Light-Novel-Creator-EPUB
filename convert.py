@@ -30,7 +30,8 @@ SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈�
 END_PUNCT = (".", "!", "?", "…", '"', "'", "»", "”", "’", ":", ")", "]")  # "]": notas del traductor
 SOFT_HYPHEN = "\u00ad"  # guion de partición: solo se ve si cae al final de la línea
 TAGS = re.compile(r"<[^>]+>")
-BAD_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+# U+FFFC: el hueco que PyMuPDF deja en el texto por una imagen en l\u00ednea de un EPUB (la imagen sale aparte)
+BAD_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffc\ufffe\uffff]")
 
 
 @dataclass
@@ -240,7 +241,7 @@ def _rows(page):
     Sin TEXT_PRESERVE_IMAGES: el dict copiaba los bytes de cada imagen y aquí solo cuenta el texto (Maryoku 1: 1,5 s)."""
     flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
     spans = [s for b in page.get_text("dict", flags=flags)["blocks"] for line in b.get("lines", [])
-             if abs(line["dir"][0]) > 0.9 for s in line["spans"] if s["text"].strip()]
+             if abs(line["dir"][0]) > 0.9 for s in line["spans"] if BAD_XML.sub("", s["text"]).strip()]
     spans = [_ref(s, spans) if REF.fullmatch(s["text"].strip()) else s for s in spans]
     rows, group = [], []
     for s in sorted(spans, key=lambda s: s["origin"][1]):
@@ -354,7 +355,11 @@ def _join_labels(rows):
     joined, i = [], 0
     while i < len(rows):
         row = rows[i]
-        label = _label(row) if row.heading else None
+        label = _label(row)
+        # Sin ser título, solo si encima de un título: el número de capítulo pequeño y sin negrita de un EPUB
+        if not row.heading and not (label and CHAPTER_LABEL.fullmatch(label) and i + 1 < len(rows)
+                                    and rows[i + 1].heading):
+            label = None
         if label is None:
             joined.append(row)
             i += 1
@@ -383,6 +388,14 @@ def _is_toc(rows):
     encima) o al menos tres líneas con puntos o guiones hasta el número de página."""
     return (any(TOC_TITLE.fullmatch(r.text) for r in rows[:3])
             or sum(bool(DOT_LEADER.search(r.text)) for r in rows) >= 3)
+
+
+def _links_only(page, rows):
+    """Página cuyas líneas son casi todas enlaces a otras páginas del libro: la continuación de un índice
+    (un EPUB compuesto por PyMuPDF reparte el suyo en varias páginas, y solo la primera dice «Contenido»)."""
+    links = [link["from"] for link in page.get_links() if link["kind"] == pymupdf.LINK_GOTO]
+    inside = sum(any(pymupdf.Point(r.x0 + 1, r.y - r.size / 3) in rect for rect in links) for r in rows)
+    return bool(rows) and inside >= 0.8 * len(rows)
 
 
 def _first_group(rows):
@@ -1290,14 +1303,16 @@ FONT_DIR = Path(__file__).parent / "fonts"  # en el .exe, junto a los módulos (
 
 
 def analyze(pdf_path, progress=None):
-    """Lee el PDF y lo devuelve como bloques, con los títulos de capítulo candidatos."""
+    """Lee el PDF (o un EPUB, que PyMuPDF compone en páginas) y lo devuelve como bloques, con los títulos de
+    capítulo candidatos."""
+    kind = "EPUB" if str(pdf_path).lower().endswith(".epub") else "PDF"
     try:
         doc = pymupdf.open(pdf_path)
     except Exception as e:
-        raise ValueError(f"No se pudo abrir el PDF: {e}") from e
+        raise ValueError(f"No se pudo abrir el {kind}: {e}") from e
     with doc:
         if doc.needs_pass:
-            raise ValueError("El PDF está protegido con contraseña.")
+            raise ValueError(f"El {kind} está protegido con contraseña.")
         n = doc.page_count
         pages = []
         for i, page in enumerate(doc):
@@ -1306,7 +1321,7 @@ def analyze(pdf_path, progress=None):
                 progress(i + 1, 2 * n)
         pages = _strip_margins(pages, [page.rect.height for page in doc])
         if not any(pages):
-            raise ValueError("El PDF no tiene texto (parece escaneado). Hace falta OCR, que no está soportado.")
+            raise ValueError(f"El {kind} no tiene texto (parece escaneado). Hace falta OCR, que no está soportado.")
 
         sizes = collections.Counter()  # tamaño de letra -> caracteres
         for rows in pages:
@@ -1344,6 +1359,7 @@ def analyze(pdf_path, progress=None):
             r.heading and KEYWORDS.match(r.text.strip(LABEL_DECOR)) for r in rows)), 0)  # sin capítulos: nada
         blocks, skipped = [], []
         para, short, last_text = None, False, ""
+        toc = False  # la página anterior era el índice
         repeated = ""  # título que la página anterior ya emitió junto a su ilustración
         digests = {}
         for i, (page, rows) in enumerate(zip(doc, pages)):
@@ -1370,7 +1386,8 @@ def analyze(pdf_path, progress=None):
                 continue
             if not rows:
                 continue
-            if _is_toc(rows):  # se apunta: si no era el índice, se habría perdido una página de texto
+            toc = _is_toc(rows) or (toc and _links_only(page, rows))
+            if toc:  # se apunta: si no era el índice, se habría perdido una página de texto
                 skipped.append((num, sum(map(_letters, (r.text for r in rows))), "se omitió como índice del PDF"))
                 continue
             # Página de diseño de los preliminares (portadilla con logo y créditos): poco texto y alguna
