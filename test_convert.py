@@ -166,6 +166,13 @@ def test_epub_has_series_metadata():
         assert b"belongs-to-collection" not in z.read("OEBPS/content.opf")  # sin serie, nada
 
 
+def test_counted_uses_singular_for_one():
+    """«1 capítulo detectado», no «1 capítulos detectados»."""
+    assert convert.counted(1, "capítulo detectado", "capítulos detectados") == "1 capítulo detectado"
+    assert convert.counted(3, "capítulo detectado", "capítulos detectados") == "3 capítulos detectados"
+    assert (convert.counted(0, "aviso"), convert.counted(1, "vez", "veces")) == ("0 avisos", "1 vez")
+
+
 def test_typography_rae_style():
     cases = [
         ('Dijo "hola" y se fue...', "Dijo «hola» y se fue…"),
@@ -2065,7 +2072,7 @@ def test_window_proposes_removing_group_sections():
     status = window.status.text()
     window.close()
     assert rows == {"Capitulo 1: Inicio": app.ON, "Agradecimientos": app.CUT, "Capitulo 2: Final": app.ON}, rows
-    assert "1 secciones del grupo en Quitar" in status, status
+    assert "1 sección del grupo en Quitar" in status, status
 
 
 def test_window_edited_text_survives_reopening_and_reaches_epub():
@@ -2817,7 +2824,19 @@ def test_window_status_line_is_visible():
     root.update()
     text, width = window.status.text(), window.status.width()
     window.close()
-    assert "capítulos detectados" in text and width > 200, (text, width)
+    assert text == "1 capítulo detectado" and width > 200, (text, width)
+
+
+def test_window_replace_field_keeps_room_in_a_small_window():
+    """En una ventana pequeña el campo «Reemplazar por» no se encoge hasta no dejar escribir."""
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Ella dijó que sí.")], []))
+    root.geometry("900x600+0+0")
+    window.find()
+    root.update()
+    width = window.replace_entry.width()
+    window.close()
+    assert width >= 150, width
 
 
 def test_window_ignore_warning():

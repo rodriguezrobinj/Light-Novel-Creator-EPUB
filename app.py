@@ -898,6 +898,7 @@ class App:
         self.find_count = _label("", "muted")
         self.find_bar = QFrame(objectName="card")
         self.replace_entry = QLineEdit(placeholderText="Reemplazar por")
+        self.replace_entry.setMinimumWidth(150)  # en ventana pequeña los botones lo dejaban sin sitio para escribir
         bar = QVBoxLayout(self.find_bar)
         bar.setContentsMargins(6, 4, 6, 4)
         bar.setSpacing(4)
@@ -1581,11 +1582,14 @@ class App:
         images = sum(self.is_image(i) for i in items)
         dropped = sum(self.tree.set(i, "inc") == DROPPED for i in items)
         others = len(items) - found - images
-        text = f"{found} capítulos detectados" if found else "No se detectaron capítulos: el EPUB tendrá una sola sección"
-        text += f", {others} subtítulos" if others else ""
-        text += f" y {images} ilustraciones" + (f" ({dropped} descartadas)" if dropped else "") if images else ""
-        text += f" · {len(cut)} secciones del grupo en Quitar" if cut else ""
-        text += f" · {len(twins)} ilustraciones repetidas descartadas" if twins else ""
+        text = (convert.counted(found, "capítulo detectado", "capítulos detectados") if found
+                else "No se detectaron capítulos: el EPUB tendrá una sola sección")
+        text += f", {convert.counted(others, 'subtítulo')}" if others else ""
+        text += (f" y {convert.counted(images, 'ilustración', 'ilustraciones')}"
+                 + (f" ({convert.counted(dropped, 'descartada')})" if dropped else "") if images else "")
+        text += f" · {convert.counted(len(cut), 'sección', 'secciones')} del grupo en Quitar" if cut else ""
+        twins_text = convert.counted(len(twins), "ilustración repetida descartada", "ilustraciones repetidas descartadas")
+        text += f" · {twins_text}" if twins else ""
         if self.load_review():
             text = "Revisión anterior recuperada"
         elif self.pdf:
@@ -1929,7 +1933,7 @@ class App:
             rules = _parse_replacements(text.toPlainText())
             if not self.book or not rules:
                 return
-            lines = [f"{find}: {n if isinstance(n, str) else f'{n} veces'}"
+            lines = [f"{find}: {n if isinstance(n, str) else convert.counted(n, 'vez', 'veces')}"
                      for find, n in convert.count_matches(self.book, rules)]
             messagebox.showinfo("Coincidencias", "\n".join(lines), parent=win)
 
@@ -2000,7 +2004,7 @@ class App:
         if not edits:
             self.status.setText("Nada que reemplazar en los párrafos: los títulos se cambian en la lista (F2)")
             return
-        self.apply_fixes(edits, f"{len(edits)} párrafos cambiados · Ctrl+Z para deshacer")
+        self.apply_fixes(edits, f"{convert.counted(len(edits), 'párrafo cambiado', 'párrafos cambiados')} · Ctrl+Z para deshacer")
         self.search_book()
 
     def save_rule(self):
@@ -2025,7 +2029,8 @@ class App:
         """Palabras que no están en el diccionario (convert.unknown_words): dónde salen, cambiarlas en todo el
         libro o añadirlas al diccionario de la serie. El editor de texto las subraya."""
         self.unknown = {w for w, _, _ in found}
-        self.status.setText(f"Ortografía: {len(found)} palabras que no están en el diccionario")
+        self.status.setText(f"Ortografía: {convert.counted(len(found), 'palabra que no está', 'palabras que no están')} "
+                            "en el diccionario")
         win, column = self.dialog("Ortografía")
         win.resize(900, 520)
         column.addWidget(_label("Palabras que no están en el diccionario, las más repetidas primero. Las que empiezan "
@@ -2055,7 +2060,7 @@ class App:
             table.delete(*table.get_children())
             for n, (word, count, _) in enumerate(state["found"]):
                 table.insert("", "end", iid=str(n), values=(word, count))
-            win.setWindowTitle(f"Ortografía · {len(state['found'])} palabras")
+            win.setWindowTitle(f"Ortografía · {convert.counted(len(state['found']), 'palabra')}")
             if state["found"]:
                 item = str(min(select, len(state["found"]) - 1))
                 table.selection_set(item)
@@ -2098,7 +2103,7 @@ class App:
             edits = convert.replace_text(self.book, word, new, word=True) if new and new != word else []
             if edits:
                 self.apply_fixes(edits, "")
-            done(word, f"«{word}» cambiada por «{new}» en {len(edits)} párrafos · Ctrl+Z para deshacer")
+            done(word, f"«{word}» cambiada por «{new}» en {convert.counted(len(edits), 'párrafo')} · Ctrl+Z para deshacer")
 
         def add():
             word = chosen()[0]
@@ -2416,7 +2421,7 @@ class App:
         if changed:
             self.history.append(changed)
             self.update_preview()
-        self.status.setText(f"{done} en {len(changed)} títulos")
+        self.status.setText(f"{done} en {convert.counted(len(changed), 'título')}")
 
     def fix_case(self):
         """Pone los títulos con las mayúsculas del español (convert.spanish_case)."""
@@ -2443,7 +2448,7 @@ class App:
             self.history.append(changed)
             self.update_reviewed()
             self.update_preview()
-        self.status.setText(f"{len(changed)} apartados como separador")
+        self.status.setText(f"{convert.counted(len(changed), 'apartado')} como separador")
 
     def font_changed(self):
         """«Otra…» pide un archivo de fuente; sin elegir ninguno, se queda la letra de antes."""
@@ -2542,13 +2547,13 @@ class App:
             ignored = [i for i in everything if _issue_key(i) in self.ignored]
             report = [i for i in everything if _issue_key(i) not in self.ignored]
             summary.setText((_quality_summary(report) or "No se encontró nada sospechoso.")
-                            + (f" · {len(ignored)} ignorados" if ignored else ""))
+                            + (f" · {convert.counted(len(ignored), 'ignorado')}" if ignored else ""))
             graves = any(i.level == "Grave" for i in report)
             summary.setStyleSheet(f"color: {levels['Grave']};" if graves else "")
             wanted = next((level for level in convert.LEVELS if LEVEL_PLURAL[level].capitalize() == show.get()), None)
             state["report"] = ignored if show.get() == "Ignorados" else [i for i in report if wanted in (None, i.level)]
             ignore_btn.setText("No ignorar" if show.get() == "Ignorados" else "Ignorar")
-            win.setWindowTitle(f"Informe de calidad · {len(report)} avisos")
+            win.setWindowTitle(f"Informe de calidad · {convert.counted(len(report), 'aviso')}")
             table.delete(*table.get_children())
             for n, issue in enumerate(state["report"]):
                 table.insert("", "end", iid=str(n), values=(f"● {issue.level}", issue.page, issue.title),
@@ -2609,7 +2614,7 @@ class App:
                 if issue.edit[1] <= limit:
                     edits.append(issue.edit)
                     limit = issue.edit[0]
-            self.apply_fixes(edits, f"{len(edits)} avisos arreglados · Ctrl+Z para deshacer")
+            self.apply_fixes(edits, f"{convert.counted(len(edits), 'aviso arreglado', 'avisos arreglados')} · Ctrl+Z para deshacer")
             fill(int(table.selection()[0]) if table.selection() else 0)
 
         def ignore(issue):
@@ -2851,7 +2856,7 @@ class App:
             if pos >= 0 and len(self.matches) < 500:
                 self.matches.append((k, block.page, term))
                 self.find_results.addItem(f"pág. {block.page} · …{plain[max(0, pos - 40):pos + 60]}…")
-        self.find_count.setText(f"{len(self.matches)} resultados"
+        self.find_count.setText(convert.counted(len(self.matches), "resultado")
                                 + (" (se muestran los 500 primeros)" if len(self.matches) == 500 else ""))
         self.find_results.setVisible(bool(self.matches))
 

@@ -936,6 +936,11 @@ def _credits(blocks):
     return found
 
 
+def counted(n, one, many=None):
+    """«1 capítulo», «3 capítulos»: el número con su palabra (many si el plural no es one + "s")."""
+    return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
 def _letters(text):
     return sum(c.isalpha() for c in text)
 
@@ -1241,7 +1246,7 @@ def quality_report(book):
         nxt = next((j for j in heads if j > k and j in book.candidates), len(blocks))
         letters = sum(_letters(_plain(b)) for b in blocks[k + 1:nxt] if b.kind == "p")
         if letters < 300 and not PART_TITLE.match(title):
-            report.append(Issue("short", k, blocks[k].page, "Revisar", f"Capítulo muy corto ({letters} letras)",
+            report.append(Issue("short", k, blocks[k].page, "Revisar", f"Capítulo muy corto ({counted(letters, 'letra')})",
                                 f"«{title}» casi no tiene texto: puede ser un título mal detectado (una cita, "
                                 "un cartel) o un capítulo cuyo texto quedó en otro.",
                                 "Si no es un capítulo, cámbialo a Subtítulo (tecla S) o quítalo (tecla Q) en la "
