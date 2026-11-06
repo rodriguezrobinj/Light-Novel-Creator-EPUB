@@ -981,7 +981,9 @@ class App:
         self.status = _label("", "muted")
         # Un estado largo se recorta en vez de ensanchar la ventana más allá de la pantalla
         self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        rows.addLayout(_row(self.progress, self.status, 1, self.quality_btn))
+        status_row = _row(self.progress, self.status, self.quality_btn)
+        status_row.setStretchFactor(self.status, 1)  # con un hueco elástico al lado, Ignored se quedaba en 0 px
+        rows.addLayout(status_row)
         outer.addWidget(bottom)
 
         self.tree.pressed.connect(self.on_click)

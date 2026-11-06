@@ -2808,6 +2808,18 @@ def test_unknown_words():
     assert words["dijó"][1][0] == "dijo" and "ciudad" in words["ciudd"][1], found
 
 
+def test_window_status_line_is_visible():
+    """El estado bajo la lista («N capítulos detectados», «Guardado: …») ocupa el hueco libre de su fila:
+    con un hueco elástico al lado se quedaba con 0 px y nunca se veía."""
+    B = convert.Block
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto " * 60)], [0]))
+    root.update()
+    text, width = window.status.text(), window.status.width()
+    window.close()
+    assert "capítulos detectados" in text and width > 200, (text, width)
+
+
 def test_window_ignore_warning():
     """«Ignorar» quita el aviso del informe y del botón de la barra; en «Ignorados» se puede recuperar."""
     B = convert.Block
