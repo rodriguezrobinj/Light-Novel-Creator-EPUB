@@ -8,3 +8,5 @@ dist/
 *.spec
 !PDF a EPUB.spec
 .superpowers/
+.claude/
+CLAUDE.md
