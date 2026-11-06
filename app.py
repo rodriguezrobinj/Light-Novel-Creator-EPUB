@@ -197,6 +197,31 @@ def _epub_name(path, kepub):
     return re.sub(r"(\.kepub)?\.epub$", "", str(path), flags=re.I) + (".kepub.epub" if kepub else ".epub")
 
 
+def _out(source):
+    """Ruta del EPUB de salida sin extensión: junto al original y con su nombre; un EPUB de entrada lleva
+    además «(LNC)» para no pisarse."""
+    source = Path(source)
+    return source.with_name(source.stem + " (LNC)") if source.suffix.lower() == ".epub" else source.with_suffix("")
+
+
+def _has_epub(source):
+    """El original ya tiene su EPUB de salida (normal o KEPUB)."""
+    return any(Path(_epub_name(_out(source), kepub)).exists() for kepub in (False, True))
+
+
+def _sources(folder):
+    """PDF y EPUB de la carpeta que se pueden convertir. Un EPUB que es la salida de otro archivo no lo es:
+    acaba en «(LNC)» o .kepub.epub, o hay un PDF con su nombre."""
+    found = []
+    for path in sorted(Path(folder).iterdir()):
+        suffix = path.suffix.lower()
+        if suffix == ".pdf" or (suffix == ".epub" and not path.stem.endswith(" (LNC)")
+                                and not path.name.lower().endswith(".kepub.epub")
+                                and not any(path.with_suffix(ext).exists() for ext in (".pdf", ".PDF"))):
+            found.append(path)
+    return [path for path in found if path.is_file()]
+
+
 KINDLE_MAIL = 50_000_000  # límite de Send to Kindle por correo; la web admite hasta 200 MB
 
 
@@ -435,7 +460,7 @@ def _batch(pdfs, options, progress=None):
         try:
             book, chapters, removed, state = _prepare(pdf, options)
             written = _write_options(state, state["_breaks"])
-            problems = _write_checked(book, chapters, _epub_name(Path(pdf).with_suffix(""), written["kepub"]),
+            problems = _write_checked(book, chapters, _epub_name(_out(pdf), written["kepub"]),
                                       removed, written)
             results.append((Path(pdf).name, "", problems))
         except Exception as e:
@@ -508,8 +533,8 @@ def _ready(folder, sizes, skip):
     que en la vuelta anterior (si cambia, aún se está copiando o descargando).
     Devuelve (listos, {pdf: tamaño} para la vuelta siguiente)."""
     ready, now = [], {}
-    for pdf in sorted(Path(folder).glob("*.pdf")):
-        if str(pdf) in skip or pdf.with_suffix(".epub").exists() or pdf.with_suffix(".kepub.epub").exists():
+    for pdf in _sources(folder):
+        if str(pdf) in skip or _has_epub(pdf):
             continue
         try:
             now[str(pdf)] = size = pdf.stat().st_size
@@ -587,7 +612,8 @@ def _install_paths():
     return base / "PDF a EPUB.exe", menu / "PDF a EPUB.lnk"
 
 
-OPEN_WITH = r"Software\Classes\SystemFileAssociations\.pdf\shell\PDFaEPUB"  # "Abrir con" en el menú de los PDF
+OPEN_WITHS = [rf"Software\Classes\SystemFileAssociations\{ext}\shell\PDFaEPUB"  # "Convertir a EPUB" en su menú
+              for ext in (".pdf", ".epub")]
 
 
 def _install(source):
@@ -602,10 +628,11 @@ def _install(source):
               f"$s.TargetPath={_ps_quote(exe)};$s.IconLocation={_ps_quote(f'{exe},0')};$s.Save()")
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, OPEN_WITH) as key:
-        winreg.SetValue(key, "", winreg.REG_SZ, "Convertir a EPUB")
-        winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, str(exe))
-        winreg.SetValue(key, "command", winreg.REG_SZ, f'"{exe}" "%1"')
+    for open_with in OPEN_WITHS:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, open_with) as key:
+            winreg.SetValue(key, "", winreg.REG_SZ, "Convertir a EPUB")
+            winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, str(exe))
+            winreg.SetValue(key, "command", winreg.REG_SZ, f'"{exe}" "%1"')
     return exe
 
 
@@ -614,7 +641,7 @@ def _uninstall():
     import winreg
     exe, link = _install_paths()
     link.unlink(missing_ok=True)
-    for sub in (OPEN_WITH + r"\command", OPEN_WITH):
+    for sub in [key for open_with in OPEN_WITHS for key in (open_with + r"\command", open_with)]:
         try:
             winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
         except OSError:
@@ -654,10 +681,10 @@ def _balanced(text):
 
 
 def _dropped_pdf(mime):
-    """El primer .pdf de lo que se suelta sobre la ventana; None si no hay ninguno."""
+    """El primer .pdf o .epub de lo que se suelta sobre la ventana; None si no hay ninguno."""
     for url in mime.urls() if mime.hasUrls() else []:
         path = url.toLocalFile()
-        if path.lower().endswith(".pdf") and Path(path).is_file():
+        if path.lower().endswith((".pdf", ".epub")) and Path(path).is_file():
             return path
     return None
 
@@ -665,9 +692,9 @@ def _dropped_pdf(mime):
 def _volume_status(pdf):
     """Estado de un tomo: «EPUB generado», «EPUB anterior a la revisión», «Revisado, sin EPUB» o «Sin revisar»."""
     pdf = Path(pdf)
-    state, epub = _read_review(pdf), pdf.with_suffix(".epub")
+    state, epub = _read_review(pdf), Path(_epub_name(_out(pdf), False))
     if not epub.exists():
-        epub = pdf.with_suffix(".kepub.epub")
+        epub = Path(_epub_name(_out(pdf), True))
     if epub.exists() and (not state or epub.stat().st_mtime >= _review_path(pdf).stat().st_mtime - 5):
         return "EPUB generado"
     if epub.exists():
@@ -831,7 +858,7 @@ class App:
 
         # Barra superior
         top = QFrame(objectName="bar")
-        self.open_btn = _button("Abrir PDF…", self.open_pdf)
+        self.open_btn = _button("Abrir PDF o EPUB…", self.open_pdf)
         self.batch_btn = _button("Convertir carpeta…", self.convert_folder)
         self.recent_menu = QMenu(root)
         tools = QMenu(root)
@@ -1059,7 +1086,7 @@ class App:
         icon = _label("📄")
         icon.setStyleSheet("font-size: 40pt;")
         for widget in (icon, _label("Suelta aquí un PDF de novela ligera", "big"), _label("o", "muted"),
-                       _button("Abrir PDF…", self.open_pdf, "primary"),
+                       _button("Abrir PDF o EPUB…", self.open_pdf, "primary"),
                        _button("¿Muchos tomos? Convertir una carpeta entera", self.convert_folder, "link")):
             inner.addWidget(widget, 0, Qt.AlignmentFlag.AlignHCenter)
         inner.addStretch(1)
@@ -1379,7 +1406,7 @@ class App:
             x0, y0, x1, y1 = (v * zoom for v in self.highlight[1])
             marks.append((QRectF(x0 - 3, y0 - 2, x1 - x0 + 6, y1 - y0 + 4), "red"))
         canvas.show_image(self.box_size(), image, marks)
-        self.pdf_caption.setText(f"PDF · página {self.pdf_page + 1}")
+        self.pdf_caption.setText(f"{self.source_name()} · página {self.pdf_page + 1}")
         self.mark_current()
 
     def draw_epub(self):
@@ -1521,12 +1548,18 @@ class App:
         return WIDE_NEXT if item in self.wide else IMAGE_NEXT
 
     def open_pdf(self):
-        path = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")], initialdir=self.settings.get("folder"))
+        path = filedialog.askopenfilename(filetypes=[("PDF o EPUB", "*.pdf *.epub")],
+                                          initialdir=self.settings.get("folder"))
         if path:
             self.open_path(path)
 
+    def source_name(self):
+        """Nombre del original en pestañas y leyendas: «PDF», u «Original» si es un EPUB (la vista previa de la
+        derecha ya se llama EPUB)."""
+        return "Original" if self.pdf and self.pdf.suffix.lower() == ".epub" else "PDF"
+
     def open_path(self, path):
-        """Abre un PDF: desde el botón, el menú de recientes o arrastrado sobre el .exe."""
+        """Abre un PDF o un EPUB: desde el botón, el menú de recientes o arrastrado sobre el .exe."""
         if self.done:  # hay un trabajo en curso
             return
         if not Path(path).is_file():
@@ -1542,6 +1575,8 @@ class App:
         self.fill_recent()
         self.pdf, self.book = Path(path), None
         self.file_label.setText(self.pdf.name)
+        self.tabs.setTabText(0, self.source_name())
+        self.pdf_caption.setText(self.source_name())
         self.tree.delete(*self.tree.get_children())
         self.stack.setCurrentIndex(1)
         self.update_header()
@@ -1566,7 +1601,7 @@ class App:
         self.replacements = []  # son de la serie: llegan con la revisión o heredados de otro tomo
         self.words, self.ignored, self.unknown = [], [], set()
         self.cover_choice = None
-        self.cover_label.setText("Portada: la del PDF")
+        self.cover_label.setText(f"Portada: la del {'EPUB' if self.source_name() == 'Original' else 'PDF'}")
         self.edits, self.analyzed = [], len(book.blocks)
         self.fill_tree({})
         cut = convert.link_sections(book)  # publicidad del grupo: se propone quitarla
@@ -1715,7 +1750,7 @@ class App:
     def generate(self):
         out = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[("EPUB", "*.epub")],
                                            initialdir=self.pdf.parent,
-                                           initialfile=_epub_name(self.pdf.stem, self.kepub_var.get()))
+                                           initialfile=_epub_name(_out(self.pdf).name, self.kepub_var.get()))
         if not out:
             return
         out = _epub_name(out, self.kepub_var.get())
@@ -2285,8 +2320,8 @@ class App:
         if not folder:
             return
         self.save_review()  # el PDF abierto también se convierte con lo revisado hasta ahora
-        pdfs = sorted(Path(folder).glob("*.pdf"))
-        existing = [p for p in pdfs if p.with_suffix(".epub").exists() or p.with_suffix(".kepub.epub").exists()]
+        pdfs = _sources(folder)
+        existing = [p for p in pdfs if _has_epub(p)]
         if existing:
             answer = messagebox.askyesnocancel(
                 "Convertir carpeta", f"{len(existing)} de {len(pdfs)} PDF ya tienen su EPUB.\n\n"
@@ -2335,7 +2370,7 @@ class App:
     def set_watch(self, folder):
         # Lo que ya hay al activarla no se toca: solo lo que llegue después
         self.watch, self.watch_sizes = folder, {}
-        self.watch_skip = {str(p) for p in Path(folder).glob("*.pdf")} if folder else set()
+        self.watch_skip = {str(p) for p in _sources(folder)} if folder else set()
         self.settings["watch"] = folder
         self.status.setText(f"Vigilando {folder}" if folder else "Carpeta vigilada desactivada")
 
@@ -2414,7 +2449,7 @@ class App:
         grid.itemClicked.connect(lambda item: item.data(Qt.ItemDataRole.UserRole) is not None
                                  and (self.set_cover(("image", item.data(Qt.ItemDataRole.UserRole))), win.close()))
         column.addWidget(grid, 1)
-        column.addLayout(_row(_button(f"Página mostrada del PDF ({self.pdf_page + 1})",
+        column.addLayout(_row(_button(f"Página mostrada del original ({self.pdf_page + 1})",
                                       lambda: (self.cover_from_page(), win.close())),
                               _button("Imagen de un archivo…", lambda: (win.close(), self.cover_from_file())),
                               _button("Portada con título", lambda: (self.set_cover(("text", "")), win.close())), 1))
@@ -2670,7 +2705,7 @@ class App:
             if issue and issue.edit and not issue.after:  # el arreglo quita el párrafo entero
                 old = [(0, len(issue.before))]
             preview(previews["before"], issue.before if issue else "", old, "old",
-                    f"(texto de la página {issue.page} del PDF: míralo en la vista previa)" if issue else "")
+                    f"(texto de la página {issue.page} del original: míralo en la vista previa)" if issue else "")
             preview(previews["after"], issue.after if issue else "", new, "new",
                     "(se quita)" if issue and issue.edit else "Sin arreglo automático: sigue la solución.")
             fix_btn.setEnabled(bool(issue and issue.edit))
@@ -2718,7 +2753,7 @@ class App:
         table = qtk.RowList(("pdf", "state", "warn"), {"pdf": "Tomo", "state": "Estado", "warn": "Avisos"},
                             {"state": 200, "warn": 80}, stretch="pdf")
         table.setMinimumSize(680, 420)
-        for pdf in sorted(Path(folder).glob("*.pdf")):
+        for pdf in _sources(folder):
             state = _read_review(pdf)
             problems = state.get("problems") if state else None
             warn = "—" if problems is None else len(problems) or "Ninguno"
@@ -2733,7 +2768,7 @@ class App:
         """Volumen recopilatorio: varios PDF (en orden de nombre) en un solo EPUB (ver _omnibus)."""
         if self.done:  # trabajo en curso: el menú no se desactiva como los botones
             return
-        paths = filedialog.askopenfilenames(filetypes=[("PDF", "*.pdf")], initialdir=self.settings.get("folder"),
+        paths = filedialog.askopenfilenames(filetypes=[("PDF o EPUB", "*.pdf *.epub")], initialdir=self.settings.get("folder"),
                                             title="Tomos del recopilatorio")
         if len(paths) < 2:
             if paths:
