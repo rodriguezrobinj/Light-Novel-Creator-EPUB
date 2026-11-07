@@ -3194,6 +3194,77 @@ def test_quality_report_fixes_fansub_typos():
                                                   "<i>¿Qué haces?</i>", "«¿Qué?» ¡Ven aquí!"], [b.html for b in book.blocks]
 
 
+def test_quality_report_fixes_grammar_and_typography():
+    """Tildes, erratas, gramática, espacios, signos dobles, incisos y cierres que faltan: cada caso con su
+    arreglo; lo que se parece pero está bien escrito no salta."""
+    cases = [  # (texto, tipo, arreglado)
+        ("Lo hizo para mi.", "accent", "Lo hizo para mí."), ("¡Tu! Vuelve aquí.", "accent", "¡Tú! Vuelve aquí."),
+        ("¿Si? Claro.", "accent", "¿Sí? Claro."), ("¿Como lo supiste?", "accent", "¿Cómo lo supiste?"),
+        ("Tambien vino despues.", "accent", "También vino después."), ("Fui con el, y nada.", "accent", "Fui con él, y nada."),
+        ("No tenia la informacion.", "accent", "No tenía la información."), ("Ya no puedo mas.", "accent", "Ya no puedo más."),
+        ("Fué ella.", "accent", "Fue ella."), ("Me aferré a el con fuerza.", "accent", "Me aferré a él con fuerza."),
+        ("Talvez venga enserio.", "spelling", "Tal vez venga en serio."), ("Tubiera tiempo.", "spelling", "Tuviera tiempo."),
+        ("Va ha llover.", "spelling", "Va a llover."), ("Vino ha ver a su madre.", "spelling", "Vino a ver a su madre."),
+        ("Eso a sido culpa mía.", "spelling", "Eso ha sido culpa mía."), ("Yo e visto eso.", "spelling", "Yo he visto eso."),
+        ("Lo he echo yo. De echo, sí.", "spelling", "Lo he hecho yo. De hecho, sí."),
+        ("Otra ves lo mismo.", "spelling", "Otra vez lo mismo."),
+        ("Se dio cuenta que era tarde.", "queismo", "Se dio cuenta de que era tarde."),
+        ("A pesar que llovía, estaba seguro que vendría.", "queismo", "A pesar de que llovía, estaba seguro de que vendría."),
+        ("Pienso de que es tarde.", "dequeismo", "Pienso que es tarde."),
+        ("Habían muchos soldados.", "haber", "Había muchos soldados."),
+        ("Volvió a el asiento de el carro.", "contraction", "Volvió al asiento del carro."),
+        ("Se sintió más peor detrás mío.", "grammar", "Se sintió peor detrás de mí."),
+        ("¡ Hay una fila!", "space", "¡Hay una fila!"), ("“Pasa ”, dijo.", "space", "“Pasa”, dijo."),
+        ("“¡ Láser!\xa0”", "space", "“¡Láser!”"),  # Maryoku: espacio duro antes del cierre
+        ("Lo siento,no puedo.", "nospace", "Lo siento, no puedo."),
+        ("Se burló.Shinichi lo miró.", "nospace", "Se burló. Shinichi lo miró."),
+        ("“¡Entendido!”dijo Teto.", "nospace", "“¡Entendido!” dijo Teto."),
+        ("¿Qué?. Y entonces….", "punct", "¿Qué? Y entonces…"), ("Hola,, adiós.", "punct", "Hola, adiós."),
+        ("Lo dejé así. . Además, nada.", "punct", "Lo dejé así. Además, nada."),
+        # Mitsuha: coma antes de la raya del narrador, y la frase que sigue tras el inciso
+        ("—Sí, — respondió el soldado, —un buque llegó.", "dialog", "—Sí —respondió el soldado—, un buque llegó."),
+        ("—Está muerto. —señaló Ferris—. Vamos.", "dialog", "—Está muerto —señaló Ferris—. Vamos."),
+        ("¡El comercio va a explotar. ¡Lo sé!", "closing", "¡El comercio va a explotar! ¡Lo sé!"),
+    ]
+    fine = ["Aun así, vino.", "Lo juzgó estricta, mas no indiferente.", "Acabamos de llegar.", "¿Que no vienes?",
+            "Es mi… mi espada.", "Y el... el objeto cayó.", "El Land Dragon rugió.", "¡El, eh, enviado llegó!",
+            "¿La ves?", "Ivan sonrió.", "Lo echo de menos.", "No ha lugar.", "Seguro que vendrá.",
+            "La cuenta que pagó era alta.", "Me alegro de que vengas.", "Habían muerto muchos.",
+            "Subió al rango A el año pasado.", "Son 3,5 kilos.", "Re:Zero es genial.", "¿”amiga” es la palabra?",
+            "Bueno...", "Trajo pan, leche, etc., y se fue.", "—¿Qué? —preguntó.", "—Ya veo —dijo—. Vamos.",
+            "¿Cómo… No, da igual.", "—¿No sería lo mejor──", "“¿Eh~...”.", "Lo vio el Dr. ramírez.",
+            "Un arma simple: un tubo que no parece robusto.",  # Mitsuha: «tubo» es el nombre
+            # Mitsuha: la exclamación sigue tras el punto, o el punto es de un número o una sigla
+            "¡Oh, wow. Esos son barcos, sin duda!", "Gracias por leer ¡Ahorrando 80.000 oros!", "¡G.I. Samurai ya existe!"]
+    texts = [t for t, _, _ in cases] + fine
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, html.escape(t, quote=False))
+                                                            for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    kinds = {kind for _, kind, _ in cases}
+    report = [i for i in convert.quality_report(book) if i.kind in kinds]
+    found = sorted((i.block, i.kind) for i in report)
+    assert found == [(k + 1, kind) for k, (_, kind, _) in enumerate(cases)], [
+        (i.block, i.kind, texts[i.block - 1]) for i in report if (i.block, i.kind) not in
+        [(k + 1, kind) for k, (_, kind, _) in enumerate(cases)]] or found
+    assert all(i.level == "Menor" and i.after and i.problem and i.solution for i in report)
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    got = [html.unescape(b.html) for b in book.blocks[1:len(cases) + 1]]
+    assert got == [fixed for _, _, fixed in cases], [(g, f) for g, (_, _, f) in zip(got, cases) if g != f]
+
+
+def test_quality_report_finds_lowercase_after_period_and_missing_end():
+    """Minúscula tras un punto (no tras una abreviatura ni puntos suspensivos) y párrafo sin punto final al que
+    sigue otro en mayúscula: avisos sin arreglo automático, porque puede sobrar el punto o faltar texto."""
+    texts = ["Lo dejó en la mesa. luego se fue.", "Trajo pan, etc. y se fue... luego volvió.",
+             "Necesitamos una opinión de un tercero sin dudarlo", "Hubiera sido genial.",
+             "Clic", "Nada más.", "La identidad verdadera de Jack el", "destripador asustaba.", "Era el final del libro"]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    found = [(i.block, i.kind, i.edit) for i in convert.quality_report(book) if i.kind in ("capital", "end")]
+    assert found == [(1, "capital", None), (3, "end", None)], found
+
+
 def test_quality_report_finds_inline_notes():
     """Una nota del traductor entre paréntesis dentro del texto se propone como nota emergente; un paréntesis
     normal no."""

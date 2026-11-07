@@ -1157,6 +1157,127 @@ def _opening_marks(line):
 INLINE_NOTE = re.compile(r"\s*[(\[]\s*(?:N\.\s?T\.?|N/T|NdT|T/N|Nota del? traductor)\s*[:.\-–—]?\s*([^()\[\]]+?)\s*[)\]]",
                          re.I)
 
+def _subs(*rules):
+    """Arreglo de una línea que aplica varias sustituciones seguidas: una función o (patrón, cambio[, pistas]).
+    Con pistas (textos), el patrón solo se prueba si la línea tiene alguna: mucho más rápido que el patrón."""
+    rules = [r if callable(r) else (functools.partial(re.compile(r[0]).sub, r[1]), r[2] if len(r) > 2 else ())
+             for r in rules]
+
+    def fix(s):
+        for rule in rules:
+            if callable(rule):
+                s = rule(s)
+            elif not rule[1] or any(h in s for h in rule[1]):
+                s = rule[0](s)
+        return s
+    return fix
+
+
+def _table(table, names=()):
+    """Arreglo de las palabras de table {mal: bien}, con su mayúscula inicial. Las de names, que también son
+    nombres propios ("Ivan", "Dragon"), solo en minúscula."""
+    keys = list(table) + [k.capitalize() for k in table if k not in names]
+    pattern = re.compile(r"\b(?:" + "|".join(sorted(keys, key=len, reverse=True)) + r")\b")
+
+    def fix(s):
+        # Mirar antes si sale alguna: recorrer cientos de alternativas en cada párrafo es lo lento
+        if table.keys().isdisjoint(_words(s)):
+            return s
+        return pattern.sub(lambda m: _case(table[m[0].lower()], m[0]), s)
+    return fix
+
+
+@functools.lru_cache(maxsize=4)
+def _words(s):
+    """Las palabras de una línea, en minúscula; las miran varias reglas seguidas."""
+    return frozenset(re.findall(r"[^\W\d_]+", s.lower()))
+
+
+def _after(words, new, n=1):
+    """Cambio por new de lo encontrado si lo preceden una de words (sus n palabras de antes, en minúscula).
+    El patrón empieza por su palabra rara («echo», «ves»): una alternativa larga al principio, en cada
+    posición de cada párrafo, hacía el informe tres veces más lento."""
+    tail = re.compile(r"[^\W\d_]+" + r" [^\W\d_]+" * (n - 1) + "$")
+
+    def repl(m):
+        w = tail.search(m.string, max(0, m.start() - 40), m.start())
+        return new if w and w[0].lower() in words else m[0]
+    return repl
+
+
+def _ion(m):
+    """«informacion» -> «información»: solo palabras en minúscula ("Fusion", nombre, no) y sin "ss"
+    ("mission", inglés, no)."""
+    w = re.search(r"[^\W\d_]+$", m.string[max(0, m.start() - 30):m.start()])
+    return "ión" if w and w[0].islower() and w[0][-1] in "cs" and w[0][-2:] != "ss" else m[0]
+
+
+def _case(new, old):
+    """new con la mayúscula inicial de old: ("tú", "Tu") -> "Tú"."""
+    return new.capitalize() if old[:1].isupper() else new
+
+
+BARE = str.maketrans("áéíóú", "aeiou")
+# Palabras que sin tilde no existen («mas» y «aun», sí: «mas no», «aun así» están bien); de erratas reales
+# de las traducciones de la carpeta de muestras
+ACCENTS = {w.translate(BARE): w for w in (
+    "también después aquí ahí allí allá acá así además quizás jamás detrás atrás todavía adiós demás ningún "
+    "algún según común razón corazón ojalá país día días mío mía míos mías tío tía oír reír sonreír héroe "
+    "héroes café fácil difícil útil inútil débil rápido rápida rápidos rápidas rápidamente último última "
+    "últimos últimas últimamente único única únicos únicas únicamente prácticamente básicamente mágico mágica "
+    "mágicos mágicas técnica técnicas música próximo próxima máximo máxima mínimo mínima lágrima lágrimas "
+    "jóvenes imágenes dragón jardín están éramos íbamos estábamos").split()}
+ACCENTS |= {"fué": "fue", "dió": "dio", "vió": "vio", "fuí": "fui", "tí": "ti", "ví": "vi"}
+# Imperfecto y condicional: "tenia" -> "tenía". Solo raíces cuyo "-ia" sin tilde no es otra palabra ("sabia",
+# "hacia", "seria" y "venia", sí)
+ACCENTS |= {stem + end: stem + "í" + end[1:] for end in ("ia", "ias", "ian", "iamos") for stem in (
+    "hab ten pod quer dec viv parec conoc cre le ve com deb segu sent ped sal exist sonre ment tem corr entend "
+    "perd dorm ofrec volv pon tra ca o podr tendr har querr deber estar habr dir sabr vendr saldr pondr "
+    "gustar encantar importar preferir").split()}
+NAMES = {"dragon", "mia", "mio", "dia", "tia", "tio", "iva", "ivan", "ivas"}  # también nombres: solo en minúscula
+INTERROGATIVE = {w.translate(BARE): w for w in "qué cómo dónde quién quiénes cuál cuáles cuánto cuánta cuántos "
+                                                "cuántas".split()}
+PREPOSITIONS = "a|de|con|para|por|sin|ante|contra|entre|hacia|hasta|según|sobre|tras"
+# Tras «a el» / «de el» va un nombre («al asiento»), salvo que «el» sea el pronombre: «a él le», «de él con»
+PRONOUN_NEXT = "le|les|lo|me|te|se|nos|no|ni|también|tampoco|con|y|pero"
+SPELLING = {"aveces": "a veces", "talvez": "tal vez", "enserio": "en serio", "derepente": "de repente",
+            "atravez": "a través", "atraves": "a través", "almenos": "al menos", "porfavor": "por favor",
+            "osea": "o sea", "apesar": "a pesar", "sinembargo": "sin embargo", "deveras": "de veras",
+            "haci": "así", "haiga": "haya", "haigan": "hayan", "iva": "iba", "ivan": "iban", "ivas": "ibas",
+            "hiba": "iba", "hiban": "iban", "aber": "haber", "ubo": "hubo", "ubiera": "hubiera",
+            "ubieran": "hubieran", "ubieron": "hubieron", "abia": "había", "abía": "había", "abian": "habían",
+            "abían": "habían", "tube": "tuve", "tubiste": "tuviste", "tubimos": "tuvimos", "tubieron": "tuvieron",
+            "tubiera": "tuviera", "tubieras": "tuvieras", "tubieran": "tuvieran", "tubiese": "tuviese",
+            "hechar": "echar", "hechaba": "echaba", "hechaban": "echaban", "hechando": "echando", "hechó": "echó",
+            "hecharon": "echaron", "hechara": "echara", "dijistes": "dijiste", "hicistes": "hiciste",
+            "fuistes": "fuiste", "vinistes": "viniste", "tuvistes": "tuviste", "estuvistes": "estuviste",
+            "pudistes": "pudiste", "quisistes": "quisiste", "supistes": "supiste"}
+# Lo que pide «de que»: «darse cuenta de que», «a pesar de que», «acordarse de que», «estar seguro de que»
+# («Seguro que vendrá», sin «estar», está bien)
+QUEISMO = ({f"{d} cuenta" for d in "di dio diste dimos dieron doy das da damos dan daba daban dé des darme darte "
+            "darse darnos dándome dándote dándose dando".split()} | {"a pesar", "en caso"}
+           | {f"{p} {a}" for p in "me te se nos".split()
+              for a in "acuerdo acuerdas acuerda acordamos acuerdan acordé acordó acordaba".split()}
+           | {f"{e} {s}" for e in "estoy estás está estaba estabas estaban estamos están estaría esté estés".split()
+              for s in "seguro segura seguros seguras".split()})
+DASHES = ("—", "―", "─", "–")  # rayas del PDF: «—», «―» (Re Zero), «─» (Kage), «–»
+PLACES = set("delante detrás encima debajo cerca alrededor enfrente dentro lejos".split())  # «detrás mío»
+# Nombres en -ar/-er/-ir: tras «ha» no son un infinitivo («no ha lugar»)
+NOT_INFINITIVE = "lugar|mar|hogar|altar|azar|bar|collar|par|mujer|ayer|placer|poder|deber|taller|alquiler"
+ABBREVIATIONS = set("sr sra srta dr dra ud uds vd etc aprox pág págs núm vol cap ej av lic ing prof vs st mr mrs "
+                    "ms art fig tel min máx mín seg atte".split())  # tras ellas el punto no acaba la frase
+CAPITAL = re.compile(r"([^\W\d_]{2,})\.\s+[a-záéíóúñ]")  # "la mesa. luego"; los puntos suspensivos no cuentan
+
+
+def _close(m):
+    """Cambia por ? o ! el punto que acaba una pregunta o exclamación abierta. No tras una abreviatura («¡Hola,
+    Sr. García!»), ni si la frase que sigue la cierra: «¡Oh, wow. Esos son barcos!» (Mitsuha)."""
+    rest = re.search(r"[¿¡?!]", m.string[m.end():])
+    if m[3].lower() in ABBREVIATIONS or rest and rest[0] in "?!":
+        return m[0]
+    return m[1] + m[2] + m[3] + ("?" if m[1] == "¿" else "!")
+
+
 TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas típicas de las traducciones fan
     ("opening", "Falta el signo de apertura", _opening_marks,
      "En español las preguntas y exclamaciones llevan signo de apertura (¿ ¡) además del de cierre.", "Corregirlo."),
@@ -1171,7 +1292,104 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
     ("note", "Nota del traductor en el texto", lambda s: INLINE_NOTE.sub(lambda m: f"[Nota: {m[1]}]", s),
      "Una nota entre paréntesis corta la lectura; como nota emergente se lee al tocar la llamada.",
      "Convertirla en nota emergente."),
+    ("accent", "Falta o sobra una tilde", _subs(
+        _table(ACCENTS, NAMES),
+        # Antes de un signo, «tu», «mi», «el» y «si» son pronombres o afirmación: «para mí», «¡Tú!», «¿Sí?».
+        # Tras puntos suspensivos o una coma puede ser un titubeo: «mi… mi espada», «el, eh, enviado»
+        (r"\b(?:[Tt]u|[Mm]i|[Ee]l|[Ss]i)(?=[.;:!?»”)](?!\.))",
+         lambda m: _case({"tu": "tú", "mi": "mí", "el": "él", "si": "sí"}[m[0].lower()], m[0])),
+        (rf" el(?=,| (?:{PRONOUN_NEXT})\b)", _after(set(PREPOSITIONS.split("|")), " él")),
+        # «¿Que no vienes?», «¿Que si vendrá?» repiten lo dicho: ahí «que» no lleva tilde
+        (r"¿(\s*(?:[Yy] )?)(" + "|".join(list(INTERROGATIVE) + [w.capitalize() for w in INTERROGATIVE]) +
+         r")\b(?! (?:no|si)\b)", lambda m: "¿" + m[1] + _case(INTERROGATIVE[m[2].lower()], m[2])),
+        (r"\bmas\b(?! no\b)", "más"),
+        (r"ion\b", _ion)),
+     "Palabras que sin tilde no existen («tambien», «tenia», «informacion»), pronombres que la llevan («para "
+     "mí», «con él», «¡Tú!»), preguntas («¿cómo?») y monosílabos que no la llevan («fue», «dio», «ti»).",
+     "Corregirlo."),
+    ("spelling", "Palabra mal escrita", _subs(
+        _table(SPELLING, NAMES),
+        (r" ha\b", _after(set("voy vas va vamos van iba ibas iban íbamos".split()), " a")),
+        (rf"\b([Hh])a (?=(?!(?:{NOT_INFINITIVE})\b)[a-záéíóúñ]+(?:ar|er|ir)\b)", lambda m: ("A" if m[1] == "H" else "a") + " ",
+         ("ha ", "Ha ")),
+        (r"\b([Aa]) (?=(?:sido|habido|tenido|podido)\b)", lambda m: ("Ha" if m[1] == "A" else "ha") + " ",
+         ("sido", "habido", "tenido", "podido")),
+        (r"\b([Ee]) (?=(?:sido|estado|hecho|visto|dicho|tenido|podido|habido|oído|querido|pensado)\b)",
+         lambda m: ("He" if m[1] == "E" else "he") + " ", ("ido", "hecho", "visto", "dicho", "oído")),
+        (r" echo\b", _after(set("he has ha hemos han había habías habían haber habría hubiera hubiese de".split()),
+                            " hecho")),
+        (r" ves\b", _after(set("una otra tal cada alguna esta primera última de".split()), " vez")),  # «¿La ves?», no
+        (r" ves\b", _after({"a la"}, " vez", 2))),
+     "Errata frecuente: palabras juntas que van separadas («a veces», «en serio»), «ha» por «a» («va a llover», "
+     "«vino a ver»), «a» o «e» por «ha» o «he» («ha sido», «he visto»), «echo» por «hecho», «ves» por «vez».",
+     "Corregirlo."),
+    ("queismo", "Falta «de» antes de «que»", _subs(
+        (r" que\b", _after(QUEISMO, " de que", 2))),
+     "Se dice «darse cuenta de que», «a pesar de que», «estar seguro de que», «acordarse de que»: sin el "
+     "«de» es queísmo.", "Corregirlo."),
+    ("dequeismo", "Sobra «de» antes de «que»", _subs(
+        (r" de que\b", _after(set("pienso piensas piensa pensé pensó pensaba creo crees cree creí creyó creía opino "
+                                  "supongo supuso suponía parece parecía imagino imaginé considero dije dijo dijiste "
+                                  "dijeron".split()), " que"))),
+     "Se dice «pienso que», «creo que», «dijo que», «parece que»: con «de» es dequeísmo.", "Corregirlo."),
+    ("haber", "«Había muchos», no «habían muchos»", _subs(
+        (r"\b(?i:habían|hubieron|habrán|habrían|hayan|hubiesen|hubieran)(?= (?i:muchos|muchas|varios|varias|"
+         r"algunos|algunas|unos|unas|pocos|pocas|tantos|tantas|demasiados|demasiadas|dos|tres|cuatro|cinco|seis|"
+         r"siete|ocho|nueve|diez|cientos|miles|decenas|docenas|más)\b)",
+         lambda m: _case({"habían": "había", "hubieron": "hubo", "habrán": "habrá", "habrían": "habría",
+                           "hayan": "haya", "hubiesen": "hubiese", "hubieran": "hubiera"}[m[0].lower()], m[0]),
+         ("abían", "ubieron", "abrán", "abrían", "ayan", "ubiesen", "ubieran"))),
+     "«Haber» con el sentido de «existir» no tiene plural: «había muchos soldados», «hubo dos ataques».",
+     "Corregirlo."),
+    ("contraction", "«a el» o «de el» sin contraer", _subs(
+        (rf"\b(a|[Dd]e) el (?!(?:{PRONOUN_NEXT}|la|los|las|os|e|o|u|mismo|misma|solo|sólo|ya|como|cómo|cuando|"
+         r"mientras|en|por|para|sin|a|de)\b)(?=[a-záéíóúñ])", lambda m: {"a": "al ", "de": "del ", "De": "Del "}[m[1]],
+         ("a el ", "e el "))),
+     "Delante de un nombre, «a el» y «de el» se contraen: «volvió al asiento del carro». Si «el» es el "
+     "pronombre, no se contrae y lleva tilde: «a él».", "Corregirlo."),
+    ("grammar", "Construcción incorrecta", _subs(
+        (r"\b([Mm])ás (mejor|peor|mejores|peores)\b", lambda m: m[2].capitalize() if m[1] == "M" else m[2],
+         ("ás mejor", "ás peor")),
+        (r" mí[oa]\b", _after(PLACES, " de mí")), (r" tuy[oa]\b", _after(PLACES, " de ti"))),
+     "«Más mejor» y «más peor» repiten la comparación (basta «mejor», «peor»); «detrás mío» es «detrás de mí».",
+     "Corregirlo."),
+    ("space", "Espacio de más junto a un signo", _subs((r"([¿¡«“(])\s+", r"\1"), (r"\s+([»”)])", r"\1")),
+     "Tras los signos de apertura (¿ ¡ « “ () y antes de los de cierre (» ” )) no va espacio.", "Quitarlo."),
+    ("nospace", "Falta un espacio tras un signo", _subs(
+        (r"(?<=[^\W\d_])([,;])(?=[^\W\d_]|[¿¡«])", r"\1 "),
+        (r"(?<=[a-záéíóúñü]{2})([.?!…])(?=[A-ZÁÉÍÓÚÑ¿¡])", r"\1 "),  # "se burló.Shinichi"; "S.A." o "p.ej.", no
+        (r"([»”)])(?<=[^\s¿¡(«“—―─–][»”)])(?=[^\W\d_]|[¿¡«])", r"\1 ")),  # tras «¿» la ” abre: «¿”amiga”?»
+     "Tras la coma, el punto, el cierre de pregunta o exclamación y el cierre de comillas va un espacio: sin él "
+     "las palabras se leen pegadas.", "Ponerlo."),
+    ("punct", "Signos de puntuación repetidos", _subs(
+        (r",{2,}", ","), (r"[,;]\s*\.(?!\.)", "."), (r"([?!])\.(?!\.)", r"\1"), (r"…\.(?!\.)", "…"),
+        (r"(?<![.…])(?<![.…] )\.\s+\.(?!\s*[.…])", ".", (". .", ".  ."))),  # ". ." suelto; ". . ." son puntos suspensivos
+     "Dos signos donde va uno: «,,», «?.», «….», «. .». Tras los puntos suspensivos o el cierre de pregunta "
+     "o exclamación no va punto.", "Corregirlo."),
+    ("dialog", "Puntuación del inciso del narrador", _subs(
+        # Mitsuha: «—Sí, — respondió el soldado, —un buque…» -> «—Sí —respondió el soldado—, un buque…»
+        (r",\s*[—―─–]\s*([a-záéíóúñ][^—―─–.!?]*?),\s*[—―─–]\s*", r" —\1—, ", DASHES),
+        (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", r"\1 —", DASHES)),
+     "En un diálogo, el punto o la coma no van antes del inciso del narrador sino tras su raya de cierre: "
+     "«—Sí —respondió—, vamos.»", "Corregirlo."),
+    ("closing", "Falta el signo de cierre", _subs(
+        (r"([¿¡])([^¿¡?!…—―─.]*?)([^\W\d_]*)\.(?![.…\w])", _close)),  # «80.000», «G.I.», no
+     "La pregunta o la exclamación se abre con ¿ o ¡ pero acaba en punto: le falta su signo de cierre.",
+     "Corregirlo."),
 )
+
+
+@functools.lru_cache(maxsize=20000)
+def _typos(line):
+    """Las erratas de TYPOS de una línea: ((índice en TYPOS, línea arreglada)…). Recordadas por línea: tras un
+    arreglo, el informe solo vuelve a mirar los párrafos que cambiaron."""
+    found = []
+    for n, (_, _, rule, _, _) in enumerate(TYPOS):
+        fixed = rule(line)
+        # Lo que la limpieza tipográfica del EPUB ya arregla («— dijo» -> «—dijo»), no se avisa
+        if fixed != line and _typography(_inline(fixed)) != _typography(_inline(line)):
+            found.append((n, fixed))
+    return tuple(found)
 
 
 def quality_report(book):
@@ -1255,14 +1473,27 @@ def quality_report(book):
                                 "grupo.", "Tradúcelo o quítalo con «Editar texto…» (tecla E).", _cut(text),
                                 text=text))
         line = _line(b, k)
-        for kind, title, rule, why, solution in TYPOS if not LINKS.search(text) else ():
-            fixed = rule(line)
-            if fixed != line:
-                before, after = TAGS.sub("", line), TAGS.sub("", fixed)
-                n = len(os.path.commonprefix([before, after]))
-                report.append(Issue(kind, k, b.page, "Menor", title, why, solution,
-                                    _around(before, n, n), _around(after, n, n + len(after) - len(before)),
-                                    (k, k + 1, fixed), text))
+        for t, fixed in _typos(line) if not LINKS.search(text) else ():
+            kind, title, _, why, solution = TYPOS[t]
+            before, after = TAGS.sub("", line), TAGS.sub("", fixed)
+            n = len(os.path.commonprefix([before, after]))
+            report.append(Issue(kind, k, b.page, "Menor", title, why, solution,
+                                _around(before, n, n), _around(after, n, n + len(after) - len(before)),
+                                (k, k + 1, fixed), text))
+        m = next((m for m in CAPITAL.finditer(text) if m[1].lower() not in ABBREVIATIONS), None)
+        if m and not LINKS.search(text):
+            report.append(Issue("capital", k, b.page, "Menor", "Minúscula tras un punto",
+                                "Tras un punto la frase nueva empieza en mayúscula. Si la frase sigue, el punto "
+                                "sobra: suele quedar de un salto de línea del PDF.",
+                                "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E): quita el punto o "
+                                "pon la mayúscula.", _around(text, m.start(), m.end()), text=text))
+        nxt = _plain(blocks[k + 1]).strip() if k + 1 < len(blocks) and blocks[k + 1].kind == "p" else ""
+        if len(text) >= 40 and re.search(r"[^\W\d_]$", text) and nxt[:1].isupper() and not LINKS.search(text):
+            report.append(Issue("end", k, b.page, "Menor", "Falta el punto final",
+                                "El párrafo acaba sin punto y el siguiente empieza en mayúscula: falta el punto, "
+                                "o el párrafo está partido y el siguiente sigue la frase.",
+                                "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E): pon el punto o "
+                                "une los dos párrafos.", _cut(text, tail=True) + " ¶\n" + _cut(nxt), text=text))
         prev_text = text
     last = None
     for k, end in zip(heads, heads[1:]):
