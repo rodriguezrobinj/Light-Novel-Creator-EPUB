@@ -844,6 +844,7 @@ class Root:
     def geometry(self, spec):
         size, x, y = spec.split("+")
         width, height = size.split("x")
+        self.window.root.showNormal()  # se abre maximizada: las pruebas la quieren de un tamaño fijo
         self.window.root.setGeometry(int(x), int(y), int(width), int(height))
         self.update()
 
@@ -3169,6 +3170,20 @@ def test_window_undo_added_page_whose_row_did_not_exist():
         results.append(([(b.kind, b.html) for b in window.book.blocks] == before, window.tree.get_children()))
     window.close()
     assert results == [(True, ("0",)), (True, ())], results
+
+
+def test_window_starts_maximized():
+    """La ventana se abre maximizada, no en una ventana más pequeña que la pantalla."""
+    import app
+    from PySide6.QtCore import Qt
+
+    app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"
+    root = app.Window()
+    window = app.App(root)
+    root.show()
+    maximized = bool(root.windowState() & Qt.WindowState.WindowMaximized)
+    window.close()
+    assert maximized
 
 
 def test_window_dialogs_fit_the_screen():

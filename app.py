@@ -860,7 +860,8 @@ class App:
         area = root.screen().availableGeometry()
         # (setGeometry no cuenta la barra de título: unos 32 px encima y 8 de borde debajo)
         width, height = min(1300, area.width() - 20), min(760, area.height() - 48)
-        root.setGeometry(area.x() + 10, area.y() + 34, width, height)
+        root.setGeometry(area.x() + 10, area.y() + 34, width, height)  # el tamaño al restaurarla
+        root.setWindowState(Qt.WindowState.WindowMaximized)  # se abre ocupando la pantalla
         sys.excepthook = self.on_error  # un fallo en un botón o atajo se apunta y se avisa
 
         central = QWidget()
