@@ -30,9 +30,10 @@ import pymupdf
 import segno
 import shiboken6
 from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
-from PySide6.QtGui import QActionGroup, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit, QProgressBar,
+from PySide6.QtGui import QActionGroup, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut, QTextCursor
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit,
+                               QProgressBar,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QStackedWidget, QTabBar,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -44,6 +45,9 @@ from qtk import filedialog, messagebox
 
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
 SEP = "Separador"                                   # título que se escribe como separador de escena
+STYLES = ["Normal", "Capítulo", "Subtítulo"]          # estilos de párrafo en la cinta del editor de texto
+STYLE_LEVELS = [None, "Capítulo", "Subtítulo"]
+FRONT = "Inicio del libro"                           # lo que va antes del primer capítulo, en el editor
 NEXT = {ON: OFF, OFF: SEP, SEP: CUT, CUT: ON}       # cada clic pasa al siguiente
 IMG, DROPPED = "Ilustración", "Descartada"           # tipo de las filas de imagen
 IMAGE_NEXT = {IMG: CUT, CUT: IMG, DROPPED: IMG}      # clic en una imagen: se quita o se recupera
@@ -2040,20 +2044,28 @@ class App:
     def apply_edit(self, edit, item):
         self.apply_edits([edit], item)
 
-    def apply_edits(self, edits, item, titles=None, follow=False):
+    def apply_edits(self, edits, item, titles=None, follow=False, kinds=None, retype=None):
         """Aplica textos editados: cambia los bloques, renumera la lista conservando los tipos elegidos
         y los apunta para la revisión. Guarda una copia de antes para deshacerlos de una vez con Ctrl+Z.
         Varios cambios van de atrás adelante: así los índices de los siguientes siguen valiendo.
         titles: {fila: título nuevo} de títulos renombrados en el editor (conservan su tipo). follow: item es
-        la fila de antes de los cambios y se vuelve a elegir donde quede."""
+        la fila de antes de los cambios y se vuelve a elegir donde quede. kinds: por cada edición, el tipo
+        (Capítulo/Subtítulo) de sus títulos, en orden. retype: {fila: tipo} de títulos que solo cambian de tipo."""
         rows = self.rows()
         self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})  # edit_section crea listas nuevas
         rows = {k: [v[0], titles[k], *v[2:]] if titles and k in titles else v for k, v in rows.items()}
-        for edit in edits:
+        rows = {k: [retype[k], *v[1:]] if retype and k in retype else v for k, v in rows.items()}
+        for n, edit in enumerate(edits):
             mapping = convert.edit_section(self.book, *edit)
             self.edits.append(list(edit))
             rows = {str(mapping[int(k)]): v for k, v in rows.items() if int(k) in mapping}
+            if kinds and kinds[n]:  # títulos escritos en el editor: con el tipo elegido en la cinta
+                count = sum(1 for line in edit[2].splitlines() if line.strip())
+                heads = [j for j in range(edit[0], edit[0] + count) if self.book.blocks[j].kind == "heading"]
+                for j, kind in zip(heads, kinds[n]):
+                    if kind in (ON, OFF):
+                        rows[str(j)] = [kind, html.unescape(self.book.blocks[j].html), ""]
             if follow and item is not None:
                 item = str(mapping[int(item)]) if int(item) in mapping else None
         self.fill_tree(rows)
@@ -3063,11 +3075,11 @@ class Dialog(QDialog):
 
 
 class TextEditor:
-    """Editor del texto como Word, sección a sección (de un título al siguiente): a la izquierda el panel de
-    navegación con los títulos del libro; en medio la hoja (editor.Sheet) con cursiva, negrita, títulos,
-    ilustraciones y separadores como quedan; a la derecha la página del PDF del párrafo del cursor, grande y
-    con zoom. Cada sección visitada guarda su texto y su deshacer; al aceptar, App.apply_edits guarda lo
-    cambiado de todas con convert.edit_section."""
+    """Editor del texto como Word, capítulo a capítulo: la cinta dice en qué capítulo se está y lleva a los
+    demás (menú y ◀ ▶); la hoja (editor.Sheet) muestra cursiva, negrita, títulos, enlaces, ilustraciones y
+    separadores como quedan; a la derecha la página del PDF del párrafo del cursor, grande, con zoom y
+    sincronizada con la hoja. Cada capítulo visitado guarda su texto y su deshacer; al aceptar,
+    App.apply_edits guarda lo cambiado de todos con convert.edit_section."""
 
     def __init__(self, app, item, start, end):
         self.app, self.item = app, item
@@ -3079,20 +3091,13 @@ class TextEditor:
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
         self.pages = {}  # (inicio, fin) -> {"doc", "look", "lines"} de cada sección visitada
         self.sections = self.outline()
-        self.nav = QListWidget()
-        self.nav.setObjectName("nav")
-        for label, _, _, indent in self.sections:
-            self.nav.addItem(("      " if indent else "") + label)
-        self.nav.itemClicked.connect(lambda it: self.open_section(*self.sections[self.nav.row(it)][1:3]))
-        nav_box = QWidget()
-        nav_column = QVBoxLayout(nav_box)
-        nav_column.setContentsMargins(8, 8, 0, 0)
-        nav_column.addWidget(_label("Navegación", "title"))
-        nav_column.addWidget(self.nav, 1)
+        self.current = None
         column = QVBoxLayout(win)
         column.setContentsMargins(0, 0, 0, 8)
         column.setSpacing(0)
         column.addWidget(self.ribbon())
+        column.addWidget(self.find_bar())
+        column.addWidget(self.link_bar())
         # Hoja centrada sobre el escritorio gris, como la vista de impresión de Word
         desk = QFrame(objectName="desk")
         desk_row = QHBoxLayout(desk)
@@ -3116,11 +3121,10 @@ class TextEditor:
                                    1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
                                    _button("+", lambda: self.zoom(25))))
         self.split = QSplitter()
-        self.split.addWidget(nav_box)
         self.split.addWidget(desk)
         self.split.addWidget(side)
+        self.split.setStretchFactor(0, 1)
         self.split.setStretchFactor(1, 1)
-        self.split.setStretchFactor(2, 1)
         self.split.splitterMoved.connect(lambda *_: self.later("panel", 80, self.redraw))
         column.addWidget(self.split, 1)
         # Barra de estado como Word: dónde estás y el zoom del texto
@@ -3148,6 +3152,7 @@ class TextEditor:
         sheet.undoAvailable.connect(self.undo_btn.setEnabled)
         sheet.redoAvailable.connect(self.redo_btn.setEnabled)
         sheet.textChanged.connect(lambda: self.later("marks", 300, self.mark_changed))
+        sheet.command.connect(self.on_command)
         editor.watch(self.scroll.viewport(), self.on_panel_event)
         win.finished.connect(lambda _: self.on_destroy())
         app.text_editor = self
@@ -3165,7 +3170,7 @@ class TextEditor:
         bar = QFrame(objectName="ribbon")
         row = QHBoxLayout(bar)
         row.setContentsMargins(10, 6, 10, 4)
-        row.setSpacing(14)
+        row.setSpacing(10)
 
         def tool(text, tip, action, checkable=False, font=None):
             button = QToolButton(objectName="tool")
@@ -3196,16 +3201,155 @@ class TextEditor:
         group("Deshacer", self.undo_btn, self.redo_btn)
         self.bold_btn = tool("N", "Negrita (Ctrl+N)", sheet.toggle_bold, True, bold_font)
         self.italic_btn = tool("K", "Cursiva (Ctrl+K)", sheet.toggle_italic, True, italic_font)
-        group("Fuente", self.bold_btn, self.italic_btn)
+        self.case_btn = tool("Aa", "Mayúsculas y minúsculas (Mayús+F3)", sheet.change_case)
+        group("Fuente", self.bold_btn, self.italic_btn, self.case_btn)
         self.style = QComboBox()
-        self.style.addItems(["Normal", "Título"])
-        self.style.setToolTip("Estilo del párrafo (Ctrl+T alterna)")
-        self.style.setMinimumWidth(96)
-        self.style.activated.connect(lambda n: (sheet.set_heading(n == 1), sheet.setFocus(), self.update_tools()))
-        group("Párrafo", self.style, tool("Unir párrafos", "Une el párrafo con el siguiente (Ctrl+J)", sheet.join_next))
-        group("Insertar", tool("❖ Separador", "Separador de escena tras el párrafo", sheet.insert_break))
+        self.style.addItems(STYLES)
+        self.style.setToolTip("Estilo del párrafo: título de capítulo o subtítulo (Ctrl+T: capítulo o normal)")
+        self.style.setMinimumWidth(110)
+        self.style.activated.connect(lambda n: (sheet.set_heading(STYLE_LEVELS[n]), sheet.setFocus(),
+                                                self.update_tools()))
+        self.center_btn = tool("≡ Centrar", "Centrar el párrafo: cartas, carteles (Ctrl+E)", sheet.toggle_center, True)
+        group("Párrafo", self.style, self.center_btn,
+              tool("⤒ Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
+                   sheet.join_next))
+        group("Insertar", tool("❖ Separador", "Separador de escena tras el párrafo", sheet.insert_break),
+              tool("🔗 Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)", self.show_link_bar),
+              tool("✎ Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note))
+        group("Buscar", tool("🔍 Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
+                             lambda: self.show_find_bar(False)))
         row.addStretch(1)
+        # A la derecha, como el panel de navegación de Word pero sin quitar sitio: dónde estás y a dónde ir
+        self.prev_chapter = tool("◀", "Capítulo anterior", lambda: self.step_section(-1))
+        self.next_chapter = tool("▶", "Capítulo siguiente", lambda: self.step_section(1))
+        self.chapter_btn = QToolButton(objectName="tool")
+        self.chapter_btn.setToolTip("Ir a otro capítulo")
+        self.chapter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.chapter_menu = QMenu(self.chapter_btn)
+        self.chapter_btn.setMenu(self.chapter_menu)
+        group("Capítulo", self.prev_chapter, self.chapter_btn, self.next_chapter)
         return bar
+
+    def find_bar(self):
+        """Barra de buscar y reemplazar bajo la cinta (Ctrl+F, Ctrl+H): todos los capítulos, uno a uno."""
+        bar = self.find_frame = QFrame(objectName="ribbon")
+        self.find_entry, self.replace_entry = QLineEdit(), QLineEdit()
+        self.find_entry.setPlaceholderText("Buscar en el libro")
+        self.replace_entry.setPlaceholderText("Reemplazar por")
+        self.find_entry.returnPressed.connect(lambda: self.find(1))
+        self.find_info = _label("", "muted")
+        close = _button("✕", lambda: (bar.hide(), self.sheet.setFocus()))
+        close.setToolTip("Cerrar (Esc)")
+        bar.setLayout(_row(self.find_entry, _button("◀", lambda: self.find(-1)), _button("▶", lambda: self.find(1)),
+                           self.replace_entry, _button("Reemplazar", self.replace_one),
+                           _button("Reemplazar todo", self.replace_everywhere), self.find_info, 1, close,
+                           margins=(10, 6, 10, 6)))
+        QShortcut(QKeySequence("Escape"), self.find_entry, lambda: (bar.hide(), self.sheet.setFocus()),
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        bar.hide()
+        return bar
+
+    def link_bar(self):
+        """Barra para poner o quitar un enlace web en el texto elegido (Ctrl+Alt+K)."""
+        bar = self.link_frame = QFrame(objectName="ribbon")
+        self.link_entry = QLineEdit()
+        self.link_entry.setPlaceholderText("Dirección del enlace: https://…")
+        self.link_entry.returnPressed.connect(self.apply_link)
+        self.link_info = _label("", "muted")
+        bar.setLayout(_row(_label("Enlace:"), self.link_entry, _button("Aplicar", self.apply_link, "primary"),
+                           _button("Quitar enlace", lambda: self.apply_link("")), self.link_info, 1,
+                           _button("✕", lambda: (bar.hide(), self.sheet.setFocus())), margins=(10, 6, 10, 6)))
+        QShortcut(QKeySequence("Escape"), self.link_entry, lambda: (bar.hide(), self.sheet.setFocus()),
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        bar.hide()
+        return bar
+
+    def on_command(self, name):
+        """Atajos de la hoja que abren una barra: Ctrl+Alt+K enlace, Ctrl+F buscar, Ctrl+H reemplazar."""
+        if name == "link":
+            self.show_link_bar()
+        else:
+            self.show_find_bar(name == "replace")
+
+    def show_link_bar(self):
+        self.link_selection = QTextCursor(self.sheet.textCursor())  # el foco se va a la barra
+        if not self.link_selection.hasSelection() and not self.sheet.link_at():
+            self.link_info.setText("Elige primero el texto del enlace")
+        else:
+            self.link_info.setText("")
+        self.link_entry.setText(self.sheet.link_at() or "https://")
+        self.find_frame.hide()
+        self.link_frame.show()
+        self.link_entry.setFocus()
+        self.link_entry.selectAll()
+
+    def apply_link(self, href=None):
+        """Pone (o quita, con "") el enlace en lo elegido al abrir la barra. Solo direcciones web."""
+        href = self.link_entry.text().strip() if href is None else href
+        if href and not re.fullmatch(r"https?://[^\s\"<>]+\.[^\s\"<>]+", href):
+            self.link_info.setText("La dirección debe empezar por http:// o https://")
+            return
+        self.sheet.setTextCursor(self.link_selection)
+        self.sheet.set_link(href)
+        self.link_frame.hide()
+        self.sheet.setFocus()
+
+    def show_find_bar(self, replace):
+        self.link_frame.hide()
+        self.find_frame.show()
+        cursor = self.sheet.textCursor()
+        if cursor.hasSelection() and "\u2029" not in cursor.selectedText():
+            self.find_entry.setText(cursor.selectedText())
+        (self.replace_entry if replace and self.find_entry.text() else self.find_entry).setFocus()
+        self.find_entry.selectAll()
+
+    def find(self, delta):
+        """Siguiente (o anterior) aparición en la hoja; al acabarse, sigue en los capítulos siguientes."""
+        term = self.find_entry.text()
+        if not term:
+            return False
+        if self.sheet.find_next(term, delta < 0):
+            self.find_info.setText("")
+            return True
+        order = [s[1:3] for s in self.sections]
+        here = order.index(self.current) if self.current in order else 0
+        for step in range(1, len(order) + 1):
+            start, end = order[(here + step * delta) % len(order)]
+            text = self.pages[(start, end)]["doc"].toPlainText() if (start, end) in self.pages else \
+                convert.section_text(self.app.book, start, end)
+            if term.lower() in text.lower():
+                self.open_section(start, end)
+                self.sheet.moveCursor(QTextCursor.MoveOperation.Start if delta > 0 else QTextCursor.MoveOperation.End)
+                if self.sheet.find_next(term, delta < 0):
+                    self.find_info.setText("")
+                    return True
+        self.find_info.setText("Sin resultados")
+        QApplication.beep()
+        return False
+
+    def replace_one(self):
+        """Cambia la aparición elegida y busca la siguiente, como Word."""
+        if not self.sheet.replace_current(self.find_entry.text(), self.replace_entry.text()):
+            self.find(1)
+            return
+        self.find(1)
+
+    def replace_everywhere(self):
+        """Cambia todas las apariciones en todos los capítulos; cada capítulo, un paso de su deshacer."""
+        term, new = self.find_entry.text(), self.replace_entry.text()
+        if not term:
+            return
+        here, total = self.current, 0
+        for _, start, end, _ in self.sections:
+            loaded = (start, end) in self.pages
+            text = self.pages[(start, end)]["doc"].toPlainText() if loaded else \
+                convert.section_text(self.app.book, start, end)
+            if term.lower() in text.lower():
+                self.open_section(start, end)
+                total += self.sheet.replace_all(term, new)
+        self.open_section(*here)
+        self.find_info.setText(f"{convert.counted(total, 'reemplazo')}")
+        self.mark_changed()
 
     def maximize(self):
         """A pantalla completa y la barra divisoria en el medio (con el tamaño ya maximizado)."""
@@ -3216,8 +3360,7 @@ class TextEditor:
     def center(self):
         """Barra divisoria al medio y el párrafo del cursor a la vista."""
         if shiboken6.isValid(self.split):
-            width = self.split.width()
-            self.split.setSizes([240, (width - 240) // 2, (width - 240) // 2])  # navegación, hoja y PDF
+            self.split.setSizes([10 ** 4, 10 ** 4])  # hoja y PDF, mitad y mitad
             self.sheet.ensureCursorVisible()
 
     def update_tools(self):
@@ -3227,7 +3370,9 @@ class TextEditor:
         f = self.sheet.currentCharFormat()
         self.bold_btn.setChecked(f.fontWeight() >= QFont.Weight.DemiBold)
         self.italic_btn.setChecked(f.fontItalic())
-        self.style.setCurrentIndex(1 if self.sheet.textCursor().blockFormat().property(editor.HEADING) else 0)
+        level = self.sheet.heading_level()
+        self.style.setCurrentIndex(0 if level is None else 1 if level == ON else 2)
+        self.center_btn.setChecked(self.sheet.is_centered())
 
     def outline(self):
         """Secciones del libro para el panel de navegación: [(título, inicio, fin, sangría)], una por capítulo.
@@ -3235,7 +3380,7 @@ class TextEditor:
         blocks, found = self.app.book.blocks, []
         heads = self.app.section_heads() + [len(blocks)]
         if heads[0] > 0:
-            found.append(("Inicio del libro", 0, heads[0], False))
+            found.append((FRONT, 0, heads[0], False))
         for k, end in zip(heads, heads[1:]):
             title = self.app.tree.set(str(k), "title") if self.app.tree.exists(str(k)) else convert._plain(blocks[k])
             kind = self.app.tree.set(str(k), "inc") if self.app.tree.exists(str(k)) else ON
@@ -3243,25 +3388,26 @@ class TextEditor:
         return found
 
     def open_section(self, start, end, focus=None):
-        """Muestra la sección start..end en la hoja (la ya editada si se visitó) y la marca en la navegación."""
+        """Muestra el capítulo start..end en la hoja (el ya editado si se visitó) y lo dice en la cinta."""
         page = self.pages.get((start, end))
         if page is None:
             # Un título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)
             book, tree = self.app.book, self.app.tree
             lines = [(k, "# " + tree.set(str(k), "title") if book.blocks[k].kind == "heading" and tree.exists(str(k))
                       else convert.section_text(book, k, k + 1)) for k in range(start, end)]
-            doc, look = self.sheet.set_content(lines, self.pictures(start, end), self.colors["muted"])
-            page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines}
+            levels = {k: tree.set(str(k), "inc") for k in range(start, end)
+                      if book.blocks[k].kind == "heading" and tree.exists(str(k))}
+            doc, look = self.sheet.set_content(lines, self.pictures(start, end), self.colors["muted"], levels)
+            page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
         else:
             self.sheet.use(page["doc"], page["look"])
         self.current = (start, end)
         if focus is not None:
             self.sheet.goto_source(focus)
         row = next((n for n, s in enumerate(self.sections) if s[1:3] == (start, end)), None)
-        if row is not None:
-            self.nav.setCurrentRow(row)
         title = self.sections[row][0] if row is not None else self.app.tree.set(self.item, "title")
         self.win.setWindowTitle(f"Texto · {title}")
+        self.show_chapter(row)
         self.undo_btn.setEnabled(page["doc"].isUndoAvailable())
         self.redo_btn.setEnabled(page["doc"].isRedoAvailable())
         self.drawn = None
@@ -3270,12 +3416,39 @@ class TextEditor:
         self.sheet.ensureCursorVisible()
         self.sheet.setFocus()
 
+    def show_chapter(self, row):
+        """Indicador de la cinta: «☰ Capítulo 3 de 31 · Título ▾», y ◀ ▶ activos si hay a dónde ir."""
+        chapters = sum(1 for s in self.sections if s[0] != FRONT)
+        number = sum(1 for s in self.sections[:row + 1] if s[0] != FRONT) if row is not None else 0
+        title = self.sections[row][0] if row is not None else self.app.tree.set(self.item, "title")
+        where = FRONT if title == FRONT else f"Capítulo {number} de {chapters}"
+        text = f"☰  {where} · {title}" if title != FRONT else f"☰  {FRONT}"
+        # Ancho fijo con «…»: un título largo ensanchaba la cinta más que la pantalla (1366 px)
+        width = 300
+        self.chapter_btn.setText(self.chapter_btn.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight,
+                                                                           width - 30) + "  ▾")
+        self.chapter_btn.setToolTip(f"{where}: {title}. Clic para ir a otro capítulo")
+        self.chapter_btn.setFixedWidth(width)
+        self.prev_chapter.setEnabled(row is not None and row > 0)
+        self.next_chapter.setEnabled(row is not None and row < len(self.sections) - 1)
+        self.mark_changed()
+
+    def step_section(self, delta):
+        row = next((n for n, s in enumerate(self.sections) if s[1:3] == self.current), None)
+        if row is not None and 0 <= row + delta < len(self.sections):
+            self.open_section(*self.sections[row + delta][1:3])
+
     def mark_changed(self):
-        """«•» en la navegación junto a las secciones con cambios sin guardar."""
-        for n, (label, start, end, indent) in enumerate(self.sections):
+        """Menú de capítulos: el de ahora marcado y «•» junto a los que tienen cambios sin guardar."""
+        if not shiboken6.isValid(self.chapter_menu):
+            return
+        self.chapter_menu.clear()
+        for label, start, end, _ in self.sections:
             page = self.pages.get((start, end))
             mark = "  •" if page and self.page_dirty(page) else ""
-            self.nav.item(n).setText(("      " if indent else "") + label + mark)
+            action = self.chapter_menu.addAction(label + mark, lambda s=start, e=end: self.open_section(s, e))
+            action.setCheckable(True)
+            action.setChecked((start, end) == self.current)
 
     def pictures(self, start, end):
         """Miniaturas de las ilustraciones y adornos de la sección, y el texto de los separadores escritos."""
@@ -3397,6 +3570,23 @@ class TextEditor:
             return
         self.box, self.drawn = None, None  # el próximo movimiento del cursor vuelve a su página
         self.show_page(min(max(self.page + delta, 0), self.app.pdf_doc.page_count - 1))
+        self.follow_page(self.page + 1)
+
+    def follow_page(self, number):
+        """La hoja va al primer párrafo de la página number del PDF, cambiando de capítulo si es de otro
+        (como el panel de navegación de Word con la vista previa). Una página sin texto no mueve la hoja."""
+        blocks = self.app.book.blocks
+        k = next((j for j, b in enumerate(blocks) if b.page == number), None)
+        if k is None:
+            return
+        bounds = self.app.section_bounds(k)
+        bounds = next((s[1:3] for s in self.sections if s[1] <= k < s[2]), bounds)
+        if bounds != self.current:
+            self.open_section(*bounds, focus=k)
+        else:
+            self.sheet.goto_source(k)
+        self.drawn = (self.source_block(), id(self.app.pdf_doc))  # la página ya está dibujada
+        self.sheet.ensureCursorVisible()
 
     @staticmethod
     def find_box(page, block):
@@ -3436,26 +3626,35 @@ class TextEditor:
         """Lo que cambió en las secciones visitadas, línea a línea frente a lo cargado: [[inicio, fin, texto]]
         de atrás adelante para edit_section, y {fila: título} de los títulos solo renombrados (conservan su
         tipo y su ✓)."""
-        edits, titles = [], {}
+        edits, titles, kinds, retype = [], {}, {}, {}
         for (start, _), page in self.pages.items():
             old = [line for _, line in page["lines"]]
-            new = [line for line in editor.dump(page["doc"]).split("\n\n") if line.strip()]
+            pairs = editor.dump_levels(page["doc"])  # [(línea, tipo de título o None)]
+            new = [line for line, _ in pairs]
             for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
                 k = str(start + i1)
-                if tag == "equal":
+                if tag == "equal":  # un título igual puede haber cambiado de tipo (capítulo ↔ subtítulo)
+                    for n in range(i2 - i1):
+                        level, was = pairs[j1 + n][1], page["levels"].get(start + i1 + n)
+                        if level in (ON, OFF) and was is not None and level != was:
+                            retype[str(start + i1 + n)] = level
                     continue
                 if (tag == "replace" and i2 - i1 == j2 - j1 == 1 and old[i1].startswith("# ")
                         and new[j1].startswith("# ") and self.app.tree.exists(k)):
                     titles[k] = new[j1][2:].strip()
+                    if pairs[j1][1] in (ON, OFF):
+                        retype[k] = pairs[j1][1]
                 else:
                     edits.append([start + i1, start + i2, "\n\n".join(new[j1:j2])])
-        return sorted(edits, reverse=True), titles
+                    kinds[start + i1] = [level for line, level in pairs[j1:j2] if line.startswith("# ")]
+        edits.sort(reverse=True)
+        return edits, titles, [kinds[e[0]] for e in edits], retype
 
     def save(self):
         """Aplica solo lo que cambió: un párrafo rehecho pierde su página del PDF, y un título rehecho su tipo."""
         if self.dirty():
-            edits, titles = self.changes()
-            self.app.apply_edits(edits, self.item, titles, follow=True)
+            edits, titles, kinds, retype = self.changes()
+            self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype)
         self.win.done(0)
 
     def cancel(self, _=None):

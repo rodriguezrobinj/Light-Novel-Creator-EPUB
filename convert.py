@@ -26,7 +26,10 @@ KEYWORDS = re.compile(
     r"|extra|parte|chapter|prologue|epilogue|afterword|interlude)\b", re.I)
 TOC_TITLE = re.compile(r"(contenidos?|[ií]ndice|tabla de contenidos?|contents|table of contents):?", re.I)
 DOT_LEADER = re.compile(r"[.\-_·…]{4,}\s*(?:p[áa]g\.?\s*)?\d+\s*\|?$", re.I)  # "..... 12", "---- Pág. 54"
-SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈•·#~◎◯]+")
+SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈•·#~◎◯♠♣♥♤♧♡◊]+")
+# Fuente Symbol sin tabla Unicode: PyMuPDF da el código de la fuente (Mitsuha 6 [Bell T]: 0xAA es ♠, sale «ª»)
+SYMBOL_FONT = str.maketrans({"\xa7": "♣", "\xa8": "♦", "\xa9": "♥", "\xaa": "♠", "\xb7": "•", "\xe0": "◊",
+                             "\xb4": "×", "\xa5": "∞", "\xae": "→", "\xac": "←"})
 END_PUNCT = (".", "!", "?", "…", '"', "'", "»", "”", "’", ":", ")", "]")  # "]": notas del traductor
 SOFT_HYPHEN = "\u00ad"  # guion de partición: solo se ve si cae al final de la línea
 TAGS = re.compile(r"<[^>]+>")
@@ -243,6 +246,9 @@ def _rows(page):
     spans = [s for b in page.get_text("dict", flags=flags)["blocks"] for line in b.get("lines", [])
              if abs(line["dir"][0]) > 0.9 for s in line["spans"] if BAD_XML.sub("", s["text"]).strip()]
     spans = [_ref(s, spans) if REF.fullmatch(s["text"].strip()) else s for s in spans]
+    for s in spans:
+        if "symbol" in s["font"].lower():
+            s["text"] = s["text"].translate(SYMBOL_FONT)
     rows, group = [], []
     for s in sorted(spans, key=lambda s: s["origin"][1]):
         if group and abs(s["origin"][1] - group[0]["origin"][1]) > 2:
@@ -700,6 +706,9 @@ def replace_text(book, find, new, word=False, blocks=None):
 TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
 INLINE = re.compile(r"&lt;(/?)([ib])&gt;")
 NOTE_MARK = re.compile(r"\[Nota: (.+?)\]")  # nota al pie en el editor de texto
+# Enlace escrito en el editor, ya escapado: solo direcciones web (un javascript: no sirve en un libro)
+LINK_MARK = re.compile(r'&lt;a href="(https?://[^"\s<>]+)"&gt;(.*?)&lt;/a&gt;')
+CENTER = "<center>"  # al principio de una línea del editor: párrafo centrado (carta, cartel)
 
 
 def section_text(book, start, end):
@@ -712,7 +721,7 @@ def section_text(book, start, end):
 def _line(b, k):
     """Línea de section_text del bloque b, que es el número k del libro."""
     if b.kind == "p":
-        return html.unescape(NOTE.sub(r"[Nota: \1]", b.html))
+        return (CENTER if b.align == "center" else "") + html.unescape(NOTE.sub(r"[Nota: \1]", b.html))
     if b.kind == "heading":
         return "# " + html.unescape(b.html)
     return f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]"
@@ -734,6 +743,7 @@ def _inline(text):
     dentro las etiquetas también cierran (si no, cruzarían el límite de la nota)."""
     out = INLINE.sub(r"<\1\2>", html.escape(text, quote=False))
     out = out if _balanced(out) else TAGS.sub("", out)
+    out = LINK_MARK.sub(lambda m: f'<a href="{m[1]}">{m[2]}</a>' if _balanced(m[2]) else m[0], out)
     return NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
 
 
@@ -750,6 +760,7 @@ def edit_section(book, start, end, text):
     for k in range(start, end):
         if old[k].kind in ("p", "heading"):
             same.setdefault(_line(old[k], k).strip(), old[k])
+            same.setdefault(_line(old[k], k).strip().removeprefix(CENTER), old[k])  # edición de antes de <center>
     new, kept = [], {}
     for line in (line.strip() for line in text.splitlines()):
         if not line:
@@ -767,6 +778,8 @@ def edit_section(book, start, end, text):
             new.append(Block("heading", page, _inline(line[2:].strip())))
         elif SCENE_BREAK.fullmatch(line):
             new.append(Block("break", page, html.escape(line, quote=False)))
+        elif line.startswith(CENTER):
+            new.append(Block("p", page, _inline(line[len(CENTER):].strip()), align="center"))
         else:
             new.append(Block("p", page, _inline(line)))
     delta = len(new) - (end - start)
@@ -1422,7 +1435,10 @@ def analyze(pdf_path, progress=None):
                     if blocks and blocks[-1].kind != "break":  # guarda el adorno, por si se quiere el original
                         blocks.append(Block("break", num, image=_extract(doc, xref) if xref else b""))
                     para = None
-                if r.heading:
+                if SCENE_BREAK.fullmatch(r.text):  # solo símbolos: separador aunque vaya en letra de título (Mitsuha 6)
+                    blocks.append(Block("break", num, r.html))  # guarda el texto original ("☆", "* * *")
+                    para = None
+                elif r.heading:
                     # Se une a la línea anterior si es el mismo título partido: mismo tamaño y pegada
                     # (un subtítulo justo debajo del capítulo queda más lejos, o lo abre un marcador).
                     if (prev is not None and prev.heading and abs(prev.size - r.size) < 0.5
@@ -1431,9 +1447,6 @@ def analyze(pdf_path, progress=None):
                         blocks[-1].rect = _rect([blocks[-1], r])  # el rectángulo abarca todas sus líneas
                     else:
                         blocks.append(Block("heading", num, html.escape(r.text), rect=_rect([r])))
-                    para = None
-                elif SCENE_BREAK.fullmatch(r.text):
-                    blocks.append(Block("break", num, r.html))  # guarda el texto original ("☆", "* * *")
                     para = None
                 else:
                     indented = r.x0 > left + body * 0.8
@@ -1977,7 +1990,7 @@ def check_epub(path):
                 problems.append(f"{name[len(base):]}: falta la imagen {img.get('src')}")
         for a in tree.iter(XHTML + "a"):
             target, _, anchor = a.get("href", "").partition("#")
-            if target and (base + target not in names or (anchor and anchor not in ids.get(base + target, ()))):
+            if target and not re.match(r"https?://", target) and (base + target not in names or (anchor and anchor not in ids.get(base + target, ()))):
                 problems.append(f"{name[len(base):]}: enlace roto a {a.get('href')}")
         h1 = next(tree.iter(XHTML + "h1"), None)
         if (re.fullmatch(r"OEBPS/sec\d+\.xhtml", name) and h1 is not None

@@ -571,6 +571,55 @@ def test_scene_breaks_keep_their_original_form():
     assert len(ornament_breaks) == 1 and pymupdf.Pixmap(ornament_breaks[0].image).width == 10
 
 
+def test_symbol_font_suits_are_scene_breaks_not_chapters():
+    """Mitsuha 6 [Bell T]: los separadores «♠♠» van en la fuente Symbol, que PyMuPDF lee como «ªª» (0xAA),
+    centrados y en letra de título (35,6 pt). Salían como capítulos «ªª»; son separadores de escena «♠♠»."""
+    doc = pymupdf.open()
+    for n, title in ((1, "Capitulo 1: Inicio"), (2, "Capitulo 2: Final")):
+        add_page(doc, n, [(72, 100, title, 20, "helv"),
+                          (92, 140, line("Primera linea del primer parrafo", 57), 11, "cour"),
+                          (72, 154, "fin del primer parrafo.", 11, "cour"),
+                          (282, 200, "ªª", 35.6, "symb"),
+                          (92, 240, line("Primera linea del segundo parrafo", 57), 11, "cour"),
+                          (72, 254, "fin del segundo parrafo.", 11, "cour")])
+    path = TMP / "simbolos.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [book.blocks[k].html for k in book.candidates]
+    breaks = [b.html for b in book.blocks if b.kind == "break"]
+    headings = [b.html for b in book.blocks if b.kind == "heading"]
+    assert titles == ["Capitulo 1: Inicio", "Capitulo 2: Final"], titles
+    assert breaks == ["♠♠", "♠♠"] and "ªª" not in headings, (breaks, headings)
+
+
+def test_links_and_centered_paragraphs_reach_the_epub():
+    """El editor escribe enlaces (<a href="https://…">) y párrafos centrados (<center> delante): llegan a los
+    bloques y al EPUB, que check_epub no da por roto, y section_text los devuelve igual. Una edición vieja de
+    un párrafo centrado por el PDF (sin <center>) lo sigue reconociendo sin cambios."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Querida Teto:", align="center"),
+              convert.Block("p", 1, "Uno.")]
+    book = convert.Book("Libro", "", JPEG, blocks, [0])
+    shown = convert.section_text(book, 1, 3)
+    convert.edit_section(book, 1, 3, "Querida Teto:\n\nUno.")  # revisión vieja: sin <center>
+    old_kept = book.blocks[1].align == "center"
+    lines = ['Ver <a href="https://example.com/?a=1&b=2">la <i>web</i></a> ahora.', "<center>Fin de la carta.",
+             '<a href="javascript:alert(1)">no</a>']
+    convert.edit_section(book, 1, 3, "\n\n".join(lines))
+    htmls = [(b.html, b.align) for b in book.blocks[1:]]
+    again = convert.section_text(book, 1, 4).split("\n\n")
+    out = TMP / "enlaces.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out)
+    text, problems = epub_text(out), convert.check_epub(str(out))
+    assert shown == "<center>Querida Teto:\n\nUno.", shown
+    assert old_kept
+    assert htmls == [('Ver <a href="https://example.com/?a=1&amp;b=2">la <i>web</i></a> ahora.', ""),
+                     ("Fin de la carta.", "center"),
+                     ('&lt;a href="javascript:alert(1)"&gt;no&lt;/a&gt;', "")], htmls
+    assert again == lines, again
+    assert 'href="https://example.com/?a=1&amp;b=2"' in text and 'class="center"' in text, text
+    assert not problems, problems
+
+
 def test_separator_options():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
               convert.Block("break", 1, "☆"), convert.Block("p", 1, "Dos."),
@@ -2286,6 +2335,72 @@ def test_editor_sheet_actions_paste_and_undo():
                     ["Dijo", "hola, y se fue."], 2, "Pegado de fuera", 1, 1], seen
 
 
+def test_editor_sheet_links_center_levels_case_and_search():
+    """Enlaces, párrafos centrados y tipo de título se ven en la hoja y vuelven al formato del texto; Mayús+F3
+    cambia mayúsculas; buscar y reemplazar en la hoja, con un solo deshacer."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    lines = [(1, "# Capítulo 1"), (2, "# El lado de Teto"), (3, 'Ver <a href="https://example.com/?a=1&b=2">la web</a>.'),
+             (4, "<center>Querida Teto:"), (5, "hola mundo, Hola otra vez.")]
+    sheet.set_content(lines, {}, levels={1: "Capítulo", 2: "Subtítulo"})
+    same = sheet.content() == "\n\n".join(line for _, line in lines)
+
+    def at(n, start=0, end=None):
+        block = sheet.document().findBlockByNumber(n)
+        c = sheet.textCursor()
+        c.setPosition(block.position() + start)
+        if end is not None:
+            c.setPosition(block.position() + end, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+
+    def line(n):
+        return sheet.content().split("\n\n")[n]
+
+    seen = []
+    at(1)
+    seen.append(sheet.heading_level())                       # Subtítulo
+    sheet.set_heading("Capítulo")
+    seen.append(sheet.heading_level())
+    at(2, 5)
+    seen.append(sheet.link_at())                             # dentro del enlace
+    at(4, 0, 4)                                              # "hola"
+    sheet.set_link("https://teto.example")
+    seen.append(line(4))
+    sheet.undo()
+    at(3)
+    sheet.toggle_center()
+    seen.append(line(3))                                     # ya no centrado
+    sheet.undo()
+    at(4, 0, 10)                                             # "hola mundo"
+    sheet.change_case()
+    seen.append(line(4)[:10])                                # Hola Mundo
+    sheet.change_case()
+    seen.append(line(4)[:10])                                # HOLA MUNDO
+    sheet.undo()
+    sheet.undo()
+    at(0)
+    found = [sheet.find_next("hola"), sheet.textCursor().selectedText()]
+    seen.append(found)
+    seen.append(sheet.replace_all("hola", "adiós"))
+    seen.append(line(4))
+    sheet.undo()                                             # un solo paso
+    seen.append(line(4))
+    at(4)
+    sheet.insert_note()
+    sheet.textCursor().insertText("aclaración")
+    seen.append(line(4)[:18])
+    assert same, sheet.content()
+    assert seen == ["Subtítulo", "Capítulo", "https://example.com/?a=1&b=2",
+                    '<a href="https://teto.example">hola</a> mundo, Hola otra vez.', "Querida Teto:",
+                    "Hola Mundo", "HOLA MUNDO", [True, "hola"], 2, "adiós mundo, adiós otra vez.",
+                    "hola mundo, Hola otra vez.", "[Nota: aclaración]"], seen
+
+
 def test_editor_sheet_looks_and_spelling():
     """Los títulos se ven grandes y en negrita sin guardar negrita; las palabras desconocidas salen subrayadas."""
     import qtk
@@ -2350,11 +2465,11 @@ def test_text_editor_opens_section_and_saves_only_changes():
     assert changed.startswith("Hola "), changed
 
 
-def test_text_editor_navigates_sections_and_saves_only_changes():
-    """Como el panel de navegación de Word: la hoja muestra una sección con su título (como en la lista) y el
-    panel lleva a las demás. Lo editado en una sección sigue ahí al volver y se marca con «•». Al aceptar se
-    guarda solo lo cambiado de todas: un título renombrado conserva su tipo y su ✓, todo se deshace con un
-    Ctrl+Z. La página del PDF más pequeña que el panel queda en el medio."""
+def test_text_editor_navigates_chapters_and_saves_only_changes():
+    """Como Word: la cinta dice en qué capítulo se está («Capítulo 2 de 2 · …») y su menú y ◀ ▶ llevan a los
+    demás; hojear el PDF hasta otro capítulo lleva la hoja ahí. Lo editado en un capítulo sigue al volver y se
+    marca con «•». Al aceptar se guarda solo lo cambiado: un título renombrado conserva su tipo y su ✓, todo se
+    deshace con un Ctrl+Z. La página del PDF más pequeña que el panel queda en el medio."""
     import app
 
     root, window = visible_window()
@@ -2376,22 +2491,27 @@ def test_text_editor_navigates_sections_and_saves_only_changes():
 
     opened = (editor.current == window.section_bounds(int(second)) and lines()[0].startswith("# ")
               and sheet.current_source() == int(second))
-    labels = [editor.nav.item(n).text().strip() for n in range(editor.nav.count())]
-    listed = "Capítulo 1: El inicio" in labels and labels[editor.nav.currentRow()] == lines()[0][2:]
+    indicator = editor.chapter_btn.text()
     editor.zoom(-50)  # al 50 %: la página cabe y va en el medio del panel
     root.update()
     view, page = editor.scroll.viewport().geometry(), editor.canvas.geometry()
     centered = abs(page.center().y() - view.height() / 2) <= 2 and abs(page.center().x() - view.width() / 2) <= 2
-    editor.nav.itemClicked.emit(editor.nav.item(labels.index("Capítulo 1: El inicio")))
-    shows_first = lines()[0] == "# Capítulo 1: El inicio"
+    editor.mark_changed()
+    labels = [action.text() for action in editor.chapter_menu.actions()]
+    editor.chapter_menu.actions()[labels.index("Capítulo 1: El inicio")].trigger()
+    shows_first = lines()[0] == "# Capítulo 1: El inicio" and editor.chapter_btn.text().find("Capítulo 1 de 2") > 0
     sheet.document().find("Capítulo 1: El inicio").insertText("Capítulo 1: El comienzo")
     editor.mark_changed()
-    marked = editor.nav.currentItem().text().endswith("•")
-    editor.open_section(*window.section_bounds(int(second)))
+    marked = any(action.text().endswith("•") for action in editor.chapter_menu.actions())
+    editor.step_section(1)  # ▶: el capítulo siguiente
+    on_second = editor.current == window.section_bounds(int(second))
     sheet.goto_source(int(second) + 1)  # el primer párrafo del segundo capítulo
     sheet.textCursor().insertText("Nuevo. ")
     editor.open_section(*window.section_bounds(int(first)))
     kept = lines()[0] == "# Capítulo 1: El comienzo"  # lo editado sigue al volver
+    editor.page = window.book.blocks[int(second)].page - 2
+    editor.turn(1)  # hojeando el PDF hasta la página del segundo capítulo, la hoja va a él
+    synced = editor.current == window.section_bounds(int(second))
     editor.save()
     rows = {i: (window.tree.set(i, "inc"), window.tree.set(i, "ok")) for i in window.tree.get_children()}
     title = window.tree.set(first, "title")
@@ -2401,13 +2521,67 @@ def test_text_editor_navigates_sections_and_saves_only_changes():
     undone = ([(b.kind, b.html, b.page) for b in window.book.blocks] == blocks_before
               and window.tree.set(first, "title") == "Capítulo 1: El inicio")
     window.close()
-    assert opened and listed, (opened, listed, labels)
+    assert opened and indicator.startswith("☰  Capítulo 2 de 2 · "), (opened, indicator)
     assert centered, (view, page)
-    assert shows_first and marked and kept, (shows_first, marked, kept)
+    assert shows_first and marked and on_second and kept and synced, (shows_first, marked, on_second, kept, synced)
     assert title == "Capítulo 1: El comienzo" and paragraph.startswith("Nuevo. "), (title, paragraph)
     assert rows == before, (rows, before)
     assert len(edits) == 1 and edits[0][1] - edits[0][0] == 1, edits  # solo el párrafo cambiado
     assert undone
+
+
+def test_text_editor_styles_links_and_find_reach_the_book():
+    """La cinta del editor: un párrafo nuevo con estilo Subtítulo llega a la lista como subtítulo, un capítulo
+    pasado a Subtítulo cambia su fila; un enlace puesto con la barra llega al libro (una dirección sin http
+    no); buscar salta de capítulo y «Reemplazar todo» cambia todos los capítulos."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    chapters = [i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON]
+    first, second = chapters[0], chapters[1]
+    window.tree.selection_set(first)
+    editor = window.edit_text()
+    root.update()
+    sheet = editor.sheet
+    sheet.goto_source(int(first) + 1)
+    sheet.split_here()
+    cursor = sheet.textCursor()
+    cursor.movePosition(cursor.MoveOperation.PreviousBlock)  # el párrafo nuevo, vacío, queda encima
+    sheet.setTextCursor(cursor)
+    sheet.textCursor().insertText("Lado de Teto")
+    editor.style.activated.emit(app.STYLES.index("Subtítulo"))
+    cursor = sheet.document().find("Primera")  # una palabra del primer párrafo
+    sheet.setTextCursor(cursor)
+    word = cursor.selectedText()
+    editor.show_link_bar()
+    editor.link_entry.setText("example.com")
+    editor.apply_link()
+    refused = editor.link_frame.isVisible() and "http" in editor.link_info.text()
+    editor.link_entry.setText("https://example.com")
+    editor.apply_link()
+    editor.find_entry.setText("parrafo")
+    jumped = editor.find(1) and editor.find(1)
+    editor.find_entry.setText("Final")
+    editor.find(1)
+    other_chapter = editor.current == window.section_bounds(int(second))
+    editor.find_entry.setText("linea")
+    editor.replace_entry.setText("fila")
+    editor.replace_everywhere()
+    replaced = editor.find_info.text()
+    editor.open_section(*window.section_bounds(int(second)))
+    sheet.goto_source(int(second))
+    editor.style.activated.emit(app.STYLES.index("Subtítulo"))
+    editor.save()
+    kinds = {window.tree.set(i, "title"): window.tree.set(i, "inc") for i in window.tree.get_children()}
+    text = " ".join(b.html for b in window.book.blocks)
+    window.close()
+    assert refused, editor.link_info.text()
+    assert kinds.get("Lado de Teto") == app.OFF and kinds["Capitulo 2: Final"] == app.OFF, kinds
+    assert f'<a href="https://example.com">{word}</a>' in text, text[:300]
+    assert jumped and other_chapter, (jumped, other_chapter)
+    assert replaced.endswith("reemplazos") and "linea" not in text.lower() and "fila" in text, (replaced, text[:200])
 
 
 def test_text_editor_ribbon_follows_the_cursor():
@@ -2432,7 +2606,7 @@ def test_text_editor_ribbon_follows_the_cursor():
     go("que era")
     found["K marcada"] = editor.italic_btn.isChecked() and not editor.bold_btn.isChecked()
     go("Capitulo 1")
-    found["estilo Título"] = editor.style.currentText() == "Título"
+    found["estilo Capítulo"] = editor.style.currentText() == "Capítulo"
     go("Ella penso")
     editor.bold_btn.click()
     found["N pone negrita"] = "<b>Ella penso</b>" in sheet.content()
@@ -2503,7 +2677,9 @@ def test_text_editor_shows_source_page_and_illustration():
 
     seen = [at("Fin."), editor.box is not None, at("[Ilustración 0]")]
     editor.turn(1)  # ▶ desde una ilustración: la página siguiente a la suya
-    seen += [editor.shown, at("Ella penso")]
+    seen.append(editor.shown)
+    editor.open_section(0, len(window.book.blocks))  # hojear llevó la hoja al capítulo de esa página
+    seen.append(at("Ella penso"))
     wide = editor.canvas.width() / editor.win.width()
     narrow = editor.canvas.width()
     editor.zoom(50)
