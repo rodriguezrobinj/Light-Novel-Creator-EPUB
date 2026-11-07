@@ -1179,11 +1179,19 @@ def _table(table, names=()):
     keys = list(table) + [k.capitalize() for k in table if k not in names]
     pattern = re.compile(r"\b(?:" + "|".join(sorted(keys, key=len, reverse=True)) + r")\b")
 
+    def repl(m):
+        # En mayúscula a media frase es un nombre o un título («The Legend of the Heroes»); con guion, una risa
+        # o un sonido («Ahi-ha»)
+        if (m[0][0].isupper() and m.string[:m.start()].rstrip()[-1:].isalpha()
+                or m.string[m.end():m.end() + 1] == "-"):  # «A-Asi», tartamudeo, sí
+            return m[0]
+        return _case(table[m[0].lower()], m[0])
+
     def fix(s):
         # Mirar antes si sale alguna: recorrer cientos de alternativas en cada párrafo es lo lento
         if table.keys().isdisjoint(_words(s)):
             return s
-        return pattern.sub(lambda m: _case(table[m[0].lower()], m[0]), s)
+        return pattern.sub(repl, s)
     return fix
 
 
@@ -1269,6 +1277,75 @@ ABBREVIATIONS = set("sr sra srta dr dra ud uds vd etc aprox pág págs núm vol 
 CAPITAL = re.compile(r"([^\W\d_]{2,})\.\s+[a-záéíóúñ]")  # "la mesa. luego"; los puntos suspensivos no cuentan
 
 
+# Tras «¿que» repiten lo dicho: «¿Que el Maestro…?». Sin «esta», «estas»: suelen ser «está», «estás» sin tilde
+DETERMINERS = set("el un una unos unas ese esa esos esas aquel aquella mi mis tu tus su sus nuestro nuestra "
+                  "nuestros nuestras".split())
+# Tras «¿como» un verbo pide «cómo» («¿Cómo supiste?»); lo demás es comparación: «¿Como tú?», «¿Como qué?»
+VERB = re.compile(r" (?:es|eres|era|eras|fue|fuiste|son|soy|somos|está|estás|están|estaba|estabas|estuvo|ha|has|"
+                  r"han|he|hemos|hay|había|se|te|me|nos|os|le|les|lo|sé|sabes|sabe|sabías|supiste|supo|puede|puedes|"
+                  r"pueden|puedo|pudiste|pudo|podría|podrías|va|vas|van|vamos|voy|iba|hiciste|hizo|haces|hace|"
+                  r"hacen|hago|quieres|quiere|quieren|dices|dice|dijiste|dijo|no|sigues|sigue|demonios|diablos|rayos|"
+                  r"[^\W\d_]+(?:aste|iste|aron|ieron)|[^\W\d_]{2,}(?:ar|er|ir)(?:me|te|se|lo|la|le|los|las|les|nos)?)"
+                  r"\b|\s*[?!….]")
+LABEL = re.compile(r"[^.!?:]{2,60}:\s")  # «TÍTULO: …», «Corrección: Rulos»: fichas y créditos, no frases
+
+
+def _pronoun(m):
+    """«tu», «mi», «el», «si» antes de un signo -> «tú», «mí», «él», «sí». No si es la palabra citada a media
+    frase («y “si”», «empiezan con “Mi”»; «“Si”, decretó», al principio, sí), ni «Oh mi» (de «Oh my»), ni el artículo de una frase dicha palabra a palabra:
+    «¡Ese! ¡Es! ¡El! ¡Problema!» (Re Zero)."""
+    before = m.string[:m.start()]
+    if (before[-1:] in "“«\"'‘" and before[:-1].strip() or re.search(r"\b[Oo]h $", before)
+            or m[0].lower() == "el" and re.search(r"(?:^|[.!?…]\s*)[¡¿“]*[^\W\d_]+[.!?]\s*[¡¿]*$", before)):
+        return m[0]
+    return _case({"tu": "tú", "mi": "mí", "el": "él", "si": "sí"}[m[0].lower()], m[0])
+
+
+def _question(m):
+    """«¿que…?», «¿como…?» -> «¿qué…?», «¿cómo…?». Salvo «¿Que el Maestro me está usando?», «¿Que habrá
+    personas que…?», que repiten lo dicho (tras «que» un artículo o un nombre, o una pregunta larga), y «¿Como
+    tú?», comparación (tras «como» no va un verbo)."""
+    word, rest = m[2].lower(), m.string[m.end():]
+    if word == "que":
+        question = re.match(r"[^?]*", rest)[0]
+        nxt = re.match(r" ([^\W\d_]+)", rest)
+        if nxt and (nxt[1] in DETERMINERS or nxt[1][0].isupper()) or len(question.split()) >= 7:
+            return m[0]
+    if word == "como" and not VERB.match(rest):
+        return m[0]
+    return "¿" + m[1] + _case(INTERROGATIVE[word], m[2])
+
+
+def _open_space(m):
+    """Quita el espacio tras «¿ ¡ « “ (». No si “ va suelta entre espacios y en la línea sobran “: hace de raya
+    («La palabra “Torre “ probablemente…», Mitsuha), ni ¡ ¿ pegados a otro signo («…?¡ campo», Re Zero)."""
+    s = m.string
+    before = re.sub(r"(?:<[^>]+>)+$", "", s[:m.start()])
+    if (m[1] == "“" and before[-1:].isspace() and s.count("“") > s.count("”")
+            or m[1] in "¿¡" and before[-1:] in ("?", "!")):
+        return m[0]
+    return m[1]
+
+
+def _quote_space(m):
+    """Espacio tras » ” ) pegados a una palabra. Una ” sin “ antes no cierra: hace de raya («piezas” quiero
+    decir», Mitsuha)."""
+    if m[1] in "»”" and not re.search("[«“\"]", m.string[:m.start()]):
+        return m[0]
+    return m[1] + " "
+
+
+def _inciso(m):
+    """«—Hola, — dijo» -> «—Hola —dijo». No si la raya, pegada al signo, cierra un inciso («pieles, etc.— que»,
+    Maryoku), ni si es la primera y única de la línea: abre el diálogo tras la narración, «El guardia contestó,
+    ―tengo entendido…» (Re Zero)."""
+    s = m.string
+    if re.match(r"[^\W\d_][.,][—―─–]\s", m[0]) or (
+            not any(d in s[:m.start()] or d in s[m.end():] for d in DASHES)):
+        return m[0]
+    return m[1] + " —"
+
+
 def _close(m):
     """Cambia por ? o ! el punto que acaba una pregunta o exclamación abierta. No tras una abreviatura («¡Hola,
     Sr. García!»), ni si la frase que sigue la cierra: «¡Oh, wow. Esos son barcos!» (Mitsuha)."""
@@ -1296,12 +1373,11 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
         _table(ACCENTS, NAMES),
         # Antes de un signo, «tu», «mi», «el» y «si» son pronombres o afirmación: «para mí», «¡Tú!», «¿Sí?».
         # Tras puntos suspensivos o una coma puede ser un titubeo: «mi… mi espada», «el, eh, enviado»
-        (r"\b(?:[Tt]u|[Mm]i|[Ee]l|[Ss]i)(?=[.;:!?»”)](?!\.))",
-         lambda m: _case({"tu": "tú", "mi": "mí", "el": "él", "si": "sí"}[m[0].lower()], m[0])),
+        (r"\b(?:[Tt]u|[Mm]i|[Ee]l|[Ss]i)(?=[.;:!?»”)](?!\.))", _pronoun),
         (rf" el(?=,| (?:{PRONOUN_NEXT})\b)", _after(set(PREPOSITIONS.split("|")), " él")),
         # «¿Que no vienes?», «¿Que si vendrá?» repiten lo dicho: ahí «que» no lleva tilde
         (r"¿(\s*(?:[Yy] )?)(" + "|".join(list(INTERROGATIVE) + [w.capitalize() for w in INTERROGATIVE]) +
-         r")\b(?! (?:no|si)\b)", lambda m: "¿" + m[1] + _case(INTERROGATIVE[m[2].lower()], m[2])),
+         r")\b(?! (?:no|si)\b)", _question),
         (r"\bmas\b(?! no\b)", "más"),
         (r"ion\b", _ion)),
      "Palabras que sin tilde no existen («tambien», «tenia», «informacion»), pronombres que la llevan («para "
@@ -1353,12 +1429,13 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
         (r" mí[oa]\b", _after(PLACES, " de mí")), (r" tuy[oa]\b", _after(PLACES, " de ti"))),
      "«Más mejor» y «más peor» repiten la comparación (basta «mejor», «peor»); «detrás mío» es «detrás de mí».",
      "Corregirlo."),
-    ("space", "Espacio de más junto a un signo", _subs((r"([¿¡«“(])\s+", r"\1"), (r"\s+([»”)])", r"\1")),
+    ("space", "Espacio de más junto a un signo", _subs((r"([¿¡«“(])\s+", _open_space), (r"\s+([»”)])", r"\1")),
      "Tras los signos de apertura (¿ ¡ « “ () y antes de los de cierre (» ” )) no va espacio.", "Quitarlo."),
     ("nospace", "Falta un espacio tras un signo", _subs(
         (r"(?<=[^\W\d_])([,;])(?=[^\W\d_]|[¿¡«])", r"\1 "),
-        (r"(?<=[a-záéíóúñü]{2})([.?!…])(?=[A-ZÁÉÍÓÚÑ¿¡])", r"\1 "),  # "se burló.Shinichi"; "S.A." o "p.ej.", no
-        (r"([»”)])(?<=[^\s¿¡(«“—―─–][»”)])(?=[^\W\d_]|[¿¡«])", r"\1 ")),  # tras «¿» la ” abre: «¿”amiga”?»
+        # "se burló.Shinichi"; "S.A." o "p.ej.", no; "…¡?" (signos revueltos), tampoco
+        (r"(?<=[a-záéíóúñü]{2})([.?!…])(?=[A-ZÁÉÍÓÚÑ]|[¿¡]+[^\W\d_])", r"\1 "),
+        (r"([»”)])(?<=[^\s¿¡(«“—―─–][»”)])(?=[^\W\d_]|[¿¡«])", _quote_space)),  # tras «¿» la ” abre: «¿”amiga”?»
      "Tras la coma, el punto, el cierre de pregunta o exclamación y el cierre de comillas va un espacio: sin él "
      "las palabras se leen pegadas.", "Ponerlo."),
     ("punct", "Signos de puntuación repetidos", _subs(
@@ -1369,11 +1446,13 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
     ("dialog", "Puntuación del inciso del narrador", _subs(
         # Mitsuha: «—Sí, — respondió el soldado, —un buque…» -> «—Sí —respondió el soldado—, un buque…»
         (r",\s*[—―─–]\s*([a-záéíóúñ][^—―─–.!?]*?),\s*[—―─–]\s*", r" —\1—, ", DASHES),
-        (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", r"\1 —", DASHES)),
+        (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", _inciso, DASHES)),
      "En un diálogo, el punto o la coma no van antes del inciso del narrador sino tras su raya de cierre: "
      "«—Sí —respondió—, vamos.»", "Corregirlo."),
     ("closing", "Falta el signo de cierre", _subs(
-        (r"([¿¡])([^¿¡?!…—―─.]*?)([^\W\d_]*)\.(?![.…\w])", _close)),  # «80.000», «G.I.», no
+        # «80.000», «G.I.», no; ni con una comilla o un paréntesis antes del punto: el signo falta dentro
+        # («¡Esa sí que es una gran noticia,” celebró…», Mitsuha) y no sabemos dónde
+        (r"([¿¡])([^¿¡?!…—―─.”»\"')]*?)([^\W\d_]*)\.(?![.…\w])", _close)),
      "La pregunta o la exclamación se abre con ¿ o ¡ pero acaba en punto: le falta su signo de cierre.",
      "Corregirlo."),
 )
@@ -1488,7 +1567,8 @@ def quality_report(book):
                                 "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E): quita el punto o "
                                 "pon la mayúscula.", _around(text, m.start(), m.end()), text=text))
         nxt = _plain(blocks[k + 1]).strip() if k + 1 < len(blocks) and blocks[k + 1].kind == "p" else ""
-        if len(text) >= 40 and re.search(r"[^\W\d_]$", text) and nxt[:1].isupper() and not LINKS.search(text):
+        if (len(text) >= 40 and re.search(r"[^\W\d_]$", text) and nxt[:1].isupper() and not LINKS.search(text)
+                and not LABEL.match(text.strip()) and not LABEL.match(nxt)):
             report.append(Issue("end", k, b.page, "Menor", "Falta el punto final",
                                 "El párrafo acaba sin punto y el siguiente empieza en mayúscula: falta el punto, "
                                 "o el párrafo está partido y el siguiente sigue la frase.",
