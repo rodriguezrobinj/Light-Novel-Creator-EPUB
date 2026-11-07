@@ -592,6 +592,34 @@ def test_symbol_font_suits_are_scene_breaks_not_chapters():
     assert breaks == ["♠♠", "♠♠"] and "ªª" not in headings, (breaks, headings)
 
 
+def test_links_and_centered_paragraphs_reach_the_epub():
+    """El editor escribe enlaces (<a href="https://…">) y párrafos centrados (<center> delante): llegan a los
+    bloques y al EPUB, que check_epub no da por roto, y section_text los devuelve igual. Una edición vieja de
+    un párrafo centrado por el PDF (sin <center>) lo sigue reconociendo sin cambios."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Querida Teto:", align="center"),
+              convert.Block("p", 1, "Uno.")]
+    book = convert.Book("Libro", "", JPEG, blocks, [0])
+    shown = convert.section_text(book, 1, 3)
+    convert.edit_section(book, 1, 3, "Querida Teto:\n\nUno.")  # revisión vieja: sin <center>
+    old_kept = book.blocks[1].align == "center"
+    lines = ['Ver <a href="https://example.com/?a=1&b=2">la <i>web</i></a> ahora.', "<center>Fin de la carta.",
+             '<a href="javascript:alert(1)">no</a>']
+    convert.edit_section(book, 1, 3, "\n\n".join(lines))
+    htmls = [(b.html, b.align) for b in book.blocks[1:]]
+    again = convert.section_text(book, 1, 4).split("\n\n")
+    out = TMP / "enlaces.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out)
+    text, problems = epub_text(out), convert.check_epub(str(out))
+    assert shown == "<center>Querida Teto:\n\nUno.", shown
+    assert old_kept
+    assert htmls == [('Ver <a href="https://example.com/?a=1&amp;b=2">la <i>web</i></a> ahora.', ""),
+                     ("Fin de la carta.", "center"),
+                     ('&lt;a href="javascript:alert(1)"&gt;no&lt;/a&gt;', "")], htmls
+    assert again == lines, again
+    assert 'href="https://example.com/?a=1&amp;b=2"' in text and 'class="center"' in text, text
+    assert not problems, problems
+
+
 def test_separator_options():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
               convert.Block("break", 1, "☆"), convert.Block("p", 1, "Dos."),

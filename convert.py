@@ -706,6 +706,9 @@ def replace_text(book, find, new, word=False, blocks=None):
 TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
 INLINE = re.compile(r"&lt;(/?)([ib])&gt;")
 NOTE_MARK = re.compile(r"\[Nota: (.+?)\]")  # nota al pie en el editor de texto
+# Enlace escrito en el editor, ya escapado: solo direcciones web (un javascript: no sirve en un libro)
+LINK_MARK = re.compile(r'&lt;a href="(https?://[^"\s<>]+)"&gt;(.*?)&lt;/a&gt;')
+CENTER = "<center>"  # al principio de una línea del editor: párrafo centrado (carta, cartel)
 
 
 def section_text(book, start, end):
@@ -718,7 +721,7 @@ def section_text(book, start, end):
 def _line(b, k):
     """Línea de section_text del bloque b, que es el número k del libro."""
     if b.kind == "p":
-        return html.unescape(NOTE.sub(r"[Nota: \1]", b.html))
+        return (CENTER if b.align == "center" else "") + html.unescape(NOTE.sub(r"[Nota: \1]", b.html))
     if b.kind == "heading":
         return "# " + html.unescape(b.html)
     return f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]"
@@ -740,6 +743,7 @@ def _inline(text):
     dentro las etiquetas también cierran (si no, cruzarían el límite de la nota)."""
     out = INLINE.sub(r"<\1\2>", html.escape(text, quote=False))
     out = out if _balanced(out) else TAGS.sub("", out)
+    out = LINK_MARK.sub(lambda m: f'<a href="{m[1]}">{m[2]}</a>' if _balanced(m[2]) else m[0], out)
     return NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
 
 
@@ -756,6 +760,7 @@ def edit_section(book, start, end, text):
     for k in range(start, end):
         if old[k].kind in ("p", "heading"):
             same.setdefault(_line(old[k], k).strip(), old[k])
+            same.setdefault(_line(old[k], k).strip().removeprefix(CENTER), old[k])  # edición de antes de <center>
     new, kept = [], {}
     for line in (line.strip() for line in text.splitlines()):
         if not line:
@@ -773,6 +778,8 @@ def edit_section(book, start, end, text):
             new.append(Block("heading", page, _inline(line[2:].strip())))
         elif SCENE_BREAK.fullmatch(line):
             new.append(Block("break", page, html.escape(line, quote=False)))
+        elif line.startswith(CENTER):
+            new.append(Block("p", page, _inline(line[len(CENTER):].strip()), align="center"))
         else:
             new.append(Block("p", page, _inline(line)))
     delta = len(new) - (end - start)
@@ -1983,7 +1990,7 @@ def check_epub(path):
                 problems.append(f"{name[len(base):]}: falta la imagen {img.get('src')}")
         for a in tree.iter(XHTML + "a"):
             target, _, anchor = a.get("href", "").partition("#")
-            if target and (base + target not in names or (anchor and anchor not in ids.get(base + target, ()))):
+            if target and not re.match(r"https?://", target) and (base + target not in names or (anchor and anchor not in ids.get(base + target, ()))):
                 problems.append(f"{name[len(base):]}: enlace roto a {a.get('href')}")
         h1 = next(tree.iter(XHTML + "h1"), None)
         if (re.fullmatch(r"OEBPS/sec\d+\.xhtml", name) and h1 is not None
