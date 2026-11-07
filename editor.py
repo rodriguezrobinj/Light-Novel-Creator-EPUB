@@ -105,7 +105,7 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
         if remember:
             f = cursor.blockFormat()
             f.setProperty(ORIGINAL, line)
-            f.setProperty(CANON, "\n\n".join(_lines(cursor.block())))
+            f.setProperty(CANON, _canonical(line))
             cursor.setBlockFormat(f)
 
 
@@ -132,6 +132,24 @@ def _marked(runs):
         out.append(text)
     out += [f"</{t}>" for t in reversed(stack)]
     return "".join(out)
+
+
+def _canonical(line):
+    """Lo que _lines daría de la línea recién cargada, sin recorrer el documento (cargar el libro entero)."""
+    bare = line.strip()
+    if convert.TOKEN.fullmatch(bare):
+        return bare
+    heading = line.startswith("# ")
+    runs, italic, bold = [], False, False
+    for part in MARKS.split(line[2:] if heading else line):
+        if part in ("<i>", "</i>"):
+            italic = part == "<i>"
+        elif part in ("<b>", "</b>"):
+            bold = part == "<b>"
+        elif part:
+            runs.append((part, italic, bold))
+    text = _marked(runs).strip()
+    return ("# " if heading else "") + text if text else ""
 
 
 def _lines(block):
@@ -281,7 +299,9 @@ class Sheet(QTextEdit):
 
     def set_content(self, lines, pictures, color="#888888"):
         self.pictures, self.color = dict(pictures), color
+        self.look.setDocument(None)  # sin colorear párrafo a párrafo mientras se carga: una vez al final
         load(self.document(), lines, self.pictures, color)
+        self.look.setDocument(self.document())
         self.moveCursor(QTextCursor.MoveOperation.Start)
 
     def content(self):
@@ -290,6 +310,18 @@ class Sheet(QTextEdit):
     def set_zoom(self, percent):
         # En la hoja de estilo: la QSS de la ventana (9 pt para todo) pisaría un setFont o la fuente del documento
         self.setStyleSheet(f"QTextEdit#sheet {{ font-family: 'Segoe UI'; font-size: {FONT_SIZE * percent / 100:.1f}pt; }}")
+
+    def goto_source(self, k):
+        """Cursor al principio del párrafo que viene del bloque k (si está)."""
+        block = self.document().firstBlock()
+        while block.isValid():
+            if source_of(block) == k:
+                cursor = self.textCursor()
+                cursor.setPosition(block.position())
+                self.setTextCursor(cursor)
+                return True
+            block = block.next()
+        return False
 
     def current_source(self):
         """Bloque del libro del párrafo del cursor o, en uno nuevo sin origen, el del anterior que lo tenga."""

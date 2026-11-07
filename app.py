@@ -2017,35 +2017,31 @@ class App:
         self.replacements_window = win, text, save
 
     def edit_text(self):
-        """Abre el editor del texto de la sección seleccionada (de su título al siguiente)."""
+        """Abre el editor con todo el libro, en la fila seleccionada (título, ilustración o separador)."""
         selected = self.tree.selection()
-        if not self.book or not selected or self.is_image(selected[0]):
+        if not self.book or not selected:
             return None
-        item = selected[0]
-        if self.is_break(item):  # la sección del título de antes
-            item = next((str(j) for j in range(int(item), -1, -1)
-                         if self.tree.exists(str(j)) and self.is_title(str(j))), None)
-            if item is None:
-                return None
-        start = int(item) + 1
-        end = next((k for k in range(start, len(self.book.blocks)) if self.book.blocks[k].kind == "heading"),
-                   len(self.book.blocks))
-        return TextEditor(self, item, start, end)
+        return TextEditor(self, selected[0], 0, len(self.book.blocks))
 
     def apply_edit(self, edit, item):
         self.apply_edits([edit], item)
 
-    def apply_edits(self, edits, item):
+    def apply_edits(self, edits, item, titles=None, follow=False):
         """Aplica textos editados: cambia los bloques, renumera la lista conservando los tipos elegidos
         y los apunta para la revisión. Guarda una copia de antes para deshacerlos de una vez con Ctrl+Z.
-        Varios cambios van de atrás adelante: así los índices de los siguientes siguen valiendo."""
+        Varios cambios van de atrás adelante: así los índices de los siguientes siguen valiendo.
+        titles: {fila: título nuevo} de títulos renombrados en el editor (conservan su tipo). follow: item es
+        la fila de antes de los cambios y se vuelve a elegir donde quede."""
         rows = self.rows()
         self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})  # edit_section crea listas nuevas
+        rows = {k: [v[0], titles[k], *v[2:]] if titles and k in titles else v for k, v in rows.items()}
         for edit in edits:
             mapping = convert.edit_section(self.book, *edit)
             self.edits.append(list(edit))
             rows = {str(mapping[int(k)]): v for k, v in rows.items() if int(k) in mapping}
+            if follow and item is not None:
+                item = str(mapping[int(item)]) if int(item) in mapping else None
         self.fill_tree(rows)
         if item is not None:  # None: libro sin títulos ni ilustraciones, la lista está vacía
             self.tree.selection_set(item)
@@ -3082,7 +3078,7 @@ class TextEditor:
         self.canvas = qtk.Preview()
         self.scroll = QScrollArea()
         self.scroll.setWidget(self.canvas)
-        self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)  # más pequeña que el panel: en el medio
         self.page_label = _label("", "muted")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.zoom_label = _label("100 %", "muted")
@@ -3116,9 +3112,13 @@ class TextEditor:
         self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
         self.drawn = None  # (bloque, PDF) del dibujo actual del panel
         self.pending = {}  # trabajo diferido: nombre -> temporizador
-        lines = [(k, convert.section_text(app.book, k, k + 1)) for k in range(start, end)]
-        sheet.set_content(lines, self.pictures(), colors["muted"])
-        self.original = sheet.content()
+        # Un título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)
+        self.lines = [(k, "# " + app.tree.set(str(k), "title") if app.book.blocks[k].kind == "heading"
+                       and app.tree.exists(str(k)) else convert.section_text(app.book, k, k + 1))
+                      for k in range(start, end)]
+        sheet.set_content(self.lines, self.pictures(), colors["muted"])
+        sheet.goto_source(int(item))
+        self.original = "\n\n".join(line for _, line in self.lines if line.strip())  # lo que daría content()
         self.set_text_zoom(100)
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
@@ -3189,10 +3189,18 @@ class TextEditor:
         """A pantalla completa y la barra divisoria en el medio (con el tamaño ya maximizado)."""
         if shiboken6.isValid(self.win) and self.win.isVisible():
             self.win.showMaximized()
-            qtk.after(0, lambda: shiboken6.isValid(self.split) and self.split.setSizes([10 ** 4, 10 ** 4]))
+            qtk.after(0, self.center)
+
+    def center(self):
+        """Barra divisoria al medio y el párrafo del cursor a la vista."""
+        if shiboken6.isValid(self.split):
+            self.split.setSizes([10 ** 4, 10 ** 4])
+            self.sheet.ensureCursorVisible()
 
     def update_tools(self):
         """La cinta sigue al cursor, como en Word: N y K marcadas si lo están, y el estilo del párrafo."""
+        if not shiboken6.isValid(self.sheet) or not shiboken6.isValid(self.style):
+            return
         f = self.sheet.currentCharFormat()
         self.bold_btn.setChecked(f.fontWeight() >= QFont.Weight.DemiBold)
         self.italic_btn.setChecked(f.fontItalic())
@@ -3226,6 +3234,8 @@ class TextEditor:
     def on_destroy(self):
         if self.app.text_editor is self:
             self.app.text_editor = None
+        if shiboken6.isValid(self.sheet):  # al destruirse, la hoja aún avisaría de cambios del cursor
+            self.sheet.blockSignals(True)
         for job in self.pending.values():
             qtk.cancel(job)
         self.pending.clear()
@@ -3347,10 +3357,28 @@ class TextEditor:
             return [line.strip() for line in text.splitlines() if line.strip()]
         return lines(self.sheet.content()) != lines(self.original)
 
+    def changes(self):
+        """Lo que cambió, línea a línea frente a lo cargado: [[inicio, fin, texto]] de atrás adelante para
+        edit_section, y {fila: título} de los títulos solo renombrados (conservan su tipo y su ✓)."""
+        old = [line for _, line in self.lines]
+        new = [line for line in self.sheet.content().split("\n\n") if line.strip()]
+        edits, titles = [], {}
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+            k = str(self.start + i1)
+            if tag == "equal":
+                continue
+            if (tag == "replace" and i2 - i1 == j2 - j1 == 1 and old[i1].startswith("# ") and new[j1].startswith("# ")
+                    and self.app.tree.exists(k)):
+                titles[k] = new[j1][2:].strip()
+            else:
+                edits.append([self.start + i1, self.start + i2, "\n\n".join(new[j1:j2])])
+        return edits[::-1], titles
+
     def save(self):
-        """Aplica el texto solo si cambió: edit_section rehace los párrafos y perderían su página del PDF."""
+        """Aplica solo lo que cambió: un párrafo rehecho pierde su página del PDF, y un título rehecho su tipo."""
         if self.dirty():
-            self.app.apply_edit([self.start, self.end, self.sheet.content()], self.item)
+            edits, titles = self.changes()
+            self.app.apply_edits(edits, self.item, titles, follow=True)
         self.win.done(0)
 
     def cancel(self, _=None):
