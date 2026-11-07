@@ -2335,6 +2335,72 @@ def test_editor_sheet_actions_paste_and_undo():
                     ["Dijo", "hola, y se fue."], 2, "Pegado de fuera", 1, 1], seen
 
 
+def test_editor_sheet_links_center_levels_case_and_search():
+    """Enlaces, párrafos centrados y tipo de título se ven en la hoja y vuelven al formato del texto; Mayús+F3
+    cambia mayúsculas; buscar y reemplazar en la hoja, con un solo deshacer."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    lines = [(1, "# Capítulo 1"), (2, "# El lado de Teto"), (3, 'Ver <a href="https://example.com/?a=1&b=2">la web</a>.'),
+             (4, "<center>Querida Teto:"), (5, "hola mundo, Hola otra vez.")]
+    sheet.set_content(lines, {}, levels={1: "Capítulo", 2: "Subtítulo"})
+    same = sheet.content() == "\n\n".join(line for _, line in lines)
+
+    def at(n, start=0, end=None):
+        block = sheet.document().findBlockByNumber(n)
+        c = sheet.textCursor()
+        c.setPosition(block.position() + start)
+        if end is not None:
+            c.setPosition(block.position() + end, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+
+    def line(n):
+        return sheet.content().split("\n\n")[n]
+
+    seen = []
+    at(1)
+    seen.append(sheet.heading_level())                       # Subtítulo
+    sheet.set_heading("Capítulo")
+    seen.append(sheet.heading_level())
+    at(2, 5)
+    seen.append(sheet.link_at())                             # dentro del enlace
+    at(4, 0, 4)                                              # "hola"
+    sheet.set_link("https://teto.example")
+    seen.append(line(4))
+    sheet.undo()
+    at(3)
+    sheet.toggle_center()
+    seen.append(line(3))                                     # ya no centrado
+    sheet.undo()
+    at(4, 0, 10)                                             # "hola mundo"
+    sheet.change_case()
+    seen.append(line(4)[:10])                                # Hola Mundo
+    sheet.change_case()
+    seen.append(line(4)[:10])                                # HOLA MUNDO
+    sheet.undo()
+    sheet.undo()
+    at(0)
+    found = [sheet.find_next("hola"), sheet.textCursor().selectedText()]
+    seen.append(found)
+    seen.append(sheet.replace_all("hola", "adiós"))
+    seen.append(line(4))
+    sheet.undo()                                             # un solo paso
+    seen.append(line(4))
+    at(4)
+    sheet.insert_note()
+    sheet.textCursor().insertText("aclaración")
+    seen.append(line(4)[:18])
+    assert same, sheet.content()
+    assert seen == ["Subtítulo", "Capítulo", "https://example.com/?a=1&b=2",
+                    '<a href="https://teto.example">hola</a> mundo, Hola otra vez.', "Querida Teto:",
+                    "Hola Mundo", "HOLA MUNDO", [True, "hola"], 2, "adiós mundo, adiós otra vez.",
+                    "hola mundo, Hola otra vez.", "[Nota: aclaración]"], seen
+
+
 def test_editor_sheet_looks_and_spelling():
     """Los títulos se ven grandes y en negrita sin guardar negrita; las palabras desconocidas salen subrayadas."""
     import qtk
