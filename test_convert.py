@@ -2304,9 +2304,10 @@ def test_editor_sheet_looks_and_spelling():
 
 
 def test_text_editor_opens_section_and_saves_only_changes():
-    """El editor muestra la sección en el formato de section_text; aceptar sin cambios no toca el libro
-    (los párrafos conservan su página) y cancelar con cambios pregunta antes de descartarlos."""
+    """El editor muestra la sección como section_text; aceptar sin cambios no toca el libro (los párrafos
+    conservan su página), un cambio llega al libro, y cancelar con cambios pregunta antes de descartarlos."""
     import app
+    from PySide6.QtGui import QTextCursor
 
     root, window = visible_window()
     window.pdf = make_novel()
@@ -2314,15 +2315,17 @@ def test_text_editor_opens_section_and_saves_only_changes():
     before = [(b.kind, b.html, b.page) for b in window.book.blocks]
     window.tree.selection_set("1")  # "Capitulo 1: Inicio": su sección son los bloques 2..5
     editor = window.edit_text()
-    shown = editor.text.get("1.0", "end-1c") == convert.section_text(window.book, 2, 6)
-    sources = [t for t in editor.text.tag_names("1.0") if t.startswith("src")]
-    grabbed = editor.win.isModal()  # la lista no cambia por debajo mientras se edita
-    editor.text.insert("end", "\n\n  ")  # líneas en blanco: no es un cambio (aceptar re-paginaría la sección)
+    shown = editor.sheet.content() == convert.section_text(window.book, 2, 6)
+    source = editor.sheet.current_source()
+    grabbed = editor.win.isModal() and editor.win.isMaximized()
+    editor.sheet.moveCursor(QTextCursor.MoveOperation.End)
+    editor.sheet.split_here()  # un párrafo vacío: no es un cambio (aceptar re-paginaría la sección)
     blank_only = not editor.dirty()
     editor.save()
     same = [(b.kind, b.html, b.page) for b in window.book.blocks] == before
     editor = window.edit_text()
-    editor.text.insert("1.0", "Hola ")
+    editor.sheet.moveCursor(QTextCursor.MoveOperation.Start)
+    editor.sheet.textCursor().insertText("Hola ")
     original, answers = app.messagebox.askyesno, []
     try:
         app.messagebox.askyesno = lambda *args, **kwargs: answers.append(args) or False
@@ -2333,35 +2336,49 @@ def test_text_editor_opens_section_and_saves_only_changes():
         closed = not editor.win.isVisible()
     finally:
         app.messagebox.askyesno = original
+    editor = window.edit_text()
+    editor.sheet.moveCursor(QTextCursor.MoveOperation.Start)
+    editor.sheet.textCursor().insertText("Hola ")
+    editor.save()
+    changed = window.book.blocks[2].html
     window.close()
-    assert shown and sources == ["src2"] and same, (shown, sources, same)
+    assert shown and source == 2 and same, (shown, source, same)
     assert grabbed and blank_only, (grabbed, blank_only)
     assert len(answers) == 1 and kept and closed, (answers, kept, closed)
+    assert changed.startswith("Hola "), changed
 
 
-def test_text_editor_highlights_marks():
-    """Títulos, cursivas, negritas, marcas de ilustración y separadores se distinguen de un vistazo."""
+def test_text_editor_ribbon_follows_the_cursor():
+    """Como en Word: la cinta marca N y K donde el texto lo es, el estilo dice Título en un título, y sus
+    botones cambian la hoja. Cerrar la ventana principal con cambios sin guardar en el editor pregunta."""
     import app
+    from PySide6.QtGui import QTextCursor
 
     root, window = visible_window()
     window.pdf = make_novel()
     window.show_book(convert.analyze(window.pdf))
     editor = app.TextEditor(window, "1", 0, len(window.book.blocks))  # todo el libro: ilustración incluida
-    text = editor.text
-    content = text.get("1.0", "end-1c")
+    sheet = editor.sheet
+    content = sheet.content()
+    found = {"ilustración": "[Ilustración 0]" in content, "cursiva": "<i>que era tarde.</i>" in content}
 
-    def tags(needle):
-        return set(text.tag_names(f"1.0+{content.index(needle)}c"))
+    def go(needle):
+        cursor = sheet.document().find(needle)
+        sheet.setTextCursor(cursor)
+        editor.update_tools()
 
-    found = {"título": "heading" in tags("# Capitulo 1"), "ilustración": "token" in tags("[Ilustración 0]"),
-             "marca": "mark" in tags("<i>que"), "marca sin cursiva": "italic" not in tags("<i>que"),
-             "cursiva": "italic" in tags("que era"), "texto normal": not {"italic", "heading"} & tags("Ella")}
-    text.insert("end", "\n\n<b>uno <i>dos</i></b>\n\n* * *")
-    editor.highlight()
-    content = text.get("1.0", "end-1c")
-    found["negrita"] = "bold" in tags("uno")
-    found["negrita y cursiva"] = "bolditalic" in tags("dos</i>")
-    found["separador escrito"] = "scene" in tags("* * *")
+    go("que era")
+    found["K marcada"] = editor.italic_btn.isChecked() and not editor.bold_btn.isChecked()
+    go("Capitulo 1")
+    found["estilo Título"] = editor.style.currentText() == "Título"
+    go("Ella penso")
+    editor.bold_btn.click()
+    found["N pone negrita"] = "<b>Ella penso</b>" in sheet.content()
+    cursor = sheet.textCursor()
+    cursor.clearSelection()
+    sheet.setTextCursor(cursor)
+    editor.style.activated.emit(1)
+    found["estilo pone título"] = any(line.startswith("# ") and "penso" in line for line in sheet.content().split("\n\n"))
     original, asked = app.messagebox.askyesno, []
     try:  # cerrar la ventana principal con cambios sin guardar en el editor: pregunta antes
         app.messagebox.askyesno = lambda *args, **kwargs: asked.append(args) or False
@@ -2375,143 +2392,70 @@ def test_text_editor_highlights_marks():
     assert all(found.values()), found
 
 
-def test_text_editor_actions_and_undo():
-    """Cursiva, título, unir y partir párrafos sin escribir marcas; cada acción se deshace con un Ctrl+Z."""
+def test_text_editor_find_box_skips_repeated_lines():
+    """Una línea corta repetida en la página no se recuadra: no se sabe cuál es."""
     import app
 
-    root, window = visible_window()
-    window.pdf = make_novel()
-    window.show_book(convert.analyze(window.pdf))
-    editor = app.TextEditor(window, "6", 7, 10)  # "Fin." / "Dijo <i>hola</i>, y se fue." / "Palabra separada."
-    text = editor.text
-
-    def line(n):
-        return text.get(f"{n}.0", f"{n}.end")
-
-    def select(first, last):
-        text.tag_remove("sel", "1.0", "end")
-        text.tag_add("sel", first, last)
-
-    seen = []
-    select("1.0", "1.3")
-    editor.step(lambda: editor.toggle_mark("i"))
-    seen.append(line(1))                       # envuelve "Fin"
-    select("1.3", "1.6")
-    editor.step(lambda: editor.toggle_mark("i"))
-    seen.append(line(1))                       # otra vez: la quita
-    select("1.0", "3.2")
-    editor.step(lambda: editor.toggle_mark("i"))
-    seen.append((line(1), line(3)))            # varias líneas: no hace nada
-    text.tag_remove("sel", "1.0", "end")
-    text.mark_set("insert", "1.2")
-    editor.step(editor.toggle_heading)
-    seen.append(line(1))
-    editor.step(editor.join_next)
-    seen.append(line(1))                       # un título no se une
-    editor.step(editor.toggle_heading)
-    text.mark_set("insert", "1.2")
-    editor.step(editor.join_next)
-    seen.append(line(1))
-    text.edit_undo()
-    seen.append((line(1), line(3)))            # un solo Ctrl+Z deshace la unión entera
-    text.mark_set("insert", "3.9")             # "Dijo <i>h|ola</i>"
-    editor.step(editor.split_here)
-    seen.append((line(3), line(5)))            # la cursiva se cierra y se vuelve a abrir
-    text.mark_set("insert", "1.0")
-    editor.step(editor.insert_break)
-    seen.append(line(3))
-    bound = all(key in editor.shortcuts for key in ("Ctrl+I", "Ctrl+B", "Ctrl+T", "Ctrl+J", "Ctrl+Return"))
-    editor.win.done(0)  # sin pasar por la pregunta de cambios sin guardar
-    window.close()
-    assert seen == ["<i>Fin</i>.", "Fin.", ("Fin.", "Dijo <i>hola</i>, y se fue."), "# Fin.", "# Fin.",
-                    "Fin. Dijo <i>hola</i>, y se fue.", ("Fin.", "Dijo <i>hola</i>, y se fue."),
-                    ("Dijo <i>h</i>", "<i>ola</i>, y se fue."), "* * *"], seen
-    assert bound
-
-
-def test_text_editor_never_breaks_marks():
-    """Lo que el editor muestra con formato llega con formato al EPUB: partir respeta el anidado, no se
-    envuelve media marca, no se escribe dentro de [Ilustración N], y las marcas que edit_section quitaría
-    (mal anidadas, ilustración copiada) se ven en rojo."""
-    import app
-
-    root, window = visible_window()
-    window.pdf = make_novel()
-    window.show_book(convert.analyze(window.pdf))
-    editor = app.TextEditor(window, "1", 0, len(window.book.blocks))
-    text = editor.text
-
-    def line(n):
-        return text.get(f"{n}.0", f"{n}.end")
-
-    def select(first, last):
-        text.tag_remove("sel", "1.0", "end")
-        text.tag_add("sel", first, last)
-
-    text.delete("1.0", "end")
-    text.insert("1.0", "<b>uno <i>dos</i></b>\n\nDijo <i>hola</i>, y se fue.\n\n[Ilustración 0]\n\nFin.")
-    seen = []
-    text.mark_set("insert", "1.12")                    # "<b>uno <i>do|s</i></b>"
-    editor.step(editor.split_here)
-    seen.append((line(1), line(3)))
-    select("5.10", "5.19")                             # "la</i>, y": media cursiva
-    editor.step(lambda: editor.toggle_mark("b"))
-    seen.append(line(5))
-    select("5.5", "5.16")                              # "<i>hola</i>" con sus marcas: se quita
-    editor.step(lambda: editor.toggle_mark("i"))
-    seen.append(line(5))
-    text.tag_remove("sel", "1.0", "end")
-    text.mark_set("insert", "7.3")                     # dentro de [Ilustración 0]
-    editor.step(lambda: editor.toggle_mark("i"))
-    seen.append(line(7))
-    select("9.0", "10.0")                              # triple clic: la línea y su salto
-    editor.step(lambda: editor.toggle_mark("i"))
-    seen.append(line(9))
-    text.insert("end", "\n\n[Ilustración 0]\n\n<i>mal <b>anidado</i></b>")
-    editor.highlight()
-    content = text.get("1.0", "end-1c")
-    copy = content.rindex("[Ilustración 0]")
-    seen.append(set(text.tag_names(f"1.0+{copy}c")) & {"token", "broken"})
-    seen.append("broken" in text.tag_names(f"1.0+{content.index('<i>mal')}c"))
-    editor.win.done(0)
-    window.close()
-    with pymupdf.open() as doc:  # una línea corta repetida en la página: no se sabe cuál es, sin recuadro
+    with pymupdf.open() as doc:
         page = doc.new_page()
         for y in (100, 200):
             page.insert_text((72, y), "Si.")
         page.insert_text((72, 300), "Una sola vez")
         boxes = [app.TextEditor.find_box(page, convert.Block("p", 1, t)) for t in ("Si.", "Una sola vez")]
-    assert seen == [("<b>uno <i>do</i></b>", "<b><i>s</i></b>"), "Dijo <i>hola</i>, y se fue.",
-                    "Dijo hola, y se fue.", "[Ilustración 0]", "<i>Fin.</i>", {"broken"}, True], seen
     assert boxes[0] is None and boxes[1] is not None, boxes
 
 
 def test_text_editor_shows_source_page_and_illustration():
-    """El panel lateral sigue al cursor: la página del PDF del párrafo (recuadrado), también en una línea
-    nueva escrita debajo; sobre [Ilustración N], la ilustración. Sección vacía y libro sin PDF: sin errores."""
+    """El panel sigue al cursor: la página del PDF del párrafo (recuadrado), también en un párrafo nuevo
+    escrito debajo; sobre una ilustración, la ilustración. Es grande (al menos el 40 % del ancho), el zoom la
+    agranda y ◀ ▶ hojean. Sección vacía y libro sin PDF: sin errores."""
     import app
+    import editor as sheet_module
 
     root, window = visible_window()
     window.pdf = make_novel()
     window.show_book(convert.analyze(window.pdf))
     editor = app.TextEditor(window, "1", 0, len(window.book.blocks))
-    text = editor.text
+    editor.win.showNormal()
+    editor.win.resize(1300, 760)
+    root.update()
+    editor.split.setSizes([650, 650])
+    root.update()
+    sheet = editor.sheet
 
     def at(needle):
-        text.mark_set("insert", text.search(needle, "1.0"))
+        if needle.startswith("["):  # una ilustración: el párrafo de su objeto
+            block = sheet.document().firstBlock()
+            while sheet_module.objects_of(block) != [needle[1:-1]]:
+                block = block.next()
+            cursor = sheet.textCursor()
+            cursor.setPosition(block.position())
+        else:
+            cursor = sheet.document().find(needle)
+        sheet.setTextCursor(cursor)
         editor.draw_source()
         return editor.shown
 
     seen = [at("Fin."), editor.box is not None, at("[Ilustración 0]")]
     editor.turn(1)  # ▶ desde una ilustración: la página siguiente a la suya
     seen += [editor.shown, at("Ella penso")]
-    text.insert(text.index(f"{text.search('Fin.', '1.0')} lineend"), "\n\nParrafo nuevo")
+    wide = editor.canvas.width() / editor.win.width()
+    narrow = editor.canvas.width()
+    editor.zoom(50)
+    bigger = editor.canvas.width() > narrow
+    cursor = sheet.document().find("Fin.")
+    cursor.movePosition(cursor.MoveOperation.EndOfBlock)
+    sheet.setTextCursor(cursor)
+    sheet.split_here()
+    sheet.textCursor().insertText("Parrafo nuevo")
     seen.append(at("Parrafo nuevo"))
+    editor.update_status()
     status = editor.status.text()
     empty = app.TextEditor(window, "6", 7, 7)  # título sin texto debajo: muestra la página del título
     empty.draw_source()
     seen.append(empty.shown)
     doc, window.pdf_doc = window.pdf_doc, None  # revisión de un PDF que ya no está
+    editor.drawn = None
     at("Fin.")
     seen.append(editor.shown)
     window.pdf_doc = doc
@@ -2520,6 +2464,7 @@ def test_text_editor_shows_source_page_and_illustration():
     window.close()
     assert seen == [("page", 4), True, ("image", 0), ("page", 3), ("page", 3), ("page", 4), ("page", 4), None], seen
     assert status.startswith("Página 4 del PDF · párrafo "), status
+    assert wide >= 0.4 and bigger, (wide, bigger)
 
 
 def test_window_find_moves_previews_to_the_match():
@@ -3152,7 +3097,7 @@ def test_window_spelling():
     window.pdf_doc = None  # libro sin PDF: el panel del editor queda en blanco
     editor = window.edit_text()
     root.update()
-    marked = [editor.text.get(*r) for r in zip(*[iter(editor.text.tag_ranges("spell"))] * 2)]
+    marked = editor.sheet.misspelled()
     editor.win.done(0)
     state = (window.words, sorted(window.unknown))
     window.close()
@@ -3407,7 +3352,7 @@ def test_editor_page_buttons_below_the_page():
     editor = window.edit_text()
     editor.win.resize(1250, 700)
     qtk.pump()
-    page, label = editor.canvas.geometry(), editor.page_label.geometry()
+    page, label = editor.scroll.geometry(), editor.page_label.geometry()
     editor.win.done(0)
     window.close()
     assert label.top() > page.bottom(), (page, label)

@@ -29,14 +29,15 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit, QProgressBar,
-                               QPushButton, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTabBar, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QStackedWidget, QTabBar,
+                               QToolButton, QVBoxLayout, QWidget)
 
 import convert
+import editor
 import qtk
 import theme
 from qtk import filedialog, messagebox
@@ -79,17 +80,13 @@ FONT_CHOICES = ["Del lector"] + list(convert.FONTS) + ["Otra…"]  # «Otra…»
 APP_NAME = "Light Novel Creator"  # nombre visible; el .exe y la carpeta de ajustes siguen siendo «PDF a EPUB»
 KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro, theme.kind_colors(True)
 PREVIEW_BOX = (480, 640)  # ancho y alto máximos de cada vista previa, en píxeles
-EDITOR_PANEL = (360, 480)  # ancho y alto máximos del panel del PDF en el editor de texto, en píxeles
 PREVIEW_CHROME = 40       # alto de la fila ◀ leyenda ▶ de cada vista previa
 DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
 THUMB_HEIGHT = 64         # alto de las miniaturas del PDF, en píxeles
 THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe congelaría la ventana
 MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
-MARK = re.compile(r"</?[ib]>")  # marcas de cursiva y negrita del editor de texto
 # Aspecto de las marcas en el editor de texto (theme.editor_tags); "broken" es lo que edit_section quitaría
-EDITOR_TAGS = theme.editor_tags(False)
-STYLE_TAGS = {1: "italic", 2: "bold", 3: "bolditalic"}  # cursiva suma 1 y negrita 2
 LEVEL_COLOR = theme.level_colors(False)  # avisos del informe de calidad; en oscuro, theme.level_colors(True)
 LEVEL_NAMES = {"Grave": ("grave", "graves"), "Revisar": ("por revisar", "por revisar"),
                "Menor": ("menor", "menores")}  # singular y plural: «1 grave», «2 graves»
@@ -661,36 +658,6 @@ def _uninstall():
             pass  # ya no estaba
     if Path(sys.executable).resolve() != exe.resolve():  # el .exe en uso no se puede borrar
         exe.unlink(missing_ok=True)
-
-
-def _is_paragraph(line):
-    """Línea del editor de texto que es un párrafo: ni título, ni marca de ilustración o separador, ni
-    separador escrito. Solo los párrafos se unen, se parten o pasan a título."""
-    line = line.strip()
-    return (bool(line) and not line.startswith("# ") and not convert.TOKEN.fullmatch(line)
-            and not convert.SCENE_BREAK.fullmatch(line))
-
-
-def _open_marks(text):
-    """Marcas <i>/<b> que quedan abiertas al final de text, de fuera adentro."""
-    stack = []
-    for m in MARK.finditer(text):
-        if not m.group().startswith("</"):
-            stack.append(m.group()[1])
-        elif stack and stack[-1] == m.group()[2]:
-            stack.pop()
-    return stack
-
-
-def _balanced(text):
-    """¿Cierran todas las marcas <i>/<b> y en orden? Si no, convert.edit_section quita todas las de la línea."""
-    stack = []
-    for m in MARK.finditer(text):
-        if not m.group().startswith("</"):
-            stack.append(m.group()[1])
-        elif not stack or stack.pop() != m.group()[2]:
-            return False
-    return not stack
 
 
 def _dropped_pdf(mime):
@@ -3084,9 +3051,9 @@ class Dialog(QDialog):
 
 
 class TextEditor:
-    """Editor del texto de una sección, de su título al siguiente: erratas, párrafos unidos o partidos,
-    títulos que el análisis no vio ("# Título"), ilustraciones movidas. Mismo formato que
-    convert.section_text; al aceptar, App.apply_edit lo aplica con convert.edit_section."""
+    """Editor del texto de una sección, de su título al siguiente, como Word: la hoja (editor.Sheet) muestra
+    cursiva, negrita, títulos, ilustraciones y separadores como quedan; al lado, la página del PDF del párrafo
+    del cursor, grande y con zoom. Al aceptar, App.apply_edit guarda el texto con convert.edit_section."""
 
     def __init__(self, app, item, start, end):
         self.app, self.item, self.start, self.end = app, item, start, end
@@ -3094,78 +3061,157 @@ class TextEditor:
         win.setWindowTitle(f"Texto · {app.tree.set(item, 'title')}")
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         win.on_reject = self.cancel  # Esc y la X de la ventana preguntan antes de descartar cambios
-        area = app.root.screen().availableGeometry()
-        width, height = min(1250, area.width() - 60), min(760, area.height() - 60)
-        win.resize(width, height)
-        panel_height = max(240, min(EDITOR_PANEL[1], height - 250))  # barra, ayuda, ◀ ▶, estado y botones
-        self.panel = (min(EDITOR_PANEL[0], int(panel_height * 0.75)), panel_height)
+        colors, tags = theme.colors(app.dark), theme.editor_tags(app.dark)
+        self.sheet = sheet = editor.Sheet()
+        sheet.look.set_tags(tags)
+        sheet.look.set_unknown(app.unknown)  # palabras de la última revisión ortográfica
         column = QVBoxLayout(win)
-        column.setContentsMargins(12, 10, 12, 10)
-        self.tools = QHBoxLayout()  # botones de formato
-        column.addLayout(self.tools)
-        column.addWidget(_label("Un párrafo por línea · «# Título» crea un título · [Ilustración N] y [Separador N]"
-                                " se pueden mover o borrar", "muted"))
-        self.text = text = qtk.TextBox()
-        text.setFont(QFont("Segoe UI", 11))
+        column.setContentsMargins(0, 0, 0, 8)
+        column.setSpacing(0)
+        column.addWidget(self.ribbon())
+        # Hoja centrada sobre el escritorio gris, como la vista de impresión de Word
+        desk = QFrame(objectName="desk")
+        desk_row = QHBoxLayout(desk)
+        desk_row.setContentsMargins(16, 16, 16, 0)
+        desk_row.addStretch(1)
+        desk_row.addWidget(sheet, 20)
+        desk_row.addStretch(1)
+        # Página del PDF a la derecha: se ajusta al ancho del panel y se amplía con el zoom
         self.canvas = qtk.Preview()
-        self.canvas.setFixedSize(*self.panel)
-        # Preview ignora su tamaño para las vistas grandes; aquí el layout le daría alto 0 y ◀ ▶ la taparía
-        self.canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.scroll = QScrollArea()
+        self.scroll.setWidget(self.canvas)
+        self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.page_label = _label("", "muted")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        side = QVBoxLayout()
-        side.addWidget(self.canvas, 0, Qt.AlignmentFlag.AlignHCenter)
-        side.addLayout(_row(1, _button("◀", lambda: self.turn(-1)), self.page_label, _button("▶", lambda: self.turn(1)), 1))
-        side.addStretch(1)
-        column.addLayout(_row(text, side, spacing=10), 1)
+        self.zoom_label = _label("100 %", "muted")
+        side = QWidget()
+        side_column = QVBoxLayout(side)
+        side_column.setContentsMargins(8, 8, 8, 0)
+        side_column.addWidget(self.scroll, 1)
+        side_column.addLayout(_row(_button("◀", lambda: self.turn(-1)), self.page_label, _button("▶", lambda: self.turn(1)),
+                                   1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
+                                   _button("+", lambda: self.zoom(25))))
+        self.split = QSplitter()
+        self.split.addWidget(desk)
+        self.split.addWidget(side)
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 1)
+        self.split.splitterMoved.connect(lambda *_: self.later("panel", 80, self.redraw))
+        column.addWidget(self.split, 1)
+        # Barra de estado como Word: dónde estás y el zoom del texto
         self.status = _label("", "muted")
-        column.addWidget(self.status)
-        column.addLayout(_row(1, _button("Aceptar", self.save, "primary"), _button("Cancelar", self.cancel)))
-        self.shown, self.box, self.page, self.offset = None, None, 0, (0, 0)
+        self.text_zoom = QSlider(Qt.Orientation.Horizontal)
+        self.text_zoom.setRange(50, 200)
+        self.text_zoom.setValue(100)
+        self.text_zoom.setFixedWidth(140)
+        self.text_zoom_label = _label("100 %", "muted")
+        self.text_zoom.valueChanged.connect(self.set_text_zoom)
+        status_row = _row(self.status, 1, _button("−", lambda: self.text_zoom.setValue(self.text_zoom.value() - 10)),
+                          self.text_zoom, _button("+", lambda: self.text_zoom.setValue(self.text_zoom.value() + 10)),
+                          self.text_zoom_label, _button("Aceptar", self.save, "primary"),
+                          _button("Cancelar", self.cancel), margins=(12, 8, 12, 0))
+        column.addLayout(status_row)
+        self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
         self.drawn = None  # (bloque, PDF) del dibujo actual del panel
-        for tag, options in theme.editor_tags(app.dark).items():
-            text.tag_configure(tag, **options)
         self.pending = {}  # trabajo diferido: nombre -> temporizador
-        self.shortcuts = {}
-        actions = (("Cursiva", "Ctrl+I", lambda: self.toggle_mark("i")),
-                   ("Negrita", "Ctrl+B", lambda: self.toggle_mark("b")),
-                   ("Título ↔ párrafo", "Ctrl+T", self.toggle_heading),
-                   ("Separador", "", self.insert_break),
-                   ("Unir con el siguiente", "Ctrl+J", self.join_next),
-                   ("Partir aquí", "Ctrl+Return", self.split_here))
-        for label, key, change in actions:
-            shown_key = key.replace("Return", "Enter")
-            self.tools.addWidget(_button(f"{label}  {shown_key}".strip(), lambda change=change: self.step(change)))
-            if key:
-                self.shortcuts[key] = QShortcut(QKeySequence(key), text, lambda change=change: self.step(change),
-                                                context=Qt.ShortcutContext.WidgetShortcut)
-        self.tools.addStretch(1)
-        # Cada bloque con su tag src<k>: va en el formato del texto, se mueve con él y dice de qué bloque viene
-        for k in range(start, end):
-            if k > start:
-                text.insert("end", "\n\n")
-            text.insert("end", convert.section_text(app.book, k, k + 1), (f"src{k}",))
-        self.original = text.get("1.0", "end-1c")
-        text.edit_reset()
-        text.mark_set("insert", "1.0")
-        text.textChanged.connect(self.on_modified)
-        text.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
+        lines = [(k, convert.section_text(app.book, k, k + 1)) for k in range(start, end)]
+        sheet.set_content(lines, self.pictures(), colors["muted"])
+        self.original = sheet.content()
+        self.set_text_zoom(100)
+        sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
+        sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
+        sheet.cursorPositionChanged.connect(self.update_tools)
+        sheet.currentCharFormatChanged.connect(lambda _: self.update_tools())
+        sheet.undoAvailable.connect(self.undo_btn.setEnabled)
+        sheet.redoAvailable.connect(self.redo_btn.setEnabled)
+        editor.watch(self.scroll.viewport(), self.on_panel_event)
         win.finished.connect(lambda _: self.on_destroy())
-        self.highlight()
-        self.draw_source()
         app.text_editor = self
         win.setModal(True)  # con la lista activa se podía abrir otro PDF u otro editor y aceptar sobre otros bloques
+        win.setWindowState(Qt.WindowState.WindowMaximized)
         win.show()
-        text.setFocus()
+        self.split.setSizes([1, 1])  # mitad y mitad
+        self.update_tools()
+        self.draw_source()
+        sheet.setFocus()
+
+    def ribbon(self):
+        """Cinta «Inicio» con los grupos de Word: deshacer, fuente, párrafo e insertar."""
+        bar = QFrame(objectName="ribbon")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(10, 6, 10, 4)
+        row.setSpacing(14)
+
+        def tool(text, tip, action, checkable=False, font=None):
+            button = QToolButton(objectName="tool")
+            button.setText(text)
+            button.setToolTip(tip)
+            button.setCheckable(checkable)
+            if font:
+                button.setFont(font)
+            button.clicked.connect(lambda: (action(), self.sheet.setFocus(), self.update_tools()))
+            return button
+
+        def group(caption, *widgets):
+            box = QVBoxLayout()
+            box.setSpacing(2)
+            box.addLayout(_row(*widgets, spacing=2))
+            label = _label(caption, "muted")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            box.addWidget(label)
+            row.addLayout(box)
+
+        sheet = self.sheet
+        bold_font, italic_font = QFont("Segoe UI", 11, QFont.Weight.Bold), QFont("Segoe UI", 11)
+        italic_font.setItalic(True)
+        self.undo_btn = tool("↶ Deshacer", "Deshacer (Ctrl+Z)", sheet.undo)
+        self.redo_btn = tool("↷ Rehacer", "Rehacer (Ctrl+Y)", sheet.redo)
+        self.undo_btn.setEnabled(False)
+        self.redo_btn.setEnabled(False)
+        group("Deshacer", self.undo_btn, self.redo_btn)
+        self.bold_btn = tool("N", "Negrita (Ctrl+N)", sheet.toggle_bold, True, bold_font)
+        self.italic_btn = tool("K", "Cursiva (Ctrl+K)", sheet.toggle_italic, True, italic_font)
+        group("Fuente", self.bold_btn, self.italic_btn)
+        self.style = QComboBox()
+        self.style.addItems(["Normal", "Título"])
+        self.style.setToolTip("Estilo del párrafo (Ctrl+T alterna)")
+        self.style.activated.connect(lambda n: (sheet.set_heading(n == 1), sheet.setFocus(), self.update_tools()))
+        group("Párrafo", self.style, tool("Unir párrafos", "Une el párrafo con el siguiente (Ctrl+J)", sheet.join_next))
+        group("Insertar", tool("❖ Separador", "Separador de escena tras el párrafo", sheet.insert_break))
+        row.addStretch(1)
+        return bar
+
+    def update_tools(self):
+        """La cinta sigue al cursor, como en Word: N y K marcadas si lo están, y el estilo del párrafo."""
+        f = self.sheet.currentCharFormat()
+        self.bold_btn.setChecked(f.fontWeight() >= QFont.Weight.DemiBold)
+        self.italic_btn.setChecked(f.fontItalic())
+        self.style.setCurrentIndex(1 if self.sheet.textCursor().blockFormat().property(editor.HEADING) else 0)
+
+    def pictures(self):
+        """Miniaturas de las ilustraciones y adornos de la sección, y el texto de los separadores escritos."""
+        found = {}
+        for k in range(self.start, self.end):
+            block = self.app.book.blocks[k]
+            if block.kind in ("image", "break") and block.image:
+                try:
+                    found[k] = qtk.qimage(pymupdf.Pixmap(block.image))
+                except Exception:
+                    pass  # imagen que MuPDF no lee: queda su marca
+            elif block.kind == "break":
+                found[k] = html.unescape(block.html).strip() or "❖"
+        return found
+
+    def set_text_zoom(self, percent):
+        self.sheet.set_zoom(percent)
+        self.sheet.setMaximumWidth(int(820 * percent / 100))  # la hoja crece con la letra, como la página en Word
+        self.text_zoom_label.setText(f"{percent} %")
 
     def later(self, name, ms, fn):
         """Ejecuta fn tras ms milisegundos sin otro aviso del mismo nombre: no repinta en cada tecla."""
         if name in self.pending:
             qtk.cancel(self.pending[name])
         self.pending[name] = qtk.after(ms, lambda: (self.pending.pop(name, None), fn()))
-
-    def on_modified(self):
-        self.later("refresh", 300, self.refresh)
 
     def on_destroy(self):
         if self.app.text_editor is self:
@@ -3174,28 +3220,38 @@ class TextEditor:
             qtk.cancel(job)
         self.pending.clear()
 
-    def refresh(self):
-        self.highlight()
-        self.update_status()
+    def on_panel_event(self, event):
+        """Ctrl+rueda amplía la página; al cambiar el tamaño del panel se vuelve a ajustar."""
+        if event.type() == QEvent.Type.Wheel and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.zoom(25 if event.angleDelta().y() > 0 else -25)
+            return True
+        if event.type() == QEvent.Type.Resize:
+            self.later("panel", 80, self.redraw)
+        return False
+
+    def zoom(self, delta):
+        self.pdf_zoom = min(3.0, max(0.5, self.pdf_zoom + delta / 100))
+        self.zoom_label.setText(f"{round(self.pdf_zoom * 100)} %")
+        self.redraw()
+
+    def redraw(self):
+        """Vuelve a dibujar lo que muestra el panel con su tamaño y zoom de ahora."""
+        if self.shown and self.shown[0] == "image":
+            self.drawn = None
+            self.draw_source()
+        elif self.shown:
+            self.show_page(self.page)
+
+    def panel_width(self):
+        return max(200, self.scroll.viewport().width() - 4)
 
     def source_block(self):
-        """Bloque del libro del que viene la línea del cursor: el de su marca [Ilustración N], el de su tag
-        src<k> o, en una línea nueva, el de la línea anterior más cercana que lo tenga. Sin ninguno (sección
-        vacía), el título de la sección."""
-        text = self.text
-        n = int(text.index("insert").split(".")[0])
-        token = convert.TOKEN.fullmatch(text.get(f"{n}.0", f"{n}.end").strip())
-        if token and int(token.group(2)) < len(self.app.book.blocks):
-            return int(token.group(2))
-        for m in range(n, 0, -1):
-            for index in (f"{m}.0", f"{m}.end-1c"):
-                for tag in text.tag_names(index):
-                    if tag.startswith("src"):
-                        return int(tag[3:])
-        return int(self.item)
+        """Bloque del libro del párrafo del cursor (o de su ilustración); sin ninguno, el título de la sección."""
+        k = self.sheet.current_source()
+        return k if k is not None and k < len(self.app.book.blocks) else int(self.item)
 
     def draw_source(self):
-        """Panel lateral: la ilustración del bloque del cursor, o su página del PDF con el párrafo recuadrado."""
+        """Panel: la ilustración del bloque del cursor, o su página del PDF con el párrafo recuadrado."""
         k = self.source_block()
         block = self.app.book.blocks[k]
         if (k, id(self.app.pdf_doc)) == self.drawn:  # mismo bloque: la página ya está dibujada
@@ -3204,15 +3260,17 @@ class TextEditor:
         self.drawn = (k, id(self.app.pdf_doc))
         if block.kind == "image" and block.image:
             pix = pymupdf.Pixmap(block.image)
-            scale = min(self.panel[0] / pix.width, self.panel[1] / pix.height, 1)
-            if scale < 1:
+            scale = min(self.panel_width() * self.pdf_zoom / pix.width, 1.5)
+            if scale != 1:
                 pix = pymupdf.Pixmap(pix, max(1, round(pix.width * scale)), max(1, round(pix.height * scale)), None)
             self.shown, self.box, self.page = ("image", k), None, block.page - 1  # ◀ ▶ siguen desde aquí
             self.put(pix)
             self.page_label.setText(f"Ilustración · pág. {block.page}")
         elif self.app.pdf_doc is None:
             self.shown, self.box = None, None
-            self.canvas.show_blank(self.panel, "Sin el PDF original no se puede mostrar la página",
+            size = (self.panel_width(), int(self.panel_width() * 1.4))
+            self.canvas.setFixedSize(*size)
+            self.canvas.show_blank(size, "Sin el PDF original no se puede mostrar la página",
                                    theme.colors(self.app.dark))
             self.page_label.setText("")
         else:
@@ -3222,20 +3280,25 @@ class TextEditor:
         self.update_status()
 
     def show_page(self, index):
-        """Dibuja la página index (desde 0) del PDF, con self.box recuadrado si lo hay."""
+        """Dibuja la página index (desde 0) del PDF al ancho del panel por el zoom, con self.box recuadrado."""
         page = self.app.pdf_doc[index]
         self.page, self.shown = index, ("page", index + 1)
-        zoom = min(self.panel[0] / page.rect.width, self.panel[1] / page.rect.height)
+        zoom = self.panel_width() / page.rect.width * self.pdf_zoom
         marks = []
         if self.box:
             box = self.box * zoom
             marks.append((QRectF(box.x0 - 3, box.y0 - 3, box.width + 6, box.height + 6), MARK_COLORS["current"]))
         self.put(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)), marks)
+        if self.box:  # el párrafo a la vista aunque la página no quepa
+            self.scroll.ensureVisible(int(self.box.x0 * zoom), int((self.box.y0 + self.box.y1) / 2 * zoom), 40,
+                                      self.scroll.viewport().height() // 3)
         self.page_label.setText(f"Página {index + 1} de {self.app.pdf_doc.page_count}")
 
     def put(self, pix, marks=()):
-        """Dibuja el pixmap centrado en el panel."""
-        self.offset = self.canvas.show_image(self.panel, qtk.qimage(pix), marks)
+        """Dibuja el pixmap en el panel, a su tamaño (con scroll si no cabe)."""
+        image = qtk.qimage(pix)
+        self.canvas.setFixedSize(image.width(), image.height())
+        self.canvas.show_image((image.width(), image.height()), image, marks)
 
     def turn(self, delta):
         """◀ ▶: hojea el PDF sin mover el cursor; el siguiente movimiento vuelve a la página de su párrafo."""
@@ -3262,155 +3325,22 @@ class TextEditor:
 
     def update_status(self):
         """«Página 34 del PDF · párrafo 12 de 80 · 3.412 palabras»."""
-        lines = self.text.get("1.0", "end-1c").split("\n")
-        paragraphs = [n for n, line in enumerate(lines, start=1) if _is_paragraph(line)]
-        current = int(self.text.index("insert").split(".")[0])
-        words = sum(len(MARK.sub("", lines[n - 1]).split()) for n in paragraphs)
-        count = len(paragraphs)
-        where = (f"párrafo {paragraphs.index(current) + 1} de {count}" if current in paragraphs
-                 else f"{count} párrafo{'' if count == 1 else 's'}")
+        count, current, words = self.sheet.paragraphs()
+        where = f"párrafo {current} de {count}" if current else f"{count} párrafo{'' if count == 1 else 's'}"
         page = self.app.book.blocks[self.source_block()].page
         self.status.setText(f"Página {page} del PDF · {where} · "
                             f"{words:,} palabra{'' if words == 1 else 's'}".replace(",", "."))
-
-    def step(self, change):
-        """Una acción del editor como un solo paso de deshacer."""
-        with self.text.group():
-            change()
-        self.highlight()
-        self.later("source", 150, self.draw_source)  # el cursor pudo moverse (unir, partir…)
-        self.text.setFocus()
-        return "break"
-
-    def toggle_mark(self, mark):
-        """Envuelve la selección en <i>/<b>, o quita las marcas si ya la envuelven. Sin selección, deja las
-        marcas vacías con el cursor dentro. No cruza párrafos ni corta otra marca: quedaría mal anidada y
-        edit_section quitaría todas las de la línea. Tampoco toca [Ilustración N]: dejaría de reconocerse."""
-        text, opening, closing = self.text, f"<{mark}>", f"</{mark}>"
-        selected = bool(text.tag_ranges("sel"))
-        first = text.index("sel.first") if selected else text.index("insert")
-        last = text.index("sel.last") if selected else first
-        if last != first and last.endswith(".0"):  # triple clic: la línea más su salto
-            last = text.index(f"{last}-1c")
-        line = text.get(f"{first} linestart", f"{first} lineend").strip()
-        inside = text.get(first, last)
-        if (first.split(".")[0] != last.split(".")[0] or convert.TOKEN.fullmatch(line)
-                or (line and convert.SCENE_BREAK.fullmatch(line))):
-            self.text.bell()
-        elif first == last:
-            text.insert("insert", opening + closing)
-            text.mark_set("insert", f"insert-{len(closing)}c")
-        elif (text.get(f"{first}-{len(opening)}c", first) == opening
-                and text.get(last, f"{last}+{len(closing)}c") == closing):
-            text.delete(last, f"{last}+{len(closing)}c")
-            text.delete(f"{first}-{len(opening)}c", first)
-        elif inside.startswith(opening) and inside.endswith(closing) and _balanced(inside):  # marcas incluidas
-            text.delete(f"{last}-{len(closing)}c", last)
-            text.delete(first, f"{first}+{len(opening)}c")
-        elif not _balanced(inside):
-            self.text.bell()
-        else:
-            text.insert(last, closing)
-            text.insert(first, opening)
-
-    def toggle_heading(self):
-        """Pone o quita "# " delante de la línea del cursor. No en una línea vacía: "# " solo se leería
-        como el separador "#"."""
-        text = self.text
-        if text.get("insert linestart", "insert linestart+2c") == "# ":
-            text.delete("insert linestart", "insert linestart+2c")
-        elif _is_paragraph(text.get("insert linestart", "insert lineend")):
-            text.insert("insert linestart", "# ")
-        else:
-            self.text.bell()
-
-    def insert_break(self):
-        """Separador de escena escrito, como párrafo propio tras la línea del cursor."""
-        end = self.text.index("insert lineend")
-        self.text.insert(end, "\n\n* * *")
-        self.text.mark_set("insert", f"{end}+7c")
-
-    def join_next(self):
-        """Une el párrafo del cursor con el siguiente: arregla un párrafo partido por un salto de página."""
-        text = self.text
-        n = int(text.index("insert").split(".")[0])
-        last = int(text.index("end-1c").split(".")[0])
-        following = next((m for m in range(n + 1, last + 1) if text.get(f"{m}.0", f"{m}.end").strip()), None)
-        line = text.get(f"{n}.0", f"{n}.end")
-        if following is None or not _is_paragraph(line) or not _is_paragraph(
-                text.get(f"{following}.0", f"{following}.end")):
-            self.text.bell()
-            return
-        nxt = text.get(f"{following}.0", f"{following}.end")
-        end = f"{n}.{len(line.rstrip())}"
-        text.delete(end, f"{following}.{len(nxt) - len(nxt.lstrip())}")
-        text.insert(end, " ")
-        text.mark_set("insert", f"{end}+1c")
-
-    def split_here(self):
-        """Parte el párrafo en el cursor. Una cursiva o negrita abierta se cierra y se vuelve a abrir: si no,
-        cada mitad quedaría con una marca suelta y edit_section la quitaría."""
-        text = self.text
-        if not _is_paragraph(text.get("insert linestart", "insert lineend")):
-            self.text.bell()
-            return
-        while text.get("insert-1c") == " ":
-            text.delete("insert-1c")
-        while text.get("insert") == " ":
-            text.delete("insert")
-        opened = _open_marks(text.get("insert linestart", "insert"))  # de fuera adentro: se cierran al revés
-        text.insert("insert", "".join(f"</{m}>" for m in reversed(opened)) + "\n\n"
-                    + "".join(f"<{m}>" for m in opened))
-
-    def highlight(self):
-        """Pone los tags de aspecto según las marcas. Solo cambia tags, no texto: no entra en deshacer."""
-        text, blocks, used = self.text, self.app.book.blocks, set()
-        for tag in EDITOR_TAGS:
-            text.tag_remove(tag, "1.0", "end")
-        # Palabras desconocidas de la última revisión ortográfica (Herramientas → Ortografía…)
-        unknown = self.app.unknown and re.compile(
-            r"(?<!\w)(?:" + "|".join(map(re.escape, sorted(self.app.unknown, key=len, reverse=True))) + r")(?!\w)", re.I)
-        for n, line in enumerate(text.get("1.0", "end-1c").split("\n"), start=1):
-            bare = line.strip()
-            token = convert.TOKEN.fullmatch(bare)
-            if bare.startswith("# "):
-                text.tag_add("heading", f"{n}.0", f"{n}.end")
-            elif token:
-                # Las mismas condiciones que edit_section: si no, la marca saldría como texto en el EPUB
-                k = int(token.group(2))
-                valid = (self.start <= k < self.end and k not in used
-                         and blocks[k].kind == ("image" if token.group(1) == "Ilustración" else "break"))
-                used.add(k)
-                text.tag_add("token" if valid else "broken", f"{n}.0", f"{n}.end")
-            elif bare and convert.SCENE_BREAK.fullmatch(bare):
-                text.tag_add("scene", f"{n}.0", f"{n}.end")
-            flags = [0] * len(line)
-            for flag, mark in ((1, "i"), (2, "b")):
-                for m in re.finditer(rf"<{mark}>(.*?)</{mark}>", line):
-                    for c in range(m.start(1), m.end(1)):
-                        flags[c] |= flag
-            run = 0
-            for c in range(1, len(line) + 1):
-                if c == len(line) or flags[c] != flags[run]:
-                    if flags[run]:
-                        text.tag_add(STYLE_TAGS[flags[run]], f"{n}.{run}", f"{n}.{c}")
-                    run = c
-            broken = not _balanced(line)
-            for m in MARK.finditer(line):
-                text.tag_add("broken" if broken else "mark", f"{n}.{m.start()}", f"{n}.{m.end()}")
-            for m in unknown.finditer(line) if unknown and not token else ():
-                text.tag_add("spell", f"{n}.{m.start()}", f"{n}.{m.end()}")
 
     def dirty(self):
         """¿Cambió algo que edit_section lea? Líneas en blanco y espacios sobrantes no cuentan."""
         def lines(text):
             return [line.strip() for line in text.splitlines() if line.strip()]
-        return lines(self.text.get("1.0", "end-1c")) != lines(self.original)
+        return lines(self.sheet.content()) != lines(self.original)
 
     def save(self):
         """Aplica el texto solo si cambió: edit_section rehace los párrafos y perderían su página del PDF."""
         if self.dirty():
-            self.app.apply_edit([self.start, self.end, self.text.get("1.0", "end")], self.item)
+            self.app.apply_edit([self.start, self.end, self.sheet.content()], self.item)
         self.win.done(0)
 
     def cancel(self, _=None):
