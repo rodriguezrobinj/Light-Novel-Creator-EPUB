@@ -3225,6 +3225,10 @@ def test_quality_report_fixes_grammar_and_typography():
         ("—Sí, — respondió el soldado, —un buque llegó.", "dialog", "—Sí —respondió el soldado—, un buque llegó."),
         ("—Está muerto. —señaló Ferris—. Vamos.", "dialog", "—Está muerto —señaló Ferris—. Vamos."),
         ("¡El comercio va a explotar. ¡Lo sé!", "closing", "¡El comercio va a explotar! ¡Lo sé!"),
+        # Aciertos que no deben perderse con las excepciones de abajo
+        ("“Si”, decretó Shinichi.", "accent", "“Sí”, decretó Shinichi."),
+        ("¿Que estas haciendo?", "accent", "¿Qué estas haciendo?"), ("¿A-Asi que sí?", "accent", "¿A-Así que sí?"),
+        ("Cerró. —Un momento, por favor, — dijo, y se fue.", "dialog", "Cerró. —Un momento, por favor —dijo, y se fue."),
     ]
     fine = ["Aun así, vino.", "Lo juzgó estricta, mas no indiferente.", "Acabamos de llegar.", "¿Que no vienes?",
             "Es mi… mi espada.", "Y el... el objeto cayó.", "El Land Dragon rugió.", "¡El, eh, enviado llegó!",
@@ -3235,7 +3239,22 @@ def test_quality_report_fixes_grammar_and_typography():
             "¿Cómo… No, da igual.", "—¿No sería lo mejor──", "“¿Eh~...”.", "Lo vio el Dr. ramírez.",
             "Un arma simple: un tubo que no parece robusto.",  # Mitsuha: «tubo» es el nombre
             # Mitsuha: la exclamación sigue tras el punto, o el punto es de un número o una sigla
-            "¡Oh, wow. Esos son barcos, sin duda!", "Gracias por leer ¡Ahorrando 80.000 oros!", "¡G.I. Samurai ya existe!"]
+            "¡Oh, wow. Esos son barcos, sin duda!", "Gracias por leer ¡Ahorrando 80.000 oros!", "¡G.I. Samurai ya existe!",
+            # Revisión de los 41 libros de muestra: «¿como» de comparación y «¿que» que repite lo dicho
+            "¿Como tú? ¿Demonios, quieres decir?", "—¿Como qué?", "¿Como el Sr. Lyp Bariel?",
+            "¿Qué? ¿Que el Maestro me está usando?", "¿Que habrá personas que simularán ataques para eso?",
+            "¿Y que Mitsuha fundó una empresa?",
+            # La palabra citada, «Oh my», frase dicha palabra a palabra, títulos ingleses, risas
+            "Las palabras clave fueron “podría” y “si”, nada más.", "Empiezan con “Mi”, como ella.", "Oh mi. ¡Bienvenido!",
+            "¡Ese! ¡Es! ¡El! ¡Problema!", "Dónde. Son. El. ¡¿Niños?!", "Lo leí en The Legend of the Heroes hoy.",
+            "Hi-ha… Ahi-ha, hi-hi.",
+            # Mitsuha: “ y ” sueltas que hacen de raya; Re Zero: signos revueltos
+            "La palabra “Torre “ probablemente era mejor.", "“¡El Kalliad “ el buque insignia “ avisa!”, gritó.", "Por mis valiosas piezas” quiero decir, amigas!",
+            "—¿¡Qué…¡?", "¿Por qué estarían?¡ campo de prácticas, dices?",
+            # Maryoku: la raya cierra el inciso; Re Zero: narración y luego el diálogo
+            "Los materiales —huesos, pieles, etc.— que quedaron.", "El guardia contestó, ―tengo entendido que sí.",
+            # Mitsuha: el signo de cierre falta antes de la comilla o el paréntesis, no al final
+            "“¡Esa sí que es una gran noticia,” celebró Mitsuha dando saltos.", "¡Quizás usan una aleación diferente)."]
     texts = [t for t, _, _ in cases] + fine
     blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, html.escape(t, quote=False))
                                                             for t in texts]
@@ -3258,7 +3277,10 @@ def test_quality_report_finds_lowercase_after_period_and_missing_end():
     sigue otro en mayúscula: avisos sin arreglo automático, porque puede sobrar el punto o faltar texto."""
     texts = ["Lo dejó en la mesa. luego se fue.", "Trajo pan, etc. y se fue... luego volvió.",
              "Necesitamos una opinión de un tercero sin dudarlo", "Hubiera sido genial.",
-             "Clic", "Nada más.", "La identidad verdadera de Jack el", "destripador asustaba.", "Era el final del libro"]
+             "Clic", "Nada más.", "La identidad verdadera de Jack el", "destripador asustaba.", "Era el final del libro",
+             # Maryoku y Re Zero: fichas de estado y créditos, una línea por dato
+             "TÍTULO: Diosa de la aldea pionera, aventurera de rango C", "NIVEL: 60",
+             "Edición de las ilustraciones en español: Kaori - Luilgo", "Corrección: HaruK"]
     blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
     book = convert.Book("Libro", "", b"", blocks, [0])
     found = [(i.block, i.kind, i.edit) for i in convert.quality_report(book) if i.kind in ("capital", "end")]
