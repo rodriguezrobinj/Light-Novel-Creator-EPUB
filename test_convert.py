@@ -2497,12 +2497,12 @@ def test_text_editor_navigates_chapters_and_saves_only_changes():
     view, page = editor.scroll.viewport().geometry(), editor.canvas.geometry()
     centered = abs(page.center().y() - view.height() / 2) <= 2 and abs(page.center().x() - view.width() / 2) <= 2
     editor.mark_changed()
-    labels = [action.text() for action in editor.chapter_menu.actions()]
-    editor.chapter_menu.actions()[labels.index("Capítulo 1: El inicio")].trigger()
+    labels = [editor.chapter_list.item(n).text() for n in range(editor.chapter_list.count())]
+    editor.chapter_list.itemClicked.emit(editor.chapter_list.item(labels.index("Capítulo 1: El inicio")))
     shows_first = lines()[0] == "# Capítulo 1: El inicio" and editor.chapter_btn.text().find("Capítulo 1 de 2") > 0
     sheet.document().find("Capítulo 1: El inicio").insertText("Capítulo 1: El comienzo")
     editor.mark_changed()
-    marked = any(action.text().endswith("•") for action in editor.chapter_menu.actions())
+    marked = any(editor.chapter_list.item(n).text().endswith("•") for n in range(editor.chapter_list.count()))
     editor.step_section(1)  # ▶: el capítulo siguiente
     on_second = editor.current == window.section_bounds(int(second))
     sheet.goto_source(int(second) + 1)  # el primer párrafo del segundo capítulo
@@ -2528,6 +2528,44 @@ def test_text_editor_navigates_chapters_and_saves_only_changes():
     assert rows == before, (rows, before)
     assert len(edits) == 1 and edits[0][1] - edits[0][0] == 1, edits  # solo el párrafo cambiado
     assert undone
+
+
+def test_text_editor_chapter_list_is_a_small_popup():
+    """Con muchos capítulos (Mitsuha 1: 34) la lista ocupaba toda la pantalla en columnas: es un desplegable
+    pequeño con scroll bajo el botón, que se filtra escribiendo y se cierra al elegir."""
+    import app
+
+    root, window = visible_window()
+    blocks = []
+    for n in range(40):
+        blocks += [convert.Block("heading", n + 1, f"Capítulo {n}: Un título bastante largo para la lista número {n}"),
+                   convert.Block("p", n + 1, "Texto.")]
+    doc = pymupdf.open()
+    for n in range(40):
+        add_page(doc, n + 1, [(72, 100, f"Pagina {n}", 11, "helv")])
+    window.pdf = TMP / f"cuarenta-{time_ns()}.pdf"
+    doc.save(window.pdf)
+    window.show_book(convert.Book("Libro", "", b"", blocks, list(range(0, 80, 2))))
+    window.tree.selection_set("0")
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    root.update()
+    editor.chapter_btn.click()
+    root.update()
+    pop = editor.chapter_popup
+    shown, size = pop.isVisible(), pop.size()
+    screen = pop.screen().availableGeometry()
+    inside = screen.contains(pop.frameGeometry())
+    editor.chapter_filter.setText("título bastante largo para la lista número 37")
+    visible = [editor.chapter_list.item(n).text() for n in range(editor.chapter_list.count())
+               if not editor.chapter_list.item(n).isHidden()]
+    editor.chapter_filter.returnPressed.emit()
+    root.update()
+    went = editor.current == window.section_bounds(74) and not pop.isVisible()
+    editor.win.done(0)
+    window.close()
+    assert shown and size.width() <= 480 and size.height() <= 420 and inside, (shown, size, screen, pop.frameGeometry())
+    assert len(visible) == 1 and visible[0].startswith("Capítulo 37"), visible
+    assert went
 
 
 def test_text_editor_styles_links_and_find_reach_the_book():

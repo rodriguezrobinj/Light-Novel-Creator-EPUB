@@ -3224,11 +3224,61 @@ class TextEditor:
         self.next_chapter = tool("▶", "Capítulo siguiente", lambda: self.step_section(1))
         self.chapter_btn = QToolButton(objectName="tool")
         self.chapter_btn.setToolTip("Ir a otro capítulo")
-        self.chapter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.chapter_menu = QMenu(self.chapter_btn)
-        self.chapter_btn.setMenu(self.chapter_menu)
+        self.chapter_btn.clicked.connect(self.show_chapters)
         group("Capítulo", self.prev_chapter, self.chapter_btn, self.next_chapter)
+        self.chapters_popup()
         return bar
+
+    def chapters_popup(self):
+        """Lista de capítulos bajo el botón: pequeña, con scroll y un filtro. Un QMenu con 34 capítulos
+        (Mitsuha 1) se repartía en columnas por toda la pantalla y tapaba el editor."""
+        pop = self.chapter_popup = QFrame(self.win, Qt.WindowType.Popup)
+        pop.setObjectName("card")
+        column = QVBoxLayout(pop)
+        column.setContentsMargins(8, 8, 8, 8)
+        self.chapter_filter = QLineEdit()
+        self.chapter_filter.setPlaceholderText("Buscar capítulo")
+        self.chapter_filter.textChanged.connect(self.filter_chapters)
+        self.chapter_filter.returnPressed.connect(self.pick_first_chapter)
+        self.chapter_list = QListWidget()
+        self.chapter_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.chapter_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.chapter_list.itemClicked.connect(self.pick_chapter)
+        self.chapter_list.itemActivated.connect(self.pick_chapter)
+        column.addWidget(self.chapter_filter)
+        column.addWidget(self.chapter_list, 1)
+        pop.resize(460, 380)
+
+    def show_chapters(self):
+        """Abre la lista bajo el botón del capítulo, dentro de la pantalla y con el de ahora a la vista."""
+        self.mark_changed()
+        self.chapter_filter.clear()
+        pop, button = self.chapter_popup, self.chapter_btn
+        area = button.screen().availableGeometry()
+        corner = button.mapToGlobal(button.rect().bottomRight())
+        x = min(max(area.left(), corner.x() - pop.width()), area.right() - pop.width() - 8)  # sin tocar el borde
+        y = min(corner.y() + 2, area.bottom() - pop.height() - 8)
+        pop.move(x, y)
+        pop.show()
+        current = self.chapter_list.currentItem()
+        if current:
+            self.chapter_list.scrollToItem(current, QListWidget.ScrollHint.PositionAtCenter)
+        self.chapter_filter.setFocus()
+
+    def filter_chapters(self, text):
+        for n in range(self.chapter_list.count()):
+            item = self.chapter_list.item(n)
+            item.setHidden(bool(text) and text.lower() not in item.text().lower())
+
+    def pick_first_chapter(self):
+        item = next((self.chapter_list.item(n) for n in range(self.chapter_list.count())
+                     if not self.chapter_list.item(n).isHidden()), None)
+        if item:
+            self.pick_chapter(item)
+
+    def pick_chapter(self, item):
+        self.chapter_popup.hide()
+        self.open_section(*self.sections[item.data(Qt.ItemDataRole.UserRole)][1:3])
 
     def find_bar(self):
         """Barra de buscar y reemplazar bajo la cinta (Ctrl+F, Ctrl+H): todos los capítulos, uno a uno."""
@@ -3439,16 +3489,18 @@ class TextEditor:
             self.open_section(*self.sections[row + delta][1:3])
 
     def mark_changed(self):
-        """Menú de capítulos: el de ahora marcado y «•» junto a los que tienen cambios sin guardar."""
-        if not shiboken6.isValid(self.chapter_menu):
+        """Lista de capítulos: el de ahora elegido y «•» junto a los que tienen cambios sin guardar."""
+        if not shiboken6.isValid(self.chapter_list):
             return
-        self.chapter_menu.clear()
-        for label, start, end, _ in self.sections:
+        self.chapter_list.clear()
+        for n, (label, start, end, _) in enumerate(self.sections):
             page = self.pages.get((start, end))
-            mark = "  •" if page and self.page_dirty(page) else ""
-            action = self.chapter_menu.addAction(label + mark, lambda s=start, e=end: self.open_section(s, e))
-            action.setCheckable(True)
-            action.setChecked((start, end) == self.current)
+            item = QListWidgetItem(label + ("  •" if page and self.page_dirty(page) else ""))
+            item.setData(Qt.ItemDataRole.UserRole, n)
+            item.setToolTip(label)
+            self.chapter_list.addItem(item)
+            if (start, end) == self.current:
+                self.chapter_list.setCurrentItem(item)
 
     def pictures(self, start, end):
         """Miniaturas de las ilustraciones y adornos de la sección, y el texto de los separadores escritos."""
