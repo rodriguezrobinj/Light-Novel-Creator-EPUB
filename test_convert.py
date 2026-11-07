@@ -2196,6 +2196,26 @@ def test_window_edited_text_survives_reopening_and_reaches_epub():
     assert "brillaba mucho." in text and "Interludio perdido" in text and "discord" not in text, text
 
 
+def test_editor_sheet_round_trip():
+    """La hoja WYSIWYG vuelve a dar el texto de section_text tal cual: aceptar sin cambios no toca el libro."""
+    import qtk
+    from PySide6.QtGui import QImage, QTextDocument
+
+    import editor
+
+    qtk.app()
+    lines = [(2, "Uno <i>dos</i> tres"), (3, "<b>uno <i>dos</i></b>"), (4, "# Capítulo <i>1</i>"),
+             (5, "[Ilustración 5]"), (6, "* * *"), (7, "[Separador 7]"), (8, "A & B < C [Nota: aclaración]"),
+             (9, "<i>a</i><b>b</b>"), (10, "<i><b>al revés</b></i>")]
+    doc = QTextDocument()
+    picture = QImage(40, 20, QImage.Format.Format_RGB32)
+    editor.load(doc, lines, {5: picture, 7: "❖"})
+    dumped = editor.dump(doc)
+    sources = [editor.source_of(doc.findBlockByNumber(n)) for n in range(doc.blockCount())]
+    assert dumped == "\n\n".join(line for _, line in lines), dumped
+    assert sources == [2, 3, 4, 5, 6, 7, 8, 9, 10], sources
+
+
 def test_text_editor_opens_section_and_saves_only_changes():
     """El editor muestra la sección en el formato de section_text; aceptar sin cambios no toca el libro
     (los párrafos conservan su página) y cancelar con cambios pregunta antes de descartarlos."""
