@@ -20,6 +20,7 @@ MIME = "application/x-lnc-hoja"  # copiar y pegar dentro de la hoja conserva for
 MARKS = re.compile(r"(</?[ib]>)")
 NOTE = re.compile(r"\[Nota: [^\]]*\]")
 THUMB = 160  # alto de las miniaturas de ilustración en la hoja, en píxeles
+SPACE = 10  # píxeles entre párrafos, como el espaciado de Word (no se guarda)
 FONT_SIZE = 12  # puntos del texto a 100 %
 
 
@@ -86,12 +87,14 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
             cursor.insertBlock(QTextBlockFormat(), _plain_format())
         if i or special or remember:
             f = QTextBlockFormat()
+            f.setBottomMargin(SPACE)
             if k is not None:
                 f.setProperty(SOURCE, k)
             if token or scene:
                 f.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             if heading:
                 f.setProperty(HEADING, True)
+                f.setTopMargin(SPACE * 2)
             cursor.setBlockFormat(f)
         if token:
             _insert_object(cursor, token.group(1), int(token.group(2)), pictures, color)
@@ -285,9 +288,8 @@ class Sheet(QTextEdit):
         return dump(self.document())
 
     def set_zoom(self, percent):
-        font = QFont("Segoe UI")
-        font.setPointSizeF(FONT_SIZE * percent / 100)
-        self.document().setDefaultFont(font)
+        # En la hoja de estilo: la QSS de la ventana (9 pt para todo) pisaría un setFont o la fuente del documento
+        self.setStyleSheet(f"QTextEdit#sheet {{ font-family: 'Segoe UI'; font-size: {FONT_SIZE * percent / 100:.1f}pt; }}")
 
     def current_source(self):
         """Bloque del libro del párrafo del cursor o, en uno nuevo sin origen, el del anterior que lo tenga."""
@@ -369,6 +371,7 @@ class Sheet(QTextEdit):
             f.setProperty(HEADING, True)
         else:
             f.clearProperty(HEADING)
+        f.setTopMargin(SPACE * 2 if on else 0)
         cursor.setBlockFormat(f)
         self.look.rehighlightBlock(block)
 

@@ -2317,6 +2317,7 @@ def test_text_editor_opens_section_and_saves_only_changes():
     editor = window.edit_text()
     shown = editor.sheet.content() == convert.section_text(window.book, 2, 6)
     source = editor.sheet.current_source()
+    root.update()  # se maximiza ya mostrada (en Windows, maximizada al crearla quedaba pequeña)
     grabbed = editor.win.isModal() and editor.win.isMaximized()
     editor.sheet.moveCursor(QTextCursor.MoveOperation.End)
     editor.sheet.split_here()  # un párrafo vacío: no es un cambio (aceptar re-paginaría la sección)

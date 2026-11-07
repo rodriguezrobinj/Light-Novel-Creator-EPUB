@@ -3030,6 +3030,8 @@ class Dialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if self.windowState() & Qt.WindowState.WindowMaximized:  # moverla la sacaría de maximizada
+            return
         area = self.screen().availableGeometry()
         frame = self.frameGeometry().size() - self.size()  # barra de título y bordes
         width = max(self.minimumWidth(), min(self.width(), area.width() - frame.width()))
@@ -3128,9 +3130,10 @@ class TextEditor:
         win.finished.connect(lambda _: self.on_destroy())
         app.text_editor = self
         win.setModal(True)  # con la lista activa se podía abrir otro PDF u otro editor y aceptar sobre otros bloques
-        win.setWindowState(Qt.WindowState.WindowMaximized)
+        win.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint)  # Word se abre a pantalla completa
         win.show()
-        self.split.setSizes([1, 1])  # mitad y mitad
+        # Maximizada al crearla, Windows la dejaba del tamaño de su contenido: se maximiza ya mostrada
+        qtk.after(0, self.maximize)
         self.update_tools()
         self.draw_source()
         sheet.setFocus()
@@ -3175,11 +3178,18 @@ class TextEditor:
         self.style = QComboBox()
         self.style.addItems(["Normal", "Título"])
         self.style.setToolTip("Estilo del párrafo (Ctrl+T alterna)")
+        self.style.setMinimumWidth(96)
         self.style.activated.connect(lambda n: (sheet.set_heading(n == 1), sheet.setFocus(), self.update_tools()))
         group("Párrafo", self.style, tool("Unir párrafos", "Une el párrafo con el siguiente (Ctrl+J)", sheet.join_next))
         group("Insertar", tool("❖ Separador", "Separador de escena tras el párrafo", sheet.insert_break))
         row.addStretch(1)
         return bar
+
+    def maximize(self):
+        """A pantalla completa y la barra divisoria en el medio (con el tamaño ya maximizado)."""
+        if shiboken6.isValid(self.win) and self.win.isVisible():
+            self.win.showMaximized()
+            qtk.after(0, lambda: shiboken6.isValid(self.split) and self.split.setSizes([10 ** 4, 10 ** 4]))
 
     def update_tools(self):
         """La cinta sigue al cursor, como en Word: N y K marcadas si lo están, y el estilo del párrafo."""
