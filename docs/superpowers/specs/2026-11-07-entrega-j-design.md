@@ -26,9 +26,10 @@ OCR y traducción automática.
   párrafos. No en etiquetas, títulos, notas ni enlaces.
 - Solo palabras de 7 letras o más; al menos 2 letras a cada lado del corte. Palabras con dígitos o con
   guion propio se dejan como están.
-- Motor: `pyphen` (dependencia nueva, fijada en `requirements.txt`) con `dict/hyph_es.dic` de LibreOffice,
-  cargado con `pyphen.Pyphen(filename=...)`. El .exe lleva solo ese diccionario, no los de todos los
-  idiomas de `pyphen`.
+- Motor: `pyphen` (dependencia nueva, fijada en `requirements.txt`) con su `hyph_es.dic` (patrones de
+  hyph-utf8, los mismos que LibreOffice). El .exe lleva solo ese diccionario: el `.spec` quita los de los
+  demás idiomas (unos 6 MB).
+- Solo con idioma del EPUB «es»: los patrones son españoles.
 - Ventana: casilla «Partir palabras» (preferencia `hyphenate`). El perfil Kindle la activa; los demás la
   apagan.
 - Riesgo: en algunos lectores la búsqueda o el diccionario al tocar una palabra pueden fallar con guiones
