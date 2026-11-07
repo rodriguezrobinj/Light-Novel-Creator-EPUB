@@ -62,24 +62,24 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
-             "credits", "profile", "replacements", "kepub", "words")
+             "credits", "profile", "replacements", "kepub", "words", "hyphenate")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
-         "font_file", "epub2", "reading", "profile", "autocase", "kepub")
+         "font_file", "epub2", "reading", "profile", "autocase", "kepub", "hyphenate")
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
 # Perfil de salida -> opciones que fija (los demás perfiles dejan las opciones como estén)
 PROFILES = {"Personalizado": {},
-            "Celular": {"gray": False, "shrink": True, "shrink_size": 1200, "epub2": False, "kepub": False},
-            "E-reader de tinta": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": False},
-            "Tablet": {"gray": False, "shrink": True, "shrink_size": 2000, "epub2": False, "kepub": False},
+            "Celular": {"gray": False, "shrink": True, "shrink_size": 1200, "epub2": False, "kepub": False, "hyphenate": False},
+            "E-reader de tinta": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": False, "hyphenate": False},
+            "Tablet": {"gray": False, "shrink": True, "shrink_size": 2000, "epub2": False, "kepub": False, "hyphenate": False},
             # Kindle en color: Amazon convierte el EPUB y la app del celular y el Colorsoft lo muestran
-            "Kindle": {"gray": False, "shrink": True, "shrink_size": 1600, "epub2": False, "kepub": False},
-            "Kobo": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": True},
+            "Kindle": {"gray": False, "shrink": True, "shrink_size": 1600, "epub2": False, "kepub": False, "hyphenate": True},
+            "Kobo": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": True, "hyphenate": False},
             "Lector antiguo (EPUB 2)": {"gray": False, "shrink": True, "shrink_size": 1400, "epub2": True,
-                                        "kepub": False}}
+                                        "kepub": False, "hyphenate": False}}
 FONT_CHOICES = ["Del lector"] + list(convert.FONTS) + ["Otra…"]  # «Otra…» pide un archivo
 APP_NAME = "Light Novel Creator"  # nombre visible; el .exe y la carpeta de ajustes siguen siendo «PDF a EPUB»
 KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro, theme.kind_colors(True)
@@ -195,7 +195,7 @@ def _write_options(state, breaks=()):
             "font": font if font in convert.FONTS
             else path if path and Path(path).name == font and Path(path).is_file() else "",
             "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
-            "breaks": list(breaks)}
+            "hyphenate": bool(state.get("hyphenate")), "breaks": list(breaks)}
 
 
 def _write_checked(book, chapters, out, removed, options):
@@ -824,6 +824,7 @@ class App:
         self.shrink_size_var = qtk.Var(convert.SHRINK)  # lado mayor de las imágenes reducidas
         self.trim_var, self.credits_var, self.reading_var = qtk.Var(False), qtk.Var(False), qtk.Var(False)
         self.epub2_var, self.kepub_var = qtk.Var(False), qtk.Var(False)
+        self.hyphenate_var = qtk.Var(False)  # guiones blandos: el Kindle apenas parte palabras en español
 
         root.setWindowTitle(APP_NAME)
         root.on_close, root.on_drop = self.close, self.open_path
@@ -983,7 +984,8 @@ class App:
                            ("Página de créditos", self.credits_var),
                            ("Minutos de lectura en el índice", self.reading_var),
                            ("EPUB 2 (lectores antiguos)", self.epub2_var),
-                           ("Formato Kobo (KEPUB)", self.kepub_var)):
+                           ("Formato Kobo (KEPUB)", self.kepub_var),
+                           ("Partir palabras con guiones (Kindle)", self.hyphenate_var)):
             action = extras.addAction(label)
             action.setCheckable(True)
             var.check(action)
@@ -2945,7 +2947,8 @@ class App:
                 "typography": self.typography_var, "shrink": self.shrink_var, "shrink_size": self.shrink_size_var,
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
-                "autocase": self.autocase_var, "kepub": self.kepub_var}
+                "autocase": self.autocase_var, "kepub": self.kepub_var,
+                "hyphenate": self.hyphenate_var}
 
     def rows(self):
         return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title"), self.tree.set(item, "ok")]

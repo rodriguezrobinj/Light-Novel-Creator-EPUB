@@ -2806,6 +2806,42 @@ def test_gray_stretches_contrast():
     assert out[:4] == b"\x89PNG" and Image.open(io.BytesIO(out)).mode == "LA", out[:4]
 
 
+def test_hyphenate_soft_hyphens_only_in_paragraph_text():
+    """Kindle apenas parte palabras en español: con hyphenate, guiones blandos en las palabras largas de los
+    párrafos, nunca en títulos, enlaces ni en libros en otro idioma."""
+    book = convert.Book("Libro", "", b"", [
+        convert.Block("heading", 1, "Desconocido"),
+        convert.Block("p", 1, 'Algo extraordinariamente raro: <a href="https://ejemplo.com/extraordinario">'
+                              'extraordinario</a>, Subaru-kun y «abc&amp;def».')], [0])
+    out = TMP / "partir.epub"
+    convert.write_epub(book, [(0, "Desconocido")], out, hyphenate=True)
+    body = epub_file(out, "OEBPS/sec001.xhtml")
+    para = re.search(r"<p>.*</p>", body)[0]
+    link = re.search(r"<a .*?</a>", para)[0]
+    convert.write_epub(book, [(0, "Desconocido")], out)
+    plain = epub_file(out, "OEBPS/sec001.xhtml")
+    convert.write_epub(book, [(0, "Desconocido")], out, hyphenate=True, lang="en")
+    english = epub_file(out, "OEBPS/sec001.xhtml")
+    convert.write_epub(book, [(0, "Desconocido")], out, hyphenate=True)
+    assert "ex­tra­or­di­na­ria­men­te" in para, para
+    assert "­" not in link and "­" not in body.split("<p>")[0], body
+    assert "Subaru-kun" in para and "&amp;" in para, para
+    assert "­" not in plain and "­" not in english, (plain, english)
+    assert convert.check_epub(out) == [], convert.check_epub(out)
+
+
+def test_window_kindle_profile_hyphenates():
+    root, window = visible_window()
+    window.profile_var.set("Kindle")
+    window.apply_profile()
+    kindle = window.write_options()["hyphenate"]
+    window.profile_var.set("Celular")
+    window.apply_profile()
+    phone = window.write_options()["hyphenate"]
+    window.close()
+    assert kindle and not phone, (kindle, phone)
+
+
 def test_typography_dash_at_paragraph_end():
     """Kage 5: la portadilla "- Kage no Jitsuryokusha ni Naritakute! -" como párrafo rompía la tipografía."""
     assert convert._typography("- Kage no Jitsuryokusha ni Naritakute! -") == "—Kage no Jitsuryokusha ni Naritakute! —"

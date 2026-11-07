@@ -646,6 +646,27 @@ def _spread(data, layout):
                 for x0 in (w / 2, 0)]
 
 
+LONG_WORD = re.compile(r"(?<![\w&-])[^\W\d_]{7,}(?![\w-])")  # «&»: no partir entidades como &hellip;
+
+
+@functools.lru_cache(maxsize=1)
+def _hyphenator():
+    import pyphen  # patrones españoles de hyph-utf8, los mismos de LibreOffice
+    return pyphen.Pyphen(lang="es", left=2, right=2)
+
+
+def _hyphenate(html_text):
+    """Guiones blandos en las palabras largas, fuera de etiquetas y enlaces: Kindle apenas parte en español
+    y el texto justificado queda con huecos. Una palabra con guion propio («Subaru-kun») no se toca."""
+    parts, link = re.split(r"(<[^>]+>)", html_text), False
+    for i, part in enumerate(parts):
+        if part.startswith("<"):
+            link = part.startswith("<a ") or (link and part != "</a>")
+        elif not link:
+            parts[i] = LONG_WORD.sub(lambda m: _hyphenator().inserted(m[0], hyphen=SOFT_HYPHEN), part)
+    return "".join(parts)
+
+
 def _replace(html_text, rules):
     """Aplica los reemplazos del usuario (_rules) solo al texto, sin tocar las etiquetas <i>/<b>."""
     parts = re.split(r"(<[^>]+>)", html_text)
@@ -2012,7 +2033,7 @@ STATUS = re.compile(r"\s*[【\[].*[】\]]\s*")  # "【Habilidad adquirida】", "
 
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
-               breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False):
+               breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -2028,8 +2049,10 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     trim: recorta el margen blanco de las ilustraciones (_trim). font: una de FONTS o la ruta de un .ttf/.otf, incrustada.
     epub2: paquete EPUB 2 para lectores antiguos. reading: minutos de lectura en la página "Contenido".
     kepub: secciones en formato Kobo (_kepub); el archivo debe acabar en .kepub.epub.
+    hyphenate: guiones blandos en los párrafos (_hyphenate), solo en libros en español.
     Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número."""
     rules = _rules(replacements)
+    hyphenate = hyphenate and lang.split("-")[0].lower() == "es"
     typo = (lambda s, dashes=False: _typography(s, dashes)) if typography else (lambda s, dashes=False: s)
     fix = lambda s, dashes=False: typo(_replace(s, rules) if rules else s, dashes)  # títulos: sin rayas
     limit = SHRINK if shrink is True else int(shrink or 0)
@@ -2094,7 +2117,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             else:
                 css = "status" if STATUS.fullmatch(_plain(b)) else "center" if b.align else ""
                 attr = f' class="{css}"' if css else ""
-                parts.append(f"<p{attr}>{mark()}{NOTE.sub(noteref, fix(b.html, dashes=True))}</p>")
+                body = NOTE.sub(noteref, fix(b.html, dashes=True))  # la nota sale del párrafo: no se parte
+                parts.append(f"<p{attr}>{mark()}{_hyphenate(body) if hyphenate else body}</p>")
         # Los lectores con notas emergentes (Kobo, Kindle, Apple Books) ocultan el aside y lo muestran
         # al tocar la llamada; los demás lo dejan al final de la sección, con enlace de vuelta.
         tag, kind = ("div", "") if epub2 else ("aside", ' epub:type="footnote"')

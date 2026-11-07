@@ -20,6 +20,9 @@ a = Analysis(
 UNUSED = ('opengl32sw.dll', 'Qt6Network.dll', 'Qt6Svg.dll', 'qdirect2d.dll', 'qsvg.dll', 'qsvgicon.dll',
           'plugins/tls/', 'plugins/networkinformation/')
 a.binaries = [b for b in a.binaries if not any(name.lower() in b[0].lower().replace('\\', '/') for name in UNUSED)]
+# pyphen trae patrones de unos 70 idiomas (6 MB): la partición de palabras solo usa el español
+a.datas = [d for d in a.datas if not d[0].replace('\\', '/').startswith('pyphen/dictionaries/')
+           or d[0].endswith('hyph_es.dic')]
 pyz = PYZ(a.pure)
 
 exe = EXE(

@@ -4,3 +4,4 @@ pyinstaller==6.22.3
 pyside6-essentials==6.12.0
 segno==1.6.6
 spylls==0.1.7
+pyphen==0.18.1
