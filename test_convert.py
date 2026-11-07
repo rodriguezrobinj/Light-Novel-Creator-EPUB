@@ -2315,7 +2315,8 @@ def test_text_editor_opens_section_and_saves_only_changes():
     before = [(b.kind, b.html, b.page) for b in window.book.blocks]
     window.tree.selection_set("1")  # "Capitulo 1: Inicio": su sección son los bloques 2..5
     editor = window.edit_text()
-    shown = editor.sheet.content() == convert.section_text(window.book, 2, 6)
+    lines = editor.sheet.content().split(chr(10) * 2)
+    shown = all(line in lines for line in convert.section_text(window.book, 2, 6).split(chr(10) * 2))
     source = editor.sheet.current_source()
     root.update()  # se maximiza ya mostrada (en Windows, maximizada al crearla quedaba pequeña)
     grabbed = editor.win.isModal() and editor.win.isMaximized()
@@ -2325,7 +2326,7 @@ def test_text_editor_opens_section_and_saves_only_changes():
     editor.save()
     same = [(b.kind, b.html, b.page) for b in window.book.blocks] == before
     editor = window.edit_text()
-    editor.sheet.moveCursor(QTextCursor.MoveOperation.Start)
+    editor.sheet.goto_source(2)
     editor.sheet.textCursor().insertText("Hola ")
     original, answers = app.messagebox.askyesno, []
     try:
@@ -2338,15 +2339,64 @@ def test_text_editor_opens_section_and_saves_only_changes():
     finally:
         app.messagebox.askyesno = original
     editor = window.edit_text()
-    editor.sheet.moveCursor(QTextCursor.MoveOperation.Start)
+    editor.sheet.goto_source(2)
     editor.sheet.textCursor().insertText("Hola ")
     editor.save()
     changed = window.book.blocks[2].html
     window.close()
-    assert shown and source == 2 and same, (shown, source, same)
+    assert shown and source == 1 and same, (shown, source, same)
     assert grabbed and blank_only, (grabbed, blank_only)
     assert len(answers) == 1 and kept and closed, (answers, kept, closed)
     assert changed.startswith("Hola "), changed
+
+
+def test_text_editor_edits_the_whole_book_and_saves_only_changes():
+    """El editor tiene todo el libro, con los títulos como en la lista (renombrados incluidos), y se abre en
+    la fila elegida. Al aceptar se guarda solo lo cambiado: un título renombrado en la hoja conserva su tipo
+    y su ✓, los demás capítulos no se tocan, todo se deshace con un Ctrl+Z. La página del PDF más pequeña
+    que el panel queda en el medio."""
+    import app
+    from PySide6.QtGui import QTextCursor
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    chapters = [i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON]
+    first, second = chapters[0], chapters[1]
+    window.tree.set(first, "title", "Capítulo 1: El inicio")  # renombrado en la lista
+    window.tree.set(second, "ok", "✓")
+    before = {i: (window.tree.set(i, "inc"), window.tree.set(i, "ok")) for i in window.tree.get_children()}
+    blocks_before = [(b.kind, b.html, b.page) for b in window.book.blocks]
+    window.tree.selection_set(second)
+    editor = window.edit_text()
+    root.update()
+    sheet = editor.sheet
+    whole = (editor.start, editor.end) == (0, len(window.book.blocks))
+    at_row = sheet.current_source() == int(second)
+    shows_title = "# Capítulo 1: El inicio" in sheet.content().split("\n\n")
+    editor.zoom(-50)  # al 50 %: la página cabe y va en el medio del panel
+    root.update()
+    view, page = editor.scroll.viewport().geometry(), editor.canvas.geometry()
+    centered = abs(page.center().y() - view.height() / 2) <= 2 and abs(page.center().x() - view.width() / 2) <= 2
+    cursor = sheet.document().find("Capítulo 1: El inicio")
+    cursor.insertText("Capítulo 1: El comienzo")
+    sheet.goto_source(int(second) + 1)  # el primer párrafo del segundo capítulo
+    sheet.textCursor().insertText("Nuevo. ")
+    editor.save()
+    rows = {i: (window.tree.set(i, "inc"), window.tree.set(i, "ok")) for i in window.tree.get_children()}
+    title = window.tree.set(first, "title")
+    paragraph = window.book.blocks[int(second) + 1].html
+    edits = list(window.edits)
+    window.undo()
+    undone = ([(b.kind, b.html, b.page) for b in window.book.blocks] == blocks_before
+              and window.tree.set(first, "title") == "Capítulo 1: El inicio")
+    window.close()
+    assert whole and at_row and shows_title, (whole, at_row, shows_title)
+    assert centered, (view, page)
+    assert title == "Capítulo 1: El comienzo" and paragraph.startswith("Nuevo. "), (title, paragraph)
+    assert rows == before, (rows, before)
+    assert len(edits) == 1 and edits[0][1] - edits[0][0] == 1, edits  # solo el párrafo cambiado
+    assert undone
 
 
 def test_text_editor_ribbon_follows_the_cursor():
@@ -2380,17 +2430,20 @@ def test_text_editor_ribbon_follows_the_cursor():
     sheet.setTextCursor(cursor)
     editor.style.activated.emit(1)
     found["estilo pone título"] = any(line.startswith("# ") and "penso" in line for line in sheet.content().split("\n\n"))
-    original, asked = app.messagebox.askyesno, []
+    original, asked, errors = (app.messagebox.askyesno, app.messagebox.showerror), [], []
     try:  # cerrar la ventana principal con cambios sin guardar en el editor: pregunta antes
+        app.messagebox.showerror = lambda title, message, **kwargs: errors.append(message)
         app.messagebox.askyesno = lambda *args, **kwargs: asked.append(args) or False
         window.close()
         kept = bool(root.winfo_exists())
         app.messagebox.askyesno = lambda *args, **kwargs: asked.append(args) or True
-        window.close()  # con el editor abierto: sus after pendientes no deben dar errores
+        window.close()  # con el editor abierto: sus after y señales pendientes no deben dar errores
+        root.update()
     finally:
-        app.messagebox.askyesno = original
+        app.messagebox.askyesno, app.messagebox.showerror = original
     found["pregunta al cerrar"] = len(asked) == 2 and kept
-    assert all(found.values()), found
+    found["sin errores al cerrar"] = not errors
+    assert all(found.values()), (found, errors)
 
 
 def test_text_editor_find_box_skips_repeated_lines():
@@ -3270,7 +3323,7 @@ def test_window_lists_scene_breaks():
     assert "subtítulo" not in status and "2 separadores" in status, status
     assert after_keys == ("Separador", "* * * · página 2"), after_keys
     assert [k for k, _ in chapters] == [0, 5] and not removed and not breaks, (chapters, removed, breaks)
-    assert section == ("0", 1, 5), section
+    assert section == ("2", 0, 7), section  # todo el libro, abierto en el separador
     assert steps == ["5", "5", "0", "0"], steps
 
 
