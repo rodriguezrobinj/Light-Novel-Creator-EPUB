@@ -1561,6 +1561,59 @@ def test_window_reports_worker_crash():
     assert unlocked
 
 
+def test_window_starts_work_with_big_data_without_freezing():
+    """Generar un libro con ilustraciones congelaba la ventana ~3 s: los datos iban por la tubería del
+    proceso nuevo y la ventana esperaba a que arrancara para leerlos. Ahora van en un archivo temporal."""
+    import time
+
+    root, window = visible_window()
+    results = []
+    started = time.time()
+    window.run(len, (b"x" * 3_000_000,), results.append)
+    took = time.time() - started
+    deadline = time.time() + 30
+    while not results and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    root.destroy()
+    assert results == [3_000_000], results
+    assert took < 0.5, took
+
+
+def test_window_quality_report_not_repeated_for_the_same_text():
+    """El informe tarda ~1 s en un libro largo: deshacer, cambiar de tema o abrir el informe con el mismo
+    texto no lo calculan otra vez (la ventana se congelaba cada vez). Un cambio del texto sí."""
+    import app
+
+    root, window = visible_window()
+    calls = []
+    original = app.convert.quality_report
+    app.convert.quality_report = lambda book: calls.append(1) or original(book)
+    try:
+        window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                         convert.Block("p", 1, "Que haces?")], [0]))
+        opened, before = len(calls), window.quality_btn.text()
+        window.theme_var.set("Oscuro")
+        window.apply_theme()
+        window.quality()
+        root.update()
+        same = len(calls)
+        window.apply_edits([(1, 2, "¿Qué haces?")], "0")
+        edited, fixed = len(calls), window.quality_btn.text()
+        window.undo()
+        undone, after = len(calls), window.quality_btn.text()
+        # Al abrir un PDF, el informe llega hecho del proceso de trabajo con el análisis (_analyze)
+        book = convert.Book("Otro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                              convert.Block("p", 1, "Otro texto.")], [0])
+        window.show_book(book, [], original(book))
+        seeded = len(calls)
+    finally:
+        app.convert.quality_report = original
+        window.close()
+    assert (opened, same, edited, undone, seeded) == (1, 1, 2, 2, 2), (opened, same, edited, undone, seeded)
+    assert before == after != fixed, (before, fixed, after)
+
+
 def test_epub_metadata_group_translator_synopsis():
     book = sectioned_book()
     book.publisher, book.translator, book.description = "Grupo & Co", "Ana", "Una bruja <muy> fuerte."
@@ -3100,6 +3153,47 @@ def test_window_replace_in_book_without_titles():
     assert (fixed, undone) == ("Ella dijo que sí.", "Ella dijó que sí."), (fixed, undone)
 
 
+def test_window_undo_added_page_whose_row_did_not_exist():
+    """Ctrl+Z tras «Añadir página» al final, o en un libro sin títulos, quita la página: la fila que estaba
+    elegida (la de la página nueva) no existía antes y deshacer no puede volver a elegirla."""
+    root, window = visible_window()
+    results = []
+    for blocks, candidates in (([convert.Block("heading", 1, "Capítulo 1"), convert.Block("p", 1, "Texto.")], [0]),
+                               ([convert.Block("p", 1, "Texto sin títulos.")], [])):
+        window.show_book(convert.Book("Libro", "", b"", blocks, candidates))
+        before = [(b.kind, b.html) for b in window.book.blocks]
+        window.insert_page("Nota del traductor", ["Gracias por leer."], first=False)
+        root.update()
+        window.undo()
+        root.update()
+        results.append(([(b.kind, b.html) for b in window.book.blocks] == before, window.tree.get_children()))
+    window.close()
+    assert results == [(True, ("0",)), (True, ())], results
+
+
+def test_window_dialogs_fit_the_screen():
+    """Con el zoom de Windows a 125 % en 1366x768 quedan 1093x582: el informe de calidad (1060x600) salía
+    más alto que la pantalla, con sus botones fuera. Cada diálogo se encoge y se coloca dentro."""
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                     convert.Block("p", 1, "Texto.")], [0]))
+    window.quality()
+    root.update()
+    report = root.dialogs()[-1]
+    narrowest = report.minimumSizeHint().width() + report.frameGeometry().width() - report.width()
+    tall, _ = window.dialog("Alto")
+    tall.resize(600, 2000)
+    tall.move(50, 300)
+    tall.show()
+    root.update()
+    screen = tall.screen().availableGeometry()
+    inside = screen.contains(tall.frameGeometry())
+    sizes = (tall.frameGeometry().getRect(), screen.getRect())
+    window.close()
+    assert inside, sizes
+    assert narrowest <= 1093, narrowest
+
+
 def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
     """Ortografía y «Añadir página» se cierran al abrir otro PDF (si no, cambiarían el libro nuevo); con un
     trabajo en curso, «Ortografía…» lo dice en vez de no hacer nada."""
@@ -3584,13 +3678,13 @@ def test_window_does_not_decode_illustrations_again():
 
     root, window = visible_window()
     window.pdf = make_novel()
-    book, twins = app._analyze(str(window.pdf))
+    book, twins, report = app._analyze(str(window.pdf))
     found = convert.duplicate_images
     original = convert.pymupdf.Pixmap
     decoded = []
     convert.duplicate_images = lambda b: 1 / 0  # ya viene del proceso de trabajo
     try:
-        window.show_book(book, twins)
+        window.show_book(book, twins, report)
         convert.pymupdf.Pixmap = lambda *args: decoded.append(args) or original(*args)
         window.fill_tree(window.rows())
     finally:
@@ -3687,6 +3781,27 @@ def test_qtk_rowlist_works_like_treeview():
     assert tree.get_children() == () and not tree.exists("3")
 
 
+def test_qtk_rowlist_tooltip_shows_cut_text():
+    """Con la ventana estrecha (zoom de Windows) los títulos largos salen cortados con «…»: al pasar el
+    ratón, el tooltip los muestra enteros. Un título que cabe deja el tooltip de la lista (los atajos)."""
+    import qtk
+
+    qtk.app()
+    tree = qtk.RowList(("inc", "title"), {"inc": "Tipo", "title": "Título"}, {"inc": 80, "title": 200}, stretch=None)
+    long_title = "Capítulo 1: Hacer frente al servicio comunitario de la capital"
+    tree.insert("", "end", iid="0", values=("Capítulo", long_title))
+    tree.insert("", "end", iid="1", values=("Capítulo", "Uno"))
+    tree.resize(320, 200)
+    tree.show()
+    qtk.pump()
+    from PySide6.QtCore import QPoint
+
+    x = tree.columnViewportPosition(1) + 20  # dentro de la columna del título
+    cut, fits = (tree.full_text_at(QPoint(x, tree.visualItemRect(tree.rows[i]).center().y())) for i in ("0", "1"))
+    tree.close()
+    assert (cut, fits) == (long_title, None), (cut, fits)
+
+
 def test_qtk_textbox_understands_tk_indices():
     import qtk
 
@@ -3711,6 +3826,39 @@ def test_qtk_textbox_understands_tk_indices():
     seen.append(text.tag_names("1.6"))
     assert seen == ["uno dos\n\ntres", "3.2", "tres", "dos", "3.4", True, "1.4", "uno dos\n\ntres\n", "3.2",
                     "uno dos", ("1.0", "1.3", ("1.0", "1.3")), True, ("src4",)], seen
+
+
+def test_theme_text_is_readable():
+    """Cada color de texto contra su fondo llega a 4,5:1 (WCAG AA) en los dos temas: el botón azul del
+    tema oscuro (3,8:1), las filas «Quitar» y «Descartada», y los avisos «Revisar» y «Menor» no llegaban.
+    El gris de lo desactivado (hint) queda fuera: WCAG no lo pide."""
+    import theme
+
+    def luminance(color):
+        def channel(v):
+            v /= 255
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+        return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+    def ratio(a, b):
+        high, low = sorted((luminance(a), luminance(b)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    low = []
+    for dark in (False, True):
+        c = theme.colors(dark)
+        pairs = [(fg, c[fg], bg, c[bg]) for fg, bg in (("ink", "bg"), ("ink", "card"), ("muted", "bg"), ("muted", "card"),
+                                                       ("acc_ink", "acc"), ("acc", "bg"), ("acc", "card"), ("acc", "drop"),
+                                                       ("warn", "card"), ("ok", "card"))]
+        pairs += [(f"fila {k}", v, "card", c["card"]) for k, v in theme.kind_colors(dark).items() if v]
+        pairs += [(f"nivel {k}", v, "card", c["card"]) for k, v in theme.level_colors(dark).items()]
+        for name, tags in (("editor", theme.editor_tags(dark)), ("informe", theme.diff_tags(dark))):
+            pairs += [(f"{name} {k}", v["foreground"], "fondo", v.get("background", c["base"]))
+                      for k, v in tags.items() if "foreground" in v]
+        low += [f"{'oscuro' if dark else 'claro'}: {fg} sobre {bg} {ratio(a, b):.2f}"
+                for fg, a, bg, b in pairs if ratio(a, b) < 4.5]
+    assert not low, low
 
 
 def test_theme_light_dark_and_bad_setting():

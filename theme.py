@@ -6,37 +6,37 @@ from PySide6.QtGui import QColor, QFont, QPalette
 CHOICES = ("Sistema", "Claro", "Oscuro")
 
 LIGHT = {"bg": "#f3f3f3", "card": "#ffffff", "base": "#ffffff", "line": "#e1e1e1", "ink": "#1b1b1b",
-         "muted": "#6b6b6b", "acc": "#2f6fdb", "acc_hover": "#285fbd", "acc_ink": "#ffffff", "sel": "#dce8fc",
+         "muted": "#6b6b6b", "acc": "#2a62c8", "acc_hover": "#2353ab", "acc_ink": "#ffffff", "sel": "#dce8fc",
          "hover": "#ececec", "press": "#e2e2e2", "warn": "#c62828", "ok": "#2e7d32", "drop": "#f5f8fe",
          "drop_line": "#b9c8e8", "sheet": "#ffffff", "sheet_line": "#d4d4d4", "hint": "#9a9a9a"}
 DARK = {"bg": "#202020", "card": "#2b2b2b", "base": "#1f1f1f", "line": "#3d3d3d", "ink": "#ececec",
-        "muted": "#a0a0a0", "acc": "#4c7ef0", "acc_hover": "#5b8cff", "acc_ink": "#ffffff", "sel": "#2f3d5c",
+        "muted": "#a0a0a0", "acc": "#7099f5", "acc_hover": "#85a9f7", "acc_ink": "#111111", "sel": "#2f3d5c",
         "hover": "#353535", "press": "#3d3d3d", "warn": "#ff6b6b", "ok": "#7bc47f", "drop": "#262a33",
         "drop_line": "#4a5a7a", "sheet": "#1a1a1a", "sheet_line": "#3d3d3d", "hint": "#7a7a7a"}
 
-# Colores de los tipos de fila de la lista ("" = el del texto normal)
-KINDS = {False: {"chapter": "", "subtitle": "#555555", "cut": "#9a9a9a", "image": "#2e7d32", "dropped": "#8a8a8a",
+# Colores de los tipos de fila de la lista ("" = el del texto normal). Todo texto llega a 4,5:1 (WCAG AA)
+KINDS = {False: {"chapter": "", "subtitle": "#555555", "cut": "#737373", "image": "#2e7d32", "dropped": "#6a6a6a",
                  "separator": "#7a5c00"},
-         True: {"chapter": "", "subtitle": "#b0b0b8", "cut": "#77777f", "image": "#7bc47f", "dropped": "#85858d",
+         True: {"chapter": "", "subtitle": "#b0b0b8", "cut": "#96969e", "image": "#7bc47f", "dropped": "#a2a2aa",
                 "separator": "#d9b54a"}}
-LEVELS = {False: {"Grave": "#c62828", "Revisar": "#e65100", "Menor": "#607d8b"},
+LEVELS = {False: {"Grave": "#c62828", "Revisar": "#b84300", "Menor": "#546e7a"},
           True: {"Grave": "#ff6b6b", "Revisar": "#ffa94d", "Menor": "#9aaab4"}}
 # Aspecto de las marcas en el editor de texto, en orden de prioridad (si dos fijan lo mismo, manda el último)
 EDITOR = {False: {"italic": {"italic": True}, "bold": {"weight": "bold"},
                   "bolditalic": {"italic": True, "weight": "bold"},
                   "heading": {"foreground": "#1f6fd1", "weight": "bold", "size": 14},
-                  "mark": {"foreground": "#a8a8a8"}, "token": {"background": "#e3efe5", "foreground": "#2e7d32"},
+                  "mark": {"foreground": "#737373"}, "token": {"background": "#e3efe5", "foreground": "#1b5e20"},
                   "scene": {"foreground": "#7a5c00"}, "broken": {"foreground": "#c62828", "underline": True},
                   "spell": {"background": "#fde2e1", "underline": True}},
           True: {"italic": {"italic": True}, "bold": {"weight": "bold"},
                  "bolditalic": {"italic": True, "weight": "bold"},
                  "heading": {"foreground": "#7aa7ff", "weight": "bold", "size": 14},
-                 "mark": {"foreground": "#6f6f78"}, "token": {"background": "#24352a", "foreground": "#8fd694"},
+                 "mark": {"foreground": "#96969e"}, "token": {"background": "#24352a", "foreground": "#8fd694"},
                  "scene": {"foreground": "#d9b54a"}, "broken": {"foreground": "#ff6b6b", "underline": True},
                  "spell": {"background": "#4a1f24", "underline": True}}}
 # Vista previa del informe de calidad: lo que se quita y lo que entra
 DIFF = {False: {"old": {"background": "#f8d7da", "foreground": "#8a1c1c", "overstrike": True},
-                "new": {"background": "#d4edda", "foreground": "#1b5e20"}, "note": {"foreground": "#777777"}},
+                "new": {"background": "#d4edda", "foreground": "#1b5e20"}, "note": {"foreground": "#6b6b6b"}},
         True: {"old": {"background": "#4a1f24", "foreground": "#ffb3b8", "overstrike": True},
                "new": {"background": "#1f3d27", "foreground": "#a6e3b0"}, "note": {"foreground": "#8a8a8a"}}}
 
