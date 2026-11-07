@@ -853,6 +853,45 @@ def name_variants(book):
     return sorted(found, key=lambda g: -sum(forms[f] for f in g))
 
 
+# Honorífico tras un nombre: «Subaru-kun», «Subaru kun»
+HONORIFIC = re.compile(r"(?<![\w-])([^\W\d_]+)(-| )((?i:" + "|".join(sorted(HONORIFICS, key=len, reverse=True))
+                       + r"))(?![\w-])")
+SOLE_WORD = re.compile(r"(?<![\w-])[^\W\d_]+(?![\w-])")
+
+
+def _honorific_key(form):
+    """Clave de un honorífico: «Subaru-kun», «Subaru kun» y «Subarukun» son el mismo; «sempai» es «senpai»."""
+    return _fold(form).replace("sempai", "senpai")
+
+
+def honorific_fixes(texts):
+    """Honoríficos escritos de varias formas en el libro: {forma en minúsculas: forma más usada}, solo de las
+    que no son la más usada. Con espacio solo cuentan en minúscula («San Pedro» no es uno). Juntas
+    («Subarukun») solo si la separada también sale: «Hassan» no es «Has-san»."""
+    forms = collections.Counter()
+    for text in texts:
+        for m in HONORIFIC.finditer(text):
+            name, sep, hon = m.groups()
+            if sep == "-" or (hon.islower() and (name[:1].isupper() or name.lower() in HONORIFICS)):
+                forms[m[0]] += 1
+    keys = {_honorific_key(f) for f in forms} | {"senpai"}
+    for text in texts:
+        forms.update(w for w in SOLE_WORD.findall(text) if _honorific_key(w) in keys)
+    groups = collections.defaultdict(collections.Counter)
+    for form, n in forms.items():
+        groups[_honorific_key(form)][form] += n
+    fixes = {}
+    for group in groups.values():
+        same = collections.Counter()  # «Senpai» al empezar frase y «senpai» son la misma forma
+        for form, n in group.items():
+            same[form.lower()] += n
+        if len(same) > 1:
+            top = same.most_common(1)[0][0]
+            best = max((f for f in group if f.lower() == top), key=group.__getitem__)
+            fixes.update({low: best for low in same if low != top})
+    return fixes
+
+
 SPELL_DIR = Path(__file__).parent / "dict"  # Hunspell es_ES de LibreOffice (RLA-ES); en el .exe, junto a los módulos
 
 
@@ -1515,6 +1554,9 @@ def quality_report(book):
     lines = collections.Counter(_plain(b).strip() for b in blocks if b.kind == "p")
     heads = [k for k, b in enumerate(blocks) if b.kind == "heading"] + [len(blocks)]
     drop = (lambda k: (k, k + 1, ""))
+    honorifics = honorific_fixes([_plain(b) for b in blocks if b.kind == "p"])
+    honorific = re.compile(r"(?<![\w-])(" + "|".join(sorted(map(re.escape, honorifics), key=len, reverse=True))
+                           + r")(?![\w-])", re.I) if honorifics else None
     prev_text = None
     for k, b in enumerate(blocks):
         if b.kind != "p":
@@ -1591,6 +1633,16 @@ def quality_report(book):
             report.append(Issue(kind, k, b.page, "Menor", title, why, solution,
                                 _around(before, n, n), _around(after, n, n + len(after) - len(before)),
                                 (k, k + 1, fixed), text))
+        m = honorific.search(line) if honorific else None
+        if m:
+            fixed = honorific.sub(lambda h: (str.upper if h[0][:1].isupper() else str.lower)(
+                honorifics[h[0].lower()][:1]) + honorifics[h[0].lower()][1:], line)
+            before, after = TAGS.sub("", line), TAGS.sub("", fixed)
+            n = len(os.path.commonprefix([before, after]))
+            report.append(Issue("honorific", k, b.page, "Menor", "Honorífico escrito de varias formas",
+                                f"El libro escribe casi siempre «{honorifics[m[0].lower()]}», y aquí «{m[0]}».",
+                                "Unificarlo en la forma más usada.", _around(before, n, n),
+                                _around(after, n, n + len(after) - len(before)), (k, k + 1, fixed), text))
         m = next((m for m in CAPITAL.finditer(text) if m[1].lower() not in ABBREVIATIONS), None)
         if m and not LINKS.search(text):
             report.append(Issue("capital", k, b.page, "Menor", "Minúscula tras un punto",

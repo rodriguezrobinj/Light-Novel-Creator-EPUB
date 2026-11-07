@@ -3246,6 +3246,27 @@ def test_quality_report_fixes_fansub_typos():
                                                   "<i>¿Qué haces?</i>", "«¿Qué?» ¡Ven aquí!"], [b.html for b in book.blocks]
 
 
+def test_quality_report_unifies_honorific_variants():
+    """«Subaru-kun» y «Subaru kun», «senpai» y «sempai» en el mismo libro: aviso en la forma menos usada, con
+    arreglo a la más usada. Lo que solo cambia de mayúscula, una sola forma o «San Pedro» no avisan."""
+    texts = ["Subaru-kun llegó tarde.", "Subaru-kun, ven.", "Gracias, Subaru-kun.", "Hola, Subaru kun.",
+             "<i>Subaru kun</i> dijo.", "Subarukun es raro.",
+             "Senpai, espera.", "Mi senpai es genial.", "Sempai, ¿qué haces?",
+             "Fueron a San Pedro.", "La Ciudad San Marcos.", "Emilia-san sonrió.", "Emilia-san asintió.",
+             "Onee-san, ayuda.", "La onee-san sonrió.", "Hassan saludó."]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    report = [i for i in convert.quality_report(book) if i.kind == "honorific"]
+    assert [(i.block, i.level) for i in report] == [(4, "Menor"), (5, "Menor"), (6, "Menor"), (9, "Menor")], \
+        [(i.block, i.title, i.problem) for i in report]
+    assert "«Subaru-kun»" in report[0].problem and "«Subaru kun»" in report[0].problem, report[0].problem
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    assert [book.blocks[k].html for k in (4, 5, 6, 9)] == [
+        "Hola, Subaru-kun.", "<i>Subaru-kun</i> dijo.", "Subaru-kun es raro.", "Senpai, ¿qué haces?"], \
+        [b.html for b in book.blocks]
+
+
 def test_quality_report_fixes_grammar_and_typography():
     """Tildes, erratas, gramática, espacios, signos dobles, incisos y cierres que faltan: cada caso con su
     arreglo; lo que se parece pero está bien escrito no salta."""
