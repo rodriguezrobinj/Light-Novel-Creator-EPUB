@@ -4,11 +4,11 @@ import re
 from contextlib import contextmanager
 
 import pymupdf
-from PySide6.QtCore import QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QTextCharFormat, QTextCursor, QTextFormat
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPen, QPixmap, QTextCharFormat, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QTextEdit, QTreeWidget,
-                               QTreeWidgetItem, QWidget)
+                               QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QTextEdit, QToolTip,
+                               QTreeWidget, QTreeWidgetItem, QWidget)
 
 IID = Qt.ItemDataRole.UserRole       # fila -> su iid (el índice del bloque, como texto)
 TAGS = Qt.ItemDataRole.UserRole + 1  # fila -> sus tags de aspecto
@@ -154,6 +154,24 @@ class RowList(QTreeWidget):
 
     def bind_key(self, key, fn, modifiers=Qt.KeyboardModifier.NoModifier):
         self.keys[(key, modifiers)] = fn
+
+    def full_text_at(self, pos):
+        """Texto de la celda en pos (del viewport) si no cabe y Qt lo corta con «…»; None si cabe."""
+        index = self.indexAt(pos)
+        item = self.itemFromIndex(index) if index.isValid() else None
+        if item is None:
+            return None
+        text, col = item.text(index.column()), index.column()
+        room = self.visualRect(index).width() - 8  # márgenes de la celda
+        return text if QFontMetrics(item.font(col)).horizontalAdvance(text) > room else None
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.Type.ToolTip:  # con la ventana estrecha, el título cortado se lee entero
+            text = self.full_text_at(event.pos())
+            if text:
+                QToolTip.showText(event.globalPos(), text, self.viewport())
+                return True
+        return super().viewportEvent(event)
 
     def keyPressEvent(self, event):
         mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier

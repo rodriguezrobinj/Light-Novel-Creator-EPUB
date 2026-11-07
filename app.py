@@ -1,5 +1,6 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
 import collections
+import contextlib
 import ctypes
 import dataclasses
 import difflib
@@ -9,6 +10,7 @@ import io
 import json
 import multiprocessing
 import os
+import pickle
 import queue
 import re
 import shutil
@@ -134,8 +136,17 @@ def _log(text):
 
 
 def _worker(events, work, args, report):
-    """Corre en otro proceso: PyMuPDF retiene el GIL y, en un hilo, trabaría la ventana."""
+    """Corre en otro proceso: PyMuPDF retiene el GIL y, en un hilo, trabaría la ventana. args es la tupla o,
+    desde App.run, la ruta del archivo donde la guardó."""
     try:
+        if isinstance(args, str):
+            path = args
+            try:
+                with open(path, "rb") as f:
+                    args = pickle.load(f)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.remove(path)
         if report:
             result = work(*args, progress=lambda done, total: events.put(("progress", done, total)))
         else:
@@ -147,10 +158,10 @@ def _worker(events, work, args, report):
 
 
 def _analyze(pdf, progress=None):
-    """convert.analyze y las ilustraciones repetidas, en el proceso de trabajo: en la ventana, buscarlas
-    la congelaba (Kage 5: 2,4 s)."""
+    """convert.analyze, las ilustraciones repetidas y el informe de calidad, en el proceso de trabajo: en la
+    ventana congelaban al abrir (Kage 5: 2,4 s las repetidas; Nageki 1: 0,9 s el informe)."""
     book = convert.analyze(pdf, progress)
-    return book, convert.duplicate_images(book)
+    return book, convert.duplicate_images(book), convert.quality_report(book)
 
 
 def _write_json(path, data):
@@ -784,6 +795,8 @@ class App:
         self.done = None                       # qué hacer con el resultado del trabajo en curso
         self.latest = None                     # último progreso (hecho, total) pendiente de pintar
         self.partial = None                    # EPUB a medio escribir del trabajo en curso
+        self.args_file = ""                    # datos del trabajo en curso, para el proceso (ver run)
+        self.reports = {}                      # informes de calidad ya calculados (ver quality_report)
         self.editor_save = None                # guarda y cierra el cuadro de edición abierto
         self.view = None                       # última posición del scroll de la lista
         self.pdf_doc = None                    # PDF abierto para la vista previa
@@ -1200,7 +1213,13 @@ class App:
         self.batch_btn.setEnabled(False)
         self.gen_btn.setEnabled(False)
         self.done, self.busy = done, busy
-        self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, args, report), daemon=True)
+        # Los datos van en un archivo: por la tubería del proceso nuevo, la ventana esperaba a que arrancara
+        # para leerlos (unos 3 s con un libro con ilustraciones). Así start() vuelve enseguida.
+        fd, path = tempfile.mkstemp(prefix="lnepub-trabajo-", suffix=".pickle")
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump(args, f, protocol=pickle.HIGHEST_PROTOCOL)
+        self.args_file = path
+        self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, path, report), daemon=True)
         self.proc.start()
         return True
 
@@ -1234,6 +1253,8 @@ class App:
     def finish(self, event):
         """Cierra el trabajo en curso: desbloquea la ventana y entrega el resultado o el error."""
         done, self.done, self.latest, self.partial = self.done, None, None, None
+        with contextlib.suppress(OSError):  # el proceso lo borra al leerlo; si murió antes, queda aquí
+            os.remove(self.args_file)
         self.open_btn.setEnabled(True)
         self.batch_btn.setEnabled(True)
         if self.book:
@@ -1529,7 +1550,8 @@ class App:
             self.book.blocks, self.book.candidates = change["blocks"], change["candidates"]
             del self.edits[change["edits"]:]
             self.fill_tree(change["rows"])
-            if change["item"] is None:  # lista vacía: no hay fila que volver a seleccionar
+            # Lista vacía, o la fila elegida era la de una página añadida que ya no está: nada que volver a elegir
+            if change["item"] is None or not self.tree.exists(change["item"]):
                 return
             change = [self.row_state(change["item"])]
         for item, kind, title in change:
@@ -1582,9 +1604,12 @@ class App:
         self.update_header()
         self.run(_analyze, (path,), lambda result: self.show_book(*result), report=True)
 
-    def show_book(self, book, twins=None):
-        """Pone en la ventana un libro analizado. twins: sus ilustraciones repetidas, si ya se buscaron."""
+    def show_book(self, book, twins=None, report=None):
+        """Pone en la ventana un libro analizado. twins y report: sus ilustraciones repetidas y su informe de
+        calidad, si ya se calcularon en el proceso de trabajo."""
         self.book = book
+        if report is not None:
+            self.reports[self.report_key()] = report
         if self.pdf_doc:
             self.pdf_doc.close()
         self.pdf_doc = pymupdf.open(self.pdf)
@@ -1782,7 +1807,7 @@ class App:
 
     def dialog(self, title, modal=False):
         """Ventana secundaria con su columna; sin modal, la principal sigue usable (como Toplevel)."""
-        win = QDialog(self.root)
+        win = Dialog(self.root)
         win.setWindowTitle(title)
         win.setModal(modal)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -2586,10 +2611,26 @@ class App:
             self.fields()[name].set(value)
         self.update_preview()
 
+    def quality_report(self):
+        """convert.quality_report del libro, recordado por su contenido: tarda ~1 s en un libro largo, y
+        deshacer, cambiar de tema o abrir el informe lo pedían otra vez con el mismo texto."""
+        key = self.report_key()
+        if key not in self.reports:
+            if len(self.reports) >= 8:  # los últimos estados: basta para deshacer varias veces
+                del self.reports[next(iter(self.reports))]
+            self.reports[key] = convert.quality_report(self.book)
+        return list(self.reports[key])
+
+    def report_key(self):
+        """Lo que mira convert.quality_report del libro: si no cambia, el informe tampoco."""
+        b = self.book
+        return (b.title, b.cover, tuple(b.candidates), tuple(tuple(s) for s in b.skipped),
+                tuple((x.kind, x.page, x.html, x.image, x.keep, x.layout, x.align) for x in b.blocks))
+
     def update_quality(self):
         """Botón de la barra inferior con los avisos del informe de calidad: dice qué falta antes de generar,
         en rojo si hay algo grave."""
-        report = [i for i in convert.quality_report(self.book) if _issue_key(i) not in self.ignored] if self.book else []
+        report = [i for i in self.quality_report() if _issue_key(i) not in self.ignored] if self.book else []
         graves = sum(i.level == "Grave" for i in report)
         rest = _quality_summary([i for i in report if i.level != "Grave"])
         if graves:
@@ -2656,7 +2697,7 @@ class App:
         state = {"report": []}
 
         def fill(select=0):
-            everything = convert.quality_report(self.book)
+            everything = self.quality_report()
             ignored = [i for i in everything if _issue_key(i) in self.ignored]
             report = [i for i in everything if _issue_key(i) not in self.ignored]
             summary.setText((_quality_summary(report) or "No se encontró nada sospechoso.")
@@ -2984,8 +3025,24 @@ class App:
 
 
 class Dialog(QDialog):
-    """QDialog que pregunta a on_reject antes de cerrarse con Esc o con la X de la ventana."""
+    """QDialog que pregunta a on_reject antes de cerrarse con Esc o con la X de la ventana, y que al
+    abrirse cabe en la pantalla (con el zoom de Windows a 125 % en 1366x768 solo quedan 1093x582)."""
     on_reject = None
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        area = self.screen().availableGeometry()
+        frame = self.frameGeometry().size() - self.size()  # barra de título y bordes
+        width = max(self.minimumWidth(), min(self.width(), area.width() - frame.width()))
+        height = max(self.minimumHeight(), min(self.height(), area.height() - frame.height()))
+        if (width, height) != (self.width(), self.height()):
+            self.resize(width, height)
+        box = self.frameGeometry()
+        # Si aun así no cabe, que se vea el principio: la barra de título y la esquina izquierda
+        x = max(area.x(), min(box.x(), area.right() - box.width() + 1))
+        y = max(area.y(), min(box.y(), area.bottom() - box.height() + 1))
+        if (x, y) != (box.x(), box.y()):
+            self.move(x, y)
 
     def reject(self):
         if self.on_reject:
