@@ -88,6 +88,13 @@ QLabel#title {{ font-size: 11pt; font-weight: 600; }}
 QLabel#big {{ font-size: 13pt; font-weight: 600; }}
 QSplitter::handle {{ background: transparent; }}
 QScrollArea {{ border: 0; background: transparent; }}
+QFrame#desk {{ background: {line}; }}
+QTextEdit#sheet {{ background: {sheet}; border: 1px solid {sheet_line}; selection-background-color: {acc};
+    selection-color: {acc_ink}; }}
+QFrame#ribbon {{ background: {card}; border-bottom: 1px solid {line}; }}
+QToolButton#tool {{ border: 1px solid transparent; background: transparent; padding: 4px 8px; }}
+QToolButton#tool:hover {{ background: {hover}; border-color: {line}; }}
+QToolButton#tool:checked {{ background: {sel}; border-color: {acc}; }}
 """
 
 
