@@ -2216,6 +2216,93 @@ def test_editor_sheet_round_trip():
     assert sources == [2, 3, 4, 5, 6, 7, 8, 9, 10], sources
 
 
+def test_editor_sheet_actions_paste_and_undo():
+    """Cursiva, negrita y título como en Word; Enter parte y el párrafo nuevo sigue apuntando a su bloque;
+    unir deja un espacio; pegar de fuera trae solo texto; una ilustración no se duplica al pegarla."""
+    import qtk
+    from PySide6.QtCore import QMimeData
+    from PySide6.QtGui import QImage, QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Fin."), (2, "Dijo hola, y se fue."), (3, "[Ilustración 3]")],
+                      {3: QImage(40, 20, QImage.Format.Format_RGB32)})
+
+    def select(start, end):
+        c = sheet.textCursor()
+        c.setPosition(start)
+        c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+
+    def first():
+        return sheet.content().split(chr(10) * 2)[0]
+
+    seen = []
+    select(0, 3)
+    sheet.toggle_italic()
+    seen.append(first())                                     # cursiva sobre "Fin"
+    sheet.toggle_italic()
+    seen.append(first())                                     # otra vez: la quita
+    select(0, 3)
+    sheet.toggle_bold()
+    seen.append(first())
+    sheet.undo()
+    select(0, 0)
+    sheet.toggle_heading()
+    seen.append(first())                                     # título
+    sheet.undo()
+    select(0, 0)
+    sheet.join_next()
+    seen.append(first())                                     # unido con un espacio
+    sheet.undo()
+    seen.append(first())                                     # un Ctrl+Z deshace la unión entera
+    select(9, 9)                                             # "Fin." / "Dijo| hola"
+    sheet.split_here()
+    seen.append(sheet.content().split(chr(10) * 2)[1:3])
+    seen.append(sheet.current_source())                      # el trozo nuevo sigue siendo del bloque 2
+    sheet.undo()
+    mime = QMimeData()
+    mime.setHtml("<p style='font-size:30pt'><b>Pegado</b> de fuera</p>")
+    mime.setText("Pegado de fuera")
+    sheet.moveCursor(QTextCursor.MoveOperation.End)
+    sheet.split_here()
+    sheet.insertFromMimeData(mime)
+    seen.append(sheet.content().split(chr(10) * 2)[-1])      # solo texto, sin negrita
+    sheet.selectAll()
+    copy = sheet.createMimeDataFromSelection()
+    sheet.moveCursor(QTextCursor.MoveOperation.End)
+    sheet.insertFromMimeData(copy)
+    seen.append(sheet.content().count("[Ilustración 3]"))    # la copia de la ilustración no se pega
+    select(0, 0)
+    sheet.textCursor().insertText("X")
+    sheet.selectAll()
+    cut = sheet.createMimeDataFromSelection()
+    sheet.textCursor().removeSelectedText()
+    sheet.insertFromMimeData(cut)
+    seen.append(sheet.content().count("[Ilustración 3]"))    # cortar y pegar la mueve
+    assert seen == ["<i>Fin</i>.", "Fin.", "<b>Fin</b>.", "# Fin.", "Fin. Dijo hola, y se fue.", "Fin.",
+                    ["Dijo", "hola, y se fue."], 2, "Pegado de fuera", 1, 1], seen
+
+
+def test_editor_sheet_looks_and_spelling():
+    """Los títulos se ven grandes y en negrita sin guardar negrita; las palabras desconocidas salen subrayadas."""
+    import qtk
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "# Título"), (2, "Ella dijó que sí.")], {})
+    sheet.look.set_unknown({"dijó"})
+    qtk.pump()
+    heading = sheet.document().findBlockByNumber(0).layout().formats()
+    bold = any(f.format.fontWeight() >= 600 for f in heading)
+    assert bold and sheet.content() == "# Título" + chr(10) * 2 + "Ella dijó que sí.", (bold, sheet.content())
+    assert sheet.misspelled() == ["dijó"], sheet.misspelled()
+
+
 def test_text_editor_opens_section_and_saves_only_changes():
     """El editor muestra la sección en el formato de section_text; aceptar sin cambios no toca el libro
     (los párrafos conservan su página) y cancelar con cambios pregunta antes de descartarlos."""
