@@ -2017,11 +2017,25 @@ class App:
         self.replacements_window = win, text, save
 
     def edit_text(self):
-        """Abre el editor con todo el libro, en la fila seleccionada (título, ilustración o separador)."""
+        """Abre el editor en la sección de la fila seleccionada (la de su título, si es una ilustración o un
+        separador), con el cursor en esa fila."""
         selected = self.tree.selection()
         if not self.book or not selected:
             return None
-        return TextEditor(self, selected[0], 0, len(self.book.blocks))
+        return TextEditor(self, selected[0], *self.section_bounds(int(selected[0])))
+
+    def section_heads(self):
+        """Títulos que abren sección en el editor: los capítulos. Subtítulos, separadores («ªª») y lo quitado
+        quedan dentro del capítulo donde están; lo de antes del primero es el inicio del libro."""
+        return [k for k, b in enumerate(self.book.blocks) if b.kind == "heading"
+                and self.tree.exists(str(k)) and self.tree.set(str(k), "inc") == ON]
+
+    def section_bounds(self, k):
+        """Bloques de la sección del bloque k: de su título (o del principio del libro) al siguiente."""
+        heads = self.section_heads()
+        start = max((j for j in heads if j <= k), default=0)
+        end = min((j for j in heads if j > start), default=len(self.book.blocks))
+        return start, end
 
     def apply_edit(self, edit, item):
         self.apply_edits([edit], item)
@@ -3049,20 +3063,32 @@ class Dialog(QDialog):
 
 
 class TextEditor:
-    """Editor del texto de una sección, de su título al siguiente, como Word: la hoja (editor.Sheet) muestra
-    cursiva, negrita, títulos, ilustraciones y separadores como quedan; al lado, la página del PDF del párrafo
-    del cursor, grande y con zoom. Al aceptar, App.apply_edit guarda el texto con convert.edit_section."""
+    """Editor del texto como Word, sección a sección (de un título al siguiente): a la izquierda el panel de
+    navegación con los títulos del libro; en medio la hoja (editor.Sheet) con cursiva, negrita, títulos,
+    ilustraciones y separadores como quedan; a la derecha la página del PDF del párrafo del cursor, grande y
+    con zoom. Cada sección visitada guarda su texto y su deshacer; al aceptar, App.apply_edits guarda lo
+    cambiado de todas con convert.edit_section."""
 
     def __init__(self, app, item, start, end):
-        self.app, self.item, self.start, self.end = app, item, start, end
+        self.app, self.item = app, item
         self.win = win = Dialog(app.root)
-        win.setWindowTitle(f"Texto · {app.tree.set(item, 'title')}")
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         win.on_reject = self.cancel  # Esc y la X de la ventana preguntan antes de descartar cambios
-        colors, tags = theme.colors(app.dark), theme.editor_tags(app.dark)
+        self.colors = theme.colors(app.dark)
         self.sheet = sheet = editor.Sheet()
-        sheet.look.set_tags(tags)
-        sheet.look.set_unknown(app.unknown)  # palabras de la última revisión ortográfica
+        sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
+        self.pages = {}  # (inicio, fin) -> {"doc", "look", "lines"} de cada sección visitada
+        self.sections = self.outline()
+        self.nav = QListWidget()
+        self.nav.setObjectName("nav")
+        for label, _, _, indent in self.sections:
+            self.nav.addItem(("      " if indent else "") + label)
+        self.nav.itemClicked.connect(lambda it: self.open_section(*self.sections[self.nav.row(it)][1:3]))
+        nav_box = QWidget()
+        nav_column = QVBoxLayout(nav_box)
+        nav_column.setContentsMargins(8, 8, 0, 0)
+        nav_column.addWidget(_label("Navegación", "title"))
+        nav_column.addWidget(self.nav, 1)
         column = QVBoxLayout(win)
         column.setContentsMargins(0, 0, 0, 8)
         column.setSpacing(0)
@@ -3090,10 +3116,11 @@ class TextEditor:
                                    1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
                                    _button("+", lambda: self.zoom(25))))
         self.split = QSplitter()
+        self.split.addWidget(nav_box)
         self.split.addWidget(desk)
         self.split.addWidget(side)
-        self.split.setStretchFactor(0, 1)
         self.split.setStretchFactor(1, 1)
+        self.split.setStretchFactor(2, 1)
         self.split.splitterMoved.connect(lambda *_: self.later("panel", 80, self.redraw))
         column.addWidget(self.split, 1)
         # Barra de estado como Word: dónde estás y el zoom del texto
@@ -3112,20 +3139,15 @@ class TextEditor:
         self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
         self.drawn = None  # (bloque, PDF) del dibujo actual del panel
         self.pending = {}  # trabajo diferido: nombre -> temporizador
-        # Un título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)
-        self.lines = [(k, "# " + app.tree.set(str(k), "title") if app.book.blocks[k].kind == "heading"
-                       and app.tree.exists(str(k)) else convert.section_text(app.book, k, k + 1))
-                      for k in range(start, end)]
-        sheet.set_content(self.lines, self.pictures(), colors["muted"])
-        sheet.goto_source(int(item))
-        self.original = "\n\n".join(line for _, line in self.lines if line.strip())  # lo que daría content()
         self.set_text_zoom(100)
+        self.open_section(start, end, int(item))
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
         sheet.cursorPositionChanged.connect(self.update_tools)
         sheet.currentCharFormatChanged.connect(lambda _: self.update_tools())
         sheet.undoAvailable.connect(self.undo_btn.setEnabled)
         sheet.redoAvailable.connect(self.redo_btn.setEnabled)
+        sheet.textChanged.connect(lambda: self.later("marks", 300, self.mark_changed))
         editor.watch(self.scroll.viewport(), self.on_panel_event)
         win.finished.connect(lambda _: self.on_destroy())
         app.text_editor = self
@@ -3194,7 +3216,8 @@ class TextEditor:
     def center(self):
         """Barra divisoria al medio y el párrafo del cursor a la vista."""
         if shiboken6.isValid(self.split):
-            self.split.setSizes([10 ** 4, 10 ** 4])
+            width = self.split.width()
+            self.split.setSizes([240, (width - 240) // 2, (width - 240) // 2])  # navegación, hoja y PDF
             self.sheet.ensureCursorVisible()
 
     def update_tools(self):
@@ -3206,10 +3229,58 @@ class TextEditor:
         self.italic_btn.setChecked(f.fontItalic())
         self.style.setCurrentIndex(1 if self.sheet.textCursor().blockFormat().property(editor.HEADING) else 0)
 
-    def pictures(self):
+    def outline(self):
+        """Secciones del libro para el panel de navegación: [(título, inicio, fin, sangría)], una por capítulo.
+        Lo de antes del primero es «Inicio del libro»."""
+        blocks, found = self.app.book.blocks, []
+        heads = self.app.section_heads() + [len(blocks)]
+        if heads[0] > 0:
+            found.append(("Inicio del libro", 0, heads[0], False))
+        for k, end in zip(heads, heads[1:]):
+            title = self.app.tree.set(str(k), "title") if self.app.tree.exists(str(k)) else convert._plain(blocks[k])
+            kind = self.app.tree.set(str(k), "inc") if self.app.tree.exists(str(k)) else ON
+            found.append((title, k, end, kind != ON))
+        return found
+
+    def open_section(self, start, end, focus=None):
+        """Muestra la sección start..end en la hoja (la ya editada si se visitó) y la marca en la navegación."""
+        page = self.pages.get((start, end))
+        if page is None:
+            # Un título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)
+            book, tree = self.app.book, self.app.tree
+            lines = [(k, "# " + tree.set(str(k), "title") if book.blocks[k].kind == "heading" and tree.exists(str(k))
+                      else convert.section_text(book, k, k + 1)) for k in range(start, end)]
+            doc, look = self.sheet.set_content(lines, self.pictures(start, end), self.colors["muted"])
+            page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines}
+        else:
+            self.sheet.use(page["doc"], page["look"])
+        self.current = (start, end)
+        if focus is not None:
+            self.sheet.goto_source(focus)
+        row = next((n for n, s in enumerate(self.sections) if s[1:3] == (start, end)), None)
+        if row is not None:
+            self.nav.setCurrentRow(row)
+        title = self.sections[row][0] if row is not None else self.app.tree.set(self.item, "title")
+        self.win.setWindowTitle(f"Texto · {title}")
+        self.undo_btn.setEnabled(page["doc"].isUndoAvailable())
+        self.redo_btn.setEnabled(page["doc"].isRedoAvailable())
+        self.drawn = None
+        self.update_tools()
+        self.draw_source()
+        self.sheet.ensureCursorVisible()
+        self.sheet.setFocus()
+
+    def mark_changed(self):
+        """«•» en la navegación junto a las secciones con cambios sin guardar."""
+        for n, (label, start, end, indent) in enumerate(self.sections):
+            page = self.pages.get((start, end))
+            mark = "  •" if page and self.page_dirty(page) else ""
+            self.nav.item(n).setText(("      " if indent else "") + label + mark)
+
+    def pictures(self, start, end):
         """Miniaturas de las ilustraciones y adornos de la sección, y el texto de los separadores escritos."""
         found = {}
-        for k in range(self.start, self.end):
+        for k in range(start, end):
             block = self.app.book.blocks[k]
             if block.kind in ("image", "break") and block.image:
                 try:
@@ -3351,28 +3422,34 @@ class TextEditor:
         self.status.setText(f"Página {page} del PDF · {where} · "
                             f"{words:,} palabra{'' if words == 1 else 's'}".replace(",", "."))
 
-    def dirty(self):
-        """¿Cambió algo que edit_section lea? Líneas en blanco y espacios sobrantes no cuentan."""
+    @staticmethod
+    def page_dirty(page):
+        """¿Cambió algo que edit_section lea en esa sección? Líneas en blanco y espacios sobrantes no cuentan."""
         def lines(text):
             return [line.strip() for line in text.splitlines() if line.strip()]
-        return lines(self.sheet.content()) != lines(self.original)
+        return lines(editor.dump(page["doc"])) != lines("\n\n".join(line for _, line in page["lines"]))
+
+    def dirty(self):
+        return any(self.page_dirty(page) for page in self.pages.values())
 
     def changes(self):
-        """Lo que cambió, línea a línea frente a lo cargado: [[inicio, fin, texto]] de atrás adelante para
-        edit_section, y {fila: título} de los títulos solo renombrados (conservan su tipo y su ✓)."""
-        old = [line for _, line in self.lines]
-        new = [line for line in self.sheet.content().split("\n\n") if line.strip()]
+        """Lo que cambió en las secciones visitadas, línea a línea frente a lo cargado: [[inicio, fin, texto]]
+        de atrás adelante para edit_section, y {fila: título} de los títulos solo renombrados (conservan su
+        tipo y su ✓)."""
         edits, titles = [], {}
-        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
-            k = str(self.start + i1)
-            if tag == "equal":
-                continue
-            if (tag == "replace" and i2 - i1 == j2 - j1 == 1 and old[i1].startswith("# ") and new[j1].startswith("# ")
-                    and self.app.tree.exists(k)):
-                titles[k] = new[j1][2:].strip()
-            else:
-                edits.append([self.start + i1, self.start + i2, "\n\n".join(new[j1:j2])])
-        return edits[::-1], titles
+        for (start, _), page in self.pages.items():
+            old = [line for _, line in page["lines"]]
+            new = [line for line in editor.dump(page["doc"]).split("\n\n") if line.strip()]
+            for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+                k = str(start + i1)
+                if tag == "equal":
+                    continue
+                if (tag == "replace" and i2 - i1 == j2 - j1 == 1 and old[i1].startswith("# ")
+                        and new[j1].startswith("# ") and self.app.tree.exists(k)):
+                    titles[k] = new[j1][2:].strip()
+                else:
+                    edits.append([start + i1, start + i2, "\n\n".join(new[j1:j2])])
+        return sorted(edits, reverse=True), titles
 
     def save(self):
         """Aplica solo lo que cambió: un párrafo rehecho pierde su página del PDF, y un título rehecho su tipo."""

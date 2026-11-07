@@ -2350,13 +2350,12 @@ def test_text_editor_opens_section_and_saves_only_changes():
     assert changed.startswith("Hola "), changed
 
 
-def test_text_editor_edits_the_whole_book_and_saves_only_changes():
-    """El editor tiene todo el libro, con los títulos como en la lista (renombrados incluidos), y se abre en
-    la fila elegida. Al aceptar se guarda solo lo cambiado: un título renombrado en la hoja conserva su tipo
-    y su ✓, los demás capítulos no se tocan, todo se deshace con un Ctrl+Z. La página del PDF más pequeña
-    que el panel queda en el medio."""
+def test_text_editor_navigates_sections_and_saves_only_changes():
+    """Como el panel de navegación de Word: la hoja muestra una sección con su título (como en la lista) y el
+    panel lleva a las demás. Lo editado en una sección sigue ahí al volver y se marca con «•». Al aceptar se
+    guarda solo lo cambiado de todas: un título renombrado conserva su tipo y su ✓, todo se deshace con un
+    Ctrl+Z. La página del PDF más pequeña que el panel queda en el medio."""
     import app
-    from PySide6.QtGui import QTextCursor
 
     root, window = visible_window()
     window.pdf = make_novel()
@@ -2371,17 +2370,28 @@ def test_text_editor_edits_the_whole_book_and_saves_only_changes():
     editor = window.edit_text()
     root.update()
     sheet = editor.sheet
-    whole = (editor.start, editor.end) == (0, len(window.book.blocks))
-    at_row = sheet.current_source() == int(second)
-    shows_title = "# Capítulo 1: El inicio" in sheet.content().split("\n\n")
+
+    def lines():
+        return sheet.content().split("\n\n")
+
+    opened = (editor.current == window.section_bounds(int(second)) and lines()[0].startswith("# ")
+              and sheet.current_source() == int(second))
+    labels = [editor.nav.item(n).text().strip() for n in range(editor.nav.count())]
+    listed = "Capítulo 1: El inicio" in labels and labels[editor.nav.currentRow()] == lines()[0][2:]
     editor.zoom(-50)  # al 50 %: la página cabe y va en el medio del panel
     root.update()
     view, page = editor.scroll.viewport().geometry(), editor.canvas.geometry()
     centered = abs(page.center().y() - view.height() / 2) <= 2 and abs(page.center().x() - view.width() / 2) <= 2
-    cursor = sheet.document().find("Capítulo 1: El inicio")
-    cursor.insertText("Capítulo 1: El comienzo")
+    editor.nav.itemClicked.emit(editor.nav.item(labels.index("Capítulo 1: El inicio")))
+    shows_first = lines()[0] == "# Capítulo 1: El inicio"
+    sheet.document().find("Capítulo 1: El inicio").insertText("Capítulo 1: El comienzo")
+    editor.mark_changed()
+    marked = editor.nav.currentItem().text().endswith("•")
+    editor.open_section(*window.section_bounds(int(second)))
     sheet.goto_source(int(second) + 1)  # el primer párrafo del segundo capítulo
     sheet.textCursor().insertText("Nuevo. ")
+    editor.open_section(*window.section_bounds(int(first)))
+    kept = lines()[0] == "# Capítulo 1: El comienzo"  # lo editado sigue al volver
     editor.save()
     rows = {i: (window.tree.set(i, "inc"), window.tree.set(i, "ok")) for i in window.tree.get_children()}
     title = window.tree.set(first, "title")
@@ -2391,8 +2401,9 @@ def test_text_editor_edits_the_whole_book_and_saves_only_changes():
     undone = ([(b.kind, b.html, b.page) for b in window.book.blocks] == blocks_before
               and window.tree.set(first, "title") == "Capítulo 1: El inicio")
     window.close()
-    assert whole and at_row and shows_title, (whole, at_row, shows_title)
+    assert opened and listed, (opened, listed, labels)
     assert centered, (view, page)
+    assert shows_first and marked and kept, (shows_first, marked, kept)
     assert title == "Capítulo 1: El comienzo" and paragraph.startswith("Nuevo. "), (title, paragraph)
     assert rows == before, (rows, before)
     assert len(edits) == 1 and edits[0][1] - edits[0][0] == 1, edits  # solo el párrafo cambiado
@@ -3314,7 +3325,7 @@ def test_window_lists_scene_breaks():
     window.tree.selection_set("2")
     chapters, removed, breaks = app._plan(window.book, window.rows())
     editor = window.edit_text()
-    section = (editor.item, editor.start, editor.end) if editor else None
+    section = (editor.item, *editor.current) if editor else None
     if editor:
         editor.win.done(0)
     window.close()
@@ -3323,7 +3334,7 @@ def test_window_lists_scene_breaks():
     assert "subtítulo" not in status and "2 separadores" in status, status
     assert after_keys == ("Separador", "* * * · página 2"), after_keys
     assert [k for k, _ in chapters] == [0, 5] and not removed and not breaks, (chapters, removed, breaks)
-    assert section == ("2", 0, 7), section  # todo el libro, abierto en el separador
+    assert section == ("2", 0, 5), section  # la sección del capítulo, abierta en el separador
     assert steps == ["5", "5", "0", "0"], steps
 
 
