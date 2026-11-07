@@ -3172,6 +3172,55 @@ def test_window_undo_added_page_whose_row_did_not_exist():
     assert results == [(True, ("0",)), (True, ())], results
 
 
+def test_window_lists_scene_breaks():
+    """Los separadores de escena del texto salen en la lista («Separador», con su símbolo y página) para
+    encontrarlos. No son títulos: las teclas de tipo, renombrar, las mayúsculas y el plan del EPUB no los
+    tocan, y «Editar texto…» sobre uno abre la sección que lo contiene."""
+    import app
+
+    root, window = visible_window()
+    blocks = [convert.Block("heading", 1, "CAPÍTULO 1"), convert.Block("p", 1, "Texto."),
+              convert.Block("break", 2, "* * *"), convert.Block("p", 2, "Más texto."),
+              convert.Block("break", 3, "", image=b"x"), convert.Block("heading", 4, "CAPÍTULO 2"),
+              convert.Block("p", 4, "Fin.")]
+    doc = pymupdf.open()
+    for n in range(1, 5):
+        add_page(doc, n, [(72, 100, f"Pagina {n}", 11, "helv")])
+    window.pdf = TMP / f"separadores-{time_ns()}.pdf"
+    doc.save(window.pdf)
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 5]))
+    root.update()
+    rows = [(i, window.tree.set(i, "inc"), window.tree.set(i, "title")) for i in window.tree.get_children()]
+    status = window.status.text()
+    window.tree.selection_set("2")
+    root.update()
+    window.shortcut(app.ON)
+    window.edit_title("2")
+    after_keys = window.tree.set("2", "inc"), window.tree.set("2", "title")
+    window.fix_case()
+    steps = []
+    for start, delta in (("0", 1), ("2", 1), ("2", -1), ("5", -1)):  # ▶ y ◀ del EPUB se saltan los separadores
+        window.tree.selection_set(start)
+        root.update()
+        window.epub_pages = 0
+        window.epub_step(delta)
+        steps.append(window.tree.selection()[0])
+    window.tree.selection_set("2")
+    chapters, removed, breaks = app._plan(window.book, window.rows())
+    editor = window.edit_text()
+    section = (editor.item, editor.start, editor.end) if editor else None
+    if editor:
+        editor.win.done(0)
+    window.close()
+    assert rows == [("0", "Capítulo", "CAPÍTULO 1"), ("2", "Separador", "* * * · página 2"),
+                    ("4", "Separador", "Adorno · página 3"), ("5", "Capítulo", "CAPÍTULO 2")], rows
+    assert "subtítulo" not in status and "2 separadores" in status, status
+    assert after_keys == ("Separador", "* * * · página 2"), after_keys
+    assert [k for k, _ in chapters] == [0, 5] and not removed and not breaks, (chapters, removed, breaks)
+    assert section == ("0", 1, 5), section
+    assert steps == ["5", "5", "0", "0"], steps
+
+
 def test_window_starts_maximized():
     """La ventana se abre maximizada, no en una ventana más pequeña que la pantalla."""
     import app
