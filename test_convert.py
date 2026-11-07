@@ -2790,6 +2790,22 @@ def test_gray_illustrations_keep_color_cover():
     assert (art.n, cover.n) == (1, 3), (art.n, cover.n)
 
 
+def test_gray_stretches_contrast():
+    """En tinta una ilustración escaneada sale lavada (grises 60–200): el gris la estira hasta casi negro y blanco.
+    Con transparencia sigue en PNG con su alfa."""
+    import io
+    from PIL import Image
+    washed = Image.linear_gradient("L").resize((64, 64)).point(lambda v: 60 + v * 140 // 255)
+    data = io.BytesIO()
+    washed.save(data, "PNG")
+    low, high = Image.open(io.BytesIO(convert._gray(data.getvalue()))).getextrema()
+    clear = io.BytesIO()
+    Image.new("RGBA", (20, 20), (200, 100, 50, 0)).save(clear, "PNG")
+    out = convert._gray(clear.getvalue())
+    assert low < 10 and high > 245, (low, high)
+    assert out[:4] == b"\x89PNG" and Image.open(io.BytesIO(out)).mode == "LA", out[:4]
+
+
 def test_typography_dash_at_paragraph_end():
     """Kage 5: la portadilla "- Kage no Jitsuryokusha ni Naritakute! -" como párrafo rompía la tipografía."""
     assert convert._typography("- Kage no Jitsuryokusha ni Naritakute! -") == "—Kage no Jitsuryokusha ni Naritakute! —"

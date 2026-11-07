@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pymupdf
-from PIL import Image
+from PIL import Image, ImageOps
 
 BAND = 0.12     # franja superior/inferior (fracción de la altura) donde viven encabezados y pies
 REPEAT = 0.30   # fracción de páginas en que una línea debe repetirse para ser encabezado o pie
@@ -603,13 +603,24 @@ def _shrink(data, limit=SHRINK):
     return small if len(small) < len(data) else data
 
 
+GRAY_GAMMA = [round(255 * (v / 255) ** 1.15) for v in range(256)]  # oscurece un poco los grises medios
+
+
 def _gray(data):
-    """Imagen en escala de grises: en un e-reader de tinta se ve igual y pesa menos."""
+    """Imagen en escala de grises con más contraste: en un e-reader de tinta pesa menos, y las ilustraciones
+    escaneadas, que salen lavadas (grises en vez de negro y blanco), se ven nítidas."""
     pix = pymupdf.Pixmap(data)
-    if pix.n - pix.alpha == 1:
-        return data
-    pix = pymupdf.Pixmap(pymupdf.csGRAY, pix)
-    return pix.tobytes("png") if pix.alpha else _jpeg(pix, 85)
+    if pix.n - pix.alpha != 1:
+        pix = pymupdf.Pixmap(pymupdf.csGRAY, pix)
+    mode = "LA" if pix.alpha else "L"
+    img = Image.frombuffer(mode, (pix.width, pix.height), pix.samples_mv, "raw", mode, pix.stride, 1)
+    gray = ImageOps.autocontrast(img.getchannel("L"), cutoff=0.5).point(GRAY_GAMMA)
+    out = io.BytesIO()
+    if pix.alpha:
+        Image.merge("LA", (gray, img.getchannel("A"))).save(out, "PNG")
+    else:
+        gray.save(out, "JPEG", quality=85)
+    return out.getvalue()
 
 
 @functools.lru_cache(maxsize=256)  # la lista lo pregunta en cada edición: decodificar costaba 2 s (Kage 5)
