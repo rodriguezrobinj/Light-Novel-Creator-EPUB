@@ -233,6 +233,17 @@ def dump(document):
     return "\n\n".join(out)
 
 
+def dump_levels(document):
+    """Las líneas de dump con el tipo de cada título ("Capítulo", "Subtítulo"…; None en lo demás)."""
+    out, block = [], document.firstBlock()
+    while block.isValid():
+        f = block.blockFormat()
+        level = (f.property(LEVEL) or "Capítulo") if f.property(HEADING) else None
+        out += [(line, level if line.startswith("# ") else None) for line in block_lines(block) if line.strip()]
+        block = block.next()
+    return out
+
+
 def objects_of(block):
     """Marcas de los objetos del párrafo ("Ilustración 3")."""
     found, it = [], block.begin()
