@@ -2790,6 +2790,58 @@ def test_gray_illustrations_keep_color_cover():
     assert (art.n, cover.n) == (1, 3), (art.n, cover.n)
 
 
+def test_gray_stretches_contrast():
+    """En tinta una ilustración escaneada sale lavada (grises 60–200): el gris la estira hasta casi negro y blanco.
+    Con transparencia sigue en PNG con su alfa."""
+    import io
+    from PIL import Image
+    washed = Image.linear_gradient("L").resize((64, 64)).point(lambda v: 60 + v * 140 // 255)
+    data = io.BytesIO()
+    washed.save(data, "PNG")
+    low, high = Image.open(io.BytesIO(convert._gray(data.getvalue()))).getextrema()
+    clear = io.BytesIO()
+    Image.new("RGBA", (20, 20), (200, 100, 50, 0)).save(clear, "PNG")
+    out = convert._gray(clear.getvalue())
+    assert low < 10 and high > 245, (low, high)
+    assert out[:4] == b"\x89PNG" and Image.open(io.BytesIO(out)).mode == "LA", out[:4]
+
+
+def test_hyphenate_soft_hyphens_only_in_paragraph_text():
+    """Kindle apenas parte palabras en español: con hyphenate, guiones blandos en las palabras largas de los
+    párrafos, nunca en títulos, enlaces ni en libros en otro idioma."""
+    book = convert.Book("Libro", "", b"", [
+        convert.Block("heading", 1, "Desconocido"),
+        convert.Block("p", 1, 'Algo extraordinariamente raro: <a href="https://ejemplo.com/extraordinario">'
+                              'extraordinario</a>, Subaru-kun y «abc&amp;def».')], [0])
+    out = TMP / "partir.epub"
+    convert.write_epub(book, [(0, "Desconocido")], out, hyphenate=True)
+    body = epub_file(out, "OEBPS/sec001.xhtml")
+    para = re.search(r"<p>.*</p>", body)[0]
+    link = re.search(r"<a .*?</a>", para)[0]
+    convert.write_epub(book, [(0, "Desconocido")], out)
+    plain = epub_file(out, "OEBPS/sec001.xhtml")
+    convert.write_epub(book, [(0, "Desconocido")], out, hyphenate=True, lang="en")
+    english = epub_file(out, "OEBPS/sec001.xhtml")
+    convert.write_epub(book, [(0, "Desconocido")], out, hyphenate=True)
+    assert "ex­tra­or­di­na­ria­men­te" in para, para
+    assert "­" not in link and "­" not in body.split("<p>")[0], body
+    assert "Subaru-kun" in para and "&amp;" in para, para
+    assert "­" not in plain and "­" not in english, (plain, english)
+    assert convert.check_epub(out) == [], convert.check_epub(out)
+
+
+def test_window_kindle_profile_hyphenates():
+    root, window = visible_window()
+    window.profile_var.set("Kindle")
+    window.apply_profile()
+    kindle = window.write_options()["hyphenate"]
+    window.profile_var.set("Celular")
+    window.apply_profile()
+    phone = window.write_options()["hyphenate"]
+    window.close()
+    assert kindle and not phone, (kindle, phone)
+
+
 def test_typography_dash_at_paragraph_end():
     """Kage 5: la portadilla "- Kage no Jitsuryokusha ni Naritakute! -" como párrafo rompía la tipografía."""
     assert convert._typography("- Kage no Jitsuryokusha ni Naritakute! -") == "—Kage no Jitsuryokusha ni Naritakute! —"
@@ -3192,6 +3244,27 @@ def test_quality_report_fixes_fansub_typos():
     assert [b.html for b in book.blocks[1:7]] == ["¿Qué haces? —preguntó. ¡Ven aquí!", "Lo vi de lejos.",
                                                   "A ver si llegas pronto.", "¿Por qué lo hiciste?",
                                                   "<i>¿Qué haces?</i>", "«¿Qué?» ¡Ven aquí!"], [b.html for b in book.blocks]
+
+
+def test_quality_report_unifies_honorific_variants():
+    """«Subaru-kun» y «Subaru kun», «senpai» y «sempai» en el mismo libro: aviso en la forma menos usada, con
+    arreglo a la más usada. Lo que solo cambia de mayúscula, una sola forma o «San Pedro» no avisan."""
+    texts = ["Subaru-kun llegó tarde.", "Subaru-kun, ven.", "Gracias, Subaru-kun.", "Hola, Subaru kun.",
+             "<i>Subaru kun</i> dijo.", "Subarukun es raro.",
+             "Senpai, espera.", "Mi senpai es genial.", "Sempai, ¿qué haces?",
+             "Fueron a San Pedro.", "La Ciudad San Marcos.", "Emilia-san sonrió.", "Emilia-san asintió.",
+             "Onee-san, ayuda.", "La onee-san sonrió.", "Hassan saludó."]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    report = [i for i in convert.quality_report(book) if i.kind == "honorific"]
+    assert [(i.block, i.level) for i in report] == [(4, "Menor"), (5, "Menor"), (6, "Menor"), (9, "Menor")], \
+        [(i.block, i.title, i.problem) for i in report]
+    assert "«Subaru-kun»" in report[0].problem and "«Subaru kun»" in report[0].problem, report[0].problem
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    assert [book.blocks[k].html for k in (4, 5, 6, 9)] == [
+        "Hola, Subaru-kun.", "<i>Subaru-kun</i> dijo.", "Subaru-kun es raro.", "Senpai, ¿qué haces?"], \
+        [b.html for b in book.blocks]
 
 
 def test_quality_report_fixes_grammar_and_typography():
@@ -3942,6 +4015,46 @@ def test_window_cover_from_illustration_quality_and_series_panel():
     assert "Sin revisar" in states or "Revisado, sin EPUB" in states, states
 
 
+def test_missing_volumes_text():
+    """El panel de serie dice qué tomos enteros faltan entre el primero y el último de cada serie."""
+    import app
+    names = lambda *stems: [Path(f"{s}.pdf") for s in stems]
+    one = app._missing_volumes(names("Re Zero - Volumen 01", "Re Zero - Volumen 03", "Re Zero - Volumen 1.5",
+                                     "Re Zero Extra"))
+    two = app._missing_volumes(names("Kage Vol 1", "Kage Vol 4"))
+    many = app._missing_volumes(names("Kage Vol 1", "Kage Vol 3", "Kage Vol 5", "Kage Vol 7"))
+    series = app._missing_volumes(names("Kage Vol 1", "Kage Vol 3", "Nageki Vol 2", "Nageki Vol 4"))
+    none = app._missing_volumes(names("Kage Vol 1", "Kage Vol 2", "Suelto"))
+    assert one == "Falta el tomo 2", one
+    assert two == "Faltan los tomos 2 y 3", two
+    assert many == "Faltan los tomos 2, 4 y 6", many
+    assert series == "Kage: falta el tomo 2\nNageki: falta el tomo 3", series
+    assert none == "", none
+
+
+def test_window_series_panel_shows_missing_and_sent():
+    """Con los tomos 1 y 3, el panel avisa del 2; el envío al lector apuntado sale en la columna «Enviado»."""
+    import app
+    folder = TMP / f"serie-{time_ns()}"
+    folder.mkdir()
+    for n in (1, 3):
+        with pymupdf.open() as doc:
+            add_page(doc, 1, [(72, 100, "Texto.", 11, "cour")])
+            doc.save(folder / f"Serie - Volumen 0{n}.pdf")
+    (folder / "Serie - Volumen 01.epub").write_bytes(b"x")
+    root, window = visible_window()
+    app._record_send(folder / "Serie - Volumen 01.epub", "USB")
+    window.pdf = folder / "Serie - Volumen 01.pdf"
+    window.series_panel()
+    root.update()
+    win, table = window.series_window
+    sent = [table.set(i, "sent") for i in table.get_children()]
+    labels = [w.text() for w in win.findChildren(app.QLabel)]
+    window.close()
+    assert sent == [f"USB · {app.datetime.now():%d/%m}", "—"], sent
+    assert "Falta el tomo 2" in labels, labels
+
+
 def test_custom_font_is_embedded():
     """Una fuente propia (.ttf/.otf) va dentro del EPUB; si el archivo desaparece, la ventana vuelve a la del
     lector y lo dice."""
@@ -4019,7 +4132,9 @@ def test_serve_gives_the_epub_over_http():
         stopped = False
     except (urllib.error.URLError, OSError):
         stopped = True
+    sent = app._sent_text(epub)  # el móvil lo descargó: el panel de serie lo cuenta como enviado
     window.close()
+    assert sent.startswith("Wi-Fi · "), sent
     assert shown == ["No hay red local: conecta el equipo a la Wi-Fi."], shown
     assert len(qr) == 1 and served and stopped, (len(qr), served, stopped)
     assert f"http://127.0.0.1:{server.server_port}/Mi%20novela.epub" in texts and "Firewall" in texts, texts
@@ -4531,9 +4646,11 @@ def test_window_result_dialog_phone_and_calibre():
             window.result_window.close()
     finally:
         app._calibre, app.subprocess.Popen = calibre, popen
+    sent = app._sent_text(out)
     window.close()
     assert seen == [(True, False), (True, True)], seen
     assert launched == [["C:/Calibre2/calibre.exe", str(out)]], launched
+    assert sent.startswith("Calibre · "), sent
 
 
 def test_window_guide_names_serious_warnings_and_colors_follow_theme():

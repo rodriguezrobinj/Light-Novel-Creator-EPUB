@@ -62,24 +62,24 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
-             "credits", "profile", "replacements", "kepub", "words")
+             "credits", "profile", "replacements", "kepub", "words", "hyphenate")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
-         "font_file", "epub2", "reading", "profile", "autocase", "kepub")
+         "font_file", "epub2", "reading", "profile", "autocase", "kepub", "hyphenate")
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
 # Perfil de salida -> opciones que fija (los demás perfiles dejan las opciones como estén)
 PROFILES = {"Personalizado": {},
-            "Celular": {"gray": False, "shrink": True, "shrink_size": 1200, "epub2": False, "kepub": False},
-            "E-reader de tinta": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": False},
-            "Tablet": {"gray": False, "shrink": True, "shrink_size": 2000, "epub2": False, "kepub": False},
+            "Celular": {"gray": False, "shrink": True, "shrink_size": 1200, "epub2": False, "kepub": False, "hyphenate": False},
+            "E-reader de tinta": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": False, "hyphenate": False},
+            "Tablet": {"gray": False, "shrink": True, "shrink_size": 2000, "epub2": False, "kepub": False, "hyphenate": False},
             # Kindle en color: Amazon convierte el EPUB y la app del celular y el Colorsoft lo muestran
-            "Kindle": {"gray": False, "shrink": True, "shrink_size": 1600, "epub2": False, "kepub": False},
-            "Kobo": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": True},
+            "Kindle": {"gray": False, "shrink": True, "shrink_size": 1600, "epub2": False, "kepub": False, "hyphenate": True},
+            "Kobo": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": True, "hyphenate": False},
             "Lector antiguo (EPUB 2)": {"gray": False, "shrink": True, "shrink_size": 1400, "epub2": True,
-                                        "kepub": False}}
+                                        "kepub": False, "hyphenate": False}}
 FONT_CHOICES = ["Del lector"] + list(convert.FONTS) + ["Otra…"]  # «Otra…» pide un archivo
 APP_NAME = "Light Novel Creator"  # nombre visible; el .exe y la carpeta de ajustes siguen siendo «PDF a EPUB»
 KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro, theme.kind_colors(True)
@@ -195,7 +195,7 @@ def _write_options(state, breaks=()):
             "font": font if font in convert.FONTS
             else path if path and Path(path).name == font and Path(path).is_file() else "",
             "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
-            "breaks": list(breaks)}
+            "hyphenate": bool(state.get("hyphenate")), "breaks": list(breaks)}
 
 
 def _write_checked(book, chapters, out, removed, options):
@@ -601,6 +601,7 @@ def _serve(path, host):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            self.server.downloaded = True  # el panel de serie lo cuenta como enviado al cerrar la ventana
 
         def log_message(self, *args):
             pass  # el .exe no tiene consola: escribir en stderr (None) fallaría
@@ -673,12 +674,66 @@ def _dropped_pdf(mime):
     return None
 
 
+def _sent_path():
+    return SETTINGS.with_suffix(".envios.json")  # junto a las preferencias: vale para cualquier carpeta
+
+
+def _sent_key(epub):
+    return os.path.normcase(os.path.abspath(epub))
+
+
+def _record_send(epub, how):
+    """Apunta el último envío del EPUB al lector, para el panel de serie. Si falla no se avisa: el envío ya
+    está hecho y el registro solo informa."""
+    try:
+        path = _sent_path()
+        sent = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        sent[_sent_key(epub)] = {"how": how, "when": f"{datetime.now():%Y-%m-%d}"}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(path, sent)
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+
+
+def _sent_text(epub):
+    """«USB · 07/11»: cómo y cuándo se envió el EPUB por última vez, o «—»."""
+    try:
+        entry = json.loads(_sent_path().read_text(encoding="utf-8")).get(_sent_key(epub))
+        _, month, day = entry["when"].split("-")
+        return f"{entry['how']} · {day}/{month}"
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        return "—"
+
+
+def _missing_volumes(paths):
+    """«Faltan los tomos 2 y 5»: los tomos enteros que faltan entre el primero y el último de cada serie de la
+    carpeta. Con varias series, una línea por serie con su nombre."""
+    series = {}
+    for path in paths:
+        name, volume = convert._series_volume(Path(path).stem, "")
+        if volume and float(volume).is_integer():
+            series.setdefault(name.casefold(), (name, set()))[1].add(int(float(volume)))
+    lines = []
+    for name, numbers in series.values():
+        gaps = [str(n) for n in range(min(numbers), max(numbers)) if n not in numbers]
+        if gaps:
+            listed = gaps[0] if len(gaps) == 1 else ", ".join(gaps[:-1]) + " y " + gaps[-1]
+            lines.append((name, ("falta el tomo " if len(gaps) == 1 else "faltan los tomos ") + listed))
+    if len(lines) == 1:
+        return lines[0][1][0].upper() + lines[0][1][1:]
+    return "\n".join(f"{name}: {text}" for name, text in lines)
+
+
+def _volume_epub(pdf):
+    """El EPUB de un tomo: el normal o el de Kobo, el que exista."""
+    epub = Path(_epub_name(_out(pdf), False))
+    return epub if epub.exists() else Path(_epub_name(_out(pdf), True))
+
+
 def _volume_status(pdf):
     """Estado de un tomo: «EPUB generado», «EPUB anterior a la revisión», «Revisado, sin EPUB» o «Sin revisar»."""
     pdf = Path(pdf)
-    state, epub = _read_review(pdf), Path(_epub_name(_out(pdf), False))
-    if not epub.exists():
-        epub = Path(_epub_name(_out(pdf), True))
+    state, epub = _read_review(pdf), _volume_epub(pdf)
     if epub.exists() and (not state or epub.stat().st_mtime >= _review_path(pdf).stat().st_mtime - 5):
         return "EPUB generado"
     if epub.exists():
@@ -824,6 +879,7 @@ class App:
         self.shrink_size_var = qtk.Var(convert.SHRINK)  # lado mayor de las imágenes reducidas
         self.trim_var, self.credits_var, self.reading_var = qtk.Var(False), qtk.Var(False), qtk.Var(False)
         self.epub2_var, self.kepub_var = qtk.Var(False), qtk.Var(False)
+        self.hyphenate_var = qtk.Var(False)  # guiones blandos: el Kindle apenas parte palabras en español
 
         root.setWindowTitle(APP_NAME)
         root.on_close, root.on_drop = self.close, self.open_path
@@ -983,7 +1039,8 @@ class App:
                            ("Página de créditos", self.credits_var),
                            ("Minutos de lectura en el índice", self.reading_var),
                            ("EPUB 2 (lectores antiguos)", self.epub2_var),
-                           ("Formato Kobo (KEPUB)", self.kepub_var)):
+                           ("Formato Kobo (KEPUB)", self.kepub_var),
+                           ("Partir palabras con guiones (Kindle)", self.hyphenate_var)):
             action = extras.addAction(label)
             action.setCheckable(True)
             var.check(action)
@@ -1861,7 +1918,8 @@ class App:
         """Copia el EPUB al lector, en Books/ si la tiene, en el proceso de trabajo (USB lento)."""
         folder = Path(root) / "Books" if (Path(root) / "Books").is_dir() else Path(root)
         if self.run(shutil.copy2, (str(out), str(folder)),
-                    lambda dest: messagebox.showinfo("Copiado", f"EPUB copiado en:\n{dest}"), busy="Copiando…"):
+                    lambda dest: (_record_send(out, "USB"), messagebox.showinfo("Copiado", f"EPUB copiado en:\n{dest}")),
+                    busy="Copiando…"):
             win.close()
 
     def send_to_phone(self, out, ip=None):
@@ -1893,7 +1951,8 @@ class App:
                                 "en su navegador. Si Windows pregunta en el Firewall, permite el acceso.\n"
                                 "Al cerrar esta ventana deja de enviarse.", "muted"))
         column.addLayout(_row(1, _button("Cerrar", win.close)))
-        win.finished.connect(lambda _: (server.shutdown(), server.server_close()))
+        win.finished.connect(lambda _: (server.shutdown(), server.server_close(),
+                                        getattr(server, "downloaded", False) and _record_send(out, "Wi-Fi")))
         win.show()
         self.phone_window = win, server
 
@@ -1904,11 +1963,13 @@ class App:
         except OSError as e:
             messagebox.showerror("Añadir a Calibre", f"No se pudo abrir Calibre: {e.strerror or e}")
             return
+        _record_send(out, "Calibre")
         self.status.setText("Enviado a Calibre: lo añade a su biblioteca.")
 
     def send_to_kindle(self, out, win):
         """Send to Kindle no tiene API pública: se abre su web y el archivo, seleccionado, para arrastrarlo."""
         webbrowser.open("https://www.amazon.com/sendtokindle")
+        _record_send(out, "Kindle (web)")  # la web de Amazon no confirma el envío: se apunta al abrirla
         self.open_external(out, win, folder=True)
 
     def open_external(self, path, win=None, folder=False):
@@ -2810,14 +2871,20 @@ class App:
         if not folder:
             return
         win, column = self.dialog(f"Serie · {Path(folder).name}")
-        table = qtk.RowList(("pdf", "state", "warn"), {"pdf": "Tomo", "state": "Estado", "warn": "Avisos"},
-                            {"state": 200, "warn": 80}, stretch="pdf")
-        table.setMinimumSize(680, 420)
-        for pdf in _sources(folder):
+        table = qtk.RowList(("pdf", "state", "warn", "sent"),
+                            {"pdf": "Tomo", "state": "Estado", "warn": "Avisos", "sent": "Enviado"},
+                            {"state": 200, "warn": 80, "sent": 130}, stretch="pdf")
+        table.setMinimumSize(800, 420)
+        sources = _sources(folder)
+        missing = _missing_volumes(sources)
+        if missing:
+            column.addWidget(_label(missing, "warn"))
+        for pdf in sources:
             state = _read_review(pdf)
             problems = state.get("problems") if state else None
             warn = "—" if problems is None else len(problems) or "Ninguno"
-            table.insert("", "end", iid=str(pdf), values=(pdf.name, _volume_status(pdf), warn))
+            table.insert("", "end", iid=str(pdf), values=(pdf.name, _volume_status(pdf), warn,
+                                                          _sent_text(_volume_epub(pdf))))
         table.double_clicked.connect(lambda _: table.selection() and (self.open_path(table.selection()[0]), win.close()))
         column.addWidget(table, 1)
         column.addWidget(_label("Doble clic: abrir el tomo", "muted"))
@@ -2945,7 +3012,8 @@ class App:
                 "typography": self.typography_var, "shrink": self.shrink_var, "shrink_size": self.shrink_size_var,
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
-                "autocase": self.autocase_var, "kepub": self.kepub_var}
+                "autocase": self.autocase_var, "kepub": self.kepub_var,
+                "hyphenate": self.hyphenate_var}
 
     def rows(self):
         return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title"), self.tree.set(item, "ok")]
