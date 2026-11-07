@@ -386,6 +386,8 @@ def _plan(book, rows):
     chapters, removed, breaks = [], [], []
     for item, (kind, title, *_) in rows.items():  # el tercer valor, si está, es la marca de revisado
         k = int(item)
+        if book.blocks[k].kind == "break":  # ya es un separador: su fila solo lo muestra
+            continue
         if book.blocks[k].kind == "image":
             book.blocks[k].keep = kind in (IMG, SPLIT, ROTATED)
             book.blocks[k].layout = LAYOUT.get(kind, "")
@@ -1464,8 +1466,16 @@ class App:
             self.epub_page = max(0, min(self.epub_page + delta, self.epub_pages - 1))
             self.draw_epub()
             return
-        items, selected = self.tree.get_children(), self.tree.selection()
-        n = items.index(selected[0]) + delta if selected else -1
+        selected = self.tree.selection()
+        # Los separadores no son secciones: desde uno se sigue con la sección de antes o la de después
+        items = [i for i in self.tree.get_children() if not self.is_break(i)]
+        here = int(selected[0]) if selected else None
+        if here is None:
+            n = -1
+        elif selected[0] in items:
+            n = items.index(selected[0]) + delta
+        else:
+            n = sum(int(i) < here for i in items) - (1 if delta < 0 else 0)
         if 0 <= n < len(items):
             self.next_page = 10 ** 6 if delta < 0 else 0  # draw_epub la ajusta a la última
             self.tree.selection_set(items[n])
@@ -1527,7 +1537,7 @@ class App:
         """R: marca el título elegido como revisado y pasa al siguiente capítulo sin revisar; si ya lo estaba,
         lo desmarca."""
         selected = self.tree.selection()
-        if not self.book or not selected or self.is_image(selected[0]):
+        if not self.book or not selected or not self.is_title(selected[0]):
             return
         item = selected[0]
         mark = "" if self.tree.set(item, "ok") else "✓"
@@ -1566,6 +1576,8 @@ class App:
 
     def cycle(self, item):
         """Orden de tipos de una fila al hacer clic: título, ilustración o ilustración doble."""
+        if self.is_break(item):
+            return {}
         if not self.is_image(item):
             return NEXT
         return WIDE_NEXT if item in self.wide else IMAGE_NEXT
@@ -1638,7 +1650,7 @@ class App:
         for k in twins:
             self.set_kind(str(k), DROPPED)
         self.update_reviewed()  # una vez, no por fila: recorre la lista entera
-        heads = [i for i in self.tree.get_children() if not self.is_image(i)]
+        heads = [i for i in self.tree.get_children() if self.is_title(i)]
         if self.autocase_var.get() and _all_caps([self.tree.set(i, "title") for i in heads]):
             self.fix_case()
         self.idle_text = "Selecciona un título en la lista"
@@ -1650,8 +1662,9 @@ class App:
         items = self.tree.get_children()
         found = len(book.candidates)
         images = sum(self.is_image(i) for i in items)
+        scenes = sum(self.is_break(i) for i in items)
         dropped = sum(self.tree.set(i, "inc") == DROPPED for i in items)
-        others = len(items) - found - images
+        others = len(items) - found - images - scenes
         text = (convert.counted(found, "capítulo detectado", "capítulos detectados") if found
                 else "No se detectaron capítulos: el EPUB tendrá una sola sección")
         text += f", {convert.counted(others, 'subtítulo')}" if others else ""
@@ -1660,6 +1673,7 @@ class App:
         text += f" · {convert.counted(len(cut), 'sección', 'secciones')} del grupo en Quitar" if cut else ""
         twins_text = convert.counted(len(twins), "ilustración repetida descartada", "ilustraciones repetidas descartadas")
         text += f" · {twins_text}" if twins else ""
+        text += f" · {convert.counted(scenes, 'separador', 'separadores')}" if scenes else ""  # al final: si no cabe, se corta esto
         if self.load_review():
             text = "Revisión anterior recuperada"
         elif self.pdf:
@@ -1694,6 +1708,9 @@ class App:
             elif block.kind == "image":
                 double = " doble" if str(i) in self.wide else ""
                 mark, title = (IMG if block.keep else DROPPED), f"Ilustración{double} · página {block.page}"
+            elif block.kind == "break":  # separador de escena del texto: su símbolo, para encontrarlo
+                symbol = html.unescape(block.html).strip() or ("Adorno" if block.image else "Separador")
+                mark, title = SEP, f"{symbol} · página {block.page}"
             else:
                 continue
             mark, title, *done = rows.get(str(i), (mark, title))
@@ -1706,10 +1723,17 @@ class App:
     def is_image(self, item):
         return self.book is not None and self.book.blocks[int(item)].kind == "image"
 
+    def is_title(self, item):
+        return self.book is not None and self.book.blocks[int(item)].kind == "heading"
+
+    def is_break(self, item):
+        """Fila de un separador de escena del texto: solo se ve; se cambia con «Editar texto…»."""
+        return self.book is not None and self.book.blocks[int(item)].kind == "break"
+
     def on_click(self, event):
         item = self.tree.identify_row(event.y)
         column = self.tree.identify_column(event.x)
-        if item and column == "#1":
+        if item and column == "#1" and self.tree.set(item, "inc") in self.cycle(item):
             self.set_kind(item, self.cycle(item)[self.tree.set(item, "inc")])
             self.update_reviewed()
             self.update_preview()
@@ -1736,7 +1760,7 @@ class App:
             self.update_preview()
 
     def edit_title(self, item):
-        if self.is_image(item):  # el nombre de una ilustración no se edita
+        if self.is_image(item) or self.is_break(item):  # el nombre de una ilustración o un separador no se edita
             return
         self.tree.see(item)
         x, y, w, h = self.tree.bbox(item, "title")
@@ -2031,6 +2055,11 @@ class App:
         if not self.book or not selected or self.is_image(selected[0]):
             return None
         item = selected[0]
+        if self.is_break(item):  # la sección del título de antes
+            item = next((str(j) for j in range(int(item), -1, -1)
+                         if self.tree.exists(str(j)) and self.is_title(str(j))), None)
+            if item is None:
+                return None
         start = int(item) + 1
         end = next((k for k in range(start, len(self.book.blocks)) if self.book.blocks[k].kind == "heading"),
                    len(self.book.blocks))
@@ -2061,7 +2090,7 @@ class App:
         seleccionada."""
         edits = sorted(edits, key=lambda e: -e[0])
         item = next((str(j) for j in range(edits[-1][0], -1, -1)
-                     if self.tree.exists(str(j)) and not self.is_image(str(j))), None)
+                     if self.tree.exists(str(j)) and self.is_title(str(j))), None)
         self.apply_edits(edits, item or next(iter(self.tree.get_children()), None))
         self.status.setText(message)
 
@@ -2330,7 +2359,7 @@ class App:
 
     def show_match(self, k, page, term):
         """Selecciona el título de la sección donde está el bloque k y lleva las vistas previas al texto."""
-        item = next((str(j) for j in range(k, -1, -1) if self.tree.exists(str(j)) and not self.is_image(str(j))), None)
+        item = next((str(j) for j in range(k, -1, -1) if self.tree.exists(str(j)) and self.is_title(str(j))), None)
         self.find_target = (page, term)
         if item is None:
             self.show_found(page, term)
@@ -2552,7 +2581,7 @@ class App:
             return
         changed = []
         for item in self.tree.get_children():
-            if not self.is_image(item):
+            if self.is_title(item):
                 title = change(self.tree.set(item, "title"))
                 if title != self.tree.set(item, "title"):
                     changed.append(self.row_state(item))
@@ -2578,7 +2607,7 @@ class App:
             return
         changed = []
         for item in self.tree.get_children():
-            if (not self.is_image(item) and self.tree.set(item, "inc") != SEP
+            if (self.is_title(item) and self.tree.set(item, "inc") != SEP
                     and convert.SUBPART.fullmatch(self.tree.set(item, "title").strip())):
                 changed.append(self.row_state(item))
                 self.tree.set(item, "inc", SEP)
@@ -2896,7 +2925,9 @@ class App:
         if not self.book or not selected:
             return
         item = selected[0]
-        items = self.tree.get_children()
+        if self.is_break(item):
+            return
+        items = [i for i in self.tree.get_children() if not self.is_break(i)]
         start, end = self.section_of(item)
         if delta < 0:
             before = [i for i in items if int(i) < start]
@@ -2912,7 +2943,7 @@ class App:
         target = self.tree.identify_row(event.y)
         source = getattr(self, "drag_source", None)
         self.drag_source = None
-        if source and target and target != source and self.tree.exists(source):
+        if source and target and target != source and self.tree.exists(source) and not self.is_break(source):
             self.move_row(source, int(target))
 
     def fields(self):
