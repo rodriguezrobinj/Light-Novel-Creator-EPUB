@@ -3994,6 +3994,46 @@ def test_window_cover_from_illustration_quality_and_series_panel():
     assert "Sin revisar" in states or "Revisado, sin EPUB" in states, states
 
 
+def test_missing_volumes_text():
+    """El panel de serie dice qué tomos enteros faltan entre el primero y el último de cada serie."""
+    import app
+    names = lambda *stems: [Path(f"{s}.pdf") for s in stems]
+    one = app._missing_volumes(names("Re Zero - Volumen 01", "Re Zero - Volumen 03", "Re Zero - Volumen 1.5",
+                                     "Re Zero Extra"))
+    two = app._missing_volumes(names("Kage Vol 1", "Kage Vol 4"))
+    many = app._missing_volumes(names("Kage Vol 1", "Kage Vol 3", "Kage Vol 5", "Kage Vol 7"))
+    series = app._missing_volumes(names("Kage Vol 1", "Kage Vol 3", "Nageki Vol 2", "Nageki Vol 4"))
+    none = app._missing_volumes(names("Kage Vol 1", "Kage Vol 2", "Suelto"))
+    assert one == "Falta el tomo 2", one
+    assert two == "Faltan los tomos 2 y 3", two
+    assert many == "Faltan los tomos 2, 4 y 6", many
+    assert series == "Kage: falta el tomo 2\nNageki: falta el tomo 3", series
+    assert none == "", none
+
+
+def test_window_series_panel_shows_missing_and_sent():
+    """Con los tomos 1 y 3, el panel avisa del 2; el envío al lector apuntado sale en la columna «Enviado»."""
+    import app
+    folder = TMP / f"serie-{time_ns()}"
+    folder.mkdir()
+    for n in (1, 3):
+        with pymupdf.open() as doc:
+            add_page(doc, 1, [(72, 100, "Texto.", 11, "cour")])
+            doc.save(folder / f"Serie - Volumen 0{n}.pdf")
+    (folder / "Serie - Volumen 01.epub").write_bytes(b"x")
+    root, window = visible_window()
+    app._record_send(folder / "Serie - Volumen 01.epub", "USB")
+    window.pdf = folder / "Serie - Volumen 01.pdf"
+    window.series_panel()
+    root.update()
+    win, table = window.series_window
+    sent = [table.set(i, "sent") for i in table.get_children()]
+    labels = [w.text() for w in win.findChildren(app.QLabel)]
+    window.close()
+    assert sent == [f"USB · {app.datetime.now():%d/%m}", "—"], sent
+    assert "Falta el tomo 2" in labels, labels
+
+
 def test_custom_font_is_embedded():
     """Una fuente propia (.ttf/.otf) va dentro del EPUB; si el archivo desaparece, la ventana vuelve a la del
     lector y lo dice."""
@@ -4071,7 +4111,9 @@ def test_serve_gives_the_epub_over_http():
         stopped = False
     except (urllib.error.URLError, OSError):
         stopped = True
+    sent = app._sent_text(epub)  # el móvil lo descargó: el panel de serie lo cuenta como enviado
     window.close()
+    assert sent.startswith("Wi-Fi · "), sent
     assert shown == ["No hay red local: conecta el equipo a la Wi-Fi."], shown
     assert len(qr) == 1 and served and stopped, (len(qr), served, stopped)
     assert f"http://127.0.0.1:{server.server_port}/Mi%20novela.epub" in texts and "Firewall" in texts, texts
@@ -4583,9 +4625,11 @@ def test_window_result_dialog_phone_and_calibre():
             window.result_window.close()
     finally:
         app._calibre, app.subprocess.Popen = calibre, popen
+    sent = app._sent_text(out)
     window.close()
     assert seen == [(True, False), (True, True)], seen
     assert launched == [["C:/Calibre2/calibre.exe", str(out)]], launched
+    assert sent.startswith("Calibre · "), sent
 
 
 def test_window_guide_names_serious_warnings_and_colors_follow_theme():

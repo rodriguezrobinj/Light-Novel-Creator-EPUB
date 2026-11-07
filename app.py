@@ -601,6 +601,7 @@ def _serve(path, host):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            self.server.downloaded = True  # el panel de serie lo cuenta como enviado al cerrar la ventana
 
         def log_message(self, *args):
             pass  # el .exe no tiene consola: escribir en stderr (None) fallaría
@@ -673,12 +674,66 @@ def _dropped_pdf(mime):
     return None
 
 
+def _sent_path():
+    return SETTINGS.with_suffix(".envios.json")  # junto a las preferencias: vale para cualquier carpeta
+
+
+def _sent_key(epub):
+    return os.path.normcase(os.path.abspath(epub))
+
+
+def _record_send(epub, how):
+    """Apunta el último envío del EPUB al lector, para el panel de serie. Si falla no se avisa: el envío ya
+    está hecho y el registro solo informa."""
+    try:
+        path = _sent_path()
+        sent = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        sent[_sent_key(epub)] = {"how": how, "when": f"{datetime.now():%Y-%m-%d}"}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(path, sent)
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+
+
+def _sent_text(epub):
+    """«USB · 07/11»: cómo y cuándo se envió el EPUB por última vez, o «—»."""
+    try:
+        entry = json.loads(_sent_path().read_text(encoding="utf-8")).get(_sent_key(epub))
+        _, month, day = entry["when"].split("-")
+        return f"{entry['how']} · {day}/{month}"
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        return "—"
+
+
+def _missing_volumes(paths):
+    """«Faltan los tomos 2 y 5»: los tomos enteros que faltan entre el primero y el último de cada serie de la
+    carpeta. Con varias series, una línea por serie con su nombre."""
+    series = {}
+    for path in paths:
+        name, volume = convert._series_volume(Path(path).stem, "")
+        if volume and float(volume).is_integer():
+            series.setdefault(name.casefold(), (name, set()))[1].add(int(float(volume)))
+    lines = []
+    for name, numbers in series.values():
+        gaps = [str(n) for n in range(min(numbers), max(numbers)) if n not in numbers]
+        if gaps:
+            listed = gaps[0] if len(gaps) == 1 else ", ".join(gaps[:-1]) + " y " + gaps[-1]
+            lines.append((name, ("falta el tomo " if len(gaps) == 1 else "faltan los tomos ") + listed))
+    if len(lines) == 1:
+        return lines[0][1][0].upper() + lines[0][1][1:]
+    return "\n".join(f"{name}: {text}" for name, text in lines)
+
+
+def _volume_epub(pdf):
+    """El EPUB de un tomo: el normal o el de Kobo, el que exista."""
+    epub = Path(_epub_name(_out(pdf), False))
+    return epub if epub.exists() else Path(_epub_name(_out(pdf), True))
+
+
 def _volume_status(pdf):
     """Estado de un tomo: «EPUB generado», «EPUB anterior a la revisión», «Revisado, sin EPUB» o «Sin revisar»."""
     pdf = Path(pdf)
-    state, epub = _read_review(pdf), Path(_epub_name(_out(pdf), False))
-    if not epub.exists():
-        epub = Path(_epub_name(_out(pdf), True))
+    state, epub = _read_review(pdf), _volume_epub(pdf)
     if epub.exists() and (not state or epub.stat().st_mtime >= _review_path(pdf).stat().st_mtime - 5):
         return "EPUB generado"
     if epub.exists():
@@ -1863,7 +1918,8 @@ class App:
         """Copia el EPUB al lector, en Books/ si la tiene, en el proceso de trabajo (USB lento)."""
         folder = Path(root) / "Books" if (Path(root) / "Books").is_dir() else Path(root)
         if self.run(shutil.copy2, (str(out), str(folder)),
-                    lambda dest: messagebox.showinfo("Copiado", f"EPUB copiado en:\n{dest}"), busy="Copiando…"):
+                    lambda dest: (_record_send(out, "USB"), messagebox.showinfo("Copiado", f"EPUB copiado en:\n{dest}")),
+                    busy="Copiando…"):
             win.close()
 
     def send_to_phone(self, out, ip=None):
@@ -1895,7 +1951,8 @@ class App:
                                 "en su navegador. Si Windows pregunta en el Firewall, permite el acceso.\n"
                                 "Al cerrar esta ventana deja de enviarse.", "muted"))
         column.addLayout(_row(1, _button("Cerrar", win.close)))
-        win.finished.connect(lambda _: (server.shutdown(), server.server_close()))
+        win.finished.connect(lambda _: (server.shutdown(), server.server_close(),
+                                        getattr(server, "downloaded", False) and _record_send(out, "Wi-Fi")))
         win.show()
         self.phone_window = win, server
 
@@ -1906,11 +1963,13 @@ class App:
         except OSError as e:
             messagebox.showerror("Añadir a Calibre", f"No se pudo abrir Calibre: {e.strerror or e}")
             return
+        _record_send(out, "Calibre")
         self.status.setText("Enviado a Calibre: lo añade a su biblioteca.")
 
     def send_to_kindle(self, out, win):
         """Send to Kindle no tiene API pública: se abre su web y el archivo, seleccionado, para arrastrarlo."""
         webbrowser.open("https://www.amazon.com/sendtokindle")
+        _record_send(out, "Kindle (web)")  # la web de Amazon no confirma el envío: se apunta al abrirla
         self.open_external(out, win, folder=True)
 
     def open_external(self, path, win=None, folder=False):
@@ -2812,14 +2871,20 @@ class App:
         if not folder:
             return
         win, column = self.dialog(f"Serie · {Path(folder).name}")
-        table = qtk.RowList(("pdf", "state", "warn"), {"pdf": "Tomo", "state": "Estado", "warn": "Avisos"},
-                            {"state": 200, "warn": 80}, stretch="pdf")
-        table.setMinimumSize(680, 420)
-        for pdf in _sources(folder):
+        table = qtk.RowList(("pdf", "state", "warn", "sent"),
+                            {"pdf": "Tomo", "state": "Estado", "warn": "Avisos", "sent": "Enviado"},
+                            {"state": 200, "warn": 80, "sent": 130}, stretch="pdf")
+        table.setMinimumSize(800, 420)
+        sources = _sources(folder)
+        missing = _missing_volumes(sources)
+        if missing:
+            column.addWidget(_label(missing, "warn"))
+        for pdf in sources:
             state = _read_review(pdf)
             problems = state.get("problems") if state else None
             warn = "—" if problems is None else len(problems) or "Ninguno"
-            table.insert("", "end", iid=str(pdf), values=(pdf.name, _volume_status(pdf), warn))
+            table.insert("", "end", iid=str(pdf), values=(pdf.name, _volume_status(pdf), warn,
+                                                          _sent_text(_volume_epub(pdf))))
         table.double_clicked.connect(lambda _: table.selection() and (self.open_path(table.selection()[0]), win.close()))
         column.addWidget(table, 1)
         column.addWidget(_label("Doble clic: abrir el tomo", "muted"))
