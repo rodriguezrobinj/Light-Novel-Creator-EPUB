@@ -294,15 +294,30 @@ class Sheet(QTextEdit):
         self.setObjectName("sheet")
         self.document().setDocumentMargin(48)
         self.look = Look(self.document())
+        self.tags, self.unknown = {}, set()  # colores y palabras desconocidas de cada hoja nueva
         self.pictures, self.color = {}, "#888888"
         self.set_zoom(100)
 
     def set_content(self, lines, pictures, color="#888888"):
-        self.pictures, self.color = dict(pictures), color
-        self.look.setDocument(None)  # sin colorear párrafo a párrafo mientras se carga: una vez al final
-        load(self.document(), lines, self.pictures, color)
-        self.look.setDocument(self.document())
+        """Hoja nueva con lines; la de antes sigue viva (con su deshacer) para volver con use(). Devuelve
+        (documento, aspecto)."""
+        self.pictures.update(pictures)
+        self.color = color
+        document = QTextDocument(self)
+        document.setDocumentMargin(48)
+        load(document, lines, self.pictures, color)
+        look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
+        look.tags = self.tags
+        look.set_unknown(self.unknown)
+        self.use(document, look)
         self.moveCursor(QTextCursor.MoveOperation.Start)
+        return document, look
+
+    def use(self, document, look):
+        """Muestra otra hoja ya cargada, con el tamaño de letra de ahora."""
+        self.setDocument(document)
+        document.setDefaultFont(self.font())
+        self.look = look
 
     def content(self):
         return dump(self.document())
@@ -310,6 +325,7 @@ class Sheet(QTextEdit):
     def set_zoom(self, percent):
         # En la hoja de estilo: la QSS de la ventana (9 pt para todo) pisaría un setFont o la fuente del documento
         self.setStyleSheet(f"QTextEdit#sheet {{ font-family: 'Segoe UI'; font-size: {FONT_SIZE * percent / 100:.1f}pt; }}")
+        self.document().setDefaultFont(self.font())
 
     def goto_source(self, k):
         """Cursor al principio del párrafo que viene del bloque k (si está)."""
