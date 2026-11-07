@@ -26,7 +26,10 @@ KEYWORDS = re.compile(
     r"|extra|parte|chapter|prologue|epilogue|afterword|interlude)\b", re.I)
 TOC_TITLE = re.compile(r"(contenidos?|[ií]ndice|tabla de contenidos?|contents|table of contents):?", re.I)
 DOT_LEADER = re.compile(r"[.\-_·…]{4,}\s*(?:p[áa]g\.?\s*)?\d+\s*\|?$", re.I)  # "..... 12", "---- Pág. 54"
-SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈•·#~◎◯]+")
+SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈•·#~◎◯♠♣♥♤♧♡◊]+")
+# Fuente Symbol sin tabla Unicode: PyMuPDF da el código de la fuente (Mitsuha 6 [Bell T]: 0xAA es ♠, sale «ª»)
+SYMBOL_FONT = str.maketrans({"\xa7": "♣", "\xa8": "♦", "\xa9": "♥", "\xaa": "♠", "\xb7": "•", "\xe0": "◊",
+                             "\xb4": "×", "\xa5": "∞", "\xae": "→", "\xac": "←"})
 END_PUNCT = (".", "!", "?", "…", '"', "'", "»", "”", "’", ":", ")", "]")  # "]": notas del traductor
 SOFT_HYPHEN = "\u00ad"  # guion de partición: solo se ve si cae al final de la línea
 TAGS = re.compile(r"<[^>]+>")
@@ -243,6 +246,9 @@ def _rows(page):
     spans = [s for b in page.get_text("dict", flags=flags)["blocks"] for line in b.get("lines", [])
              if abs(line["dir"][0]) > 0.9 for s in line["spans"] if BAD_XML.sub("", s["text"]).strip()]
     spans = [_ref(s, spans) if REF.fullmatch(s["text"].strip()) else s for s in spans]
+    for s in spans:
+        if "symbol" in s["font"].lower():
+            s["text"] = s["text"].translate(SYMBOL_FONT)
     rows, group = [], []
     for s in sorted(spans, key=lambda s: s["origin"][1]):
         if group and abs(s["origin"][1] - group[0]["origin"][1]) > 2:
@@ -1422,7 +1428,10 @@ def analyze(pdf_path, progress=None):
                     if blocks and blocks[-1].kind != "break":  # guarda el adorno, por si se quiere el original
                         blocks.append(Block("break", num, image=_extract(doc, xref) if xref else b""))
                     para = None
-                if r.heading:
+                if SCENE_BREAK.fullmatch(r.text):  # solo símbolos: separador aunque vaya en letra de título (Mitsuha 6)
+                    blocks.append(Block("break", num, r.html))  # guarda el texto original ("☆", "* * *")
+                    para = None
+                elif r.heading:
                     # Se une a la línea anterior si es el mismo título partido: mismo tamaño y pegada
                     # (un subtítulo justo debajo del capítulo queda más lejos, o lo abre un marcador).
                     if (prev is not None and prev.heading and abs(prev.size - r.size) < 0.5
@@ -1431,9 +1440,6 @@ def analyze(pdf_path, progress=None):
                         blocks[-1].rect = _rect([blocks[-1], r])  # el rectángulo abarca todas sus líneas
                     else:
                         blocks.append(Block("heading", num, html.escape(r.text), rect=_rect([r])))
-                    para = None
-                elif SCENE_BREAK.fullmatch(r.text):
-                    blocks.append(Block("break", num, r.html))  # guarda el texto original ("☆", "* * *")
                     para = None
                 else:
                     indented = r.x0 > left + body * 0.8

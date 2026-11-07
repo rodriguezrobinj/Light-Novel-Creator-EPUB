@@ -571,6 +571,27 @@ def test_scene_breaks_keep_their_original_form():
     assert len(ornament_breaks) == 1 and pymupdf.Pixmap(ornament_breaks[0].image).width == 10
 
 
+def test_symbol_font_suits_are_scene_breaks_not_chapters():
+    """Mitsuha 6 [Bell T]: los separadores «♠♠» van en la fuente Symbol, que PyMuPDF lee como «ªª» (0xAA),
+    centrados y en letra de título (35,6 pt). Salían como capítulos «ªª»; son separadores de escena «♠♠»."""
+    doc = pymupdf.open()
+    for n, title in ((1, "Capitulo 1: Inicio"), (2, "Capitulo 2: Final")):
+        add_page(doc, n, [(72, 100, title, 20, "helv"),
+                          (92, 140, line("Primera linea del primer parrafo", 57), 11, "cour"),
+                          (72, 154, "fin del primer parrafo.", 11, "cour"),
+                          (282, 200, "ªª", 35.6, "symb"),
+                          (92, 240, line("Primera linea del segundo parrafo", 57), 11, "cour"),
+                          (72, 254, "fin del segundo parrafo.", 11, "cour")])
+    path = TMP / "simbolos.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [book.blocks[k].html for k in book.candidates]
+    breaks = [b.html for b in book.blocks if b.kind == "break"]
+    headings = [b.html for b in book.blocks if b.kind == "heading"]
+    assert titles == ["Capitulo 1: Inicio", "Capitulo 2: Final"], titles
+    assert breaks == ["♠♠", "♠♠"] and "ªª" not in headings, (breaks, headings)
+
+
 def test_separator_options():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
               convert.Block("break", 1, "☆"), convert.Block("p", 1, "Dos."),
