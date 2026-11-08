@@ -2786,6 +2786,56 @@ def test_window_editor_reads_aloud_paragraph_by_paragraph():
     assert escaped == (None, True), escaped
     assert failed is None
 
+
+def test_window_reviewer_comments():
+    """Un comentario puesto con clic derecho en el editor: fondo amarillo, aviso «Comentario del revisor» en el
+    informe, guardado en la revisión y no en el EPUB; sobrevive a reabrir y a editar un poco el párrafo; «Quitar
+    comentario» lo borra."""
+    import app
+
+    original = app._ask_note
+    app._ask_note = lambda parent, note: "Revisar con el traductor: ¿«Tino» o «Tiño»?"
+    try:
+        root, window = visible_window()
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
+        window.tree.selection_set([i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON][0])
+        editor = window.edit_text()
+        root.update()
+        sheet = editor.sheet
+        block = sheet.document().firstBlock().next()
+        k = app.editor.source_of(block)
+        menu = editor.mark_menu(sheet.cursorRect(app.QTextCursor(block)).center())
+        [add] = [a for a in menu.actions() if a.text() == "Comentario…"]
+        add.trigger()
+        marked = [s for s in sheet.extraSelections() if s.format.background().color().name() ==
+                  app.theme.mark_colors(False)["comment"]]
+        editor.save()
+        report = [i for i in window.quality_report() if i.kind == "comment"]
+        state = window.review_state()
+        epub = TMP / "comentario.epub"
+        chapters, removed, breaks = app._plan(window.book, window.rows())
+        convert.write_epub(window.book, chapters, epub, removed=removed)
+        in_epub = "traductor" in epub_text(epub)
+        window.save_review()
+        # El párrafo cambia un poco (otra edición): el comentario sigue con él
+        b = window.book.blocks[k]
+        window.book.blocks[k] = convert.Block(b.kind, b.page, b.html.replace("relleno", "Relleno", 1))
+        kept = [i.block for i in window.comment_issues()]
+        window.show_book(convert.analyze(window.pdf))  # reabrir: la revisión guardada trae el comentario
+        reopened = [i.block for i in window.comment_issues()]
+        window.remove_comment(window.comment_issues()[0])
+        left = window.comments
+        window.close()
+    finally:
+        app._ask_note = original
+    assert marked, "sin fondo amarillo en el párrafo comentado"
+    assert [(i.block, i.level, i.problem) for i in report] == [
+        (k, "Revisar", "Revisar con el traductor: ¿«Tino» o «Tiño»?")], report
+    assert state["comments"][0]["note"].startswith("Revisar con el traductor") and not in_epub, state["comments"]
+    assert kept == [k] and reopened == [k], (kept, reopened, k)
+    assert left == [], left
+
 def test_sheet_symbols_and_typography():
     """Raya, puntos y comillas con Ctrl+Alt como Word; con texto elegido, las comillas lo envuelven. AltGr+2
     (Ctrl+Alt) sigue escribiendo «@». «Corregir tipografía» pone rayas y comillas conservando la cursiva, en

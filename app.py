@@ -36,6 +36,7 @@ from PySide6.QtCore import QEvent, QObject, QProcess, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPixmap,
                            QShortcut, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit,
                                QProgressBar,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QStackedWidget, QTabBar,
@@ -197,6 +198,26 @@ def _spell_server(requests, replies):
             word = pending.pop(0)[1]
             done.add(word)
             replies.put(("suggestions", word, convert.spell_suggestions(word, good)))
+
+
+def _comment_block(blocks, texts, comment):
+    """Párrafo del libro de un comentario: el que empieza por su texto (mejor en su página) o, si se editó, el más
+    parecido de su página. texts: [(índice, texto)] de los párrafos. None si ya no está."""
+    start, page = comment["text"], comment.get("page")
+    hits = [k for k, t in texts if t.startswith(start)]
+    if hits:
+        return min(hits, key=lambda k: blocks[k].page != page)
+    near = [(difflib.SequenceMatcher(None, t[:len(start)], start).ratio(), k) for k, t in texts if blocks[k].page == page]
+    ratio, k = max(near, default=(0, None))
+    return k if ratio >= 0.6 else None
+
+
+def _ask_note(parent, note):
+    """Texto del comentario del revisor (note: el de ahora), o None si se cancela."""
+    text, ok = QInputDialog.getMultiLineText(parent, "Comentario del revisor",
+                                             "Nota sobre este párrafo, para ti o para el traductor (no sale en el "
+                                             "EPUB). Vacía, quita el comentario:", note)
+    return text if ok else None
 
 
 NO_VOICE = ("Windows no tiene ninguna voz en español instalada.\n\nInstálala en Configuración → Hora e idioma → "
@@ -422,7 +443,7 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "credits": "Página de créditos", "reading": "Minutos de lectura", "epub2": "EPUB 2",
                 "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
-                "words": "Diccionario de la serie", "glossary": "Glosario", "ignored": "Avisos ignorados",
+                "words": "Diccionario de la serie", "glossary": "Glosario", "ignored": "Avisos ignorados", "comments": "Comentarios",
                 "echoes": "Buscar ecos"}
 
 
@@ -1168,6 +1189,7 @@ class App:
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
         self.words = []                        # diccionario de la serie: palabras que la ortografía da por buenas
         self.glossary = []                     # glosario de la serie: los nombres como deben ir
+        self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
         self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
@@ -2018,7 +2040,8 @@ class App:
         self.book = book
         # El análisis tal cual, para restaurar versiones sin volver a analizar: las ediciones hacen listas nuevas
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
-        if report is not None and not (self.echoes_var.get() or self.glossary):  # el del proceso va sin opciones
+        self.glossary, self.comments = [], []  # son del libro: llegan con la revisión (el glosario, o heredado)
+        if report is not None and not self.echoes_var.get():  # el del proceso va sin opciones
             self.reports[self.report_key()] = report
         if memos:
             convert.seed_report_memos(memos)
@@ -3114,7 +3137,35 @@ class App:
             if len(self.reports) >= 8:  # los últimos estados: basta para deshacer varias veces
                 del self.reports[next(iter(self.reports))]
             self.reports[key] = convert.quality_report(self.book, self.echoes_var.get(), self.glossary)
-        return list(self.reports[key]) + self.toc_issues()
+        return list(self.reports[key]) + self.toc_issues() + self.comment_issues()
+
+    def comment_issues(self):
+        """Los comentarios del revisor como avisos «Revisar»: salen en F8, en el informe y al exportarlo. El de un
+        párrafo que ya no está sale con su página."""
+        texts = [(k, convert._plain(b).strip()) for k, b in enumerate(self.book.blocks) if b.kind == "p"]
+        by_block, issues = dict(texts), []
+        for c in self.comments:
+            k = _comment_block(self.book.blocks, texts, c)
+            text = by_block[k] if k is not None else c["text"]
+            issues.append(convert.Issue("comment", k, self.book.blocks[k].page if k is not None else c.get("page", 0),
+                                        "Revisar", "Comentario del revisor", c["note"],
+                                        "Cuando esté resuelto, quítalo con «Ignorar» (o en el editor, clic derecho → "
+                                        "«Quitar comentario»).", convert._cut(text), text=text))
+        return issues
+
+    def set_comment(self, k, note):
+        """Pone (o cambia, o con note vacía quita) el comentario del párrafo k del libro."""
+        texts = [(j, convert._plain(b).strip()) for j, b in enumerate(self.book.blocks) if b.kind == "p"]
+        self.comments = [c for c in self.comments if _comment_block(self.book.blocks, texts, c) != k]
+        if note.strip():
+            self.comments.append({"text": dict(texts)[k][:80], "page": self.book.blocks[k].page, "note": note.strip()})
+        self.update_quality()
+
+    def remove_comment(self, issue):
+        texts = [(j, convert._plain(b).strip()) for j, b in enumerate(self.book.blocks) if b.kind == "p"]
+        self.comments = [c for c in self.comments if not (c["note"] == issue.problem and
+                                                          _comment_block(self.book.blocks, texts, c) == issue.block)]
+        self.update_quality()
 
     def toc_issues(self):
         """Avisos del índice impreso del PDF frente a los capítulos de la lista: un título del índice sin
@@ -3308,9 +3359,12 @@ class App:
             fill(int(table.selection()[0]) if table.selection() else 0)
 
         def ignore(issue):
-            """Ignorar (o volver a mostrar) un aviso: se recuerda en la revisión."""
+            """Ignorar (o volver a mostrar) un aviso: se recuerda en la revisión. Un comentario del revisor se quita."""
             key = _issue_key(issue)
-            self.ignored = [k for k in self.ignored if k != key] if key in self.ignored else self.ignored + [key]
+            if issue.kind == "comment":
+                self.remove_comment(issue)
+            else:
+                self.ignored = [k for k in self.ignored if k != key] if key in self.ignored else self.ignored + [key]
             self.update_quality()
             fill(int(table.selection()[0]) if table.selection() else 0)
 
@@ -3480,7 +3534,7 @@ class App:
         state = {name: var.get() for name, var in self.fields().items()}
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
-                     glossary=self.glossary, ignored=self.ignored)
+                     glossary=self.glossary, ignored=self.ignored, comments=self.comments)
         return state
 
     def save_review(self):
@@ -3540,6 +3594,8 @@ class App:
         self.description = state.get("description", "")
         self.last_problems = state.get("problems")
         self.ignored = state["ignored"] if isinstance(state.get("ignored"), list) else []
+        self.comments = [c for c in state.get("comments", []) if isinstance(c, dict)  # el .json se edita a mano
+                         and isinstance(c.get("note"), str) and isinstance(c.get("text"), str)]
         if state.get("cover"):
             try:
                 self.set_cover(state["cover"])
@@ -4367,8 +4423,11 @@ class TextEditor:
             for issue in self.block_issues(block):
                 start, end = self.issue_range(block, issue)
                 selection = QTextEdit.ExtraSelection()
-                selection.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
-                selection.format.setUnderlineColor(QColor(colors[issue.level]))
+                if issue.kind == "comment":  # como una nota adhesiva: fondo amarillo, no ondulado de error
+                    selection.format.setBackground(QColor(colors["comment"]))  # la nota, en el clic derecho
+                else:
+                    selection.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+                    selection.format.setUnderlineColor(QColor(colors[issue.level]))
                 cursor = QTextCursor(block)
                 cursor.setPosition(block.position() + start)
                 cursor.setPosition(block.position() + end, QTextCursor.MoveMode.KeepAnchor)
@@ -4478,20 +4537,41 @@ class TextEditor:
         return ("…" if left else "") + after[left:right].strip() + ("…" if right < len(after) else "")
 
     def ignore_issue(self, issue):
-        """«Ignorar este aviso»: como en el informe de calidad, se recuerda en la revisión."""
+        """«Ignorar este aviso»: como en el informe de calidad, se recuerda en la revisión. Un comentario se quita."""
         key = _issue_key(issue)
-        if key not in self.app.ignored:
+        if issue.kind == "comment":
+            self.app.remove_comment(issue)
+        elif key not in self.app.ignored:
             self.app.ignored.append(key)
             self.app.update_quality()
-        left = [i for i in self.issues.get(issue.block, []) if i is not issue]
-        if left:
-            self.issues[issue.block] = left
-        else:
-            self.issues.pop(issue.block, None)
+        self.drop_issues(issue.block, lambda i: i is issue)
         if self.shown_issue is issue:
             self.issue_frame.hide()
         self.refresh_marks()
-        self.tell("Aviso ignorado: no vuelve a salir en este libro")
+        self.tell("Comentario quitado" if issue.kind == "comment" else "Aviso ignorado: no vuelve a salir en este libro")
+
+    def drop_issues(self, k, which):
+        """Quita de los avisos del párrafo k los que cumplen which."""
+        left = [i for i in self.issues.get(k, []) if not which(i)]
+        if left:
+            self.issues[k] = left
+        else:
+            self.issues.pop(k, None)
+
+    def edit_comment(self, block):
+        """Clic derecho → «Comentario…»: pone, cambia o (vacío) quita el comentario del párrafo."""
+        k = editor.source_of(block)
+        old = next((i for i in self.issues.get(k, []) if i.kind == "comment"), None)
+        note = _ask_note(self.win, old.problem if old else "")
+        if note is None or k is None:
+            return
+        self.app.set_comment(k, note)
+        self.drop_issues(k, lambda i: i.kind == "comment")
+        for issue in self.app.comment_issues():
+            if issue.block == k:
+                self.issues.setdefault(k, []).append(issue)
+        self.refresh_marks()
+        self.tell("Comentario guardado" if note.strip() else "Comentario quitado")
 
     # Símbolos, revisado, cifras
     def fix_typography(self):
@@ -4818,9 +4898,13 @@ class TextEditor:
                 change = self.fix_preview(issue)
                 menu.addAction(f"Arreglar: «{change}»" if issue.edit[2] else "Arreglar: quitar este párrafo",
                                lambda i=issue: self.fix_issue(i, go_next=False))
-            menu.addAction("Ignorar este aviso", lambda i=issue: self.ignore_issue(i))
+            menu.addAction("Quitar comentario" if issue.kind == "comment" else "Ignorar este aviso",
+                           lambda i=issue: self.ignore_issue(i))
             menu.addAction("Aviso siguiente   (F8)", self.next_issue)
             menu.addSeparator()
+        if editor.source_of(block) is not None and not editor.objects_of(block) and block.text().strip():
+            has = any(i.kind == "comment" for i in self.block_issues(block))
+            menu.addAction("Cambiar comentario…" if has else "Comentario…", lambda: self.edit_comment(block))
         if sheet.can_restore(block, self.loaded()):
             menu.addAction("Volver al original", lambda: (sheet.setTextCursor(QTextCursor(block)), self.restore_current()))
         if menu.actions() and not menu.actions()[-1].isSeparator():
