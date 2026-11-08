@@ -2807,6 +2807,8 @@ def test_window_reviewer_comments():
         k = app.editor.source_of(block)
         menu = editor.mark_menu(sheet.cursorRect(app.QTextCursor(block)).center())
         [add] = [a for a in menu.actions() if a.text() == "Comentario…"]
+        title = editor.mark_menu(sheet.cursorRect(app.QTextCursor(sheet.document().firstBlock())).center())
+        on_title = [a.text() for a in title.actions() if "omentario" in a.text()]  # Re Zero: «Parte 1» fallaba
         add.trigger()
         marked = [s for s in sheet.extraSelections() if s.format.background().color().name() ==
                   app.theme.mark_colors(False)["comment"]]
@@ -2830,6 +2832,7 @@ def test_window_reviewer_comments():
     finally:
         app._ask_note = original
     assert marked, "sin fondo amarillo en el párrafo comentado"
+    assert on_title == [], on_title
     assert [(i.block, i.level, i.problem) for i in report] == [
         (k, "Revisar", "Revisar con el traductor: ¿«Tino» o «Tiño»?")], report
     assert state["comments"][0]["note"].startswith("Revisar con el traductor") and not in_epub, state["comments"]

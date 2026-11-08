@@ -4926,7 +4926,8 @@ class TextEditor:
                            lambda i=issue: self.ignore_issue(i))
             menu.addAction("Aviso siguiente   (F8)", self.next_issue)
             menu.addSeparator()
-        if editor.source_of(block) is not None and not editor.objects_of(block) and block.text().strip():
+        k = editor.source_of(block)  # solo párrafos de texto del libro: un subtítulo («Parte 1») no lleva comentario
+        if k is not None and editor._is_text(block) and self.app.book.blocks[k].kind == "p":
             has = any(i.kind == "comment" for i in self.block_issues(block))
             menu.addAction("Cambiar comentario…" if has else "Comentario…", lambda: self.edit_comment(block))
         if sheet.can_restore(block, self.loaded()):
