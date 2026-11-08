@@ -78,16 +78,19 @@ nombre con mayúscula a mitad de frase («el Señor Pérez» → «el señor Pé
 
 ### 7. Expresiones regulares en la búsqueda
 
-- Casilla «.*» («Expresión regular») en la barra de búsqueda del editor y en la de la ventana principal si
-  comparte `find_pattern`. Con ella, el término se usa tal cual y el reemplazo admite `\1`, `\g<nombre>`.
-- Expresión mal escrita: el campo en rojo y el error en la línea de estado; no se busca ni reemplaza.
-- `convert.replace_text(book, find, new, word=False, blocks=None, regex=False)`.
+- Casilla «.*» («Expresión regular») en la barra de búsqueda del editor. Con ella, el término se usa tal
+  cual y el reemplazo admite `\1`, `\g<nombre>`. La barra de la ventana principal no comparte `find_pattern`
+  y se queda como está; «Reemplazos…» ya admitía expresiones con «re:».
+- Expresión mal escrita: el campo en rojo y el error junto a la barra; no se busca ni reemplaza.
+- En la hoja, `QRegularExpression` busca y el `re` de Python expande los grupos del reemplazo. Una
+  coincidencia vacía («a*») no cuenta: reemplazarla no avanzaría.
 
 ### 8. Leer en voz alta
 
 - Botón «🔊 Leer» en el grupo Revisar del editor. Lee desde el párrafo del cursor, resalta el que lee y
   pasa al siguiente hasta el final del capítulo.
-- Para con el mismo botón («■ Parar»), con Esc, con un clic en la hoja o al cambiar de capítulo o cerrar.
+- Para con el mismo botón (queda pulsado mientras lee), con Esc, con un clic o una tecla en la hoja, o al
+  cambiar de capítulo o cerrar. El párrafo se marca de fondo, sin elegirlo: teclear no lo borraría.
 - Motor: un proceso `powershell` de larga duración con `System.Speech`; recibe un párrafo por línea en
   stdin, responde «ok» al terminar cada uno. Voz: la primera con cultura `es-*`.
 - Sin voz en español: mensaje con cómo instalarla (Configuración → Hora e idioma → Voz).
@@ -95,9 +98,9 @@ nombre con mayúscula a mitad de frase («el Señor Pérez» → «el señor Pé
 ### 9. Comentarios del revisor
 
 - Clic derecho en un párrafo → «Comentario…» (añadir o cambiar) y «Quitar comentario».
-- Guardados en `.lnepub.json` (`comments`: `[{"text": inicio del párrafo, "page": n, "note": "…"}]`),
-  anclados como los avisos ignorados. No salen en el EPUB.
-- En la hoja: fondo amarillo suave (color del tema) y el comentario como tooltip.
+- Guardados en `.lnepub.json` (`comments`: `[{"text": inicio del párrafo, "page": n, "note": "…"}]`). El
+  párrafo es el que empieza por ese texto o, si se editó, el más parecido de su página. No salen en el EPUB.
+- En la hoja: fondo amarillo suave (color del tema); la nota sale en el clic derecho y en la barra de F8.
 - La ventana los suma al informe como avisos `comment` («Revisar», «Comentario del revisor»): salen en F8,
   en «Avisos ▾», en el diálogo de calidad y en la exportación. «Ignorar» un comentario lo borra.
 

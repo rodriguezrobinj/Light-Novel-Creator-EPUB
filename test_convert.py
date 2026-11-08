@@ -4627,6 +4627,53 @@ def test_window_echoes_and_glossary_in_quality_report():
     assert state["glossary"] == ["Emilia"] and state["echoes"] is True, state["glossary"]
     assert "glossary" in kinds and "echo" in kinds, kinds
 
+
+def test_quality_score_and_export():
+    """La nota resta 10, 3 o 1 por aviso según su gravedad, cada 10 000 palabras, entre 0 y 100. El informe se
+    exporta a .csv para Excel («;», UTF-8 con BOM) y a .html que escapa el texto del libro."""
+    issue = lambda level, text: convert.Issue("x", 1, 7, level, "Aviso <b>", "Problema", "Solución", text)
+    report = [issue("Grave", "Tom & <Jerry>"), issue("Revisar", "a"), issue("Menor", "«b»")]
+    assert convert.quality_score(report, 10000) == 86
+    assert convert.quality_score(report, 1000) == 0 and convert.quality_score([], 0) == 100
+    csv_path, html_path = TMP / "informe.csv", TMP / "informe.html"
+    convert.export_report(report, csv_path, "Libro", 86)
+    convert.export_report(report, html_path, "Libro & Co", 86)
+    raw = csv_path.read_bytes()
+    page = html_path.read_text(encoding="utf-8")
+    assert raw.startswith(b"\xef\xbb\xbf") and raw.decode("utf-8-sig").splitlines()[1] == \
+        "Grave;7;Aviso <b>;Problema;Solución;Tom & <Jerry>", raw[:200]
+    assert "Nota 86/100" in page and "Tom &amp; &lt;Jerry&gt;" in page and "Libro &amp; Co" in page, page[:400]
+    assert "<Jerry>" not in page
+
+
+def test_window_quality_dialog_score_and_export():
+    """El informe dice la nota del libro y «Exportar…» guarda el .html con los avisos no ignorados."""
+    import app
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella abrió la puerta y dijo que"), B("p", 2, "nadie vendría."),
+              B("p", 2, "12")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.quality()
+    root.update()
+    parts = root.dialogs()[-1].parts
+    summary = parts["summary"].text()
+    out = TMP / "exportado.html"
+    asked = []
+    original = app.filedialog.asksaveasfilename
+    app.filedialog.asksaveasfilename = lambda **options: asked.append(options) or str(out)
+    try:
+        [export] = [b for b in root.dialogs()[-1].findChildren(app.QPushButton) if b.text() == "Exportar…"]
+        export.click()
+    finally:
+        app.filedialog.asksaveasfilename = original
+    window.close()
+    page = out.read_text(encoding="utf-8")
+    assert summary.startswith("Nota 0/100 · "), summary  # 2 avisos «Revisar» en 11 palabras
+    assert "Párrafo partido" in page and "Número suelto" in page, page[:300]
+    assert asked[0]["initialfile"].endswith("informe de calidad.html"), asked
+
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
     página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""

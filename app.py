@@ -3204,6 +3204,26 @@ class App:
                                                 "(tecla S) o quítalo (tecla Q).", text=title))
         return issues
 
+    def word_count(self):
+        """Palabras de los párrafos del libro: la nota del informe se mide por cada 10 000."""
+        return convert.text_stats(convert._plain(b) for b in self.book.blocks if b.kind == "p")["words"]
+
+    def export_report(self, report, score, parent):
+        """«Exportar…» del informe de calidad: .html para leerlo sin la app o .csv para Excel."""
+        name = f"{self.pdf.stem if self.pdf else self.book.title} - informe de calidad.html"
+        path = filedialog.asksaveasfilename(defaultextension=".html", initialfile=name, parent=parent,
+                                            initialdir=str(self.pdf.parent) if self.pdf else None,
+                                            filetypes=[("Página web", "*.html"), ("Tabla para Excel", "*.csv")],
+                                            title="Exportar el informe de calidad")
+        if not path:
+            return
+        try:
+            convert.export_report(report, path, self.title_var.get() or self.book.title, score)
+        except OSError as e:
+            messagebox.showerror("Exportar", f"No se pudo guardar el informe:\n{e.strerror or e}", parent=parent)
+            return
+        self.status.setText(f"Informe guardado: {Path(path).name}")
+
     def report_key(self):
         """Lo que mira convert.quality_report del libro: si no cambia, el informe tampoco."""
         b = self.book
@@ -3244,7 +3264,9 @@ class App:
         echoes = QCheckBox("Buscar ecos (palabras repetidas cerca)", checked=self.echoes_var.get())
         # Sin Var.check: el diálogo se cierra y la variable no debe seguir poniendo valor a una casilla borrada
         echoes.toggled.connect(lambda on: (self.echoes_var.set(on), fill(), self.update_quality()))
-        column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown))
+        export_btn = _button("Exportar…", lambda: self.export_report(state["all"], state["score"], win))
+        export_btn.setToolTip("Guardar el informe como página web (.html) o tabla para Excel (.csv), para otra persona")
+        column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown, export_btn))
         panes = QSplitter(Qt.Orientation.Horizontal)
         column.addWidget(panes, 1)
         table = qtk.RowList(("level", "page", "title"), {"level": "Gravedad", "page": "Pág.", "title": "Aviso"},
@@ -3287,7 +3309,8 @@ class App:
             everything = self.quality_report()
             ignored = [i for i in everything if _issue_key(i) in self.ignored]
             report = [i for i in everything if _issue_key(i) not in self.ignored]
-            summary.setText((_quality_summary(report) or "No se encontró nada sospechoso.")
+            state["all"], state["score"] = report, convert.quality_score(report, self.word_count())
+            summary.setText(f"Nota {state['score']}/100 · " + (_quality_summary(report) or "No se encontró nada sospechoso.")
                             + (f" · {convert.counted(len(ignored), 'ignorado')}" if ignored else ""))
             graves = any(i.level == "Grave" for i in report)
             summary.setStyleSheet(f"color: {levels['Grave']};" if graves else "")
