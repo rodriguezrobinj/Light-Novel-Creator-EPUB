@@ -1,4 +1,5 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
+import base64
 import collections
 import contextlib
 import ctypes
@@ -31,7 +32,7 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QProcess, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPixmap,
                            QShortcut, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -196,6 +197,61 @@ def _spell_server(requests, replies):
             word = pending.pop(0)[1]
             done.add(word)
             replies.put(("suggestions", word, convert.spell_suggestions(word, good)))
+
+
+NO_VOICE = ("Windows no tiene ninguna voz en español instalada.\n\nInstálala en Configuración → Hora e idioma → "
+            "Voz → Agregar voces, elige Español y vuelve a pulsar «Leer».")
+# Voz de Windows (System.Speech): lee una línea de la entrada, la dice y responde «ok». Sin voz en español, «novoice»
+SPEECH_SCRIPT = r"""
+[Console]::InputEncoding = [Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$v = $s.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -like 'es*' } | Select-Object -First 1
+if (-not $v) { [Console]::Out.WriteLine('novoice'); exit }
+$s.SelectVoice($v.VoiceInfo.Name)
+while ($null -ne ($line = [Console]::In.ReadLine())) { $s.Speak($line); [Console]::Out.WriteLine('ok') }
+"""
+
+
+class Speaker(QObject):
+    """Lee en voz alta con la voz de Windows, sin dependencias: un PowerShell que vive mientras se lee y recibe un
+    párrafo por línea. Parar lo cierra (la voz se calla en el acto); el siguiente «Leer» abre otro."""
+    done = Signal()       # acabó el párrafo
+    failed = Signal(str)  # el motivo, para el usuario
+
+    def __init__(self):
+        super().__init__()
+        self.proc = None
+
+    def say(self, text):
+        if self.proc is None:
+            self.proc = QProcess(self)
+            self.proc.readyReadStandardOutput.connect(self._read)
+            self.proc.errorOccurred.connect(lambda _: self._fail("No se pudo abrir la voz de Windows (PowerShell)."))
+            script = SPEECH_SCRIPT.encode("utf-16-le")  # -EncodedCommand: sin líos de comillas
+            self.proc.start("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                           "-EncodedCommand", base64.b64encode(script).decode()])
+        self.proc.write((" ".join(text.split()) + "\n").encode("utf-8"))
+
+    def _read(self):
+        for line in bytes(self.proc.readAllStandardOutput()).decode("utf-8", "replace").split():
+            if line == "ok":
+                self.done.emit()
+            elif line == "novoice":
+                self._fail(NO_VOICE)
+
+    def _fail(self, message):
+        self.stop()
+        self.failed.emit(message)
+
+    def stop(self):
+        proc, self.proc = self.proc, None
+        if proc is not None:
+            proc.readyReadStandardOutput.disconnect()
+            proc.errorOccurred.disconnect()  # matarlo no es un fallo
+            proc.kill()
+            proc.waitForFinished(1000)
+            proc.deleteLater()
 
 
 def _start_spell_process():
@@ -3771,7 +3827,9 @@ class TextEditor:
         self.app, self.item = app, item
         self.win = win = Dialog(app.root)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        win.on_reject = self.cancel  # Esc y la X de la ventana preguntan antes de descartar cambios
+        # Esc y la X de la ventana preguntan antes de descartar cambios; leyendo en voz alta, Esc solo calla la voz
+        win.on_reject = lambda: self.stop_reading() if self.reading is not None else self.cancel()
+        self.reading, self.speaker = None, None  # párrafo que se lee en voz alta (QTextBlock) y la voz (Speaker)
         self.colors = theme.colors(app.dark)
         self.sheet = sheet = editor.Sheet()
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
@@ -3846,6 +3904,9 @@ class TextEditor:
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
         sheet.cursorPositionChanged.connect(self.update_tools)
+        # Un clic o una tecla en la hoja mientras se lee: la voz se calla, como al pulsar Parar
+        sheet.cursorPositionChanged.connect(lambda: self.reading is not None and self.sheet.textCursor().position()
+                                            != self.reading.position() and self.stop_reading())
         sheet.currentCharFormatChanged.connect(lambda _: self.update_tools())
         sheet.undoAvailable.connect(self.undo_btn.setEnabled)
         sheet.redoAvailable.connect(self.redo_btn.setEnabled)
@@ -3969,9 +4030,11 @@ class TextEditor:
             info.setEnabled(False)
             menu.insertAction(menu.actions()[0], info)
             menu.insertSeparator(menu.actions()[1])
+        self.read_btn = tool("🔊 Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
+                             "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, short="🔊", level=2)
         group("Revisar", self.changes_btn, self.issues_btn,
               tool("Σ Cifras", "Cifras: palabras, párrafos, minutos de lectura y diálogo del capítulo y del libro",
-                   self.show_stats, short="Σ", level=2))
+                   self.show_stats, short="Σ", level=2), self.read_btn)
         row.addStretch(1)
         # A la derecha, como el panel de navegación de Word pero sin quitar sitio: dónde estás y a dónde ir
         self.prev_chapter = tool("◀", "Capítulo anterior", lambda: self.step_section(-1))
@@ -4312,6 +4375,12 @@ class TextEditor:
                 selection.cursor = cursor
                 selections.append(selection)
                 issues += 1
+            if block == self.reading:  # el párrafo que se lee en voz alta, de fondo: sin elegirlo, que teclear no lo borre
+                selection = QTextEdit.ExtraSelection()
+                selection.format.setBackground(QColor(colors["reading"]))
+                selection.cursor = QTextCursor(block)
+                selection.cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+                selections.insert(0, selection)
             block = block.next()
         self.sheet.setExtraSelections(selections)
         self.sheet.set_bars(changed, colors["changed"])
@@ -4809,6 +4878,8 @@ class TextEditor:
 
     def open_section(self, start, end, focus=None):
         """Muestra el capítulo start..end en la hoja (el ya editado si se visitó) y lo dice en la cinta."""
+        if self.reading is not None:
+            self.stop_reading()
         page = self.pages.get((start, end))
         if page is None:
             # Un título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)
@@ -4912,6 +4983,46 @@ class TextEditor:
         if self.spell:
             self.spell[2].terminate()  # nada que guardar: lo aprendido ya está en App.words
             self.spell = None
+        if self.speaker:
+            self.speaker.stop()
+
+    # Leer en voz alta
+    def toggle_reading(self):
+        if self.reading is not None:
+            self.stop_reading()
+            return
+        if self.speaker is None:
+            self.speaker = Speaker()
+            self.speaker.done.connect(lambda: self.reading is not None and self.read_block(self.reading.next()))
+            self.speaker.failed.connect(self.reading_failed)
+        self.read_block(self.sheet.textCursor().block())
+
+    def read_block(self, block):
+        """Lee el párrafo block (o el siguiente con texto) con el cursor al principio y su fondo marcado; al acabar
+        el capítulo, para."""
+        while block.isValid() and not block.text().replace("\ufffc", "").strip():  # ilustraciones, separadores
+            block = block.next()
+        if not block.isValid():
+            self.stop_reading()
+            return
+        self.reading = block
+        self.sheet.setTextCursor(QTextCursor(block))
+        self.sheet.ensureCursorVisible()
+        self.read_btn.setChecked(True)
+        self.refresh_marks()
+        self.speaker.say(block.text().replace("\ufffc", " "))
+
+    def stop_reading(self):
+        self.reading = None
+        if self.speaker:
+            self.speaker.stop()
+        if shiboken6.isValid(self.read_btn):
+            self.read_btn.setChecked(False)
+            self.refresh_marks()
+
+    def reading_failed(self, message):
+        self.stop_reading()
+        messagebox.showinfo("Leer en voz alta", message, parent=self.win)
 
     def on_panel_event(self, event):
         """Ctrl+rueda amplía la página; al cambiar el tamaño del panel se vuelve a ajustar."""

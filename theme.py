@@ -111,8 +111,11 @@ def kind_colors(dark):
 
 # Marcas de la hoja del editor, como Word: ondulado rojo (Grave), naranja (Revisar) y azul (Menor, como la
 # gramática de Word) bajo el problema; barrita verde en el margen de los párrafos cambiados
-MARKS = {False: {"Grave": "#d32f2f", "Revisar": "#e07b00", "Menor": "#1f6fd1", "changed": "#2e9d4a"},
-         True: {"Grave": "#ff6b6b", "Revisar": "#ffa94d", "Menor": "#6ea8ff", "changed": "#5cc777"}}
+# reading: fondo del párrafo que se lee en voz alta; comment: el de un párrafo con comentario del revisor
+MARKS = {False: {"Grave": "#d32f2f", "Revisar": "#e07b00", "Menor": "#1f6fd1", "changed": "#2e9d4a",
+                 "reading": "#cfe3fb", "comment": "#fff3b0"},
+         True: {"Grave": "#ff6b6b", "Revisar": "#ffa94d", "Menor": "#6ea8ff", "changed": "#5cc777",
+                "reading": "#1f3a5c", "comment": "#4a4318"}}
 
 
 def mark_colors(dark):

@@ -2730,6 +2730,62 @@ def test_window_editor_regex_box_marks_bad_expressions():
     assert ok == "", ok
     assert "linea" not in text and "línea" in text, text[:300]
 
+
+def test_window_editor_reads_aloud_paragraph_by_paragraph():
+    """«Leer» lee desde el párrafo del cursor, uno a uno, saltando ilustraciones, con el fondo del que se lee; un
+    clic en la hoja, Esc o cambiar de capítulo la paran; sin voz en español, un aviso lo explica."""
+    import app
+    from PySide6.QtCore import QObject, Signal
+
+    class FakeSpeaker(QObject):
+        done, failed = Signal(), Signal(str)
+        said, stops = [], []
+
+        def say(self, text):
+            self.said.append(text)
+
+        def stop(self):
+            self.stops.append(1)
+
+    original, info = app.Speaker, app.messagebox.showinfo
+    told = []
+    app.Speaker = FakeSpeaker
+    app.messagebox.showinfo = lambda title, message, **_: told.append(message)
+    try:
+        root, window = visible_window()
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
+        window.tree.selection_set([i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON][0])
+        editor = window.edit_text()
+        root.update()
+        sheet = editor.sheet
+        first = sheet.document().firstBlock().next()  # tras el título
+        sheet.setTextCursor(app.QTextCursor(first))
+        editor.read_btn.click()
+        speaker = editor.speaker
+        speaker.done.emit()
+        two = list(speaker.said)
+        marked = any(s.cursor.block() == editor.reading for s in sheet.extraSelections())
+        checked = editor.read_btn.isChecked()
+        sheet.setTextCursor(app.QTextCursor(sheet.document().firstBlock()))  # como un clic en otro sitio
+        clicked = editor.reading, editor.read_btn.isChecked()
+        editor.read_btn.click()
+        editor.win.reject()  # Esc: calla la voz y no cierra el editor
+        escaped = editor.reading, editor.win.isVisible()
+        editor.read_btn.click()
+        speaker.failed.emit(app.NO_VOICE)
+        failed = editor.reading
+        window.close()
+    finally:
+        app.Speaker, app.messagebox.showinfo = original, info
+    texts = [first.text(), first.next().next().text()]  # en medio, una ilustración: se salta
+    assert first.next().text() == "￼" and two == texts, (two, texts)
+    assert told == [app.NO_VOICE], told
+    assert marked and checked, (marked, checked)
+    assert clicked == (None, False), clicked
+    assert escaped == (None, True), escaped
+    assert failed is None
+
 def test_sheet_symbols_and_typography():
     """Raya, puntos y comillas con Ctrl+Alt como Word; con texto elegido, las comillas lo envuelven. AltGr+2
     (Ctrl+Alt) sigue escribiendo «@». «Corregir tipografía» pone rayas y comillas conservando la cursiva, en
