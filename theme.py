@@ -34,11 +34,14 @@ EDITOR = {False: {"italic": {"italic": True}, "bold": {"weight": "bold"},
                  "mark": {"foreground": "#96969e"}, "token": {"background": "#24352a", "foreground": "#8fd694"},
                  "scene": {"foreground": "#d9b54a"}, "broken": {"foreground": "#ff6b6b", "underline": True},
                  "spell": {"background": "#4a1f24", "underline": True}}}
-# Vista previa del informe de calidad: lo que se quita y lo que entra
+# Vista previa del informe de calidad y comparación de versiones: lo que se quita, lo que entra y los apartados
+# (en color: un tag del TextBox no cambia el grosor de la letra)
 DIFF = {False: {"old": {"background": "#f8d7da", "foreground": "#8a1c1c", "overstrike": True},
-                "new": {"background": "#d4edda", "foreground": "#1b5e20"}, "note": {"foreground": "#6b6b6b"}},
+                "new": {"background": "#d4edda", "foreground": "#1b5e20"}, "note": {"foreground": "#6b6b6b"},
+                "head": {"foreground": "#1f6fd1"}},
         True: {"old": {"background": "#4a1f24", "foreground": "#ffb3b8", "overstrike": True},
-               "new": {"background": "#1f3d27", "foreground": "#a6e3b0"}, "note": {"foreground": "#8a8a8a"}}}
+               "new": {"background": "#1f3d27", "foreground": "#a6e3b0"}, "note": {"foreground": "#8a8a8a"},
+               "head": {"foreground": "#7aa7ff"}}}
 
 QSS = """
 QWidget {{ font-family: "Segoe UI"; font-size: 9pt; color: {ink}; }}
