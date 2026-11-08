@@ -4,7 +4,7 @@ import re
 from contextlib import contextmanager
 
 import pymupdf
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPen, QPixmap, QTextCharFormat, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
                                QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QTextEdit, QToolTip,
@@ -262,7 +262,9 @@ class RowList(QTreeWidget):
         return tuple(item.data(0, IID) for item in self.selectedItems())
 
     def selection_set(self, iid):
-        self.setCurrentItem(self.rows[iid])
+        # Como Tk, sustituye la selección: con selección múltiple, Qt sumaría la fila si hay Ctrl pulsado
+        flags = QItemSelectionModel.SelectionFlag
+        self.setCurrentItem(self.rows[iid], 0, flags.ClearAndSelect | flags.Rows)
 
     def see(self, iid):
         self.scrollToItem(self.rows[iid])

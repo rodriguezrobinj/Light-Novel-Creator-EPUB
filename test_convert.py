@@ -5121,6 +5121,148 @@ def test_qtk_dialog_filters():
     assert qtk.filters([("PDF", "*.pdf"), ("Imagen", "*.jpg *.png")]) == "PDF (*.pdf);;Imagen (*.jpg *.png)"
 
 
+def versioned_window():
+    """Ventana con la novela de prueba abierta y sin versiones de otras pruebas."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    app._versions_path(window.pdf).unlink(missing_ok=True)
+    window.show_book(convert.analyze(window.pdf))
+    return root, window
+
+
+def book_text(window):
+    return " ".join(plain(b.html) for b in window.book.blocks)
+
+
+def test_window_versions_compare_and_restore():
+    """Como commits de git: se guarda el estado, se compara con lo de ahora (dato, fila y palabras del texto) y
+    se restaura sin perder nada: lo de antes de restaurar queda como versión, y se puede volver a ello."""
+    import app
+
+    root, window = versioned_window()
+    item = first_title(window)
+    original_cover = window.book.cover
+    assert window.add_version("Primera")
+    start, end = window.section_bounds(int(item))
+    text = convert.section_text(window.book, start + 1, end)  # sin el título: solo cambia el párrafo
+    assert "fin del primer parrafo" in text, text
+    window.apply_edit((start + 1, end, text.replace("fin del primer parrafo", "final del primer parrafo")), item)
+    window.tree.set(item, "title", "Capítulo uno")
+    window.publisher_var.set("Grupo X")
+    window.pdf_page = 2
+    window.cover_from_page()
+    first = app._load_versions(window.pdf)[0][0]
+    segments = window.compare(first["state"], None)
+    shown = "".join(t for t, _ in segments)
+    assert "Grupo: (vacío) → «Grupo X»" in shown and "Capítulo uno" in shown and "Portada" in shown, shown
+    assert ("fin", "old") in segments and ("final", "new") in segments, segments
+
+    assert window.restore_version(0)
+    back = (window.tree.set(item, "title"), window.publisher_var.get(), window.cover_choice, window.cover_label.text(),
+            window.book.cover == original_cover, "final del primer" in book_text(window), window.history)
+    names = [v["name"] for v in app._load_versions(window.pdf)[0]]
+    assert back == ("Capitulo 1: Inicio", "", None, "Portada: la del PDF", True, False, []), back
+    assert names == ["Primera", "Antes de restaurar otra versión"], names
+
+    assert window.restore_version(1)  # la alternativa sigue ahí
+    again = (window.tree.set(item, "title"), window.publisher_var.get(), window.cover_choice,
+             "final del primer" in book_text(window))
+    window.close()
+    assert again == ("Capítulo uno", "Grupo X", ["page", 2], True), again
+    reopened = app._read_review(window.pdf)
+    assert reopened and reopened["publisher"] == "Grupo X", "la revisión no quedó con lo restaurado"
+
+
+def test_window_version_after_each_new_epub():
+    """Generar el EPUB deja una versión automática (la publicada); generar otra vez sin cambios no la repite."""
+    import app
+
+    root, window = versioned_window()
+    window.saved(str(TMP / "publicado.epub"), [])
+    window.saved(str(TMP / "publicado.epub"), ["un aviso"])  # solo cambian los avisos: no es otra versión
+    window.publisher_var.set("Grupo Y")
+    window.saved(str(TMP / "publicado.epub"), [])
+    versions = app._load_versions(window.pdf)[0]
+    changes = app._version_changes(versions[0]["state"], versions[1]["state"])
+    window.close()
+    assert [(v["name"], v["auto"]) for v in versions] == [("EPUB generado · publicado.epub", True)] * 2, versions
+    assert changes == "1 dato", changes
+
+
+def test_window_versions_dialog_saves_renames_and_deletes():
+    import app
+
+    root, window = versioned_window()
+    window.versions()
+    win = window.versions_window
+    parts = win.parts
+    parts["name"].setText("Antes de corregir")
+    parts["save"].click()
+    window.publisher_var.set("Grupo Z")
+    parts["name"].setText("Con grupo")
+    parts["save"].click()
+    rows = [parts["table"].set(i, "name") for i in parts["table"].get_children()]
+    parts["table"].selection_set("0")
+    compared = parts["box"].toPlainText()
+    parts["name"].setText("Sin grupo")
+    parts["rename"].click()
+    original = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda *args, **kwargs: True
+    try:
+        parts["table"].selection_set("1")
+        parts["delete"].click()
+    finally:
+        app.messagebox.askyesno = original
+    names = [v["name"] for v in app._load_versions(window.pdf)[0]]
+    title = win.windowTitle()
+    window.close()
+    assert rows == ["Con grupo", "Antes de corregir"], rows  # la más nueva arriba, como git log
+    assert "«Grupo Z»" in compared, compared
+    assert names == ["Sin grupo"] and title == "Versiones · 1 versión", (names, title)
+
+
+def test_damaged_versions_file_is_set_aside():
+    """Un zip de versiones roto no se pisa: se aparta en .bak y se empieza otro."""
+    import app
+
+    root, window = versioned_window()
+    path = app._versions_path(window.pdf)
+    path.write_bytes(b"no es un zip")
+    assert window.add_version("Nueva")
+    status = window.status.text()
+    versions = app._load_versions(window.pdf)[0]
+    window.close()
+    backup = path.with_name(path.name + ".bak")
+    assert backup.read_bytes() == b"no es un zip" and backup.name in status, status
+    assert [v["name"] for v in versions] == ["Nueva"], versions
+
+
+def test_version_of_another_analysis_is_not_restored():
+    """Una versión con otros bloques (otro PDF u otra forma de leerlo) se compara, pero no se aplica."""
+    import app
+
+    root, window = versioned_window()
+    window.add_version("Vieja")
+    versions = app._load_versions(window.pdf)[0]
+    versions[0]["state"]["blocks"] += 1
+    app._write_versions(window.pdf, versions)
+    window.publisher_var.set("Grupo X")
+    errors = []
+    original = app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message, **kwargs: errors.append(message)
+    try:
+        restored = window.restore_version(0)
+    finally:
+        app.messagebox.showerror = original
+    shown = "".join(t for t, _ in window.compare(versions[0]["state"], None))
+    publisher = window.publisher_var.get()
+    window.close()
+    assert restored is False and publisher == "Grupo X" and "otro análisis" in errors[0], (restored, errors)
+    assert "No se compara el texto" in shown and "Grupo X" in shown, shown
+
+
 def no_modal_dialogs():
     """Sin pantalla, un aviso modal bloquearía la prueba: los que ninguna prueba espera se apuntan y responden «No»."""
     import qtk

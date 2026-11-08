@@ -23,6 +23,8 @@ import traceback
 import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
+import zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -348,6 +350,193 @@ def _set_aside(pdf):
     except OSError:
         return None  # no había revisión
     return backup
+
+
+# Versiones del trabajo de un libro, como los commits de git: copias completas de la revisión en un zip junto al
+# PDF. Restaurar una no borra las posteriores: así conviven alternativas del mismo tomo.
+VERSION_NOISE = ("problems", "pdf")  # no cuentan para saber si una versión automática repite la última
+COMPARE_LIMIT = 300  # párrafos cambiados que se muestran al comparar: más no se leen y la ventana tardaría
+FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volume": "Vol.", "publisher": "Grupo",
+                "translator": "Traductor", "illustrator": "Ilustraciones", "proofreader": "Corrección",
+                "editor": "Edición", "original_title": "Título original", "subjects": "Géneros", "date": "Fecha",
+                "lang": "Idioma", "description": "Sinopsis", "cover": "Portada", "style": "Estilo",
+                "separator": "Separadores", "font": "Fuente", "font_file": "Archivo de fuente", "profile": "Perfil",
+                "typography": "Limpieza tipográfica", "gray": "Imágenes en gris", "shrink": "Reducir imágenes",
+                "shrink_size": "Tamaño de las imágenes", "trim": "Recortar márgenes blancos",
+                "credits": "Página de créditos", "reading": "Minutos de lectura", "epub2": "EPUB 2",
+                "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
+                "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
+                "words": "Diccionario de la serie", "ignored": "Avisos ignorados"}
+
+
+def _versions_path(pdf):
+    return Path(pdf).with_name(Path(pdf).stem + ".lnepub.versiones.zip")
+
+
+def _load_versions(pdf):
+    """Versiones guardadas de este PDF, de la más antigua a la más nueva, y el .bak donde se apartó el archivo si
+    estaba dañado (si no, None): así la versión siguiente no lo pisa. OSError si no se puede leer."""
+    path = _versions_path(pdf)
+    try:
+        with zipfile.ZipFile(path) as z:
+            versions = [json.loads(z.read(name)) for name in sorted(z.namelist())]
+        if all(isinstance(v, dict) and isinstance(v.get("state"), dict) and "name" in v for v in versions):
+            return versions, None
+    except FileNotFoundError:
+        return [], None
+    except (zipfile.BadZipFile, zlib.error, ValueError, KeyError):
+        pass
+    backup = path.with_name(path.name + ".bak")
+    os.replace(path, backup)
+    return [], backup
+
+
+def _write_versions(pdf, versions):
+    """Escribe todas las versiones o ninguna, como _write_json; sin versiones, borra el archivo."""
+    path = _versions_path(pdf)
+    if not versions:
+        path.unlink(missing_ok=True)
+        return
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            for n, version in enumerate(versions):
+                z.writestr(f"{n:04}.json", json.dumps(version, ensure_ascii=False))
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _shown(key, value):
+    """Valor de un dato al comparar versiones, como lo entiende quien lo eligió en la ventana."""
+    if key == "cover":
+        kind, choice = value if isinstance(value, list) and len(value) == 2 else (None, None)
+        names = {"page": lambda: f"página {choice + 1}", "image": lambda: "una ilustración",
+                 "file": lambda: Path(str(choice)).name, "text": lambda: "con título"}
+        return names[kind]() if kind in names else "la del PDF"
+    if isinstance(value, bool):
+        return "sí" if value else "no"
+    if isinstance(value, list):
+        return str(len(value))
+    return f"«{value}»" if str(value if value is not None else "").strip() else "(vacío)"
+
+
+def _data_changes(old, new):
+    """Líneas [(texto, tag)] de los datos del libro y las opciones que cambian de old a new."""
+    lines = []
+    for key, label in FIELD_LABELS.items():
+        a, b = old.get(key), new.get(key)
+        if a == b or (not a and not b):  # sin valor y vacío son lo mismo para quien lo lee
+            continue
+        if key == "description":
+            lines.append([(f"{label}: cambiada", None)])
+        else:
+            lines.append([(f"{label}: ", None), (_shown(key, a), "old"), (" → ", None), (_shown(key, b), "new")])
+    images = [sum(1 for e in s.get("edits", []) if e[:1] == ["image"]) for s in (old, new)]
+    if images[0] != images[1]:
+        lines.append([("Ilustraciones cambiadas por otra imagen: ", None), (str(images[0]), "old"), (" → ", None),
+                      (str(images[1]), "new")])
+    return lines
+
+
+def _rows_of(state):
+    """(tipo, título) de las filas de la lista, en su orden."""
+    rows = state.get("rows", {})
+    return [tuple(rows[k][:2]) for k in sorted(rows, key=int)]
+
+
+def _row_changes(old, new):
+    """Líneas [(texto, tag)] de las filas de la lista añadidas, quitadas, renombradas o con otro tipo."""
+    a, b, lines = _rows_of(old), _rows_of(new), []
+    ops = difflib.SequenceMatcher(None, [t for _, t in a], [t for _, t in b], autojunk=False).get_opcodes()
+    for op, i1, i2, j1, j2 in ops:
+        if op == "equal":
+            lines += [[(f"«{t}»: ", None), (ka, "old"), (" → ", None), (kb, "new")]
+                      for (ka, t), (kb, _) in zip(a[i1:i2], b[j1:j2]) if ka != kb]
+            continue
+        pairs = list(zip(a[i1:i2], b[j1:j2])) if op == "replace" else []
+        for (ka, ta), (kb, tb) in pairs:
+            kind = [(f" ({ka} → {kb})", None)] if ka != kb else []
+            lines.append([("«", None), (ta, "old"), ("» → «", None), (tb, "new"), ("»", None)] + kind)
+        lines += [[("Ya no está: ", None), (f"«{t}» ({k})", "old")] for k, t in a[i1 + len(pairs):i2]]
+        lines += [[("Nueva: ", None), (f"«{t}» ({k})", "new")] for k, t in b[j1 + len(pairs):j2]]
+    return lines
+
+
+def _plain_lines(blocks):
+    """(página, texto) de los párrafos, títulos y separadores: lo que se compara del texto entre versiones."""
+    return [(b.page, ("# " if b.kind == "heading" else "") + html.unescape(convert.TAGS.sub("", b.html)))
+            for b in blocks if b.kind in ("p", "heading", "break")]
+
+
+def _word_diff(before, after):
+    """Un párrafo con lo quitado ("old") y lo puesto ("new") palabra a palabra, como el control de cambios de Word."""
+    x, y = re.findall(r"\S+|\s+", before), re.findall(r"\S+|\s+", after)
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes():
+        if op == "equal":
+            out.append(("".join(x[i1:i2]), None))
+            continue
+        if i2 > i1:
+            out.append(("".join(x[i1:i2]), "old"))
+        if j2 > j1:
+            out.append(("".join(y[j1:j2]), "new"))
+    return out
+
+
+def _text_changes(old_blocks, new_blocks):
+    """Líneas [(texto, tag)] de los párrafos que cambian, con su página."""
+    a, b, lines = _plain_lines(old_blocks), _plain_lines(new_blocks), []
+    ops = difflib.SequenceMatcher(None, [t for _, t in a], [t for _, t in b], autojunk=False).get_opcodes()
+    for op, i1, i2, j1, j2 in ops:
+        if op == "equal":
+            continue
+        olds, news = a[i1:i2], b[j1:j2]
+        for n in range(max(len(olds), len(news))):
+            o, w = olds[n] if n < len(olds) else None, news[n] if n < len(news) else None
+            lines.append([(f"pág. {(w or o)[0]} · ", "note")] + _word_diff(o[1] if o else "", w[1] if w else ""))
+    return lines
+
+
+def _compare(old, new, old_blocks=None, new_blocks=None):
+    """Qué cambia de la revisión old a new, como [(texto, tag)] para un TextBox: "head" en los apartados, "old" y
+    "new" en lo quitado y lo puesto. Sin los bloques de las dos (otro análisis), el texto no se compara."""
+    parts = [("Datos del libro y opciones", _data_changes(old, new)), ("Lista", _row_changes(old, new))]
+    if old_blocks is None or new_blocks is None:
+        parts.append(("Texto", [[("No se compara el texto: la versión es de otro análisis del PDF.", "note")]]))
+    else:
+        lines = _text_changes(old_blocks, new_blocks)
+        if len(lines) > COMPARE_LIMIT:
+            more = convert.counted(len(lines) - COMPARE_LIMIT, "párrafo cambiado más", "párrafos cambiados más")
+            lines = lines[:COMPARE_LIMIT] + [[(f"… y {more}", "note")]]
+        parts.append(("Texto", lines))
+    out = []
+    for title, lines in parts:
+        if lines:
+            out.append((f"{title}\n", "head"))
+            for line in lines:
+                out += line + [("\n", None)]
+            out.append(("\n", None))
+    return out or [("Sin cambios.", "note")]
+
+
+def _version_changes(prev, cur):
+    """Resumen de una versión respecto a la anterior: «2 datos · 3 filas · 1 edición de texto»."""
+    if prev is None:
+        return "Primera versión"
+    old, new = prev.get("edits", []), cur.get("edits", [])
+    common = next((n for n, (x, y) in enumerate(zip(old, new)) if x != y), min(len(old), len(new)))
+    counts = ((len(_data_changes(prev, cur)), "dato", "datos"), (len(_row_changes(prev, cur)), "fila", "filas"),
+              (len(new) - common, "edición de texto", "ediciones de texto"))
+    return " · ".join(convert.counted(n, one, many) for n, one, many in counts if n) or "Sin cambios"
+
+
+def _date_text(iso):
+    try:
+        return datetime.fromisoformat(iso).strftime("%d/%m/%Y %H:%M")
+    except (TypeError, ValueError):
+        return str(iso)
 
 
 def _inherited(pdf, series):
@@ -978,6 +1167,7 @@ class App:
         tools.addAction("Añadir página…", self.add_page)
         tools.addAction("Página de personajes…", self.character_page)
         tools.addAction("Cambiar ilustración…", self.change_image)
+        tools.addAction("Versiones…", self.versions)
         tools.addSeparator()
         tools.addAction("Panel de serie…", self.series_panel)
         tools.addAction("Volumen recopilatorio…", self.omnibus)
@@ -1732,6 +1922,8 @@ class App:
         """Pone en la ventana un libro analizado. twins, report y memos: sus ilustraciones repetidas, su informe
         de calidad y lo que el informe recuerda de cada párrafo, si ya se calcularon en el proceso de trabajo."""
         self.book = book
+        # El análisis tal cual, para restaurar versiones sin volver a analizar: las ediciones hacen listas nuevas
+        self.pristine = (list(book.blocks), list(book.candidates), book.cover)
         if report is not None:
             self.reports[self.report_key()] = report
         if memos:
@@ -1941,6 +2133,7 @@ class App:
         self.status.setText(f"Guardado: {Path(out).name}" + (" (con avisos)" if problems else ""))
         self.last_problems = list(problems)
         self.save_review()  # el panel de serie muestra los avisos del último EPUB
+        self.add_version(f"EPUB generado · {Path(out).name}", auto=True)  # lo publicado, para compararlo luego
         self.result_dialog(out, problems)
 
     def dialog(self, title, modal=False):
@@ -3104,13 +3297,18 @@ class App:
         return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title"), self.tree.set(item, "ok")]
                 for item in self.tree.get_children()}
 
-    def save_review(self):
-        if not (self.book and self.pdf):
-            return
+    def review_state(self):
+        """Lo que se guarda del trabajo en este libro: en la revisión y en cada versión."""
         state = {name: var.get() for name, var in self.fields().items()}
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
                      ignored=self.ignored)
+        return state
+
+    def save_review(self):
+        if not (self.book and self.pdf):
+            return
+        state = self.review_state()
         try:
             state["pdf"] = _fingerprint(self.pdf)
             _write_json(_review_path(self.pdf), state)
@@ -3143,9 +3341,11 @@ class App:
         if isinstance(state.get("words"), list):
             self.words = [str(w) for w in state["words"]]
 
-    def load_review(self):
-        """Recupera la revisión guardada de este PDF. False si no hay o si el PDF cambió desde entonces."""
-        state = _read_review(self.pdf, len(self.book.blocks)) if self.pdf else None
+    def load_review(self, state=None):
+        """Recupera la revisión guardada de este PDF, o la de una versión (state). False si no hay o si el PDF
+        cambió desde entonces."""
+        if state is None:
+            state = _read_review(self.pdf, len(self.book.blocks)) if self.pdf else None
         if not state:
             return False
         self.edits = _replay(self.book, state)
@@ -3167,6 +3367,215 @@ class App:
                 pass  # la imagen de portada ya no existe: se queda la del PDF
         self.update_quality()  # sin los avisos ignorados
         return True
+
+    def add_version(self, name, auto=False):
+        """Guarda lo de ahora como versión. Una automática igual que la última (sin contar los avisos) no se repite.
+        True si lo de ahora queda guardado en las versiones; False si no se pudo escribir, con aviso."""
+        if not (self.book and self.pdf):
+            return False
+        try:
+            state = json.loads(json.dumps(self.review_state() | {"pdf": _fingerprint(self.pdf)}))
+            versions, backup = _load_versions(self.pdf)
+            if backup:
+                self.status.setText(f"El archivo de versiones estaba dañado: copia en {backup.name}")
+            same = [{k: v for k, v in s.items() if k not in VERSION_NOISE} for s in (versions[-1]["state"], state)] \
+                if versions else None
+            if auto and same and same[0] == same[1]:
+                return True
+            versions.append({"name": name, "date": datetime.now().isoformat(timespec="seconds"), "auto": auto,
+                             "state": state})
+            _write_versions(self.pdf, versions)
+        except OSError as e:
+            self.status.setText(f"No se pudo guardar la versión: {e.strerror or e}")
+            return False
+        return True
+
+    def restorable(self, state):
+        """Una versión vale para este libro si es del mismo análisis: mismos bloques y mismo tamaño de PDF (la
+        fecha no: OneDrive la cambia al sincronizar)."""
+        try:
+            return (state.get("blocks") == self.analyzed and isinstance(state.get("rows"), dict)
+                    and state["pdf"][0] == _fingerprint(self.pdf)[0])
+        except (OSError, KeyError, TypeError, IndexError):
+            return False
+
+    def version_blocks(self, state):
+        """Bloques del libro con las ediciones de una versión, sobre el análisis; None si es de otro análisis."""
+        if not self.restorable(state):
+            return None
+        book = dataclasses.replace(self.book, blocks=list(self.pristine[0]), candidates=list(self.pristine[1]))
+        _replay(book, state)
+        return book.blocks
+
+    def compare(self, old, new=None):
+        """Qué cambia de la versión old a la new (None: lo de ahora), como [(texto, tag)] (ver _compare)."""
+        if new is None:
+            new_state, new_blocks = self.review_state(), self.book.blocks
+        else:
+            new_state, new_blocks = new, self.version_blocks(new)
+        return _compare(old, new_state, self.version_blocks(old), new_blocks)
+
+    def restore_version(self, n):
+        """Vuelve a la versión n (en el orden de _load_versions) sin borrar ninguna: antes guarda lo de ahora."""
+        try:
+            version = _load_versions(self.pdf)[0][n]
+        except (OSError, IndexError) as e:
+            messagebox.showerror("Versiones", f"No se pudo leer la versión: {getattr(e, 'strerror', None) or e}")
+            return False
+        if not self.restorable(version["state"]):
+            messagebox.showerror("Versiones", "Esta versión es de otro análisis del PDF (cambió el PDF o la forma de "
+                                              "leerlo): no se puede restaurar, solo comparar.")
+            return False
+        # Sin el nombre de la restaurada: restaurar una de estas daría «Antes de restaurar «Antes de restaurar…»»
+        if not self.add_version("Antes de restaurar otra versión", auto=True):
+            return False  # sin esa copia, lo de ahora se perdería
+        for win in (getattr(self, name, None) for name in ("spelling_window", "page_window", "quality_window")):
+            if win and shiboken6.isValid(win):  # tienen índices de bloques del libro de antes
+                win.close()
+        self.book.blocks, self.book.candidates, self.book.cover = list(self.pristine[0]), list(self.pristine[1]), \
+            self.pristine[2]
+        self.cover_choice = None  # la versión pone la suya, si eligió otra
+        self.cover_label.setText(f"Portada: la del {'EPUB' if self.source_name() == 'Original' else 'PDF'}")
+        self.load_review(version["state"])
+        self.history = []  # Ctrl+Z volvería a bloques que ya no están; lo de antes quedó como versión
+        self.update_header()
+        self.update_cover()
+        self.update_preview()
+        self.save_review()
+        self.status.setText(f"Versión «{version['name']}» restaurada · lo de antes quedó en Versiones")
+        return True
+
+    def versions(self):
+        """Versiones del libro, como los commits de git: guardar, comparar (con lo de ahora, o dos entre sí),
+        restaurar, renombrar y borrar."""
+        if not (self.book and self.pdf):
+            return
+        win, column = self.dialog("Versiones")
+        win.resize(940, 620)
+        name = QLineEdit()
+        name.setPlaceholderText("Nombre de la versión, p. ej. «Antes de corregir»")
+        save_btn = _button("Guardar versión", lambda: save(), "primary")
+        column.addLayout(_row(QLabel("Nombre:"), name, save_btn))
+        panes = QSplitter(Qt.Orientation.Vertical)
+        column.addWidget(panes, 1)
+        table = qtk.RowList(("name", "date", "changes"), {"name": "Versión", "date": "Fecha", "changes": "Cambios"},
+                            {"date": 130, "changes": 300}, stretch="name")
+        table.setSelectionMode(table.SelectionMode.ExtendedSelection)  # dos con Ctrl+clic: se comparan entre sí
+        panes.addWidget(table)
+        bottom = QWidget()
+        lower = QVBoxLayout(bottom)
+        lower.setContentsMargins(0, 6, 0, 0)
+        heading = _label("", "muted")
+        heading.setWordWrap(True)
+        lower.addWidget(heading)
+        box = qtk.TextBox()
+        box.setReadOnly(True)
+        for tag, look in theme.diff_tags(self.dark).items():
+            box.tag_configure(tag, **look)
+        lower.addWidget(box, 1)
+        panes.addWidget(bottom)
+        panes.setSizes([220, 400])
+        restore_btn = _button("Restaurar", lambda: restore())
+        rename_btn = _button("Renombrar", lambda: rename())
+        delete_btn = _button("Borrar", lambda: delete())
+        column.addLayout(_row(restore_btn, rename_btn, delete_btn, 1, _button("Cerrar", win.close)))
+        state = {"versions": []}
+
+        def fill(select=None):
+            try:
+                versions, backup = _load_versions(self.pdf)
+            except OSError as e:
+                versions, backup = [], None
+                messagebox.showerror("Versiones", f"No se pudo leer el archivo de versiones: {e.strerror or e}", parent=win)
+            if backup:
+                messagebox.showwarning("Versiones", f"El archivo de versiones estaba dañado. Se apartó como {backup.name} "
+                                                    "y se empieza uno nuevo.", parent=win)
+            state["versions"] = versions
+            table.delete(*table.get_children())
+            for n in reversed(range(len(versions))):  # la más nueva arriba, como git log
+                v = versions[n]
+                table.insert("", "end", iid=str(n), values=(
+                    v["name"] + (" (automática)" if v.get("auto") else ""), _date_text(v.get("date")),
+                    _version_changes(versions[n - 1]["state"] if n else None, v["state"])))
+            win.setWindowTitle(f"Versiones · {convert.counted(len(versions), 'versión', 'versiones')}")
+            if versions:
+                table.selection_set(str(len(versions) - 1 if select is None else min(select, len(versions) - 1)))
+            pick()
+
+        def chosen():
+            return sorted(int(i) for i in table.selection())
+
+        def pick():
+            picked, versions = chosen(), state["versions"]
+            restore_btn.setEnabled(len(picked) == 1)
+            rename_btn.setEnabled(len(picked) == 1)
+            delete_btn.setEnabled(bool(picked))
+            for tag in ("old", "new", "note", "head"):
+                box.tag_remove(tag, "1.0", "end")
+            box.delete("1.0", "end")
+            if not picked:
+                heading.setText("Elige una versión para ver qué cambió desde entonces, o dos (Ctrl+clic) para "
+                                "compararlas." if versions else
+                                "Sin versiones todavía. «Guardar versión» guarda todo lo revisado hasta ahora; cada "
+                                "EPUB que generas también se guarda como versión, automáticamente.")
+                return
+            old = versions[picked[0]]
+            if len(picked) == 1:
+                heading.setText(f"De «{old['name']}» a lo de ahora")
+                name.setText(old["name"])
+                segments = self.compare(old["state"])
+            else:
+                new = versions[picked[-1]]
+                heading.setText(f"De «{old['name']}» a «{new['name']}»")
+                segments = self.compare(old["state"], new["state"])
+            box.insert("1.0", "".join(text for text, _ in segments))
+            at = 0
+            for text, tag in segments:
+                if tag:
+                    box.tag_add(tag, f"1.0+{at}c", f"1.0+{at + len(text)}c")
+                at += len(text)
+
+        def save():
+            if self.add_version(name.text().strip() or f"Versión del {datetime.now():%d/%m/%Y %H:%M}"):
+                self.status.setText("Versión guardada")
+            name.clear()
+            fill()
+
+        def change(edit):
+            """Cambia la lista de versiones con edit(versions) y la vuelve a escribir."""
+            versions = state["versions"]
+            edit(versions)
+            try:
+                _write_versions(self.pdf, versions)
+            except OSError as e:
+                messagebox.showerror("Versiones", f"No se pudieron guardar las versiones: {e.strerror or e}", parent=win)
+
+        def rename():
+            picked = chosen()
+            if name.text().strip():
+                change(lambda versions: versions[picked[0]].update(name=name.text().strip()))
+                fill(picked[0])
+
+        def delete():
+            picked = chosen()
+            names = ", ".join(f"«{state['versions'][n]['name']}»" for n in picked)
+            if messagebox.askyesno("Borrar versiones", f"¿Borrar {names}? No se puede deshacer.", parent=win):
+                change(lambda versions: [versions.pop(n) for n in reversed(picked)])
+                fill(picked[0] - 1 if picked[0] else 0)
+
+        def restore():
+            picked = chosen()
+            if self.restore_version(picked[0]):
+                fill()
+
+        table.selected.connect(pick)
+        name.returnPressed.connect(save)
+        fill()
+        win.show()
+        name.setFocus()
+        win.parts = {"name": name, "save": save_btn, "table": table, "box": box, "heading": heading,
+                     "restore": restore_btn, "rename": rename_btn, "delete": delete_btn, "fill": fill}
+        self.versions_window = win
 
     def search_book(self):
         term = self.find_entry.text().strip()
