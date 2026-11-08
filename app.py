@@ -3258,6 +3258,7 @@ class App:
         win.resize(1060, 600)
         levels = theme.level_colors(self.dark)
         summary = _label("", "title")
+        summary.setWordWrap(True)  # nota, recuentos e ignorados: en 1093 px (125 %) baja a dos líneas
         show = qtk.Var("Todos")
         shown = _combo(show, ["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS] + ["Ignorados"],
                        12, changed=lambda: fill())
