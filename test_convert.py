@@ -2760,6 +2760,51 @@ def test_text_editor_marks_issues_and_changes():
     assert restored == "Otro párrafo normal.", restored
 
 
+def test_text_editor_underlines_issues_like_word():
+    """Como Word: ondulado solo bajo el trozo del problema, del color de su gravedad (azul el Menor), sin fondo
+    que parezca una selección; clic izquierdo sobre él abre su menú con «Arreglar» e «Ignorar este aviso»; un
+    párrafo cambiado lleva una barrita en el margen."""
+    import app
+    import theme
+    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtGui import QMouseEvent, QTextCharFormat
+    from PySide6.QtWidgets import QApplication
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"),
+                                      B("p", 1, "Se dio cuenta que era muy tarde para todo aquello."),
+                                      B("p", 1, "Otro párrafo sin nada raro que avisar aquí.")], [0])
+    editor.win.show()
+    sheet = editor.sheet
+    marks = [(s.cursor.selectedText(), s.format.underlineStyle(), s.format.underlineColor().name(),
+              s.format.background().style()) for s in sheet.extraSelections()]
+    cursor = sheet.document().find("cuenta")
+    pos = sheet.cursorRect(cursor).center()
+    for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+        QApplication.sendEvent(sheet.viewport(), QMouseEvent(kind, pos, sheet.viewport().mapToGlobal(pos),
+                                                             Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                                                             Qt.KeyboardModifier.NoModifier))
+    for _ in range(5):
+        root.update()
+        QApplication.processEvents()
+    menu = editor.context
+    labels = [a.text() for a in menu.actions() if a.text()]
+    ignore = next(a for a in menu.actions() if a.text() == "Ignorar este aviso")
+    menu.close()
+    ignore.trigger()
+    left = [s.cursor.selectedText() for s in sheet.extraSelections()]
+    ignored = list(window.ignored)
+    sheet.document().find("Otro").insertText("Un")
+    editor.refresh_marks()
+    bars = [b.text() for b in sheet.bars]
+    editor.win.done(0)
+    window.close()
+    blue = theme.mark_colors(False)["Menor"]
+    assert ("cuenta que", QTextCharFormat.UnderlineStyle.WaveUnderline, blue, Qt.BrushStyle.NoBrush) in marks, marks
+    assert labels[0].startswith("Arreglar: «") and "de que" in labels[0] and "Ignorar este aviso" in labels, labels
+    assert "cuenta que" not in left and len(ignored) == 1, (left, ignored)
+    assert bars == ["Un párrafo sin nada raro que avisar aquí."], bars
+
+
 def test_text_editor_escape_closes_bars_not_the_editor():
     """Esc en el campo de buscar, reemplazar, enlace o dividir cierra su barra: llegaba al diálogo, que lo
     tomaba como cancelar el editor y preguntaba «¿Descartar cambios?»."""
@@ -3607,6 +3652,26 @@ def test_quality_report_unifies_honorific_variants():
         "Hola, Subaru-kun.", "<i>Subaru-kun</i> dijo.", "Subaru-kun es raro.", "Senpai, ¿qué haces?",
         "Rem-sama llegó.", "Gracias, Rem-sama."], \
         [b.html for b in book.blocks]
+
+
+def test_quality_report_spans_point_at_the_problem():
+    """Cada aviso dice dónde está el problema en el párrafo tal como lo muestra el editor: el editor lo subraya
+    ahí, como Word, y no el párrafo entero. Un «de» que falta subraya las palabras de alrededor."""
+    texts = ["Se dio cuenta que <i>era</i> tarde.", "Pasé seis días. para combinar en uno.",
+             "y sigue la frase partida.", "Einherjar Project", "Einherjar Project", "Einherjar Project",
+             "Habló con Subaru kun ayer.", "Subaru-kun llegó.", "Subaru-kun salió."]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    spans = {}
+    for issue in convert.quality_report(book):
+        if issue.block is not None and issue.span:
+            shown = convert.TAGS.sub("", convert._line(blocks[issue.block], issue.block))
+            spans.setdefault(issue.kind, shown[slice(*issue.span)])
+    assert spans["queismo"] == "cuenta que", spans
+    assert spans["capital"] == "días. para", spans
+    assert spans["lower"] == "y", spans
+    assert spans["repeated"] == "Einherjar Project", spans
+    assert spans["honorific"] == "Subaru kun", spans  # cambia el espacio: se subrayan sus palabras
 
 
 def test_quality_report_fixes_grammar_and_typography():

@@ -31,12 +31,12 @@ import segno
 import shiboken6
 from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPixmap,
-                           QShortcut, QTextCursor, QTextFormat)
+                           QShortcut, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit,
                                QProgressBar,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QStackedWidget, QTabBar,
-                               QLayout, QTextEdit, QToolButton, QVBoxLayout, QWidget)
+                               QLayout, QTextEdit, QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
 import convert
 import editor
@@ -3321,6 +3321,7 @@ class TextEditor:
         sheet.command.connect(self.on_command)
         sheet.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         sheet.customContextMenuRequested.connect(self.context_menu)
+        editor.watch(sheet.viewport(), self.on_sheet_click)
         self.spell = _start_spell_process()
         if self.spell:  # todo el libro de una vez; luego, lo que se escriba
             blocks = [b for b in app.book.blocks if b.kind in ("p", "heading")]
@@ -3732,44 +3733,49 @@ class TextEditor:
         """Bloques del libro cargados en la hoja de ahora, en orden."""
         return [k for k, _ in self.pages[self.current]["lines"]] if self.current in self.pages else []
 
-    def block_issue(self, block):
-        """Primer aviso del párrafo si sigue como al abrir el editor (si se cambió, el aviso ya no vale)."""
+    def block_issues(self, block):
+        """Avisos del párrafo si sigue como al abrir el editor (si se cambió, ya no valen)."""
         k = block.blockFormat().property(editor.SOURCE)
         if k is None or k not in self.issues or editor.objects_of(block):
-            return None
+            return []
         original = block.blockFormat().property(editor.ORIGINAL)
-        return self.issues[k][0] if original is not None and editor.block_lines(block) == [original] else None
+        return list(self.issues[k]) if original is not None and editor.block_lines(block) == [original] else []
+
+    def block_issue(self, block):
+        issues = self.block_issues(block)
+        return issues[0] if issues else None
+
+    @staticmethod
+    def issue_range(block, issue):
+        """(inicio, fin) del problema dentro del párrafo de la hoja; sin posición, todo el párrafo."""
+        size = max(block.length() - 1, 0)
+        start, end = issue.span or (0, size)
+        start, end = min(start, size), min(end, size)
+        return (start, end) if end > start else (0, size)
 
     def refresh_marks(self):
-        """Franjas de la hoja: azul en lo cambiado y el color de su gravedad en los avisos. Solo se pintan
-        (extraSelections): no se guardan ni entran en deshacer."""
+        """Marcas de la hoja, como Word: ondulado bajo el trozo exacto de cada aviso, del color de su gravedad, y
+        barrita en el margen de los párrafos cambiados. Solo se pintan: no se guardan ni entran en deshacer."""
         if not shiboken6.isValid(self.sheet) or self.current not in self.pages:
             return
-        changed_color = QColor(theme.editor_tags(self.app.dark)["changed"]["background"])
-        levels = theme.level_colors(self.app.dark)
+        colors = theme.mark_colors(self.app.dark)
         selections, changed, issues = [], self.sheet.changed_blocks(), 0
-
-        def stripe(block, color):
-            selection = QTextEdit.ExtraSelection()
-            selection.format.setBackground(color)
-            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
-            cursor = QTextCursor(block)
-            cursor.setPosition(block.position() + max(block.length() - 1, 0), QTextCursor.MoveMode.KeepAnchor)
-            selection.cursor = cursor
-            selections.append(selection)
-
-        for block in changed:
-            stripe(block, changed_color)
         block = self.sheet.document().firstBlock()
         while block.isValid():
-            issue = self.block_issue(block)
-            if issue:
-                color = QColor(levels[issue.level])
-                color.setAlpha(45)
-                stripe(block, color)
+            for issue in self.block_issues(block):
+                start, end = self.issue_range(block, issue)
+                selection = QTextEdit.ExtraSelection()
+                selection.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+                selection.format.setUnderlineColor(QColor(colors[issue.level]))
+                cursor = QTextCursor(block)
+                cursor.setPosition(block.position() + start)
+                cursor.setPosition(block.position() + end, QTextCursor.MoveMode.KeepAnchor)
+                selection.cursor = cursor
+                selections.append(selection)
                 issues += 1
             block = block.next()
         self.sheet.setExtraSelections(selections)
+        self.sheet.set_bars(changed, colors["changed"])
         self.counts = len(changed), issues
         self.show_counts()
 
@@ -3836,21 +3842,48 @@ class TextEditor:
         self.goto_block(block)
         self.hide_bars()
         self.issue_title.setText(f"● {issue.level} · {issue.title}")
-        self.issue_title.setStyleSheet(f"color: {theme.level_colors(self.app.dark)[issue.level]};")
+        self.issue_title.setStyleSheet(f"color: {theme.mark_colors(self.app.dark)[issue.level]};")
         self.issue_text.setText(f"{issue.problem}\nSolución: {issue.solution}")
         self.issue_fix.setEnabled(issue.edit is not None)
         self.issue_frame.show()
         self.sheet.setFocus()
 
-    def fix_issue(self):
-        """«Arreglar»: el cambio del aviso, en la hoja (un paso de deshacer); luego el siguiente aviso."""
-        issue = self.shown_issue
+    def fix_issue(self, issue=None, go_next=True):
+        """«Arreglar»: el cambio del aviso, en la hoja (un paso de deshacer); desde la barra, luego el siguiente."""
+        issue = issue or self.shown_issue
         if not issue or not issue.edit or not self.sheet.replace_sources(*issue.edit):
             QApplication.beep()
             return
         self.refresh_marks()
         self.tell("Aviso arreglado · Ctrl+Z para deshacer")
-        self.next_issue()
+        if go_next:
+            self.next_issue()
+
+    @staticmethod
+    def fix_preview(issue):
+        """El texto con el arreglo, alrededor de lo que cambia: «…estoy seguro de que se…»."""
+        after = re.sub(r"\s+", " ", convert.TAGS.sub("", issue.edit[2]))
+        start = issue.span[0] if issue.span else 0
+        left = max(0, after.rfind(" ", 0, max(start - 12, 0)) + 1)
+        right = after.find(" ", min(start + 36, len(after)))
+        right = len(after) if right < 0 else right
+        return ("…" if left else "") + after[left:right].strip() + ("…" if right < len(after) else "")
+
+    def ignore_issue(self, issue):
+        """«Ignorar este aviso»: como en el informe de calidad, se recuerda en la revisión."""
+        key = _issue_key(issue)
+        if key not in self.app.ignored:
+            self.app.ignored.append(key)
+            self.app.update_quality()
+        left = [i for i in self.issues.get(issue.block, []) if i is not issue]
+        if left:
+            self.issues[issue.block] = left
+        else:
+            self.issues.pop(issue.block, None)
+        if self.shown_issue is issue:
+            self.issue_frame.hide()
+        self.refresh_marks()
+        self.tell("Aviso ignorado: no vuelve a salir en este libro")
 
     # Símbolos, revisado, cifras
     def fix_typography(self):
@@ -4104,14 +4137,39 @@ class TextEditor:
         self.ignore_word(word)
         self.tell(f"«{word}» añadida al diccionario de la serie")
 
+    def on_sheet_click(self, event):
+        """Clic izquierdo sobre algo subrayado (falta o aviso): su menú, como las sugerencias de Word. Tras
+        soltar, para que el cursor ya esté ahí; no al elegir texto arrastrando."""
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            qtk.after(0, lambda: shiboken6.isValid(self.sheet) and self.click_menu(pos))
+        return False
+
+    def click_menu(self, pos):
+        if self.sheet.textCursor().hasSelection():
+            return
+        menu = self.mark_menu(pos, editing=False)
+        if menu.actions():
+            self.context = menu
+            menu.popup(self.sheet.viewport().mapToGlobal(pos))
+
     def context_menu(self, pos):
-        """Clic derecho en la hoja, en español: sugerencias de la palabra subrayada, ignorarla o añadirla al
-        diccionario, el aviso del párrafo, volver al original y editar."""
-        sheet, doc = self.sheet, self.sheet.document()
+        """Clic derecho en la hoja, en español: lo del clic izquierdo (sugerencias, avisos), volver al
+        original y editar."""
+        sheet = self.sheet
         here = sheet.cursorForPosition(pos)
         current = sheet.textCursor()
         if not (current.hasSelection() and current.selectionStart() <= here.position() <= current.selectionEnd()):
             sheet.setTextCursor(here)  # como Word: el clic fuera de la selección pone ahí el cursor
+        self.context = self.mark_menu(pos, editing=True)
+        self.context.popup(sheet.viewport().mapToGlobal(pos))
+
+    def mark_menu(self, pos, editing):
+        """Menú de lo que hay en pos: sugerencias de la palabra subrayada (o ignorarla, añadirla al diccionario),
+        cada aviso subrayado ahí con su explicación, arreglo e ignorar; con editing, también volver al original
+        y deshacer, cortar, copiar, pegar."""
+        sheet, doc = self.sheet, self.sheet.document()
+        here = sheet.cursorForPosition(pos)
         word_cursor = QTextCursor(here)
         word_cursor.select(QTextCursor.SelectionType.WordUnderCursor)
         word = word_cursor.selectedText()
@@ -4134,10 +4192,35 @@ class TextEditor:
             menu.addAction("Añadir al diccionario de la serie", lambda: self.add_word(word))
             menu.addSeparator()
         block = here.block()
-        if self.block_issue(block):
-            menu.addAction(f"Ver aviso: {self.block_issue(block).title}", lambda: self.show_issue(block))
-        if sheet.can_restore(block, self.loaded()):
+        offset = here.position() - block.position()
+        colors = theme.mark_colors(self.app.dark)
+        for issue in self.block_issues(block):
+            start, end = self.issue_range(block, issue)
+            if not editing and not start <= offset <= end:
+                continue
+            title = QLabel(f"● {issue.level} · {issue.title}")
+            title.setStyleSheet(f"color: {colors[issue.level]}; font-weight: bold; padding: 6px 12px 2px 12px;")
+            explain = QLabel(issue.problem)
+            explain.setWordWrap(True)
+            explain.setMaximumWidth(380)
+            explain.setStyleSheet("padding: 0 12px 6px 12px;")
+            for label in (title, explain):
+                action = QWidgetAction(menu)
+                action.setDefaultWidget(label)
+                menu.addAction(action)
+            if issue.edit:
+                change = self.fix_preview(issue)
+                menu.addAction(f"Arreglar: «{change}»" if issue.edit[2] else "Arreglar: quitar este párrafo",
+                               lambda i=issue: self.fix_issue(i, go_next=False))
+            menu.addAction("Ignorar este aviso", lambda i=issue: self.ignore_issue(i))
+            menu.addAction("Aviso siguiente   (F8)", self.next_issue)
+            menu.addSeparator()
+        if editing and sheet.can_restore(block, self.loaded()):
             menu.addAction("Volver al original", lambda: (sheet.setTextCursor(QTextCursor(block)), self.restore_current()))
+        if not editing:
+            while menu.actions() and menu.actions()[-1].isSeparator():
+                menu.removeAction(menu.actions()[-1])
+            return menu
         if menu.actions() and not menu.actions()[-1].isSeparator():
             menu.addSeparator()
         selection = sheet.textCursor().hasSelection()
@@ -4148,8 +4231,7 @@ class TextEditor:
                 menu.addSeparator()
             else:
                 menu.addAction(item[0], item[1]).setEnabled(item[2])
-        self.context = menu
-        menu.popup(sheet.viewport().mapToGlobal(pos))
+        return menu
 
     def replace_word(self, cursor, new):
         cursor.beginEditBlock()
