@@ -904,18 +904,69 @@ def _fold(text):
     return re.sub(r"[\s\-]", "", plain.lower())
 
 
+@_memo  # por párrafo: el informe con glosario lo pide tras cada edición, y el libro entero tardaba 0,3 s
+def _block_names(block_html):
+    """_name_forms de un párrafo."""
+    text = html.unescape(TAGS.sub("", block_html))
+    tokens = re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", text)
+    common = frozenset(_fold(t) for t in tokens if t[:1].islower())
+    proper = frozenset(_fold(re.split(r"[- ]", m.group(1))[0])
+                       for m in re.finditer(r"(?<=[\w,;]) ([^\W\d_][\w-]*)", text) if m.group(1)[:1].isupper())
+    forms = collections.Counter(t for t in tokens if t[:1].isupper() and not (len(t) > 1 and t.isupper()))
+    forms.update(f"{a} {b}" for a, b in zip(tokens, tokens[1:]) if a[:1].isupper() and b.lower() in HONORIFICS)
+    return forms, common, proper
+
+
+def _name_forms(book):
+    """(formas con mayúscula y sus veces, claves _fold de las palabras que salen en minúscula, claves de las que
+    van con mayúscula a mitad de frase, como los nombres propios)."""
+    forms, common, proper = collections.Counter(), set(), set()
+    for b in book.blocks:
+        if b.kind in ("p", "heading"):
+            f, c, p = _block_names(b.html)
+            forms.update(f)
+            common |= c
+            proper |= p
+    return forms, common, proper
+
+
+def proper_names(book):
+    """Los nombres propios del libro y sus veces: {forma: veces}. Palabras con mayúscula que nunca salen en
+    minúscula y que van con mayúscula a mitad de frase; sin las formas con el honorífico aparte."""
+    forms, common, proper = _name_forms(book)
+    return {f: n for f, n in forms.items() if " " not in f and len(_fold(f)) >= 3 and _fold(f) not in common
+            and _fold(f.split("-")[0]) in proper}
+
+
+def _one_edit(a, b):
+    """a y b se diferencian en una letra: cambiada, de más o de menos."""
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    a, b = sorted((a, b), key=len)
+    return len(b) - len(a) == 1 and any(b[:i] + b[i + 1:] == a for i in range(len(b)))
+
+
+def glossary_fixes(book, glossary):
+    """{forma del libro: término del glosario} de los nombres que no están en el glosario pero son uno de sus
+    términos con otras tildes o guiones, o con una letra distinta si el término tiene 5 o más ("Emilía",
+    "Reinhart"). Con menos, una letra separa nombres distintos ("Rem" / "Ram")."""
+    terms = {_fold(t): t for t in glossary}
+    known = set(glossary)
+    fixes = {}
+    for form in proper_names(book):
+        key = _fold(form)
+        term = terms.get(key) or next((t for k, t in terms.items() if len(k) >= 5 and _one_edit(key, k)), None)
+        if term and form not in known:
+            fixes[form] = term
+    return fixes
+
+
 def name_variants(book):
     """Nombres escritos de varias formas ("Greg-sama" / "Greg sama", "Tino" / "Tiño"):
     [[forma más usada, otras…]], los más frecuentes primero. Solo palabras con mayúscula que nunca
     salen en minúscula ("Él" / "El", "Tú" / "Tu") y que alguna vez van con mayúscula en mitad de una
     frase, como los nombres propios ("Utilizó" / "Utilizo" al empezar frase, "Ja-ja" / "Jaja", no)."""
-    text = " ".join(html.unescape(TAGS.sub("", b.html)) for b in book.blocks if b.kind in ("p", "heading"))
-    tokens = re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", text)
-    common = {_fold(t) for t in tokens if t[:1].islower()}
-    proper = {_fold(re.split(r"[- ]", m.group(1))[0]) for m in re.finditer(r"(?<=[\w,;]) ([^\W\d_][\w-]*)", text)
-              if m.group(1)[:1].isupper()}
-    forms = collections.Counter(t for t in tokens if t[:1].isupper() and not (len(t) > 1 and t.isupper()))
-    forms.update(f"{a} {b}" for a, b in zip(tokens, tokens[1:]) if a[:1].isupper() and b.lower() in HONORIFICS)
+    forms, common, proper = _name_forms(book)
     groups = collections.defaultdict(dict)
     for form, n in forms.items():
         key = _fold(form)
@@ -1476,6 +1527,15 @@ PLACES = set("delante detrás encima debajo cerca alrededor enfrente dentro lejo
 NOT_INFINITIVE = "lugar|mar|hogar|altar|azar|bar|collar|par|mujer|ayer|placer|poder|deber|taller|alquiler"
 ABBREVIATIONS = set("sr sra srta dr dra ud uds vd etc aprox pág págs núm vol cap ej av lic ing prof vs st mr mrs "
                     "ms art fig tel min máx mín seg atte".split())  # tras ellas el punto no acaba la frase
+# «tomar lugar», «hacer sentido» -> «tener lugar», «tener sentido», en el mismo tiempo
+TENER = {"toma": "tiene", "tomó": "tuvo", "tomaba": "tenía", "tomará": "tendrá", "tomaría": "tendría",
+         "tomado": "tenido", "tomar": "tener", "toman": "tienen", "tomaron": "tuvieron", "tomaban": "tenían",
+         "hace": "tiene", "hizo": "tuvo", "hacía": "tenía", "hará": "tendrá", "haría": "tendría", "hacen": "tienen",
+         "hacer": "tener"}
+DAYS_MONTHS = ("Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Enero|Febrero|Marzo|Mayo|Junio|Julio|Agosto|"
+               "Septiembre|Setiembre|Octubre|Noviembre|Diciembre")  # Abril y Domingo también son nombres
+# «el Señor Demonio», «el Señor Oscuro»: títulos de fantasía que hacen de nombre, con mayúscula
+TITLE_NOUNS = "Demonio|Demonios|Oscuro|Supremo|Dragón|Dragones|Feudal|Celestial|Espada|Tiempo|Destino|Lich"
 CAPITAL = re.compile(r"([^\W\d_]{2,})\.\s+[a-záéíóúñ]")  # "la mesa. luego"; los puntos suspensivos no cuentan
 
 
@@ -1642,15 +1702,32 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
      "las palabras se leen pegadas.", "Ponerlo."),
     ("punct", "Signos de puntuación repetidos", _subs(
         (r",{2,}", ","), (r"[,;]\s*\.(?!\.)", "."), (r"([?!])\.(?!\.)", r"\1"), (r"…\.(?!\.)", "…"),
-        (r"(?<![.…])(?<![.…] )\.\s+\.(?!\s*[.…])", ".", (". .", ".  ."))),  # ". ." suelto; ". . ." son puntos suspensivos
+        (r"(?<![.…])(?<![.…] )\.\s+\.(?!\s*[.…])", ".", (". .", ".  .")),  # ". ." suelto; ". . ." son puntos suspensivos
+        (r"([!?¡¿])\1{3,}", r"\1\1\1", ("!!!!", "????", "¡¡¡¡", "¿¿¿¿"))),
      "Dos signos donde va uno: «,,», «?.», «….», «. .». Tras los puntos suspensivos o el cierre de pregunta "
-     "o exclamación no va punto.", "Corregirlo."),
+     "o exclamación no va punto, y más de tres «!» o «?» seguidos sobran.", "Corregirlo."),
     ("dialog", "Puntuación del inciso del narrador", _subs(
         # Mitsuha: «—Sí, — respondió el soldado, —un buque…» -> «—Sí —respondió el soldado—, un buque…»
         (r",\s*[—―─–]\s*([a-záéíóúñ][^—―─–.!?]*?),\s*[—―─–]\s*", r" —\1—, ", DASHES),
         (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", _inciso, DASHES)),
      "En un diálogo, el punto o la coma no van antes del inciso del narrador sino tras su raya de cierre: "
      "«—Sí —respondió—, vamos.»", "Corregirlo."),
+    ("calque", "Calco del inglés", _subs(
+        (r"\b([Ee])n base a\b", lambda m: ("Con" if m[1] == "E" else "con") + " base en", ("base a",)),
+        (r"\b((?i:tom(?:a|ó|aba|ará|aría|ado|ar|an|aron|aban)))(?= lugar\b)",
+         lambda m: _case(TENER[m[1].lower()], m[1]), ("lugar",)),
+        (r"\b((?i:hace|hizo|hacía|hará|haría|hacen|hacer))(?= sentido\b)",
+         lambda m: _case(TENER[m[1].lower()], m[1]), ("sentido",)),
+        (rf"\b([Ee])n orden (?:de|a) (?=(?!(?:{NOT_INFINITIVE})\b)[a-záéíóúñ]+(?:ar|er|ir)\b)",
+         lambda m: ("Para" if m[1] == "E" else "para") + " ", ("orden",))),
+     "Traducción literal del inglés: «based on» es «con base en», «take place» es «tener lugar», «make sense» es "
+     "«tener sentido», «in order to» es «para».", "Corregirlo."),
+    ("uppercase", "Mayúscula innecesaria", _subs(
+        (rf"(?<=[a-záéíóúñ,] )({DAYS_MONTHS})\b", lambda m: m[1].lower()),
+        (rf"(?<=[a-záéíóúñ,] )(Señor|Señora|Señorita|Don|Doña)(?= (?!(?:{TITLE_NOUNS})\b)[A-ZÁÉÍÓÚÑ][a-záéíóúñ])",
+         lambda m: m[1].lower())),
+     "En español los días, los meses y los tratamientos («señor», «don») van en minúscula a mitad de frase.",
+     "Corregirlo."),
     ("closing", "Falta el signo de cierre", _subs(
         # «80.000», «G.I.», no; ni con una comilla o un paréntesis antes del punto: el signo falta dentro
         # («¡Esa sí que es una gran noticia,” celebró…», Mitsuha) y no sabemos dónde
@@ -1686,7 +1763,58 @@ def _facts(text):
             capital, bool(re.search(r"[^\W\d_]$", text)))
 
 
-REPORT_MEMOS = (_unhtml, _letters, _honorific_key, _honorific_forms, _facts, _typos)
+PAIRS = (("«", "»"), ("“", "”"), ("(", ")"))
+# Emoticonos «:)» y enumeraciones «a)»: un «)» que no cierra nada
+LONE_CLOSE = re.compile(r"[:;]-?\)|(?:^|(?<=\s))[a-z0-9]\)")
+UNPAIRED_STYLE = 20  # más avisos de un mismo signo en un libro: es su estilo, no se avisan
+QUOTE_LEAD = re.compile(r"\s*(?:[—―─–]\s*)?[«»“”\"]")  # párrafo que empieza con comillas: sigue una cita
+
+
+@_memo
+def _unpaired(text):
+    """El primer signo sin pareja del párrafo: (posición, signo de apertura, True si falta el cierre), o None."""
+    clean = LONE_CLOSE.sub(lambda m: " " * len(m[0]), text)
+    for a, b in PAIRS:
+        depth, first = 0, None
+        for i, c in enumerate(clean):
+            if a == "“" and c == '"':  # «“Hola"» (Maryoku, Nageki): la recta cierra la abierta o abre otra
+                c = b if depth else a
+            if c == a:
+                first = first if depth else i
+                depth += 1
+            elif c == b:
+                if not depth:
+                    return i, a, False
+                depth -= 1
+        if depth:
+            return first, a, True
+    return None
+
+
+# Palabras de 5 letras o más tan comunes que repetirlas no se nota
+ECHO_SKIP = set("cuando porque entonces también estaba estaban había habían tenía tenían puede pueden quiero quería "
+                "sobre desde hasta donde mientras siempre todavía mucho mucha muchos muchas nuestro nuestra algún "
+                "alguna alguien nadie nada cosas parece podía después antes ahora aquí estoy estás están somos "
+                "fueron siendo hacia contra otros otras tanto todos todas porqué quizás realmente simplemente".split())
+
+
+@_memo
+def _echo(text):
+    """(inicio, fin) de la segunda de dos palabras iguales a menos de 12 palabras, o None. Solo en minúscula (los
+    nombres se repiten a propósito), de 5 letras o más y no comunes; a menos de 3 es repetición buscada
+    («espera, espera»)."""
+    seen = {}
+    for n, m in enumerate(re.finditer(r"[^\W\d_]+", text)):
+        w = m[0]
+        if len(w) < 5 or not w.islower() or w in ECHO_SKIP:
+            continue
+        if w in seen and 3 <= n - seen[w] <= 12:
+            return m.span()
+        seen[w] = n
+    return None
+
+
+REPORT_MEMOS = (_unhtml, _letters, _honorific_key, _honorific_forms, _facts, _typos, _unpaired, _echo)
 
 
 def report_memos():
@@ -1735,6 +1863,11 @@ def _issue_span(issue, blocks):
     if issue.kind == "broken":
         m = MOJIBAKE.search(text) or re.search("�", text)
         return _words_around(shown, lead + m.start(), lead + m.end()) if m else None
+    if issue.kind == "unpaired" and _unpaired(text):
+        pos = _unpaired(text)[0]
+        return lead + pos, lead + pos + 1
+    if issue.kind == "echo" and _echo(text):
+        return tuple(lead + p for p in _echo(text))
     if issue.kind == "lower":
         return lead, lead + len(text.split()[0])
     if issue.kind == "end":
@@ -1742,10 +1875,12 @@ def _issue_span(issue, blocks):
     return lead, lead + len(text)
 
 
-def quality_report(book):
+def quality_report(book, echoes=False, glossary=()):
     """Lo sospechoso del libro, para revisarlo: [Issue], por página. Cada aviso dice el problema, la
-    solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa."""
+    solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa. Con echoes, también
+    las palabras repetidas cerca (muchos avisos de estilo); glossary, los nombres de la serie como deben ir."""
     blocks = book.blocks
+    unpaired_signs = {}  # bloque -> signo de su aviso «Signo sin pareja»
     report = [Issue("skipped", None, page, "Grave", f"Texto no incluido ({letters} letras)",
                     f"La página {page} tiene texto que no entró en el libro: {why}.",
                     "Mira la página en la vista previa del PDF. Si era texto de la novela, cópialo en su "
@@ -1758,6 +1893,9 @@ def quality_report(book):
     honorifics = honorific_fixes([_plain(b) for b in blocks if b.kind == "p"])
     honorific = re.compile(r"(?<![\w-])(" + "|".join(sorted(map(re.escape, honorifics), key=len, reverse=True))
                            + r")(?![\w-])", re.I) if honorifics else None
+    named = glossary_fixes(book, glossary) if glossary else {}
+    names = re.compile(r"(?<![\w-])(" + "|".join(sorted(map(re.escape, named), key=len, reverse=True))
+                       + r")(?![\w-])") if named else None
     prev_text = None
     for k, b in enumerate(blocks):
         if b.kind != "p":
@@ -1825,6 +1963,29 @@ def quality_report(book):
                                 "El párrafo parece estar en inglés: el traductor se lo saltó o es una nota del "
                                 "grupo.", "Tradúcelo o quítalo con «Editar texto…» (tecla E).", _cut(text),
                                 text=text))
+        nxt = _plain(blocks[k + 1]).strip() if k + 1 < len(blocks) and blocks[k + 1].kind == "p" else ""
+        unpaired = _unpaired(text) if not link else None
+        if unpaired:
+            sign, open_ = unpaired[1:]
+            twin = _unpaired(nxt if open_ else prev_text or "")
+            # Cita o diálogo de varios párrafos: los siguientes empiezan con comillas y solo el último cierra
+            # (Maryoku, Kage); o el PDF partió el párrafo y el signo que falta está en el de al lado
+            if sign != "(" and QUOTE_LEAD.match(nxt if open_ else text) or twin and twin[1:] == (sign, not open_):
+                unpaired = None
+        if unpaired:
+            pos = unpaired[0]
+            unpaired_signs[k] = unpaired[1]
+            report.append(Issue("unpaired", k, b.page, "Revisar", "Signo sin pareja",
+                                "Se abren comillas o un paréntesis que no se cierran, o se cierran sin abrirse: "
+                                "falta un signo o sobra.",
+                                "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E).",
+                                _around(text, pos, pos + 1), text=text))
+        echo = _echo(text) if echoes else None
+        if echo:
+            report.append(Issue("echo", k, b.page, "Menor", "Palabra repetida cerca",
+                                f"«{text[echo[0]:echo[1]]}» sale dos veces en pocas palabras: suena repetido.",
+                                "Cambia una por un sinónimo o reescribe la frase con «Editar texto…» (tecla E).",
+                                _around(text, *echo), text=text))
         line = _line(b, k)
         for t, fixed in _typos(line) if not link else ():
             kind, title, _, why, solution = TYPOS[t]
@@ -1845,13 +2006,22 @@ def quality_report(book):
                                 f"{counted(n_here, 'vez', 'veces')}: mejor una sola forma.",
                                 f"Unificarlo en «{best}».", _around(before, n, n),
                                 _around(after, n, n + len(after) - len(before)), (k, k + 1, fixed), text))
+        m = names.search(line) if names else None
+        if m:
+            fixed = names.sub(lambda h: named[h[0]], line)
+            before, after = TAGS.sub("", line), TAGS.sub("", fixed)
+            n = len(os.path.commonprefix([before, after]))
+            report.append(Issue("glossary", k, b.page, "Menor", "Nombre distinto al glosario",
+                                f"El glosario de la serie escribe «{named[m[0]]}»; aquí sale «{m[0]}».",
+                                f"Cambiarlo por «{named[m[0]]}». Si las dos formas valen, añade esta al glosario.",
+                                _around(before, n, n), _around(after, n, n + len(after) - len(before)),
+                                (k, k + 1, fixed), text))
         if capital and not link:
             report.append(Issue("capital", k, b.page, "Menor", "Minúscula tras un punto",
                                 "Tras un punto la frase nueva empieza en mayúscula. Si la frase sigue, el punto "
                                 "sobra: suele quedar de un salto de línea del PDF.",
                                 "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E): quita el punto o "
                                 "pon la mayúscula.", _around(text, *capital), text=text))
-        nxt = _plain(blocks[k + 1]).strip() if k + 1 < len(blocks) and blocks[k + 1].kind == "p" else ""
         if (len(text) >= 40 and letter_end and nxt[:1].isupper() and not link
                 and not LABEL.match(text.strip()) and not LABEL.match(nxt)):
             report.append(Issue("end", k, b.page, "Menor", "Falta el punto final",
@@ -1860,6 +2030,10 @@ def quality_report(book):
                                 "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E): pon el punto o "
                                 "une los dos párrafos.", _cut(text, tail=True) + " ¶\n" + _cut(nxt), text=text))
         prev_text = text
+    # Un signo sin pareja en todo el libro es el estilo del grupo (Maryoku no cierra las “ del diálogo), no una
+    # errata: decenas de avisos que nadie va a revisar uno a uno
+    many = {s for s, n in collections.Counter(unpaired_signs.values()).items() if n > UNPAIRED_STYLE}
+    report = [i for i in report if not (i.kind == "unpaired" and unpaired_signs[i.block] in many)]
     last = None
     for k, end in zip(heads, heads[1:]):
         if k not in book.candidates:

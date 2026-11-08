@@ -1693,7 +1693,7 @@ def test_window_quality_report_not_repeated_for_the_same_text():
     root, window = visible_window()
     calls = []
     original = app.convert.quality_report
-    app.convert.quality_report = lambda book: calls.append(1) or original(book)
+    app.convert.quality_report = lambda book, *options: calls.append(1) or original(book, *options)
     try:
         window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
                                                          convert.Block("p", 1, "Que haces?")], [0]))
@@ -3866,6 +3866,108 @@ def test_quality_report_fixes_grammar_and_typography():
     assert got == [fixed for _, _, fixed in cases], [(g, f) for g, (_, _, f) in zip(got, cases) if g != f]
 
 
+
+def _typo_book(texts):
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, html.escape(t, quote=False))
+                                                            for t in texts]
+    return convert.Book("Libro", "", b"", blocks, [0])
+
+
+def check_typo_cases(kind, cases, fine, **options):
+    """cases [(texto, arreglado)] avisan de kind y su arreglo los deja así; fine no avisa."""
+    texts = [t for t, _ in cases] + fine
+    book = _typo_book(texts)
+    report = [i for i in convert.quality_report(book, **options) if i.kind == kind]
+    found = sorted(i.block for i in report)
+    assert found == list(range(1, len(cases) + 1)), [(i.block, texts[i.block - 1]) for i in report]
+    assert all(i.level == "Menor" and i.after and i.problem and i.solution for i in report)
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    got = [html.unescape(b.html) for b in book.blocks[1:len(cases) + 1]]
+    assert got == [fixed for _, fixed in cases], [(g, f) for g, (_, f) in zip(got, cases) if g != f]
+
+
+def test_quality_report_leaves_narration_after_aside():
+    """Tras «—dijo él.» casi siempre sigue narración, no diálogo (Mitsuha 1: 31 de 31, Re Zero 1: 16 de 16): no se
+    pide raya de cierre. El punto antes del inciso sí se corrige."""
+    check_typo_cases("dialog", [("—Ven. —dijo él.", "—Ven —dijo él.")],
+                     ["—Ven —dijo él. Luego se fue.", "—No te muevas —dijo la chica—. Podía verse en sus ojos.",
+                      "—Ven —dijo él.", "—Ven —dijo él—. Vamos ya."])
+
+
+def test_quality_report_finds_calques():
+    """Calcos del inglés de frase fija: «en base a», «tomar lugar», «hacer sentido», «en orden de» + infinitivo."""
+    check_typo_cases("calque", [
+        ("Lo hizo en base a eso.", "Lo hizo con base en eso."),
+        ("La boda tomó lugar ayer.", "La boda tuvo lugar ayer."),
+        ("Eso no hace sentido.", "Eso no tiene sentido."),
+        ("Hace sentido, ¿no?", "Tiene sentido, ¿no?"),
+        ("Corrió en orden de llegar antes.", "Corrió para llegar antes.")],
+        ["Tomó su lugar en la mesa.", "Fueron en orden de llegada.", "Eso me hace sentir mal."])
+
+
+def test_quality_report_finds_needless_capitals():
+    """Días, meses y tratamientos en mayúscula a mitad de frase; los títulos de fantasía («el Señor Demonio»)
+    y los que también son nombres («Abril», «Domingo») no."""
+    check_typo_cases("uppercase", [
+        ("Llegó el Lunes por la mañana.", "Llegó el lunes por la mañana."),
+        ("Nació en Enero, creo.", "Nació en enero, creo."),
+        ("Habló con el Señor Pérez ayer.", "Habló con el señor Pérez ayer.")],
+        ["Lunes. Otra vez.", "Apareció el Señor Demonio.", "Lo dijo el Rey Demonio.", "Fue a la casa de Abril.",
+         "Habló con Domingo ayer.", "Gracias, Señor."])
+
+
+def test_quality_report_unpaired_and_repeated_marks():
+    """Más de tres signos seguidos sobran; comillas o paréntesis sin pareja avisan para revisar, sin arreglo, salvo
+    emoticonos, enumeraciones y citas que siguen en el párrafo siguiente."""
+    check_typo_cases("punct", [("¡¡¡¡No!!!!", "¡¡¡No!!!"), ("¿¿¿¿Qué????", "¿¿¿Qué???")], ["¡¡¡No!!!", "¿Eh?!"])
+    texts = ["Dijo «hola y se fue.", "Lo vio (de lejos y calló.", "Ella dijo «sí».", "¿Qué? :)",
+             "a) primero esto.", "Era así: «primero lo uno,", "»y luego lo otro».", "Lo dijo así.)"]
+    book = _typo_book(texts)
+    report = [i for i in convert.quality_report(book) if i.kind == "unpaired"]
+    assert [i.block for i in report] == [1, 2, 8], [(i.block, texts[i.block - 1]) for i in report]
+    assert all(i.level == "Revisar" and i.edit is None for i in report)
+    assert report[0].span == (5, 6), report[0].span  # el subrayado del editor, en la «
+    # Kage, Maryoku: diálogo de varios párrafos que solo cierra el último; párrafo partido por el PDF ("Zenis.”");
+    # Nageki: comilla recta que cierra la curva
+    fine = ["“Bien. En ese caso será el almuerzo", "Zenis.”", "“Primero lo uno.", "“Y luego lo otro.”",
+            '“Lo siento mucho, pero deberíamos empezar."']
+    assert not [i for i in convert.quality_report(_typo_book(fine)) if i.kind == "unpaired"]
+    # El mismo signo sin cerrar en más de 20 párrafos es el estilo del libro (Maryoku): no se avisa ninguno
+    style = ["“Hola, ¿qué tal?", "Ella sonrió."] * 21
+    assert not [i for i in convert.quality_report(_typo_book(style)) if i.kind == "unpaired"]
+    assert len([i for i in convert.quality_report(_typo_book(style[:40])) if i.kind == "unpaired"]) == 20
+
+
+def test_quality_report_echoes_only_when_asked():
+    """Ecos: la misma palabra cerca, solo si se piden; ni nombres, ni repetición buscada, ni palabras comunes."""
+    texts = ["Miró la puerta y luego volvió a mirar la puerta cerrada.", "Espera, espera, ¡espera!",
+             "Subaru dijo que Subaru no vendría.", "Estaba cansado y estaba triste."]
+    book = _typo_book(texts)
+    assert not [i for i in convert.quality_report(book) if i.kind == "echo"]
+    report = [i for i in convert.quality_report(book, echoes=True) if i.kind == "echo"]
+    assert [(i.block, i.level, i.edit) for i in report] == [(1, "Menor", None)], [(i.block, i.title) for i in report]
+    start, end = report[0].span
+    assert texts[0][start:end] == "puerta" and start > texts[0].index("puerta"), report[0].span
+
+
+def test_quality_report_glossary():
+    """Glosario de la serie: un nombre que es un término con otras tildes o una letra distinta avisa, con arreglo;
+    los cortos («Ram» frente a «Rem»), las formas que también están en el glosario y las de honorífico, no."""
+    texts = ["Ayer vi a Emilía en la plaza.", "Luego llegó Reinhart con la espada.", "Mañana vendrá Emilia otra vez.",
+             "Hoy vi a Rem y a Ram juntas.", "La saludó Emilia-sama al llegar.", "Vino Felis con Felix."]
+    book = _typo_book(texts)
+    glossary = ["Emilia", "Reinhard", "Rem", "Felix", "Felis"]
+    assert not [i for i in convert.quality_report(book) if i.kind == "glossary"]
+    report = [i for i in convert.quality_report(book, glossary=glossary) if i.kind == "glossary"]
+    assert [(i.block, i.level) for i in report] == [(1, "Menor"), (2, "Menor")], [(i.block, i.problem) for i in report]
+    assert "«Emilia»" in report[0].problem and "«Emilía»" in report[0].problem
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    assert [b.html for b in book.blocks[1:3]] == ["Ayer vi a Emilia en la plaza.", "Luego llegó Reinhard con la espada."]
+    names = convert.proper_names(book)
+    assert names["Emilia"] == 2 and "Luego" not in names and "Hoy" not in names, names
+
 def test_quality_report_finds_lowercase_after_period_and_missing_end():
     """Minúscula tras un punto (no tras una abreviatura ni puntos suspensivos) y párrafo sin punto final al que
     sigue otro en mayúscula: avisos sin arreglo automático, porque puede sobrar el punto o faltar texto."""
@@ -4341,6 +4443,40 @@ def test_replay_image_and_page_at_start():
     assert pymupdf.Pixmap(book.blocks[3].image).width == 20 and book.blocks[4].image == JPEG, book.blocks
     assert book.candidates == [2], book.candidates
 
+
+
+def test_window_echoes_and_glossary_in_quality_report():
+    """La casilla «Buscar ecos» del informe añade los ecos; el glosario guardado va en la revisión y el informe
+    avisa de la variante; «Añadir nombres de este tomo» propone los frecuentes."""
+    from PySide6.QtWidgets import QPushButton
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Miró la puerta y luego volvió a mirar la puerta cerrada."),
+              B("p", 1, "Ayer vi a Emilía en la plaza.")] + [B("p", 2, "Luego vino Emilia a verla.")] * 5
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.quality()
+    root.update()
+    parts = root.dialogs()[-1].parts
+    titles = lambda: [parts["table"].set(i, "title") for i in parts["table"].get_children()]
+    without = titles()
+    parts["echoes"].click()
+    root.update()
+    with_echoes = titles()
+    window.edit_glossary()
+    root.update()
+    glossary_win, text, save = window.glossary_window
+    [add] = [b for b in glossary_win.findChildren(QPushButton) if b.text() == "Añadir nombres de este tomo"]
+    add.click()
+    proposed = text.toPlainText()
+    save()
+    root.update()
+    state = window.review_state()
+    kinds = [i.kind for i in window.quality_report()]
+    window.close()
+    assert "Palabra repetida cerca" not in without and "Palabra repetida cerca" in with_echoes, (without, with_echoes)
+    assert proposed == "Emilia  # 5 veces", proposed
+    assert state["glossary"] == ["Emilia"] and state["echoes"] is True, state["glossary"]
+    assert "glossary" in kinds and "echo" in kinds, kinds
 
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
