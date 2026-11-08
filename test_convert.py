@@ -5600,7 +5600,9 @@ def test_window_find_bar_and_result_dialog():
     assert shown and found[1] >= 1 and found[0].startswith(f"{found[1]} resultado"), found
     assert page == window.book.blocks[window.matches[0][0]].page - 1 and hidden, page
     assert title == "EPUB guardado con avisos" and texts == ["sec1.xhtml: algo raro"], (title, texts)
-    assert buttons[:2] == ["Abrir EPUB", "Abrir carpeta"] and buttons[-1] == "Cerrar", buttons
+    # «Validar con EPUBCheck» va en su fila, debajo: la de los botones ya llena 1093 px con un lector conectado
+    assert buttons[:2] == ["Abrir EPUB", "Abrir carpeta"] and buttons[-2:] == ["Cerrar", "Validar con EPUBCheck"], \
+        buttons
 
 
 def test_window_result_dialog_phone_and_calibre():
