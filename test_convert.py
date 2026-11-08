@@ -2726,7 +2726,7 @@ def test_window_editor_regex_box_marks_bad_expressions():
     editor.save()
     text = " ".join(b.html for b in window.book.blocks)
     window.close()
-    assert bad[0].startswith("Expresión no válida") and bad[1] is False, bad
+    assert bad[0] == "Expresión no válida: falta cerrar un paréntesis (carácter 1)" and bad[1] is False, bad
     assert ok == "", ok
     assert "linea" not in text and "línea" in text, text[:300]
 

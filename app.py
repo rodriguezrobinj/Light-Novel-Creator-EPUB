@@ -200,6 +200,13 @@ def _spell_server(requests, replies):
             replies.put(("suggestions", word, convert.spell_suggestions(word, good)))
 
 
+# Los errores de re vienen en inglés: los más comunes, dichos para el usuario
+REGEX_ERRORS = (("missing )", "falta cerrar un paréntesis"), ("unbalanced parenthesis", "sobra un «)»"),
+                ("unterminated character set", "falta cerrar un «[»"), ("nothing to repeat", "«*», «+» o «?» sin nada "
+                 "delante"), ("multiple repeat", "dos repeticiones seguidas"), ("bad escape", "barra invertida no "
+                 "válida"), ("bad character range", "rango de letras al revés"), ("unknown extension", "«(?» no válido"))
+
+
 def _comment_block(blocks, texts, comment):
     """Párrafo del libro de un comentario: el que empieza por su texto (mejor en su página) o, si se editó, el más
     parecido de su página. texts: [(índice, texto)] de los párrafos. None si ya no está."""
@@ -3142,6 +3149,8 @@ class App:
     def comment_issues(self):
         """Los comentarios del revisor como avisos «Revisar»: salen en F8, en el informe y al exportarlo. El de un
         párrafo que ya no está sale con su página."""
+        if not self.comments:
+            return []
         texts = [(k, convert._plain(b).strip()) for k, b in enumerate(self.book.blocks) if b.kind == "p"]
         by_block, issues = dict(texts), []
         for c in self.comments:
@@ -4700,7 +4709,8 @@ class TextEditor:
             try:
                 self.find_pattern()
             except re.error as e:
-                error = f"Expresión no válida: {e.msg}"
+                why = next((text for start, text in REGEX_ERRORS if e.msg.startswith(start)), "revísala")
+                error = f"Expresión no válida: {why} (carácter {(e.pos or 0) + 1})"
         self.find_entry.setStyleSheet(f"color: {theme.level_colors(self.app.dark)['Grave']}" if error else "")
         self.find_info.setText(error)
         return error
