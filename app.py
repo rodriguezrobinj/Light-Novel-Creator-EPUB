@@ -66,11 +66,11 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
-             "credits", "profile", "replacements", "kepub", "words", "hyphenate")
+             "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
-         "font_file", "epub2", "reading", "profile", "autocase", "kepub", "hyphenate")
+         "font_file", "epub2", "reading", "profile", "autocase", "kepub", "hyphenate", "echoes")
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
@@ -366,7 +366,8 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "credits": "Página de créditos", "reading": "Minutos de lectura", "epub2": "EPUB 2",
                 "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
-                "words": "Diccionario de la serie", "ignored": "Avisos ignorados"}
+                "words": "Diccionario de la serie", "glossary": "Glosario", "ignored": "Avisos ignorados",
+                "echoes": "Buscar ecos"}
 
 
 def _versions_path(pdf):
@@ -1110,6 +1111,7 @@ class App:
         self._description = ""                 # sinopsis (propiedad description)
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
         self.words = []                        # diccionario de la serie: palabras que la ortografía da por buenas
+        self.glossary = []                     # glosario de la serie: los nombres como deben ir
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
         self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
@@ -1135,6 +1137,7 @@ class App:
         self.shrink_size_var = qtk.Var(convert.SHRINK)  # lado mayor de las imágenes reducidas
         self.trim_var, self.credits_var, self.reading_var = qtk.Var(False), qtk.Var(False), qtk.Var(False)
         self.epub2_var, self.kepub_var = qtk.Var(False), qtk.Var(False)
+        self.echoes_var = qtk.Var(False)  # ecos en el informe: muchos avisos de estilo, solo si se piden
         self.hyphenate_var = qtk.Var(False)  # guiones blandos: el Kindle apenas parte palabras en español
 
         root.setWindowTitle(APP_NAME)
@@ -1443,7 +1446,8 @@ class App:
         self.autocase_var.check(autocase)
         self.cover_label = _label("", "muted")
         grid.addLayout(_row(_button("Portada…", self.choose_cover), self.cover_label,
-                            _button("Reemplazos…", self.edit_replacements), _menu_button("Títulos", titles), 1,
+                            _button("Reemplazos…", self.edit_replacements),
+                            _button("Glosario…", self.edit_glossary), _menu_button("Títulos", titles), 1,
                             _button("Buscar en internet (AniList)…", self.search_online)), 5, 0, 1, 8)
         for c in (1, 3, 5):
             grid.setColumnStretch(c, 2)
@@ -1958,7 +1962,7 @@ class App:
         self.book = book
         # El análisis tal cual, para restaurar versiones sin volver a analizar: las ediciones hacen listas nuevas
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
-        if report is not None:
+        if report is not None and not (self.echoes_var.get() or self.glossary):  # el del proceso va sin opciones
             self.reports[self.report_key()] = report
         if memos:
             convert.seed_report_memos(memos)
@@ -2398,6 +2402,43 @@ class App:
                               1, _button("Aceptar", save, "primary")))
         win.show()
         self.replacements_window = win, text, save
+
+    def edit_glossary(self):
+        """Glosario de la serie: los nombres y términos como deben ir. El informe avisa de las formas parecidas."""
+        win, column = self.dialog("Glosario")
+        column.addWidget(QLabel("Un nombre o término por línea, como debe ir escrito («Emilia», «Reinhard»). El informe "
+                                "de calidad avisa\nde las formas parecidas («Emilía», «Reinhart»). Lo que va tras # "
+                                "no cuenta. Pasa a los demás tomos de la serie."))
+        text = QPlainTextEdit("\n".join(self.glossary))
+        text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        text.setMinimumSize(560, 260)
+        column.addWidget(text, 1)
+        text.setFocus()
+
+        def terms():
+            return list(dict.fromkeys(t for t in (line.split("#")[0].strip() for line in text.toPlainText().splitlines())
+                                      if t))
+
+        def add_names():
+            """Añade los nombres propios de este tomo que salen 5 veces o más y aún no están."""
+            have = set(terms())
+            names = sorted(((n, f) for f, n in (convert.proper_names(self.book) if self.book else {}).items()
+                            if n >= 5 and f not in have), reverse=True)
+            if not names:
+                messagebox.showinfo("Glosario", "No hay nombres nuevos que salgan 5 veces o más en este tomo.", parent=win)
+                return
+            lead = "\n" if text.toPlainText().strip() else ""
+            text.setPlainText(text.toPlainText() + lead + "\n".join(f"{f}  # {convert.counted(n, 'vez', 'veces')}"
+                                                                    for n, f in names))
+
+        def save():
+            self.glossary = terms()
+            win.close()
+            self.update_quality()
+
+        column.addLayout(_row(_button("Añadir nombres de este tomo", add_names), 1, _button("Aceptar", save, "primary")))
+        win.show()
+        self.glossary_window = win, text, save
 
     def edit_text(self):
         """Abre el editor en la sección de la fila seleccionada (la de su título, si es una ilustración o un
@@ -3016,7 +3057,7 @@ class App:
         if key not in self.reports:
             if len(self.reports) >= 8:  # los últimos estados: basta para deshacer varias veces
                 del self.reports[next(iter(self.reports))]
-            self.reports[key] = convert.quality_report(self.book)
+            self.reports[key] = convert.quality_report(self.book, self.echoes_var.get(), self.glossary)
         return list(self.reports[key]) + self.toc_issues()
 
     def toc_issues(self):
@@ -3060,7 +3101,8 @@ class App:
         """Lo que mira convert.quality_report del libro: si no cambia, el informe tampoco."""
         b = self.book
         return (b.title, b.cover, tuple(b.candidates), tuple(tuple(s) for s in b.skipped),
-                tuple((x.kind, x.page, x.html, x.image, x.keep, x.layout, x.align) for x in b.blocks))
+                tuple((x.kind, x.page, x.html, x.image, x.keep, x.layout, x.align) for x in b.blocks),
+                self.echoes_var.get(), tuple(self.glossary))
 
     def update_quality(self):
         """Botón de la barra inferior con los avisos del informe de calidad: dice qué falta antes de generar,
@@ -3092,7 +3134,10 @@ class App:
         show = qtk.Var("Todos")
         shown = _combo(show, ["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS] + ["Ignorados"],
                        12, changed=lambda: fill())
-        column.addLayout(_row(summary, 1, QLabel("Mostrar:"), shown))
+        echoes = QCheckBox("Buscar ecos (palabras repetidas cerca)", checked=self.echoes_var.get())
+        # Sin Var.check: el diálogo se cierra y la variable no debe seguir poniendo valor a una casilla borrada
+        echoes.toggled.connect(lambda on: (self.echoes_var.set(on), fill(), self.update_quality()))
+        column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown))
         panes = QSplitter(Qt.Orientation.Horizontal)
         column.addWidget(panes, 1)
         table = qtk.RowList(("level", "page", "title"), {"level": "Gravedad", "page": "Pág.", "title": "Aviso"},
@@ -3217,7 +3262,7 @@ class App:
         fill()
         win.show()
         win.parts = {"table": table, "summary": summary, "heading": heading, "texts": texts, "previews": previews,
-                     "fix": fix_btn, "all": all_btn, "ignore": ignore_btn, "show": show, "fill": fill}
+                     "fix": fix_btn, "all": all_btn, "ignore": ignore_btn, "show": show, "fill": fill, "echoes": echoes}
         self.quality_window = win
 
     def series_panel(self):
@@ -3368,7 +3413,7 @@ class App:
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var,
-                "hyphenate": self.hyphenate_var}
+                "hyphenate": self.hyphenate_var, "echoes": self.echoes_var}
 
     def rows(self):
         return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title"), self.tree.set(item, "ok")]
@@ -3379,7 +3424,7 @@ class App:
         state = {name: var.get() for name, var in self.fields().items()}
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
-                     ignored=self.ignored)
+                     glossary=self.glossary, ignored=self.ignored)
         return state
 
     def save_review(self):
@@ -3417,6 +3462,8 @@ class App:
             pass  # sin reemplazos guardados, o mal escritos a mano
         if isinstance(state.get("words"), list):
             self.words = [str(w) for w in state["words"]]
+        if isinstance(state.get("glossary"), list):
+            self.glossary = [str(w) for w in state["glossary"]]
 
     def load_review(self, state=None):
         """Recupera la revisión guardada de este PDF, o la de una versión (state). False si no hay o si el PDF

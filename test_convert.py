@@ -1693,7 +1693,7 @@ def test_window_quality_report_not_repeated_for_the_same_text():
     root, window = visible_window()
     calls = []
     original = app.convert.quality_report
-    app.convert.quality_report = lambda book: calls.append(1) or original(book)
+    app.convert.quality_report = lambda book, *options: calls.append(1) or original(book, *options)
     try:
         window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
                                                          convert.Block("p", 1, "Que haces?")], [0]))
@@ -3942,6 +3942,24 @@ def test_quality_report_echoes_only_when_asked():
     start, end = report[0].span
     assert texts[0][start:end] == "puerta" and start > texts[0].index("puerta"), report[0].span
 
+
+def test_quality_report_glossary():
+    """Glosario de la serie: un nombre que es un término con otras tildes o una letra distinta avisa, con arreglo;
+    los cortos («Ram» frente a «Rem»), las formas que también están en el glosario y las de honorífico, no."""
+    texts = ["Ayer vi a Emilía en la plaza.", "Luego llegó Reinhart con la espada.", "Mañana vendrá Emilia otra vez.",
+             "Hoy vi a Rem y a Ram juntas.", "La saludó Emilia-sama al llegar.", "Vino Felis con Felix."]
+    book = _typo_book(texts)
+    glossary = ["Emilia", "Reinhard", "Rem", "Felix", "Felis"]
+    assert not [i for i in convert.quality_report(book) if i.kind == "glossary"]
+    report = [i for i in convert.quality_report(book, glossary=glossary) if i.kind == "glossary"]
+    assert [(i.block, i.level) for i in report] == [(1, "Menor"), (2, "Menor")], [(i.block, i.problem) for i in report]
+    assert "«Emilia»" in report[0].problem and "«Emilía»" in report[0].problem
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    assert [b.html for b in book.blocks[1:3]] == ["Ayer vi a Emilia en la plaza.", "Luego llegó Reinhard con la espada."]
+    names = convert.proper_names(book)
+    assert names["Emilia"] == 2 and "Luego" not in names and "Hoy" not in names, names
+
 def test_quality_report_finds_lowercase_after_period_and_missing_end():
     """Minúscula tras un punto (no tras una abreviatura ni puntos suspensivos) y párrafo sin punto final al que
     sigue otro en mayúscula: avisos sin arreglo automático, porque puede sobrar el punto o faltar texto."""
@@ -4417,6 +4435,40 @@ def test_replay_image_and_page_at_start():
     assert pymupdf.Pixmap(book.blocks[3].image).width == 20 and book.blocks[4].image == JPEG, book.blocks
     assert book.candidates == [2], book.candidates
 
+
+
+def test_window_echoes_and_glossary_in_quality_report():
+    """La casilla «Buscar ecos» del informe añade los ecos; el glosario guardado va en la revisión y el informe
+    avisa de la variante; «Añadir nombres de este tomo» propone los frecuentes."""
+    from PySide6.QtWidgets import QPushButton
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Miró la puerta y luego volvió a mirar la puerta cerrada."),
+              B("p", 1, "Ayer vi a Emilía en la plaza.")] + [B("p", 2, "Luego vino Emilia a verla.")] * 5
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.quality()
+    root.update()
+    parts = root.dialogs()[-1].parts
+    titles = lambda: [parts["table"].set(i, "title") for i in parts["table"].get_children()]
+    without = titles()
+    parts["echoes"].click()
+    root.update()
+    with_echoes = titles()
+    window.edit_glossary()
+    root.update()
+    glossary_win, text, save = window.glossary_window
+    [add] = [b for b in glossary_win.findChildren(QPushButton) if b.text() == "Añadir nombres de este tomo"]
+    add.click()
+    proposed = text.toPlainText()
+    save()
+    root.update()
+    state = window.review_state()
+    kinds = [i.kind for i in window.quality_report()]
+    window.close()
+    assert "Palabra repetida cerca" not in without and "Palabra repetida cerca" in with_echoes, (without, with_echoes)
+    assert proposed == "Emilia  # 5 veces", proposed
+    assert state["glossary"] == ["Emilia"] and state["echoes"] is True, state["glossary"]
+    assert "glossary" in kinds and "echo" in kinds, kinds
 
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de

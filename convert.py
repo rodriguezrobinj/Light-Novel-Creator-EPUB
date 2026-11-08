@@ -904,11 +904,9 @@ def _fold(text):
     return re.sub(r"[\s\-]", "", plain.lower())
 
 
-def name_variants(book):
-    """Nombres escritos de varias formas ("Greg-sama" / "Greg sama", "Tino" / "Tiño"):
-    [[forma más usada, otras…]], los más frecuentes primero. Solo palabras con mayúscula que nunca
-    salen en minúscula ("Él" / "El", "Tú" / "Tu") y que alguna vez van con mayúscula en mitad de una
-    frase, como los nombres propios ("Utilizó" / "Utilizo" al empezar frase, "Ja-ja" / "Jaja", no)."""
+def _name_forms(book):
+    """(formas con mayúscula y sus veces, claves _fold de las palabras que salen en minúscula, claves de las que
+    van con mayúscula a mitad de frase, como los nombres propios)."""
     text = " ".join(html.unescape(TAGS.sub("", b.html)) for b in book.blocks if b.kind in ("p", "heading"))
     tokens = re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", text)
     common = {_fold(t) for t in tokens if t[:1].islower()}
@@ -916,6 +914,46 @@ def name_variants(book):
               if m.group(1)[:1].isupper()}
     forms = collections.Counter(t for t in tokens if t[:1].isupper() and not (len(t) > 1 and t.isupper()))
     forms.update(f"{a} {b}" for a, b in zip(tokens, tokens[1:]) if a[:1].isupper() and b.lower() in HONORIFICS)
+    return forms, common, proper
+
+
+def proper_names(book):
+    """Los nombres propios del libro y sus veces: {forma: veces}. Palabras con mayúscula que nunca salen en
+    minúscula y que van con mayúscula a mitad de frase; sin las formas con el honorífico aparte."""
+    forms, common, proper = _name_forms(book)
+    return {f: n for f, n in forms.items() if " " not in f and len(_fold(f)) >= 3 and _fold(f) not in common
+            and _fold(f.split("-")[0]) in proper}
+
+
+def _one_edit(a, b):
+    """a y b se diferencian en una letra: cambiada, de más o de menos."""
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    a, b = sorted((a, b), key=len)
+    return len(b) - len(a) == 1 and any(b[:i] + b[i + 1:] == a for i in range(len(b)))
+
+
+def glossary_fixes(book, glossary):
+    """{forma del libro: término del glosario} de los nombres que no están en el glosario pero son uno de sus
+    términos con otras tildes o guiones, o con una letra distinta si el término tiene 5 o más ("Emilía",
+    "Reinhart"). Con menos, una letra separa nombres distintos ("Rem" / "Ram")."""
+    terms = {_fold(t): t for t in glossary}
+    known = set(glossary)
+    fixes = {}
+    for form in proper_names(book):
+        key = _fold(form)
+        term = terms.get(key) or next((t for k, t in terms.items() if len(k) >= 5 and _one_edit(key, k)), None)
+        if term and form not in known:
+            fixes[form] = term
+    return fixes
+
+
+def name_variants(book):
+    """Nombres escritos de varias formas ("Greg-sama" / "Greg sama", "Tino" / "Tiño"):
+    [[forma más usada, otras…]], los más frecuentes primero. Solo palabras con mayúscula que nunca
+    salen en minúscula ("Él" / "El", "Tú" / "Tu") y que alguna vez van con mayúscula en mitad de una
+    frase, como los nombres propios ("Utilizó" / "Utilizo" al empezar frase, "Ja-ja" / "Jaja", no)."""
+    forms, common, proper = _name_forms(book)
     groups = collections.defaultdict(dict)
     for form, n in forms.items():
         key = _fold(form)
@@ -1847,6 +1885,9 @@ def quality_report(book, echoes=False, glossary=()):
     honorifics = honorific_fixes([_plain(b) for b in blocks if b.kind == "p"])
     honorific = re.compile(r"(?<![\w-])(" + "|".join(sorted(map(re.escape, honorifics), key=len, reverse=True))
                            + r")(?![\w-])", re.I) if honorifics else None
+    named = glossary_fixes(book, glossary) if glossary else {}
+    names = re.compile(r"(?<![\w-])(" + "|".join(sorted(map(re.escape, named), key=len, reverse=True))
+                       + r")(?![\w-])") if named else None
     prev_text = None
     for k, b in enumerate(blocks):
         if b.kind != "p":
@@ -1952,6 +1993,16 @@ def quality_report(book, echoes=False, glossary=()):
                                 f"{counted(n_here, 'vez', 'veces')}: mejor una sola forma.",
                                 f"Unificarlo en «{best}».", _around(before, n, n),
                                 _around(after, n, n + len(after) - len(before)), (k, k + 1, fixed), text))
+        m = names.search(line) if names else None
+        if m:
+            fixed = names.sub(lambda h: named[h[0]], line)
+            before, after = TAGS.sub("", line), TAGS.sub("", fixed)
+            n = len(os.path.commonprefix([before, after]))
+            report.append(Issue("glossary", k, b.page, "Menor", "Nombre distinto al glosario",
+                                f"El glosario de la serie escribe «{named[m[0]]}»; aquí sale «{m[0]}».",
+                                f"Cambiarlo por «{named[m[0]]}». Si las dos formas valen, añade esta al glosario.",
+                                _around(before, n, n), _around(after, n, n + len(after) - len(before)),
+                                (k, k + 1, fixed), text))
         if capital and not link:
             report.append(Issue("capital", k, b.page, "Menor", "Minúscula tras un punto",
                                 "Tras un punto la frase nueva empieza en mayúscula. Si la frase sigue, el punto "
