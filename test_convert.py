@@ -917,6 +917,7 @@ def visible_window():
     import app
 
     app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"  # cada ventana sin preferencias de otra prueba
+    app._start_spell_process = lambda: None  # sin el proceso de ortografía del editor (su prueba pone uno falso)
     window = app.App(app.Window())
     window.theme_var.set("Claro")
     window.apply_theme()
@@ -2491,7 +2492,7 @@ def test_text_editor_navigates_chapters_and_saves_only_changes():
 
     opened = (editor.current == window.section_bounds(int(second)) and lines()[0].startswith("# ")
               and sheet.current_source() == int(second))
-    indicator = editor.chapter_btn.text()
+    tooltip = editor.chapter_btn.toolTip()
     editor.zoom(-50)  # al 50 %: la página cabe y va en el medio del panel
     root.update()
     view, page = editor.scroll.viewport().geometry(), editor.canvas.geometry()
@@ -2499,7 +2500,7 @@ def test_text_editor_navigates_chapters_and_saves_only_changes():
     editor.mark_changed()
     labels = [editor.chapter_list.item(n).text() for n in range(editor.chapter_list.count())]
     editor.chapter_list.itemClicked.emit(editor.chapter_list.item(labels.index("Capítulo 1: El inicio")))
-    shows_first = lines()[0] == "# Capítulo 1: El inicio" and editor.chapter_btn.text().find("Capítulo 1 de 2") > 0
+    shows_first = lines()[0] == "# Capítulo 1: El inicio" and editor.chapter_btn.toolTip().startswith("Capítulo 1 de 2")
     sheet.document().find("Capítulo 1: El inicio").insertText("Capítulo 1: El comienzo")
     editor.mark_changed()
     marked = any(editor.chapter_list.item(n).text().endswith("•") for n in range(editor.chapter_list.count()))
@@ -2521,7 +2522,7 @@ def test_text_editor_navigates_chapters_and_saves_only_changes():
     undone = ([(b.kind, b.html, b.page) for b in window.book.blocks] == blocks_before
               and window.tree.set(first, "title") == "Capítulo 1: El inicio")
     window.close()
-    assert opened and indicator.startswith("☰  Capítulo 2 de 2 · "), (opened, indicator)
+    assert opened and tooltip.startswith("Capítulo 2 de 2: "), (opened, tooltip)  # el botón se acorta si no cabe
     assert centered, (view, page)
     assert shows_first and marked and on_second and kept and synced, (shows_first, marked, on_second, kept, synced)
     assert title == "Capítulo 1: El comienzo" and paragraph.startswith("Nuevo. "), (title, paragraph)
@@ -2620,6 +2621,340 @@ def test_text_editor_styles_links_and_find_reach_the_book():
     assert f'<a href="https://example.com">{word}</a>' in text, text[:300]
     assert jumped and other_chapter, (jumped, other_chapter)
     assert replaced.endswith("reemplazos") and "linea" not in text.lower() and "fila" in text, (replaced, text[:200])
+
+
+def sheet_with(lines):
+    """Hoja suelta con lines de section_text; el párrafo n viene del bloque n."""
+    import editor
+    import qtk
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content(list(enumerate(lines)), {})
+    return sheet
+
+
+def test_sheet_symbols_and_typography():
+    """Raya, puntos y comillas con Ctrl+Alt como Word; con texto elegido, las comillas lo envuelven. AltGr+2
+    (Ctrl+Alt) sigue escribiendo «@». «Corregir tipografía» pone rayas y comillas conservando la cursiva, en
+    un solo paso de deshacer."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent, QTextCursor
+    from PySide6.QtCore import QEvent
+    sheet = sheet_with(["Hola mundo", '-Ven aquí -dijo <i>"Tino"</i>.', "Nada que cambiar."])
+
+    def key(k, text=""):
+        mods = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+        sheet.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, k, mods, text))
+
+    cursor = sheet.document().find("mundo")  # elegida
+    sheet.setTextCursor(cursor)
+    key(Qt.Key.Key_Q)
+    sheet.moveCursor(QTextCursor.MoveOperation.EndOfBlock)
+    key(Qt.Key.Key_Minus)
+    key(Qt.Key.Key_Period)
+    key(Qt.Key.Key_2, "@")  # AltGr+2 en un teclado español
+    first = sheet.document().firstBlock().text()
+    before = sheet.content()
+    changed = sheet.fix_typography()
+    fixed = sheet.content().split("\n\n")[1]
+    sheet.undo()
+    undone = sheet.content() == before
+    assert first == "Hola «mundo»—…@", first
+    assert changed == 1 and fixed == "—Ven aquí —dijo <i>«Tino»</i>.", (changed, fixed)
+    assert undone, sheet.content()
+
+
+def test_sheet_changes_and_restore():
+    """Un párrafo editado cuenta como cambiado y vuelve a su línea original; uno partido o unido no se
+    ofrece para volver (duplicaría o perdería texto): ahí está Deshacer."""
+    from PySide6.QtGui import QTextCursor
+    sheet = sheet_with(["Uno <i>dos</i>.", "Tres cuatro.", "Cinco seis.", "Siete."])
+    loaded = [0, 1, 2, 3]
+    doc = sheet.document()
+    clean = sheet.changed_blocks()
+    cursor = doc.find("dos")
+    cursor.insertText("DOS")
+    edited = [b.text() for b in sheet.changed_blocks()]
+    first = doc.firstBlock()
+    ok = sheet.can_restore(first, loaded)
+    sheet.restore(first)
+    restored = sheet.content().split("\n\n")[0]
+    cursor = doc.find("cuatro")  # partir «Tres cuatro.»
+    cursor.setPosition(cursor.selectionStart())
+    sheet.setTextCursor(cursor)
+    sheet.split_here()
+    split = [sheet.can_restore(b, loaded) for b in sheet.block_of(1)]
+    cursor = doc.find("Cinco")
+    sheet.setTextCursor(cursor)
+    sheet.join_next()  # «Cinco seis.» + «Siete.»
+    joined = sheet.can_restore(sheet.block_of(2)[0], loaded)
+    assert clean == [] and edited == ["Uno DOS."] and ok, (clean, edited, ok)
+    assert restored == "Uno <i>dos</i>.", restored
+    assert split == [False, False] and joined is False, (split, joined)
+
+
+def test_sheet_replace_sources_and_split_chapter():
+    """El arreglo de «Párrafo partido» une dos párrafos con una ilustración en medio y la ilustración sigue;
+    un arreglo vacío quita el párrafo. «Dividir capítulo» pone un título de capítulo en el cursor."""
+    import editor
+    sheet = sheet_with(["Empieza la frase", "[Ilustración 1]", "y sigue aquí.", "Línea suelta 12", "Final."])
+    sheet.replace_sources(0, 3, "Empieza la frase y sigue aquí.\n\n[Ilustración 1]")
+    joined = sheet.content().split("\n\n")
+    sheet.replace_sources(3, 4, "")
+    dropped = sheet.content().split("\n\n")
+    cursor = sheet.document().find("sigue")
+    cursor.setPosition(cursor.selectionStart())
+    sheet.setTextCursor(cursor)
+    sheet.split_chapter("Capítulo 2: Otro día")
+    levels = editor.dump_levels(sheet.document())
+    refused = not sheet.split_chapter("Otro")  # el cursor está en el título
+    assert joined == ["Empieza la frase y sigue aquí.", "[Ilustración 1]", "Línea suelta 12", "Final."], joined
+    assert dropped == ["Empieza la frase y sigue aquí.", "[Ilustración 1]", "Final."], dropped
+    assert levels[:3] == [("Empieza la frase y", None), ("# Capítulo 2: Otro día", "Capítulo"),
+                          ("sigue aquí.", None)], levels
+    assert refused
+
+
+def editor_on(blocks, candidates):
+    """Ventana con un libro hecho a mano (y un PDF de una página por bloque) y su editor en la primera sección."""
+    import app
+    root, window = visible_window()
+    doc = pymupdf.open()
+    for n in range(max(b.page for b in blocks)):
+        add_page(doc, n + 1, [(72, 100, f"Pagina {n}", 11, "helv")])
+    window.pdf = TMP / f"hecho-{time_ns()}.pdf"
+    doc.save(window.pdf)
+    window.show_book(convert.Book("Libro", "", b"", blocks, candidates))
+    window.tree.selection_set("0")
+    return root, window, app.TextEditor(window, "0", *window.section_bounds(0))
+
+
+def test_text_editor_marks_issues_and_changes():
+    """Los avisos del informe se marcan en su párrafo; F8 abre su barra y «Arreglar» une el párrafo partido en
+    la hoja; lo cambiado se marca, «Volver al original» lo devuelve y Ctrl+Z deshace el arreglo."""
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Empieza la frase"),
+                                      B("p", 1, "y sigue aquí."), B("p", 1, "Otro párrafo normal.")], [0])
+    sheet = editor.sheet
+    marks_issue = len(sheet.extraSelections())
+    issues_label = editor.issues_menu.actions()[0].text()
+    editor.next_issue()
+    bar = editor.issue_frame.isVisible() and "Párrafo partido" in editor.issue_title.text()
+    editor.fix_issue()
+    fixed = sheet.content().split("\n\n")
+    editor.refresh_marks()
+    changes_label = editor.changes_menu.actions()[0].text()
+    sheet.undo()
+    undone = sheet.content().split("\n\n")
+    cursor = sheet.document().find("normal")
+    cursor.insertText("NORMAL")
+    sheet.setTextCursor(cursor)
+    editor.restore_current()
+    restored = sheet.content().split("\n\n")[-1]
+    editor.win.done(0)
+    window.close()
+    assert marks_issue == 2 and issues_label == "2 avisos en este capítulo", (marks_issue, issues_label)  # y «muy corto»
+    assert bar, editor.issue_title.text()
+    assert fixed[1] == "Empieza la frase y sigue aquí." and changes_label == "1 párrafo cambiado", (fixed, changes_label)
+    assert undone[1:3] == ["Empieza la frase", "y sigue aquí."], undone
+    assert restored == "Otro párrafo normal.", restored
+
+
+def test_text_editor_escape_closes_bars_not_the_editor():
+    """Esc en el campo de buscar, reemplazar, enlace o dividir cierra su barra: llegaba al diálogo, que lo
+    tomaba como cancelar el editor y preguntaba «¿Descartar cambios?»."""
+    import app
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Texto del capítulo.")], [0])
+    editor.win.show()
+    editor.sheet.textCursor().insertText("Cambio ")  # con cambios, cancelar pregunta
+    asked, original = [], app.messagebox.askyesno
+    app.messagebox.askyesno = lambda *args, **kwargs: asked.append(args) or False
+    closed = []
+    try:
+        for show, bar, entry in ((lambda: editor.show_find_bar(False), editor.find_frame, editor.find_entry),
+                                 (lambda: editor.show_find_bar(True), editor.find_frame, editor.replace_entry),
+                                 (editor.show_link_bar, editor.link_frame, editor.link_entry),
+                                 (editor.show_split_bar, editor.split_frame, editor.split_entry)):
+            show()
+            if entry is editor.find_entry:  # tras la lista de «Todos» la ventana no está activa: el atajo no saltaba
+                entry.setText("Texto")
+                editor.show_all_matches()
+                editor.matches_popup.hide()
+            entry.setFocus()
+            root.update()
+            QTest.keyClick(entry, Qt.Key.Key_Escape)
+            closed.append(not bar.isVisible())
+        open_editor = editor.win.isVisible()
+    finally:
+        app.messagebox.askyesno = original
+    editor.win.done(0)
+    window.close()
+    assert closed == [True] * 4 and not asked and open_editor, (closed, asked, open_editor)
+
+
+def test_text_editor_ribbon_fits_the_screen():
+    """Con las herramientas nuevas la cinta pedía ~1800 px: en 1366 (y 1093 con el zoom al 125 %) los botones
+    se montaban. Cada nivel de fit_ribbon la estrecha (iconos, botón de capítulo más corto) y se elige el
+    primero que cabe; el texto queda en la ayuda. (Sin pantalla las letras miden más que en Windows: el
+    ancho real se mira con /verificar-ventana.)"""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1: Un título largo para la cinta"),
+                                      B("p", 1, "Texto.")], [0])
+    import app
+    widths = []
+    for level in range(len(app.CHAPTER_WIDTHS)):
+        editor.ribbon_level = level
+        for button, text, short, needs in editor.compact:
+            button.setText(short if level >= needs else text)
+        editor.show_chapter(0)
+        editor.refresh_marks()  # «Avisos (1) ▾» o «⚠ 1 ▾» según el nivel
+        QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest.value)
+        widths.append(editor.ribbon_bar.sizeHint().width())
+    editor.fit_ribbon()
+    room = min(editor.win.width(), editor.win.screen().availableGeometry().width())
+    level, undo, tip = editor.ribbon_level, editor.undo_btn.text(), editor.undo_btn.toolTip()
+    editor.win.done(0)
+    window.close()
+    assert widths == sorted(widths, reverse=True) and len(set(widths)) == len(widths), widths
+    assert widths[-1] < 0.6 * widths[0], widths
+    assert level == next((n for n, w in enumerate(widths) if w <= room), len(widths) - 1), (level, widths, room)
+    assert undo == "↶" and "Deshacer" in tip, (undo, tip)
+
+
+class FakeSpellProcess:
+    alive = True
+
+    def is_alive(self):
+        return self.alive
+
+    def terminate(self):
+        self.alive = False
+
+
+def test_text_editor_live_spelling():
+    """Ortografía en vivo con un proceso falso: el editor manda las palabras del libro, subraya las que no
+    están, pide sus sugerencias y el clic derecho las ofrece con «Ignorar» y «Añadir al diccionario de la
+    serie». Si el proceso muere, el editor sigue."""
+    import queue
+
+    import app
+    requests, replies, proc = queue.Queue(), queue.Queue(), FakeSpellProcess()
+    B = convert.Block
+    original = app._start_spell_process
+    root, window = visible_window()
+    app._start_spell_process = lambda: (requests, replies, proc)
+    try:
+        doc = pymupdf.open()
+        add_page(doc, 1, [(72, 100, "Pagina", 11, "helv")])
+        window.pdf = TMP / f"ortografia-{time_ns()}.pdf"
+        doc.save(window.pdf)
+        window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"),
+                                                          B("p", 1, "La palabrq rara y Subaru.")], [0]))
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    finally:
+        app._start_spell_process = original
+    sent = requests.get_nowait()
+    replies.put(("unknown", ["palabrq"]))
+    editor.poll_spelling()
+    underlined = editor.sheet.misspelled()
+    asked = requests.get_nowait()
+    pos = editor.sheet.cursorRect(editor.sheet.document().find("palabrq")).center()
+    editor.context_menu(pos)  # antes de que lleguen: «Buscando sugerencias…» y se pide la primera
+    root.update()
+    waiting = [a.text() for a in editor.context.actions()][:1]
+    first = requests.get_nowait()
+    replies.put(("suggestions", "palabrq", ["palabra", "palabras"]))
+    editor.poll_spelling()  # llegan con el menú abierto: aparecen en él
+    labels = [a.text() for a in editor.context.actions()]
+    editor.context.close()
+    editor.add_word("palabrq")
+    after = editor.sheet.misspelled()
+    proc.alive = False
+    editor.poll_spelling()
+    stopped = editor.spell is None
+    words = list(window.words)
+    editor.win.done(0)
+    window.close()
+    assert sent[0] == "check" and "palabrq" in sent[1] and "Subaru" not in sent[1], sent
+    assert underlined == ["palabrq"] and asked == ("suggest", "palabrq"), (underlined, asked)
+    assert waiting == ["Buscando sugerencias…"] and first == ("first", "palabrq"), (waiting, first)
+    assert labels[:4] == ["palabra", "palabras", "Ignorar", "Añadir al diccionario de la serie"], labels
+    assert "Deshacer" in labels and "Copiar" in labels, labels
+    assert after == [] and words == ["palabrq"] and stopped, (after, words, stopped)
+
+
+def test_spell_server_answers_checks_before_suggestions():
+    """El proceso de ortografía (aquí en un hilo con colas) dice qué palabras no están y sus sugerencias."""
+    import queue
+    import threading
+
+    import app
+    requests, replies = queue.Queue(), queue.Queue()
+    worker = threading.Thread(target=app._spell_server, args=(requests, replies), daemon=True)
+    worker.start()
+    requests.put(("check", ["casa", "tambien"]))
+    unknown = replies.get(timeout=60)
+    worker.join(0.1)
+    requests.put(None)
+    worker.join(10)
+    # Sugerencias: «first» (el clic derecho) se adelanta a las pedidas antes
+    requests.put(("suggest", "caballeroz"))
+    requests.put(("first", "tambien"))
+    requests.put(("suggest", "caballeroz"))  # repetida: una sola respuesta
+    worker = threading.Thread(target=app._spell_server, args=(requests, replies), daemon=True)
+    worker.start()
+    suggestions = [replies.get(timeout=60), replies.get(timeout=60)]
+    requests.put(None)
+    worker.join(10)
+    assert unknown == ("unknown", ["tambien"]), unknown
+    assert [s[1] for s in suggestions] == ["tambien", "caballeroz"] and suggestions[0][2][0] == "también", suggestions
+    assert replies.empty()
+    assert not worker.is_alive()
+
+
+def test_text_editor_review_split_find_and_stats():
+    """Ctrl+Intro marca el capítulo como revisado y abre el siguiente sin revisar; «Dividir» parte el
+    capítulo y al aceptar la lista tiene la fila nueva; buscar con palabra completa y mayúsculas, y «Todos»
+    lista cada resultado; las cifras cuentan palabras y diálogo."""
+    import app
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "—Él dijo algo. Aquél no."),
+                                      B("p", 1, "Narración de él y del Él grande."),
+                                      B("heading", 2, "Capítulo 2"), B("p", 2, "Más texto aquí.")], [0, 3])
+    editor.toggle_reviewed()
+    reviewed = window.tree.set("0", "ok") == "✓" and editor.current == window.section_bounds(3)
+    label = editor.review_btn.toolTip()
+    editor.open_section(*window.section_bounds(0))
+    editor.find_entry.setText("él")
+    loose = len(editor.all_matches())
+    editor.whole_box.setChecked(True)
+    whole = len(editor.all_matches())
+    editor.case_box.setChecked(True)
+    exact = [text for _, _, text in editor.all_matches()]
+    editor.show_all_matches()
+    listed = editor.matches_popup.isVisible()
+    editor.matches_popup.hide()
+    editor.show_stats()
+    grid = [w.text() for w in editor.stats_window.findChildren(app.QLabel)]
+    editor.stats_window.close()
+    cursor = editor.sheet.document().find("Narración")
+    cursor.setPosition(cursor.selectionStart())
+    editor.sheet.setTextCursor(cursor)
+    editor.show_split_bar()
+    editor.split_entry.setText("Capítulo 1.5: Interludio")
+    editor.apply_split()
+    editor.save()
+    rows = [(window.tree.set(i, "title"), window.tree.set(i, "inc")) for i in window.tree.get_children()]
+    window.close()
+    assert reviewed and label.startswith("Capítulos revisados: 1 de 2."), (reviewed, label)
+    assert loose == 4 and whole == 3 and len(exact) == 1 and "de él y" in exact[0], (loose, whole, exact)
+    assert listed and grid[3:6] == ["Palabras", "12", "15"] and "42 %" in grid, grid  # 5 de 12 en diálogo
+    assert ("Capítulo 1.5: Interludio", app.ON) in rows, rows
 
 
 def test_text_editor_ribbon_follows_the_cursor():
