@@ -19,6 +19,29 @@ from pathlib import Path
 import pymupdf
 from PIL import Image, ImageOps
 
+MEMO_SIZE = 50000  # resultados por función de _memo: de sobra para varios libros
+
+
+def _memo(fn):
+    """Como functools.lru_cache de un argumento, con su dict a la vista (.cache): el proceso de trabajo se lo
+    pasa a la ventana. Lleno, se vacía entero: más simple que llevar el orden de uso."""
+    cache = {}
+
+    @functools.wraps(fn)
+    def memo(arg):
+        try:
+            return cache[arg]
+        except KeyError:
+            pass
+        if len(cache) >= MEMO_SIZE:
+            cache.clear()
+        cache[arg] = value = fn(arg)
+        return value
+
+    memo.cache = cache
+    return memo
+
+
 BAND = 0.12     # franja superior/inferior (fracción de la altura) donde viven encabezados y pies
 REPEAT = 0.30   # fracción de páginas en que una línea debe repetirse para ser encabezado o pie
 KEYWORDS = re.compile(
@@ -865,13 +888,13 @@ SOLE_WORD = re.compile(r"(?<![\w-])[^\W\d_]+(?![\w-])")
 HONORIFIC_ENDS = tuple(HONORIFICS)  # solo una palabra que acaba en honorífico puede ser una forma junta
 
 
-@functools.lru_cache(maxsize=50000)
+@_memo
 def _honorific_key(form):
     """Clave de un honorífico: «Subaru-kun», «Subaru kun» y «Subarukun» son el mismo; «sempai» es «senpai»."""
     return _fold(form).replace("sempai", "senpai")
 
 
-@functools.lru_cache(maxsize=50000)  # el informe lo pide para todo el libro tras cada edición
+@_memo  # el informe lo pide para todo el libro tras cada edición
 def _honorific_forms(text):
     """(formas con guion o espacio, palabras que acaban en honorífico) de un párrafo."""
     compounds = tuple(m[0] for m in HONORIFIC.finditer(text) if m[2] == "-"
@@ -1054,7 +1077,7 @@ def counted(n, one, many=None):
     return f"{n} {one if n == 1 else (many or one + 's')}"
 
 
-@functools.lru_cache(maxsize=50000)  # el informe de calidad lo pide por párrafo tras cada edición
+@_memo  # el informe de calidad lo pide por párrafo tras cada edición
 def _letters(text):
     return sum(map(str.isalpha, text))
 
@@ -1063,7 +1086,7 @@ def _plain(block):
     return _unhtml(block.html)
 
 
-@functools.lru_cache(maxsize=50000)  # tras una edición casi todos los párrafos siguen igual
+@_memo  # tras una edición casi todos los párrafos siguen igual
 def _unhtml(text):
     return html.unescape(TAGS.sub("", text))
 
@@ -1551,7 +1574,7 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
 )
 
 
-@functools.lru_cache(maxsize=20000)
+@_memo
 def _typos(line):
     """Las erratas de TYPOS de una línea: ((índice en TYPOS, línea arreglada)…). Recordadas por línea: tras un
     arreglo, el informe solo vuelve a mirar los párrafos que cambiaron."""
@@ -1564,7 +1587,7 @@ def _typos(line):
     return tuple(found)
 
 
-@functools.lru_cache(maxsize=50000)  # tras una edición casi todos los párrafos siguen igual
+@_memo  # tras una edición casi todos los párrafos siguen igual
 def _facts(text):
     """Lo que el informe mira de un párrafo sin sus vecinos: (número suelto, enlace, caracteres rotos, inglés,
     posición de la minúscula tras un punto o None, acaba en letra)."""
@@ -1577,16 +1600,19 @@ def _facts(text):
             capital, bool(re.search(r"[^\W\d_]$", text)))
 
 
-def warm_report(blocks):
-    """Calcula lo que quality_report recuerda de cada párrafo. La ventana lo llama por tandas tras abrir un
-    libro: su primer informe se hizo en el proceso de trabajo, y la primera edición lo recalculaba entero."""
-    for b in blocks:
-        if b.kind == "p":
-            text = _plain(b)
-            _honorific_forms(text)
-            _letters(text)
-            if not _facts(text.strip())[1]:  # con enlace, las erratas no se miran
-                _typos(_line(b, 0))
+REPORT_MEMOS = (_unhtml, _letters, _honorific_key, _honorific_forms, _facts, _typos)
+
+
+def report_memos():
+    """Lo que quality_report recuerda de cada párrafo. El primer informe de un libro se hace en el proceso de
+    trabajo: la ventana recibe esto con él, y su primera edición no lo recalcula entero (2–3 s parada)."""
+    return {f.__name__: f.cache for f in REPORT_MEMOS}
+
+
+def seed_report_memos(memos):
+    """Añade a la ventana lo que el proceso de trabajo recordó (report_memos)."""
+    for f in REPORT_MEMOS:
+        f.cache.update(memos.get(f.__name__, {}))
 
 
 def quality_report(book):
