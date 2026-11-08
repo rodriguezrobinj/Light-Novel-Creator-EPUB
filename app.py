@@ -4072,12 +4072,17 @@ class TextEditor:
         self.find_info = _label("", "muted")
         self.whole_box, self.case_box = QCheckBox("Palabra completa"), QCheckBox("Mayúsculas")
         self.case_box.setToolTip("Distinguir mayúsculas y minúsculas")
+        self.regex_box = QCheckBox(".*")
+        self.regex_box.setToolTip(r"Expresión regular: \d+ cifras, (\w+) una palabra… En el reemplazo, \1 es lo "
+                                  "del primer paréntesis")
+        for widget in (self.find_entry, self.regex_box):  # la expresión se revisa al escribirla
+            (widget.textChanged if widget is self.find_entry else widget.toggled).connect(lambda _: self.regex_error())
         close = _button("✕", lambda: (bar.hide(), self.sheet.setFocus()))
         close.setToolTip("Cerrar (Esc)")
         all_btn = _button("Todos", self.show_all_matches)
         all_btn.setToolTip("Lista de todos los resultados del libro")
         bar.setLayout(_row(self.find_entry, _button("◀", lambda: self.find(-1)), _button("▶", lambda: self.find(1)),
-                           all_btn, self.whole_box, self.case_box,
+                           all_btn, self.whole_box, self.case_box, self.regex_box,
                            self.replace_entry, _button("Reemplazar", self.replace_one),
                            _button("Reemplazar todo", self.replace_everywhere), self.find_info, 1, close,
                            margins=(10, 6, 10, 6)))
@@ -4165,7 +4170,7 @@ class TextEditor:
     def find(self, delta):
         """Siguiente (o anterior) aparición en la hoja; al acabarse, sigue en los capítulos siguientes."""
         term = self.find_entry.text()
-        if not term:
+        if not term or self.regex_error():
             return False
         if self.sheet.find_next(term, delta < 0, *self.find_options()):
             self.find_info.setText("")
@@ -4188,7 +4193,9 @@ class TextEditor:
 
     def replace_one(self):
         """Cambia la aparición elegida y busca la siguiente, como Word."""
-        if not self.sheet.replace_current(self.find_entry.text(), self.replace_entry.text(), self.case_box.isChecked()):
+        if self.regex_error():
+            return
+        if not self.sheet.replace_current(self.find_entry.text(), self.replace_entry.text(), *self.find_options()):
             self.find(1)
             return
         self.find(1)
@@ -4196,7 +4203,7 @@ class TextEditor:
     def replace_everywhere(self):
         """Cambia todas las apariciones en todos los capítulos; cada capítulo, un paso de su deshacer."""
         term, new = self.find_entry.text(), self.replace_entry.text()
-        if not term:
+        if not term or self.regex_error():
             return
         here, total = self.current, 0
         for _, start, end, _ in self.sections:
@@ -4504,17 +4511,30 @@ class TextEditor:
 
     # Buscar: opciones y todos los resultados
     def find_options(self):
-        return self.whole_box.isChecked(), self.case_box.isChecked()
+        return self.whole_box.isChecked(), self.case_box.isChecked(), self.regex_box.isChecked()
 
     def find_pattern(self):
-        """El término de la barra como expresión, con las opciones: para mirar capítulos sin abrirlos."""
-        whole, case = self.find_options()
-        term = re.escape(self.find_entry.text())
-        return re.compile(rf"(?<!\w){term}(?!\w)" if whole else term, 0 if case else re.I)
+        """El término de la barra como expresión, con las opciones: para mirar capítulos sin abrirlos. Lanza
+        re.error si es una expresión regular mal escrita."""
+        whole, case, regex = self.find_options()
+        term = self.find_entry.text() if regex else re.escape(self.find_entry.text())
+        return re.compile(rf"(?<!\w)(?:{term})(?!\w)" if whole else term, 0 if case else re.I)
+
+    def regex_error(self):
+        """Con «.*», el error de la expresión escrita (y el campo en rojo), o "" si vale."""
+        error = ""
+        if self.regex_box.isChecked() and self.find_entry.text():
+            try:
+                self.find_pattern()
+            except re.error as e:
+                error = f"Expresión no válida: {e.msg}"
+        self.find_entry.setStyleSheet(f"color: {theme.level_colors(self.app.dark)['Grave']}" if error else "")
+        self.find_info.setText(error)
+        return error
 
     def all_matches(self):
         """Cada resultado del libro: [(fila de sections, número de aparición en esa sección, texto)]."""
-        if not self.find_entry.text():
+        if not self.find_entry.text() or self.regex_error():
             return []
         pattern, found = self.find_pattern(), []
         for n, (title, start, end, _) in enumerate(self.sections):

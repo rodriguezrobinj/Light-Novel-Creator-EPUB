@@ -4,7 +4,7 @@ separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda
 import html
 import re
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, QRectF, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QMimeData, QObject, QRectF, QRegularExpression, Qt, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat)
 from PySide6.QtWidgets import QApplication, QTextEdit
@@ -613,38 +613,61 @@ class Sheet(QTextEdit):
                 flags |= flag
         return flags
 
-    def find_next(self, term, backward=False, whole=False, case=False):
+    def _find(self, term, cursor, backward=False, whole=False, case=False, regex=False):
+        """document().find de term desde cursor. Con regex, term es una expresión regular (sintaxis de Python, que
+        QRegularExpression entiende igual en lo común); una coincidencia vacía («a*») cuenta como no encontrada:
+        reemplazarla no avanzaría."""
+        if not regex:
+            return self.document().find(term, cursor, self._flags(backward, whole, case))
+        expr = QRegularExpression(rf"(?<!\w)(?:{term})(?!\w)" if whole else term,
+                                  QRegularExpression.PatternOption(0) if case
+                                  else QRegularExpression.PatternOption.CaseInsensitiveOption)
+        found = self.document().find(expr, cursor, self._flags(backward))
+        return QTextCursor() if found.isNull() or not found.hasSelection() else found
+
+    @staticmethod
+    def _replacement(term, new, selected, case=False, regex=False):
+        """Lo que va en lugar de selected, o None si selected no es una aparición de term. Con regex, new admite
+        \\1 o \\g<nombre> de los grupos."""
+        if regex:
+            m = re.fullmatch(term, selected, 0 if case else re.I)
+            return m.expand(new) if m else None
+        return new if (selected == term if case else selected.lower() == term.lower()) else None
+
+    def find_next(self, term, backward=False, whole=False, case=False, regex=False):
         """Selecciona la siguiente aparición de term desde el cursor (whole: palabra completa; case: distingue
-        mayúsculas); False si no hay más en esta hoja."""
-        found = self.document().find(term, self.textCursor(), self._flags(backward, whole, case))
+        mayúsculas; regex: expresión regular); False si no hay más en esta hoja."""
+        found = self._find(term, self.textCursor(), backward, whole, case, regex)
         if found.isNull():
             return False
         self.setTextCursor(found)
         return True
 
-    def replace_current(self, term, new, case=False):
+    def replace_current(self, term, new, whole=False, case=False, regex=False):
         """Si la selección es term, la cambia por new (con su formato). True si cambió algo."""
         cursor = self.textCursor()
-        same = cursor.selectedText() == term if case else cursor.selectedText().lower() == term.lower()
-        if not cursor.hasSelection() or not same:
+        text = self._replacement(term, new, cursor.selectedText(), case, regex) if cursor.hasSelection() else None
+        if text is None:
             return False
         cursor.beginEditBlock()
-        cursor.insertText(new, cursor.charFormat())
+        cursor.insertText(text, cursor.charFormat())
         cursor.endEditBlock()
         return True
 
-    def replace_all(self, term, new, whole=False, case=False):
+    def replace_all(self, term, new, whole=False, case=False, regex=False):
         """Cambia todas las apariciones de term en la hoja, en un solo paso de deshacer. Devuelve cuántas."""
         doc, count = self.document(), 0
         cursor = QTextCursor(doc)
         edit = QTextCursor(doc)
         edit.beginEditBlock()
         while True:
-            cursor = doc.find(term, cursor, self._flags(False, whole, case))
+            cursor = self._find(term, cursor, False, whole, case, regex)
             if cursor.isNull():
                 break
-            cursor.insertText(new, cursor.charFormat())
-            count += 1
+            text = self._replacement(term, new, cursor.selectedText(), case, regex)
+            if text is not None:  # una expresión con (?<=…) no casa con lo elegido suelto: se deja como está
+                cursor.insertText(text, cursor.charFormat())
+                count += 1
         edit.endEditBlock()
         return count
 

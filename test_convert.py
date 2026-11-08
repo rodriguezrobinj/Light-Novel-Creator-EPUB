@@ -2687,6 +2687,49 @@ def sheet_with(lines):
     return sheet
 
 
+
+def test_sheet_regex_find_and_replace_with_groups():
+    """Con expresión regular, buscar casa el patrón y reemplazar admite grupos; una expresión que casa vacío no
+    se queda en un bucle."""
+    sheet = sheet_with(["Tenía 12 años y <i>3</i> gatos.", "Nada aquí."])
+    found = sheet.find_next("[0-9]+", regex=True) and sheet.textCursor().selectedText()
+    replaced = sheet.replace_current("([0-9]+)", r"«\1»", regex=True)
+    count = sheet.replace_all("([0-9]+) gatos", r"\1 perros", regex=True)
+    empty = sheet.replace_all("x*", "y", regex=True)
+    text = sheet.toPlainText()
+    plain = sheet.replace_all("[0-9]", "N")  # sin regex, los corchetes son texto
+    assert found == "12" and replaced, (found, replaced)
+    assert count == 1 and empty == 0 and plain == 0, (count, empty, plain)
+    assert text.startswith("Tenía «12» años y 3 perros."), text
+
+
+def test_window_editor_regex_box_marks_bad_expressions():
+    """La casilla «.*» de la barra de búsqueda: una expresión mal escrita pone el aviso y no busca ni reemplaza;
+    bien escrita, «Reemplazar todo» usa los grupos en todo el libro."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.tree.selection_set([i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON][0])
+    editor = window.edit_text()
+    root.update()
+    editor.show_find_bar(True)
+    editor.regex_box.setChecked(True)
+    editor.find_entry.setText("(linea")
+    bad = editor.find_info.text(), editor.find(1)
+    editor.replace_everywhere()
+    editor.find_entry.setText(r"(l)inea")
+    ok = editor.find_info.text()
+    editor.replace_entry.setText(r"\1ínea")
+    editor.replace_everywhere()
+    editor.save()
+    text = " ".join(b.html for b in window.book.blocks)
+    window.close()
+    assert bad[0].startswith("Expresión no válida") and bad[1] is False, bad
+    assert ok == "", ok
+    assert "linea" not in text and "línea" in text, text[:300]
+
 def test_sheet_symbols_and_typography():
     """Raya, puntos y comillas con Ctrl+Alt como Word; con texto elegido, las comillas lo envuelven. AltGr+2
     (Ctrl+Alt) sigue escribiendo «@». «Corregir tipografía» pone rayas y comillas conservando la cursiva, en
