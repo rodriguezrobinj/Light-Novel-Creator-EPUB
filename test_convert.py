@@ -3866,6 +3866,82 @@ def test_quality_report_fixes_grammar_and_typography():
     assert got == [fixed for _, _, fixed in cases], [(g, f) for g, (_, _, f) in zip(got, cases) if g != f]
 
 
+
+def _typo_book(texts):
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, html.escape(t, quote=False))
+                                                            for t in texts]
+    return convert.Book("Libro", "", b"", blocks, [0])
+
+
+def check_typo_cases(kind, cases, fine, **options):
+    """cases [(texto, arreglado)] avisan de kind y su arreglo los deja así; fine no avisa."""
+    texts = [t for t, _ in cases] + fine
+    book = _typo_book(texts)
+    report = [i for i in convert.quality_report(book, **options) if i.kind == kind]
+    found = sorted(i.block for i in report)
+    assert found == list(range(1, len(cases) + 1)), [(i.block, texts[i.block - 1]) for i in report]
+    assert all(i.level == "Menor" and i.after and i.problem and i.solution for i in report)
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    got = [html.unescape(b.html) for b in book.blocks[1:len(cases) + 1]]
+    assert got == [fixed for _, fixed in cases], [(g, f) for g, (_, f) in zip(got, cases) if g != f]
+
+
+def test_quality_report_closes_aside_dash():
+    """Si el diálogo sigue tras el inciso del narrador, la raya cierra el inciso antes del punto (RAE)."""
+    check_typo_cases("dialog", [
+        ("—Ven —dijo él. Vamos ya.", "—Ven —dijo él—. Vamos ya."),
+        ("—¿Vienes? —preguntó Emilia. ¡Date prisa!", "—¿Vienes? —preguntó Emilia—. ¡Date prisa!")],
+        ["El guardia dijo él. Vamos ya.", "—Ven —dijo él.", "—Ven —le pareció oír. Luego se fue.",
+         "—Ven —dijo él—. Vamos ya."])
+
+
+def test_quality_report_finds_calques():
+    """Calcos del inglés de frase fija: «en base a», «tomar lugar», «hacer sentido», «en orden de» + infinitivo."""
+    check_typo_cases("calque", [
+        ("Lo hizo en base a eso.", "Lo hizo con base en eso."),
+        ("La boda tomó lugar ayer.", "La boda tuvo lugar ayer."),
+        ("Eso no hace sentido.", "Eso no tiene sentido."),
+        ("Hace sentido, ¿no?", "Tiene sentido, ¿no?"),
+        ("Corrió en orden de llegar antes.", "Corrió para llegar antes.")],
+        ["Tomó su lugar en la mesa.", "Fueron en orden de llegada.", "Eso me hace sentir mal."])
+
+
+def test_quality_report_finds_needless_capitals():
+    """Días, meses y tratamientos en mayúscula a mitad de frase; los títulos de fantasía («el Señor Demonio»)
+    y los que también son nombres («Abril», «Domingo») no."""
+    check_typo_cases("uppercase", [
+        ("Llegó el Lunes por la mañana.", "Llegó el lunes por la mañana."),
+        ("Nació en Enero, creo.", "Nació en enero, creo."),
+        ("Habló con el Señor Pérez ayer.", "Habló con el señor Pérez ayer.")],
+        ["Lunes. Otra vez.", "Apareció el Señor Demonio.", "Lo dijo el Rey Demonio.", "Fue a la casa de Abril.",
+         "Habló con Domingo ayer.", "Gracias, Señor."])
+
+
+def test_quality_report_unpaired_and_repeated_marks():
+    """Más de tres signos seguidos sobran; comillas o paréntesis sin pareja avisan para revisar, sin arreglo, salvo
+    emoticonos, enumeraciones y citas que siguen en el párrafo siguiente."""
+    check_typo_cases("punct", [("¡¡¡¡No!!!!", "¡¡¡No!!!"), ("¿¿¿¿Qué????", "¿¿¿Qué???")], ["¡¡¡No!!!", "¿Eh?!"])
+    texts = ["Dijo «hola y se fue.", "Lo vio (de lejos y calló.", "Ella dijo «sí».", "¿Qué? :)",
+             "a) primero esto.", "Era así: «primero lo uno,", "»y luego lo otro».", "Lo dijo así.)"]
+    book = _typo_book(texts)
+    report = [i for i in convert.quality_report(book) if i.kind == "unpaired"]
+    assert [i.block for i in report] == [1, 2, 8], [(i.block, texts[i.block - 1]) for i in report]
+    assert all(i.level == "Revisar" and i.edit is None for i in report)
+    assert report[0].span == (5, 6), report[0].span  # el subrayado del editor, en la «
+
+
+def test_quality_report_echoes_only_when_asked():
+    """Ecos: la misma palabra cerca, solo si se piden; ni nombres, ni repetición buscada, ni palabras comunes."""
+    texts = ["Miró la puerta y luego volvió a mirar la puerta cerrada.", "Espera, espera, ¡espera!",
+             "Subaru dijo que Subaru no vendría.", "Estaba cansado y estaba triste."]
+    book = _typo_book(texts)
+    assert not [i for i in convert.quality_report(book) if i.kind == "echo"]
+    report = [i for i in convert.quality_report(book, echoes=True) if i.kind == "echo"]
+    assert [(i.block, i.level, i.edit) for i in report] == [(1, "Menor", None)], [(i.block, i.title) for i in report]
+    start, end = report[0].span
+    assert texts[0][start:end] == "puerta" and start > texts[0].index("puerta"), report[0].span
+
 def test_quality_report_finds_lowercase_after_period_and_missing_end():
     """Minúscula tras un punto (no tras una abreviatura ni puntos suspensivos) y párrafo sin punto final al que
     sigue otro en mayúscula: avisos sin arreglo automático, porque puede sobrar el punto o faltar texto."""

@@ -1476,6 +1476,17 @@ PLACES = set("delante detrás encima debajo cerca alrededor enfrente dentro lejo
 NOT_INFINITIVE = "lugar|mar|hogar|altar|azar|bar|collar|par|mujer|ayer|placer|poder|deber|taller|alquiler"
 ABBREVIATIONS = set("sr sra srta dr dra ud uds vd etc aprox pág págs núm vol cap ej av lic ing prof vs st mr mrs "
                     "ms art fig tel min máx mín seg atte".split())  # tras ellas el punto no acaba la frase
+SPEECH = ("dijo|preguntó|respondió|contestó|gritó|murmuró|susurró|exclamó|añadió|replicó|continuó|insistió|"
+          "explicó|comentó|preguntaba|decía")  # verbos de habla: tras ellos el inciso es del narrador
+# «tomar lugar», «hacer sentido» -> «tener lugar», «tener sentido», en el mismo tiempo
+TENER = {"toma": "tiene", "tomó": "tuvo", "tomaba": "tenía", "tomará": "tendrá", "tomaría": "tendría",
+         "tomado": "tenido", "tomar": "tener", "toman": "tienen", "tomaron": "tuvieron", "tomaban": "tenían",
+         "hace": "tiene", "hizo": "tuvo", "hacía": "tenía", "hará": "tendrá", "haría": "tendría", "hacen": "tienen",
+         "hacer": "tener"}
+DAYS_MONTHS = ("Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Enero|Febrero|Marzo|Mayo|Junio|Julio|Agosto|"
+               "Septiembre|Setiembre|Octubre|Noviembre|Diciembre")  # Abril y Domingo también son nombres
+# «el Señor Demonio», «el Señor Oscuro»: títulos de fantasía que hacen de nombre, con mayúscula
+TITLE_NOUNS = "Demonio|Demonios|Oscuro|Supremo|Dragón|Dragones|Feudal|Celestial|Espada|Tiempo|Destino|Lich"
 CAPITAL = re.compile(r"([^\W\d_]{2,})\.\s+[a-záéíóúñ]")  # "la mesa. luego"; los puntos suspensivos no cuentan
 
 
@@ -1546,6 +1557,13 @@ def _inciso(m):
             not any(d in s[:m.start()] or d in s[m.end():] for d in DASHES)):
         return m[0]
     return m[1] + " —"
+
+
+def _aside_close(s):
+    """«—Ven —dijo él. Vamos» -> «—Ven —dijo él—. Vamos»: si el diálogo sigue tras el inciso, la raya lo cierra."""
+    if not re.match(r"\s*(?:<[ib]>)?[—―─–]", s):
+        return s
+    return re.sub(rf"(\s[—―─–](?:{SPEECH})\b[^—―─–.!?…<>]*?)\.\s+(?=[¿¡«“\"]?[A-ZÁÉÍÓÚÑ])", r"\1—. ", s)
 
 
 def _close(m):
@@ -1642,15 +1660,33 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
      "las palabras se leen pegadas.", "Ponerlo."),
     ("punct", "Signos de puntuación repetidos", _subs(
         (r",{2,}", ","), (r"[,;]\s*\.(?!\.)", "."), (r"([?!])\.(?!\.)", r"\1"), (r"…\.(?!\.)", "…"),
-        (r"(?<![.…])(?<![.…] )\.\s+\.(?!\s*[.…])", ".", (". .", ".  ."))),  # ". ." suelto; ". . ." son puntos suspensivos
+        (r"(?<![.…])(?<![.…] )\.\s+\.(?!\s*[.…])", ".", (". .", ".  .")),  # ". ." suelto; ". . ." son puntos suspensivos
+        (r"([!?¡¿])\1{3,}", r"\1\1\1", ("!!!!", "????", "¡¡¡¡", "¿¿¿¿"))),
      "Dos signos donde va uno: «,,», «?.», «….», «. .». Tras los puntos suspensivos o el cierre de pregunta "
-     "o exclamación no va punto.", "Corregirlo."),
+     "o exclamación no va punto, y más de tres «!» o «?» seguidos sobran.", "Corregirlo."),
     ("dialog", "Puntuación del inciso del narrador", _subs(
         # Mitsuha: «—Sí, — respondió el soldado, —un buque…» -> «—Sí —respondió el soldado—, un buque…»
         (r",\s*[—―─–]\s*([a-záéíóúñ][^—―─–.!?]*?),\s*[—―─–]\s*", r" —\1—, ", DASHES),
-        (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", _inciso, DASHES)),
+        (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", _inciso, DASHES), _aside_close),
      "En un diálogo, el punto o la coma no van antes del inciso del narrador sino tras su raya de cierre: "
-     "«—Sí —respondió—, vamos.»", "Corregirlo."),
+     "«—Sí —respondió—, vamos.» Si el diálogo sigue tras el inciso, la raya lo cierra: «—Ven —dijo—. Vamos.»",
+     "Corregirlo."),
+    ("calque", "Calco del inglés", _subs(
+        (r"\b([Ee])n base a\b", lambda m: ("Con" if m[1] == "E" else "con") + " base en", ("base a",)),
+        (r"\b((?i:tom(?:a|ó|aba|ará|aría|ado|ar|an|aron|aban)))(?= lugar\b)",
+         lambda m: _case(TENER[m[1].lower()], m[1]), ("lugar",)),
+        (r"\b((?i:hace|hizo|hacía|hará|haría|hacen|hacer))(?= sentido\b)",
+         lambda m: _case(TENER[m[1].lower()], m[1]), ("sentido",)),
+        (rf"\b([Ee])n orden (?:de|a) (?=(?!(?:{NOT_INFINITIVE})\b)[a-záéíóúñ]+(?:ar|er|ir)\b)",
+         lambda m: ("Para" if m[1] == "E" else "para") + " ", ("orden",))),
+     "Traducción literal del inglés: «based on» es «con base en», «take place» es «tener lugar», «make sense» es "
+     "«tener sentido», «in order to» es «para».", "Corregirlo."),
+    ("uppercase", "Mayúscula innecesaria", _subs(
+        (rf"(?<=[a-záéíóúñ,] )({DAYS_MONTHS})\b", lambda m: m[1].lower()),
+        (rf"(?<=[a-záéíóúñ,] )(Señor|Señora|Señorita|Don|Doña)(?= (?!(?:{TITLE_NOUNS})\b)[A-ZÁÉÍÓÚÑ][a-záéíóúñ])",
+         lambda m: m[1].lower())),
+     "En español los días, los meses y los tratamientos («señor», «don») van en minúscula a mitad de frase.",
+     "Corregirlo."),
     ("closing", "Falta el signo de cierre", _subs(
         # «80.000», «G.I.», no; ni con una comilla o un paréntesis antes del punto: el signo falta dentro
         # («¡Esa sí que es una gran noticia,” celebró…», Mitsuha) y no sabemos dónde
@@ -1686,7 +1722,54 @@ def _facts(text):
             capital, bool(re.search(r"[^\W\d_]$", text)))
 
 
-REPORT_MEMOS = (_unhtml, _letters, _honorific_key, _honorific_forms, _facts, _typos)
+PAIRS = (("«", "»"), ("“", "”"), ("(", ")"))
+# Emoticonos «:)» y enumeraciones «a)»: un «)» que no cierra nada
+LONE_CLOSE = re.compile(r"[:;]-?\)|(?:^|(?<=\s))[a-z0-9]\)")
+
+
+@_memo
+def _unpaired(text):
+    """El primer signo sin pareja del párrafo: (posición, signo de apertura, True si falta el cierre), o None."""
+    clean = LONE_CLOSE.sub(lambda m: " " * len(m[0]), text)
+    for a, b in PAIRS:
+        depth, first = 0, None
+        for i, c in enumerate(clean):
+            if c == a:
+                first = first if depth else i
+                depth += 1
+            elif c == b:
+                if not depth:
+                    return i, a, False
+                depth -= 1
+        if depth:
+            return first, a, True
+    return None
+
+
+# Palabras de 5 letras o más tan comunes que repetirlas no se nota
+ECHO_SKIP = set("cuando porque entonces también estaba estaban había habían tenía tenían puede pueden quiero quería "
+                "sobre desde hasta donde mientras siempre todavía mucho mucha muchos muchas nuestro nuestra algún "
+                "alguna alguien nadie nada cosas parece podía después antes ahora aquí estoy estás están somos "
+                "fueron siendo hacia contra otros otras tanto todos todas porqué quizás realmente simplemente".split())
+
+
+@_memo
+def _echo(text):
+    """(inicio, fin) de la segunda de dos palabras iguales a menos de 12 palabras, o None. Solo en minúscula (los
+    nombres se repiten a propósito), de 5 letras o más y no comunes; a menos de 3 es repetición buscada
+    («espera, espera»)."""
+    seen = {}
+    for n, m in enumerate(re.finditer(r"[^\W\d_]+", text)):
+        w = m[0]
+        if len(w) < 5 or not w.islower() or w in ECHO_SKIP:
+            continue
+        if w in seen and 3 <= n - seen[w] <= 12:
+            return m.span()
+        seen[w] = n
+    return None
+
+
+REPORT_MEMOS = (_unhtml, _letters, _honorific_key, _honorific_forms, _facts, _typos, _unpaired, _echo)
 
 
 def report_memos():
@@ -1735,6 +1818,11 @@ def _issue_span(issue, blocks):
     if issue.kind == "broken":
         m = MOJIBAKE.search(text) or re.search("�", text)
         return _words_around(shown, lead + m.start(), lead + m.end()) if m else None
+    if issue.kind == "unpaired" and _unpaired(text):
+        pos = _unpaired(text)[0]
+        return lead + pos, lead + pos + 1
+    if issue.kind == "echo" and _echo(text):
+        return tuple(lead + p for p in _echo(text))
     if issue.kind == "lower":
         return lead, lead + len(text.split()[0])
     if issue.kind == "end":
@@ -1742,9 +1830,10 @@ def _issue_span(issue, blocks):
     return lead, lead + len(text)
 
 
-def quality_report(book):
+def quality_report(book, echoes=False, glossary=()):
     """Lo sospechoso del libro, para revisarlo: [Issue], por página. Cada aviso dice el problema, la
-    solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa."""
+    solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa. Con echoes, también
+    las palabras repetidas cerca (muchos avisos de estilo); glossary, los nombres de la serie como deben ir."""
     blocks = book.blocks
     report = [Issue("skipped", None, page, "Grave", f"Texto no incluido ({letters} letras)",
                     f"La página {page} tiene texto que no entró en el libro: {why}.",
@@ -1825,6 +1914,24 @@ def quality_report(book):
                                 "El párrafo parece estar en inglés: el traductor se lo saltó o es una nota del "
                                 "grupo.", "Tradúcelo o quítalo con «Editar texto…» (tecla E).", _cut(text),
                                 text=text))
+        nxt = _plain(blocks[k + 1]).strip() if k + 1 < len(blocks) and blocks[k + 1].kind == "p" else ""
+        unpaired = _unpaired(text) if not link else None
+        # Cita de varios párrafos: cada uno sigue con « o » y solo el último la cierra
+        if unpaired and unpaired[1] == "«" and (nxt if unpaired[2] else text)[:1] in ("«", "»"):
+            unpaired = None
+        if unpaired:
+            pos = unpaired[0]
+            report.append(Issue("unpaired", k, b.page, "Revisar", "Signo sin pareja",
+                                "Se abren comillas o un paréntesis que no se cierran, o se cierran sin abrirse: "
+                                "falta un signo o sobra.",
+                                "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E).",
+                                _around(text, pos, pos + 1), text=text))
+        echo = _echo(text) if echoes else None
+        if echo:
+            report.append(Issue("echo", k, b.page, "Menor", "Palabra repetida cerca",
+                                f"«{text[echo[0]:echo[1]]}» sale dos veces en pocas palabras: suena repetido.",
+                                "Cambia una por un sinónimo o reescribe la frase con «Editar texto…» (tecla E).",
+                                _around(text, *echo), text=text))
         line = _line(b, k)
         for t, fixed in _typos(line) if not link else ():
             kind, title, _, why, solution = TYPOS[t]
@@ -1851,7 +1958,6 @@ def quality_report(book):
                                 "sobra: suele quedar de un salto de línea del PDF.",
                                 "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E): quita el punto o "
                                 "pon la mayúscula.", _around(text, *capital), text=text))
-        nxt = _plain(blocks[k + 1]).strip() if k + 1 < len(blocks) and blocks[k + 1].kind == "p" else ""
         if (len(text) >= 40 and letter_end and nxt[:1].isupper() and not link
                 and not LABEL.match(text.strip()) and not LABEL.match(nxt)):
             report.append(Issue("end", k, b.page, "Menor", "Falta el punto final",
