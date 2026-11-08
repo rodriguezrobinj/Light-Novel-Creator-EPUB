@@ -904,16 +904,29 @@ def _fold(text):
     return re.sub(r"[\s\-]", "", plain.lower())
 
 
+@_memo  # por párrafo: el informe con glosario lo pide tras cada edición, y el libro entero tardaba 0,3 s
+def _block_names(block_html):
+    """_name_forms de un párrafo."""
+    text = html.unescape(TAGS.sub("", block_html))
+    tokens = re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", text)
+    common = frozenset(_fold(t) for t in tokens if t[:1].islower())
+    proper = frozenset(_fold(re.split(r"[- ]", m.group(1))[0])
+                       for m in re.finditer(r"(?<=[\w,;]) ([^\W\d_][\w-]*)", text) if m.group(1)[:1].isupper())
+    forms = collections.Counter(t for t in tokens if t[:1].isupper() and not (len(t) > 1 and t.isupper()))
+    forms.update(f"{a} {b}" for a, b in zip(tokens, tokens[1:]) if a[:1].isupper() and b.lower() in HONORIFICS)
+    return forms, common, proper
+
+
 def _name_forms(book):
     """(formas con mayúscula y sus veces, claves _fold de las palabras que salen en minúscula, claves de las que
     van con mayúscula a mitad de frase, como los nombres propios)."""
-    text = " ".join(html.unescape(TAGS.sub("", b.html)) for b in book.blocks if b.kind in ("p", "heading"))
-    tokens = re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", text)
-    common = {_fold(t) for t in tokens if t[:1].islower()}
-    proper = {_fold(re.split(r"[- ]", m.group(1))[0]) for m in re.finditer(r"(?<=[\w,;]) ([^\W\d_][\w-]*)", text)
-              if m.group(1)[:1].isupper()}
-    forms = collections.Counter(t for t in tokens if t[:1].isupper() and not (len(t) > 1 and t.isupper()))
-    forms.update(f"{a} {b}" for a, b in zip(tokens, tokens[1:]) if a[:1].isupper() and b.lower() in HONORIFICS)
+    forms, common, proper = collections.Counter(), set(), set()
+    for b in book.blocks:
+        if b.kind in ("p", "heading"):
+            f, c, p = _block_names(b.html)
+            forms.update(f)
+            common |= c
+            proper |= p
     return forms, common, proper
 
 
