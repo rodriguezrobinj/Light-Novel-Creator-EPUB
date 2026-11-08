@@ -1514,8 +1514,6 @@ PLACES = set("delante detrás encima debajo cerca alrededor enfrente dentro lejo
 NOT_INFINITIVE = "lugar|mar|hogar|altar|azar|bar|collar|par|mujer|ayer|placer|poder|deber|taller|alquiler"
 ABBREVIATIONS = set("sr sra srta dr dra ud uds vd etc aprox pág págs núm vol cap ej av lic ing prof vs st mr mrs "
                     "ms art fig tel min máx mín seg atte".split())  # tras ellas el punto no acaba la frase
-SPEECH = ("dijo|preguntó|respondió|contestó|gritó|murmuró|susurró|exclamó|añadió|replicó|continuó|insistió|"
-          "explicó|comentó|preguntaba|decía")  # verbos de habla: tras ellos el inciso es del narrador
 # «tomar lugar», «hacer sentido» -> «tener lugar», «tener sentido», en el mismo tiempo
 TENER = {"toma": "tiene", "tomó": "tuvo", "tomaba": "tenía", "tomará": "tendrá", "tomaría": "tendría",
          "tomado": "tenido", "tomar": "tener", "toman": "tienen", "tomaron": "tuvieron", "tomaban": "tenían",
@@ -1595,13 +1593,6 @@ def _inciso(m):
             not any(d in s[:m.start()] or d in s[m.end():] for d in DASHES)):
         return m[0]
     return m[1] + " —"
-
-
-def _aside_close(s):
-    """«—Ven —dijo él. Vamos» -> «—Ven —dijo él—. Vamos»: si el diálogo sigue tras el inciso, la raya lo cierra."""
-    if not re.match(r"\s*(?:<[ib]>)?[—―─–]", s):
-        return s
-    return re.sub(rf"(\s[—―─–](?:{SPEECH})\b[^—―─–.!?…<>]*?)\.\s+(?=[¿¡«“\"]?[A-ZÁÉÍÓÚÑ])", r"\1—. ", s)
 
 
 def _close(m):
@@ -1705,10 +1696,9 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
     ("dialog", "Puntuación del inciso del narrador", _subs(
         # Mitsuha: «—Sí, — respondió el soldado, —un buque…» -> «—Sí —respondió el soldado—, un buque…»
         (r",\s*[—―─–]\s*([a-záéíóúñ][^—―─–.!?]*?),\s*[—―─–]\s*", r" —\1—, ", DASHES),
-        (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", _inciso, DASHES), _aside_close),
+        (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", _inciso, DASHES)),
      "En un diálogo, el punto o la coma no van antes del inciso del narrador sino tras su raya de cierre: "
-     "«—Sí —respondió—, vamos.» Si el diálogo sigue tras el inciso, la raya lo cierra: «—Ven —dijo—. Vamos.»",
-     "Corregirlo."),
+     "«—Sí —respondió—, vamos.»", "Corregirlo."),
     ("calque", "Calco del inglés", _subs(
         (r"\b([Ee])n base a\b", lambda m: ("Con" if m[1] == "E" else "con") + " base en", ("base a",)),
         (r"\b((?i:tom(?:a|ó|aba|ará|aría|ado|ar|an|aron|aban)))(?= lugar\b)",
@@ -1763,6 +1753,8 @@ def _facts(text):
 PAIRS = (("«", "»"), ("“", "”"), ("(", ")"))
 # Emoticonos «:)» y enumeraciones «a)»: un «)» que no cierra nada
 LONE_CLOSE = re.compile(r"[:;]-?\)|(?:^|(?<=\s))[a-z0-9]\)")
+UNPAIRED_STYLE = 20  # más avisos de un mismo signo en un libro: es su estilo, no se avisan
+QUOTE_LEAD = re.compile(r"\s*(?:[—―─–]\s*)?[«»“”\"]")  # párrafo que empieza con comillas: sigue una cita
 
 
 @_memo
@@ -1772,6 +1764,8 @@ def _unpaired(text):
     for a, b in PAIRS:
         depth, first = 0, None
         for i, c in enumerate(clean):
+            if a == "“" and c == '"':  # «“Hola"» (Maryoku, Nageki): la recta cierra la abierta o abre otra
+                c = b if depth else a
             if c == a:
                 first = first if depth else i
                 depth += 1
@@ -1873,6 +1867,7 @@ def quality_report(book, echoes=False, glossary=()):
     solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa. Con echoes, también
     las palabras repetidas cerca (muchos avisos de estilo); glossary, los nombres de la serie como deben ir."""
     blocks = book.blocks
+    unpaired_signs = {}  # bloque -> signo de su aviso «Signo sin pareja»
     report = [Issue("skipped", None, page, "Grave", f"Texto no incluido ({letters} letras)",
                     f"La página {page} tiene texto que no entró en el libro: {why}.",
                     "Mira la página en la vista previa del PDF. Si era texto de la novela, cópialo en su "
@@ -1957,11 +1952,16 @@ def quality_report(book, echoes=False, glossary=()):
                                 text=text))
         nxt = _plain(blocks[k + 1]).strip() if k + 1 < len(blocks) and blocks[k + 1].kind == "p" else ""
         unpaired = _unpaired(text) if not link else None
-        # Cita de varios párrafos: cada uno sigue con « o » y solo el último la cierra
-        if unpaired and unpaired[1] == "«" and (nxt if unpaired[2] else text)[:1] in ("«", "»"):
-            unpaired = None
+        if unpaired:
+            sign, open_ = unpaired[1:]
+            twin = _unpaired(nxt if open_ else prev_text or "")
+            # Cita o diálogo de varios párrafos: los siguientes empiezan con comillas y solo el último cierra
+            # (Maryoku, Kage); o el PDF partió el párrafo y el signo que falta está en el de al lado
+            if sign != "(" and QUOTE_LEAD.match(nxt if open_ else text) or twin and twin[1:] == (sign, not open_):
+                unpaired = None
         if unpaired:
             pos = unpaired[0]
+            unpaired_signs[k] = unpaired[1]
             report.append(Issue("unpaired", k, b.page, "Revisar", "Signo sin pareja",
                                 "Se abren comillas o un paréntesis que no se cierran, o se cierran sin abrirse: "
                                 "falta un signo o sobra.",
@@ -2017,6 +2017,10 @@ def quality_report(book, echoes=False, glossary=()):
                                 "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E): pon el punto o "
                                 "une los dos párrafos.", _cut(text, tail=True) + " ¶\n" + _cut(nxt), text=text))
         prev_text = text
+    # Un signo sin pareja en todo el libro es el estilo del grupo (Maryoku no cierra las “ del diálogo), no una
+    # errata: decenas de avisos que nadie va a revisar uno a uno
+    many = {s for s, n in collections.Counter(unpaired_signs.values()).items() if n > UNPAIRED_STYLE}
+    report = [i for i in report if not (i.kind == "unpaired" and unpaired_signs[i.block] in many)]
     last = None
     for k, end in zip(heads, heads[1:]):
         if k not in book.candidates:

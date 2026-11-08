@@ -22,14 +22,10 @@ da falsos avisos en más de un tercio de los casos mirados, se rebaja a «Revisa
 
 ### 1. Puntuación del diálogo (RAE)
 
-Dos entradas nuevas en `TYPOS`, tipo `dialogue`, «Puntuación del diálogo»:
-
-- **Punto antes del inciso**: «—Hola. —dijo él» → «—Hola —dijo él». Solo si tras la raya sigue una
-  minúscula (inciso del narrador). No tras puntos suspensivos, ni «?» o «!» (esos se quedan).
-- **Raya de cierre tras el inciso**: «—Ven —dijo él. Vamos» → «—Ven —dijo él—. Vamos». Solo en líneas que
-  empiezan por raya, con el inciso empezando por un verbo de habla (dijo, preguntó, respondió, contestó,
-  gritó, murmuró, susurró, exclamó, añadió, replicó, continuó, insistió, explicó, comentó, preguntaba,
-  decía) y seguido por una mayúscula o un signo de apertura.
+- **Punto antes del inciso** («—Hola. —dijo él» → «—Hola —dijo él»): ya lo arreglaba la entrada `"dialog"`.
+- **Raya de cierre tras el inciso** («—Ven —dijo él. Vamos» → «…él—. Vamos»): **descartada** tras la regresión.
+  Tras «—dijo él.» casi siempre sigue narración (Mitsuha 1: 31 de 31, Re Zero 1: 16 de 16), y desde el texto
+  no se distingue. Un test fija que no se toca.
 
 ### 2. Calcos del inglés
 
@@ -51,9 +47,13 @@ nombre con mayúscula a mitad de frase («el Señor Pérez» → «el señor Pé
 
 ### 4. Signos sin pareja
 
-- Tipo `unpaired`, «Revisar», «Signo sin pareja», sin arreglo: en un párrafo, « » ( ) “ ” o ¿ ? que no
-  cuadran. Una « abierta sin cerrar no avisa si el párrafo siguiente empieza por « o » (cita que sigue).
-- Tipo `repeated_marks` dentro de `TYPOS`: más de tres «!» o «?» seguidos → tres.
+- Tipo `unpaired`, «Revisar», «Signo sin pareja», sin arreglo: en un párrafo, « » “ ” o ( ) que no cuadran
+  (¿ ? ya los cubren «Falta el signo de apertura» y «Falta el signo de cierre»). No avisa:
+  - si el párrafo siguiente (o este, para un cierre sin abrir) empieza con comillas: diálogo de varios párrafos;
+  - si el signo que falta está en el párrafo de al lado: párrafo partido por el PDF;
+  - de emoticonos «:)» ni de enumeraciones «a)»; la comilla recta " cierra la “ abierta;
+  - de un signo que falla en más de 20 párrafos del libro: es el estilo del grupo (Maryoku), no una errata.
+- Dentro de `"punct"`: más de tres «!» o «?» seguidos → tres.
 
 ### 5. Ecos
 
@@ -68,7 +68,7 @@ nombre con mayúscula a mitad de frase («el Señor Pérez» → «el señor Pé
 - Campo de revisión `glossary` (lista de términos), en `INHERITED`: pasa de tomo a tomo como los reemplazos.
 - «Editar datos» → botón «Glosario…»: lista editable de términos (añadir, quitar, cambiar) y botón «Añadir
   nombres de este tomo», que propone los nombres propios con 5 o más apariciones que aún no están, con
-  casillas y su recuento.
+  su recuento como comentario (`Emilia  # 120 veces`), en el mismo cuadro de texto que «Reemplazos…».
 - `quality_report(book, glossary=())`: tipo `glossary`, «Menor», «Nombre distinto al glosario». Un nombre con
   mayúscula del libro que no está en el glosario pero es la misma palabra sin tildes ni guiones (`_fold`) o
   difiere en una letra de un término de 5 letras o más. Arreglo: cambiar la forma del libro por la del

@@ -3887,13 +3887,12 @@ def check_typo_cases(kind, cases, fine, **options):
     assert got == [fixed for _, fixed in cases], [(g, f) for g, (_, f) in zip(got, cases) if g != f]
 
 
-def test_quality_report_closes_aside_dash():
-    """Si el diálogo sigue tras el inciso del narrador, la raya cierra el inciso antes del punto (RAE)."""
-    check_typo_cases("dialog", [
-        ("—Ven —dijo él. Vamos ya.", "—Ven —dijo él—. Vamos ya."),
-        ("—¿Vienes? —preguntó Emilia. ¡Date prisa!", "—¿Vienes? —preguntó Emilia—. ¡Date prisa!")],
-        ["El guardia dijo él. Vamos ya.", "—Ven —dijo él.", "—Ven —le pareció oír. Luego se fue.",
-         "—Ven —dijo él—. Vamos ya."])
+def test_quality_report_leaves_narration_after_aside():
+    """Tras «—dijo él.» casi siempre sigue narración, no diálogo (Mitsuha 1: 31 de 31, Re Zero 1: 16 de 16): no se
+    pide raya de cierre. El punto antes del inciso sí se corrige."""
+    check_typo_cases("dialog", [("—Ven. —dijo él.", "—Ven —dijo él.")],
+                     ["—Ven —dijo él. Luego se fue.", "—No te muevas —dijo la chica—. Podía verse en sus ojos.",
+                      "—Ven —dijo él.", "—Ven —dijo él—. Vamos ya."])
 
 
 def test_quality_report_finds_calques():
@@ -3929,6 +3928,15 @@ def test_quality_report_unpaired_and_repeated_marks():
     assert [i.block for i in report] == [1, 2, 8], [(i.block, texts[i.block - 1]) for i in report]
     assert all(i.level == "Revisar" and i.edit is None for i in report)
     assert report[0].span == (5, 6), report[0].span  # el subrayado del editor, en la «
+    # Kage, Maryoku: diálogo de varios párrafos que solo cierra el último; párrafo partido por el PDF ("Zenis.”");
+    # Nageki: comilla recta que cierra la curva
+    fine = ["“Bien. En ese caso será el almuerzo", "Zenis.”", "“Primero lo uno.", "“Y luego lo otro.”",
+            '“Lo siento mucho, pero deberíamos empezar."']
+    assert not [i for i in convert.quality_report(_typo_book(fine)) if i.kind == "unpaired"]
+    # El mismo signo sin cerrar en más de 20 párrafos es el estilo del libro (Maryoku): no se avisa ninguno
+    style = ["“Hola, ¿qué tal?", "Ella sonrió."] * 21
+    assert not [i for i in convert.quality_report(_typo_book(style)) if i.kind == "unpaired"]
+    assert len([i for i in convert.quality_report(_typo_book(style[:40])) if i.kind == "unpaired"]) == 20
 
 
 def test_quality_report_echoes_only_when_asked():
