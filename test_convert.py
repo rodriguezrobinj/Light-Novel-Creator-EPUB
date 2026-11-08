@@ -1731,6 +1731,107 @@ def test_epub_metadata_group_translator_synopsis():
     assert "<dc:description>Una bruja &lt;muy&gt; fuerte.</dc:description>" in opf, opf
 
 
+
+def test_epub_accessibility_metadata_and_alt_text():
+    """EPUB 3 accesible: metadatos schema.org (modo visual y texto alternativo solo con ilustraciones) y cada
+    ilustración con su descripción: la del usuario o «Ilustración de «capítulo»». En EPUB 2, sin metadatos."""
+    pic = jpeg(300, 400)
+    other = jpeg(320, 400)
+    B = convert.Block
+    book = convert.Book("Libro", "", pic, [B("image", 1, image=other), B("heading", 2, "Cap 1"), B("p", 2, "Texto."),
+                                           B("image", 3, image=pic)], [1])
+    out = TMP / "accesible.epub"
+    convert.write_epub(book, [(1, "Cap <1>")], out, alts={convert.image_key(other): "Emilia & Subaru en el mercado"})
+    opf = epub_file(out, "OEBPS/content.opf")
+    ET.fromstring(opf.encode())
+    pages = " ".join(epub_file(out, f"OEBPS/{n}") for n in ("sec001.xhtml", "sec002.xhtml"))
+    plain = TMP / "sin-ilustraciones.epub"
+    convert.write_epub(convert.Book("Libro", "", pic, book.blocks[1:3], [0]), [(0, "Cap 1")], plain)
+    plain_opf = epub_file(plain, "OEBPS/content.opf")
+    old = TMP / "epub2.epub"
+    convert.write_epub(book, [(1, "Cap 1")], old, epub2=True)
+    assert '<meta property="schema:accessMode">visual</meta>' in opf and "alternativeText" in opf, opf
+    assert '<meta property="schema:accessibilityHazard">none</meta>' in opf and "conformsTo" not in opf
+    assert 'alt="Emilia &amp; Subaru en el mercado"' in pages and 'alt="Ilustración de «Cap &lt;1&gt;»"' in pages, pages
+    assert "visual" not in plain_opf and "alternativeText" not in plain_opf and "tableOfContents" in plain_opf
+    assert "schema:" not in epub_file(old, "OEBPS/content.opf")
+    assert not convert.check_epub(out), convert.check_epub(out)
+
+
+def test_window_describe_image_reaches_the_epub():
+    """«Describir ilustración…» guarda la descripción por la imagen (no por la fila) en la revisión, y el EPUB la
+    lleva como texto alternativo; sin una ilustración elegida, un aviso lo pide."""
+    import app
+
+    pic = jpeg(300, 400)
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto."), B("image", 2, image=pic)]
+    original, told = app._ask_line, []
+    info = app.messagebox.showinfo
+    app._ask_line = lambda parent, title, label, text: "Emilia en el mercado"
+    app.messagebox.showinfo = lambda title, message, **_: told.append(message)
+    try:
+        root, window = visible_window()
+        window.show_book(convert.Book("Libro", "", b"", blocks, [0]))  # sin portada: la parecida se descarta
+        window.tree.selection_set("0")
+        window.describe_image()  # un título: no es una ilustración
+        window.tree.selection_set("2")
+        window.describe_image()
+        state = window.review_state()
+        out = TMP / "descrita.epub"
+        chapters, removed, breaks = app._plan(window.book, window.rows())
+        convert.write_epub(window.book, chapters, out, removed=removed, **window.write_options(breaks))
+        window.close()
+    finally:
+        app._ask_line, app.messagebox.showinfo = original, info
+    assert told == ["Elige primero una ilustración en la lista."], told
+    assert state["alts"] == {convert.image_key(pic): "Emilia en el mercado"}, state["alts"]
+    with zipfile.ZipFile(out) as z:
+        pages = {n: z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml")}
+    assert any('alt="Emilia en el mercado"' in p for p in pages.values()), {
+        n: re.findall(r"<img[^>]*>", p) for n, p in pages.items()}
+
+
+def test_epubcheck_messages_in_spanish():
+    """El informe JSON de EPUBCheck se lee como (gravedad, dónde, mensaje) en español."""
+    import app
+
+    data = {"messages": [{"severity": "ERROR", "message": "Falta el atributo «alt». ",
+                          "locations": [{"path": "OEBPS/sec001.xhtml", "line": 12}]},
+                         {"severity": "WARNING", "message": "Aviso", "locations": [{"path": "OEBPS/content.opf",
+                                                                                     "line": -1}]},
+                         {"severity": "FATAL", "message": "Roto"}]}
+    assert app._epubcheck_messages(data) == [("Error", "OEBPS/sec001.xhtml, línea 12", "Falta el atributo «alt»."),
+                                             ("Advertencia", "OEBPS/content.opf", "Aviso"), ("Error grave", "", "Roto")]
+
+
+def test_window_epubcheck_asks_before_downloading():
+    """Sin Java, un aviso dice cómo instalarlo; sin EPUBCheck, pregunta antes de descargar nada; el resultado se
+    muestra en una lista o como «cumple el estándar»."""
+    import app
+
+    root, window = visible_window()
+    told, asked, ran = [], [], []
+    saved = app.shutil.which, app.messagebox.showinfo, app.messagebox.askyesno, window.run
+    app.messagebox.showinfo = lambda title, message, **_: told.append(message)
+    app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or False
+    window.run = lambda work, args, done, **options: ran.append(work) or True
+    try:
+        app.shutil.which = lambda name: None
+        window.validate_epub(TMP / "libro.epub")
+        app.shutil.which = lambda name: "java.exe"
+        window.validate_epub(TMP / "libro.epub")  # sin el .jar: pregunta, y con «No» no descarga
+        window.show_epubcheck(TMP / "libro.epub", [])
+        clean = root.dialogs()[-1].findChildren(app.QLabel)[1].text()
+        window.show_epubcheck(TMP / "libro.epub", [("Error", "OEBPS/sec001.xhtml", "Mal"), ("Advertencia", "", "Ojo")])
+        status = window.status.text()
+    finally:
+        app.shutil.which, app.messagebox.showinfo, app.messagebox.askyesno, window.run = saved
+        window.close()
+    assert "Java" in told[0] and "33 MB" in asked[0] and ran == [], (told, asked, ran)
+    assert clean == "Sin errores ni advertencias: el EPUB cumple el estándar.", clean
+    assert status == "EPUBCheck: 1 error, 1 advertencia", status
+
 def jpeg(width, height):
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
     pix.set_rect(pix.irect, (200, 120, 40))

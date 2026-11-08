@@ -4,6 +4,7 @@ import colorsys
 import csv
 import difflib
 import functools
+import hashlib
 import html
 import io
 import os
@@ -2506,6 +2507,25 @@ def _separator(block, index, style, choice, images):
     return f'<p class="brk">{symbol}</p>'
 
 
+def image_key(data):
+    """Clave de una ilustración para recordar su descripción: el índice del bloque cambia al editar, ella no."""
+    return hashlib.sha1(data).hexdigest()[:16]
+
+
+def _accessibility(illustrated):
+    """Metadatos de accesibilidad de EPUB 3 (schema.org): las tiendas los piden desde la Ley Europea de
+    Accesibilidad. Sin dcterms:conformsTo: nadie ha verificado el libro contra WCAG."""
+    features = ["tableOfContents", "readingOrder", "structuralNavigation"] + (["alternativeText"] if illustrated else [])
+    summary = ("Texto que se adapta a la pantalla, con índice, capítulos navegables y un orden de lectura lógico. "
+               + ("Las ilustraciones llevan una descripción breve. " if illustrated else "")
+               + "Sin destellos, movimiento ni sonido.")
+    return ([f'<meta property="schema:accessMode">{mode}</meta>' for mode in ["textual"] + ["visual"] * illustrated]
+            + ['<meta property="schema:accessModeSufficient">textual</meta>']
+            + [f'<meta property="schema:accessibilityFeature">{f}</meta>' for f in features]
+            + ['<meta property="schema:accessibilityHazard">none</meta>',
+               f'<meta property="schema:accessibilitySummary">{summary}</meta>'])
+
+
 def _file_as(author):
     """Autor para ordenar: "Tappei Nagatsuki" -> "Nagatsuki, Tappei" (si ya lleva coma, tal cual)."""
     words = author.split()
@@ -2517,7 +2537,7 @@ STATUS = re.compile(r"\s*[【\[].*[】\]]\s*")  # "【Habilidad adquirida】", "
 
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
-               breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False):
+               breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -2534,6 +2554,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     epub2: paquete EPUB 2 para lectores antiguos. reading: minutos de lectura en la página "Contenido".
     kepub: secciones en formato Kobo (_kepub); el archivo debe acabar en .kepub.epub.
     hyphenate: guiones blandos en los párrafos (_hyphenate), solo en libros en español.
+    alts: {image_key: descripción} de las ilustraciones que describió el usuario; las demás, «Ilustración de
+    «capítulo»». Con los metadatos de accesibilidad (EPUB 3), el lector de pantalla las anuncia.
     Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número."""
     rules = _rules(replacements)
     hyphenate = hyphenate and lang.split("-")[0].lower() == "es"
@@ -2588,11 +2610,12 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 marked.add(b.page)
                 pending = b.page
             if b.kind == "image":
+                alt = (alts or {}).get(image_key(b.image)) or (f"Ilustración de «{title}»" if is_chapter else "Ilustración")
                 for i, data in enumerate(_spread(b.image, b.layout) if b.layout else [b.image]):
                     ext = "png" if data[:4] == b"\x89PNG" else "jpg"  # PNG si trae transparencia
                     src = f"img/b{k:05d}{'_' + str(i) if b.layout else ''}.{ext}"  # por bloque: una página puede tener varias
                     images[src] = data
-                    parts.append(f'<div class="img"><img src="{src}" alt=""/></div>')
+                    parts.append(f'<div class="img"><img src="{src}" alt="{html.escape(alt)}"/></div>')
             elif b.kind == "break" or k in breaks:
                 parts.append(_separator(b if b.kind == "break" else Block("break", b.page), k, style, separator, images))
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
@@ -2652,6 +2675,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             meta.append(f'<meta name="calibre:series_index" content="{number}"/>')
     if not epub2:
         meta.append(f'<meta property="dcterms:modified">{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}</meta>')
+        meta += _accessibility(bool(images))
     nav_props, cover_props = ("", "") if epub2 else (' properties="nav"', ' properties="cover-image"')
     manifest = [
         f'<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml"{nav_props}/>',
