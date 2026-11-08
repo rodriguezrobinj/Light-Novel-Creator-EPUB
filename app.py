@@ -3321,7 +3321,6 @@ class TextEditor:
         sheet.command.connect(self.on_command)
         sheet.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         sheet.customContextMenuRequested.connect(self.context_menu)
-        editor.watch(sheet.viewport(), self.on_sheet_click)
         self.spell = _start_spell_process()
         if self.spell:  # todo el libro de una vez; luego, lo que se escriba
             blocks = [b for b in app.book.blocks if b.kind in ("p", "heading")]
@@ -4137,37 +4136,22 @@ class TextEditor:
         self.ignore_word(word)
         self.tell(f"«{word}» añadida al diccionario de la serie")
 
-    def on_sheet_click(self, event):
-        """Clic izquierdo sobre algo subrayado (falta o aviso): su menú, como las sugerencias de Word. Tras
-        soltar, para que el cursor ya esté ahí; no al elegir texto arrastrando."""
-        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-            pos = event.position().toPoint()
-            qtk.after(0, lambda: shiboken6.isValid(self.sheet) and self.click_menu(pos))
-        return False
-
-    def click_menu(self, pos):
-        if self.sheet.textCursor().hasSelection():
-            return
-        menu = self.mark_menu(pos, editing=False)
-        if menu.actions():
-            self.context = menu
-            menu.popup(self.sheet.viewport().mapToGlobal(pos))
-
     def context_menu(self, pos):
-        """Clic derecho en la hoja, en español: lo del clic izquierdo (sugerencias, avisos), volver al
-        original y editar."""
+        """Clic derecho en la hoja, en español: sugerencias de la falta o el aviso subrayado ahí, volver al
+        original y editar. Solo con el derecho: con el izquierdo el menú no dejaba poner el cursor ni elegir
+        texto."""
         sheet = self.sheet
         here = sheet.cursorForPosition(pos)
         current = sheet.textCursor()
         if not (current.hasSelection() and current.selectionStart() <= here.position() <= current.selectionEnd()):
             sheet.setTextCursor(here)  # como Word: el clic fuera de la selección pone ahí el cursor
-        self.context = self.mark_menu(pos, editing=True)
+        self.context = self.mark_menu(pos)
         self.context.popup(sheet.viewport().mapToGlobal(pos))
 
-    def mark_menu(self, pos, editing):
+    def mark_menu(self, pos):
         """Menú de lo que hay en pos: sugerencias de la palabra subrayada (o ignorarla, añadirla al diccionario),
-        cada aviso subrayado ahí con su explicación, arreglo e ignorar; con editing, también volver al original
-        y deshacer, cortar, copiar, pegar."""
+        cada aviso subrayado ahí con su explicación, arreglo e ignorar, volver al original y deshacer, cortar,
+        copiar, pegar."""
         sheet, doc = self.sheet, self.sheet.document()
         here = sheet.cursorForPosition(pos)
         word_cursor = QTextCursor(here)
@@ -4196,7 +4180,7 @@ class TextEditor:
         colors = theme.mark_colors(self.app.dark)
         for issue in self.block_issues(block):
             start, end = self.issue_range(block, issue)
-            if not editing and not start <= offset <= end:
+            if not start <= offset <= end:  # como Word: lo subrayado donde se pulsa
                 continue
             title = QLabel(f"● {issue.level} · {issue.title}")
             title.setStyleSheet(f"color: {colors[issue.level]}; font-weight: bold; padding: 6px 12px 2px 12px;")
@@ -4215,12 +4199,8 @@ class TextEditor:
             menu.addAction("Ignorar este aviso", lambda i=issue: self.ignore_issue(i))
             menu.addAction("Aviso siguiente   (F8)", self.next_issue)
             menu.addSeparator()
-        if editing and sheet.can_restore(block, self.loaded()):
+        if sheet.can_restore(block, self.loaded()):
             menu.addAction("Volver al original", lambda: (sheet.setTextCursor(QTextCursor(block)), self.restore_current()))
-        if not editing:
-            while menu.actions() and menu.actions()[-1].isSeparator():
-                menu.removeAction(menu.actions()[-1])
-            return menu
         if menu.actions() and not menu.actions()[-1].isSeparator():
             menu.addSeparator()
         selection = sheet.textCursor().hasSelection()
