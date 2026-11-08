@@ -4778,6 +4778,47 @@ def test_window_quality_dialog_score_and_export():
     assert "Párrafo partido" in page and "Número suelto" in page, page[:300]
     assert asked[0]["initialfile"].endswith("informe de calidad.html"), asked
 
+
+def test_window_quality_report_says_where_and_opens_the_editor_on_the_problem():
+    """El informe dice el capítulo, el subtítulo y el número de párrafo de cada aviso; «Abrir en el editor» (o doble
+    clic) abre ese capítulo con el trozo exacto del aviso elegido y su barra, no solo el cursor en el párrafo.
+    Maryoku 1: «¿Viene alguien, Señora Bruja?» abría el editor sin marcar «Señora»."""
+    import app
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 0: El discípulo regresa"), B("p", 1, "Primero llegó la carta."),
+              B("heading", 2, "Lado de Teto"), B("p", 2, "Ella miró."), B("p", 2, html.escape("“¿Viene alguien, Señora Bruja?”, me preguntó Teto.")),
+              B("heading", 3, "Capítulo 1: Otro día"), B("p", 3, "Nada más.")]
+    doc = pymupdf.open()
+    for n in range(3):  # el editor muestra la página del PDF de cada párrafo
+        add_page(doc, n + 1, [])
+    doc.save(TMP / "donde.pdf")
+    root, window = visible_window()
+    window.pdf = TMP / "donde.pdf"
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 5]))
+    window.quality()
+    root.update()
+    dialog = root.dialogs()[-1]
+    parts = dialog.parts
+    table = parts["table"]
+    row = next(i for i in table.get_children() if table.set(i, "title") == "Mayúscula innecesaria")
+    table.selection_set(row)
+    root.update()
+    where, place = table.set(row, "where"), parts["place"].text()
+    parts["edit"].click()
+    root.update()
+    editor = window.text_editor
+    chosen = editor.sheet.textCursor().selectedText()
+    bar = editor.issue_frame.isVisible(), editor.issue_title.text()
+    title = editor.win.windowTitle()
+    editor.win.done(0)
+    window.close()
+    assert where == "Capítulo 0 · ¶3", where
+    assert place == "Capítulo 0: El discípulo regresa › Lado de Teto · párrafo 3 de 3 · pág. 2", place
+    assert chosen == "Señora", chosen
+    assert bar == (True, "● Menor · Mayúscula innecesaria"), bar
+    assert title.startswith("Texto · Capítulo 0"), title
+
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
     página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""
