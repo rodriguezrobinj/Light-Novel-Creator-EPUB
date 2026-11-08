@@ -89,7 +89,6 @@ PREVIEW_CHROME = 40       # alto de la fila ◀ leyenda ▶ de cada vista previa
 DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
 THUMB_HEIGHT = 64         # alto de las miniaturas del PDF, en píxeles
 THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe congelaría la ventana
-WARM_PER_TICK = 50        # párrafos por tanda al preparar el informe de calidad (~30 ms)
 MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
 # Aspecto de las marcas en el editor de texto (theme.editor_tags); "broken" es lo que edit_section quitaría
@@ -164,7 +163,7 @@ def _analyze(pdf, progress=None):
     """convert.analyze, las ilustraciones repetidas y el informe de calidad, en el proceso de trabajo: en la
     ventana congelaban al abrir (Kage 5: 2,4 s las repetidas; Nageki 1: 0,9 s el informe)."""
     book = convert.analyze(pdf, progress)
-    return book, convert.duplicate_images(book), convert.quality_report(book)
+    return book, convert.duplicate_images(book), convert.quality_report(book), convert.report_memos()
 
 
 def _write_json(path, data):
@@ -1569,16 +1568,6 @@ class App:
         if end < self.pdf_doc.page_count:
             qtk.after(10, self.add_thumbs, job, end, titles, images)
 
-    def warm_report(self, book, start):
-        """Prepara por tandas, con la ventana libre, lo que el informe de calidad recuerda de cada párrafo: sin
-        esto la primera edición tras abrir paraba la ventana 2–3 s recalculándolo entero."""
-        if book is not self.book or self.closed:
-            return
-        end = start + WARM_PER_TICK
-        convert.warm_report(book.blocks[start:end])
-        if end < len(book.blocks):
-            qtk.after(1, self.warm_report, book, end)
-
     def mark_current(self):
         """Destaca en la tira la miniatura de la página que muestra la vista previa del PDF."""
         self.strip.mark(self.pdf_page)
@@ -1691,13 +1680,14 @@ class App:
         self.update_header()
         self.run(_analyze, (path,), lambda result: self.show_book(*result), report=True)
 
-    def show_book(self, book, twins=None, report=None):
-        """Pone en la ventana un libro analizado. twins y report: sus ilustraciones repetidas y su informe de
-        calidad, si ya se calcularon en el proceso de trabajo."""
+    def show_book(self, book, twins=None, report=None, memos=None):
+        """Pone en la ventana un libro analizado. twins, report y memos: sus ilustraciones repetidas, su informe
+        de calidad y lo que el informe recuerda de cada párrafo, si ya se calcularon en el proceso de trabajo."""
         self.book = book
         if report is not None:
             self.reports[self.report_key()] = report
-        qtk.after(50, self.warm_report, book, 0)
+        if memos:
+            convert.seed_report_memos(memos)
         if self.pdf_doc:
             self.pdf_doc.close()
         self.pdf_doc = pymupdf.open(self.pdf)

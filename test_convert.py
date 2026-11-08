@@ -4062,31 +4062,28 @@ def test_window_series_panel_shows_missing_and_sent():
     assert "Falta el tomo 2" in labels, labels
 
 
-def test_window_status_line_elides_and_warms_report():
-    """Una línea de estado larga acaba en «…» con el texto entero al pasar el ratón; tras abrir, la ventana
-    prepara por tandas lo que el informe recuerda de cada párrafo (si no, la primera edición la paraba 2–3 s)."""
-    import time
-
+def test_window_status_line_elides_and_gets_report_memos():
+    """Una línea de estado larga acaba en «…» con el texto entero al pasar el ratón. Al abrir, la ventana
+    recibe del proceso de trabajo lo que el informe recuerda de cada párrafo: si no, la primera edición la
+    paraba 2–3 s recalculándolo entero."""
     import app
-    import qtk
     root, window = visible_window()
     window.pdf = make_group_pdf()
-    book = convert.analyze(window.pdf)
-    convert._facts.cache_clear()
-    window.show_book(book)
+    result = app._analyze(window.pdf)  # como en el proceso de trabajo
+    memos = {name: dict(cache) for name, cache in result[3].items()}
+    for f in convert.REPORT_MEMOS:
+        f.cache.clear()  # la ventana empieza sin nada, como otro proceso
+    window.show_book(*result[:3], memos)
     long_text = "Estado " + "muy largo " * 80 + "FINAL"
     window.status.setText(long_text)
     root.update()
     shown = window.status.fontMetrics().elidedText(long_text, app.Qt.TextElideMode.ElideRight, window.status.width())
     tip, text = window.status.toolTip(), window.status.text()
-    for _ in range(50):
-        qtk.pump()
-        time.sleep(0.01)
-    paragraphs = {convert._plain(b).strip() for b in book.blocks if b.kind == "p"}
-    warmed = convert._facts.cache_info().currsize
+    paragraphs = {convert._plain(b).strip() for b in window.book.blocks if b.kind == "p"}
+    seeded = paragraphs <= set(convert._facts.cache)
     window.close()
-    assert shown.endswith("…") and tip == long_text and text == long_text, (tip[-10:], text[-10:])
-    assert warmed >= len(paragraphs), (warmed, len(paragraphs))
+    assert shown.endswith("\u2026") and tip == long_text and text == long_text, (tip[-10:], text[-10:])
+    assert seeded and memos["_facts"], (len(paragraphs), len(memos["_facts"]))
 
 
 def test_custom_font_is_embedded():
@@ -4315,13 +4312,13 @@ def test_window_does_not_decode_illustrations_again():
 
     root, window = visible_window()
     window.pdf = make_novel()
-    book, twins, report = app._analyze(str(window.pdf))
+    book, twins, report, memos = app._analyze(str(window.pdf))
     found = convert.duplicate_images
     original = convert.pymupdf.Pixmap
     decoded = []
     convert.duplicate_images = lambda b: 1 / 0  # ya viene del proceso de trabajo
     try:
-        window.show_book(book, twins, report)
+        window.show_book(book, twins, report, memos)
         convert.pymupdf.Pixmap = lambda *args: decoded.append(args) or original(*args)
         window.fill_tree(window.rows())
     finally:
