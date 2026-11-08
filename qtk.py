@@ -4,15 +4,15 @@ import re
 from contextlib import contextmanager
 
 import pymupdf
-from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPen, QPixmap, QTextCharFormat, QTextCursor, QTextFormat
+from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QPen, QPixmap, QPolygonF,
+                           QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QTextEdit, QToolTip,
-                               QTreeWidget, QTreeWidgetItem, QWidget)
+                               QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
+                               QStyleOptionViewItem, QTextEdit, QToolTip, QTreeWidget, QTreeWidgetItem, QWidget)
 
 IID = Qt.ItemDataRole.UserRole       # fila -> su iid (el índice del bloque, como texto)
 TAGS = Qt.ItemDataRole.UserRole + 1  # fila -> sus tags de aspecto
-VALUE = Qt.ItemDataRole.UserRole + 2  # celda con etiqueta (RowList.label) -> su valor de verdad
 SRC = QTextFormat.Property.UserProperty + 1  # carácter -> tag src<k> (bloque del que viene)
 
 
@@ -119,6 +119,41 @@ class _FileDialog:
 messagebox, filedialog = _MessageBox(), _FileDialog()
 
 
+class _Branches(QStyledItemDelegate):
+    """Celda con un margen a la izquierda donde se dibuja la flecha que une la fila con su capítulo:
+    línea vertical que baja del capítulo y ▸ hacia cada fila suya, como las ramas de un árbol."""
+    PAD = 18
+
+    def paint(self, painter, option, index):
+        tree = self.parent()
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        style = opt.widget.style()
+        style.drawPrimitive(QStyle.PrimitiveElement.PE_PanelItemViewItem, opt, painter, opt.widget)
+        opt.rect = option.rect.adjusted(self.PAD, 0, 0, 0)
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        shape = tree.branches.get(tree.itemFromIndex(index).data(0, IID))
+        if not shape:
+            return
+        r = option.rect
+        x, y = r.left() + 8, r.center().y()
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = opt.palette.color(QPalette.ColorRole.Text)
+        color.setAlpha(150)
+        painter.setPen(QPen(color, 1.2))
+        if shape == "root":  # el origen: un punto en el capítulo y la línea que baja
+            painter.setBrush(color)
+            painter.drawEllipse(QPointF(x, y), 2.5, 2.5)
+            painter.drawLine(x, y, x, r.bottom() + 1)
+        else:
+            painter.drawLine(x, r.top(), x, r.bottom() + 1 if shape == "mid" else y)
+            painter.drawLine(x, y, x + 6, y)
+            painter.setBrush(color)
+            painter.drawPolygon(QPolygonF([QPointF(x + 6, y - 3.5), QPointF(x + 11, y), QPointF(x + 6, y + 3.5)]))
+        painter.restore()
+
+
 class RowList(QTreeWidget):
     """ttk.Treeview de una sola altura: filas con iid, columnas con nombre y tags de aspecto."""
     selected = Signal()            # <<TreeviewSelect>>
@@ -135,6 +170,7 @@ class RowList(QTreeWidget):
         self.columns = list(columns)
         self.rows = {}   # iid -> QTreeWidgetItem
         self.looks = {}  # tag -> (fuente, color)
+        self.branches = {}  # iid -> forma de su flecha de pertenencia (link)
         self.setColumnCount(len(columns))
         self.setHeaderLabels([headings[c] for c in columns])
         self.setRootIsDecorated(False)
@@ -234,22 +270,19 @@ class RowList(QTreeWidget):
         return iid in self.rows
 
     def set(self, iid, column, value=None):
-        n, item = self.columns.index(column), self.rows[iid]
+        n = self.columns.index(column)
         if value is None:
-            shown = item.data(n, VALUE)
-            return item.text(n) if shown is None else shown
-        item.setData(n, VALUE, None)  # el valor nuevo se ve tal cual: fuera la etiqueta
-        item.setToolTip(n, "")
-        item.setText(n, str(value))
+            return self.rows[iid].text(n)
+        self.rows[iid].setText(n, str(value))
         return None
 
-    def label(self, iid, column, text, tip=""):
-        """Muestra en la celda un texto distinto de su valor; set sigue devolviendo el valor."""
-        n, item = self.columns.index(column), self.rows[iid]
-        if item.data(n, VALUE) is None:
-            item.setData(n, VALUE, item.text(n))
-        item.setText(n, text)
-        item.setToolTip(n, tip)
+    def link(self, shapes, column):
+        """Flechas de pertenencia en una columna: {iid: "root" (de ella cuelgan las siguientes), "mid" o "last"
+        (cuelga de la fila de arriba con "root")}. Sustituye las de antes."""
+        if not isinstance(self.itemDelegateForColumn(self.columns.index(column)), _Branches):
+            self.setItemDelegateForColumn(self.columns.index(column), _Branches(self))
+        self.branches = shapes
+        self.viewport().update()
 
     def item(self, iid, tags=None):
         if tags is not None:
