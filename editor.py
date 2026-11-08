@@ -4,7 +4,7 @@ separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda
 import html
 import re
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QMimeData, QObject, QRectF, Qt, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat)
 from PySide6.QtWidgets import QApplication, QTextEdit
@@ -355,6 +355,7 @@ class Sheet(QTextEdit):
         self.look = Look(self.document())
         self.tags, self.unknown = {}, set()  # colores y palabras desconocidas de cada hoja nueva
         self.pictures, self.color = {}, "#888888"
+        self.bars, self.bar_color = [], QColor("#2e9d4a")  # párrafos cambiados: barrita en el margen
         self.set_zoom(100)
 
     def set_content(self, lines, pictures, color="#888888", levels=None):
@@ -380,6 +381,28 @@ class Sheet(QTextEdit):
 
     def content(self):
         return dump(self.document())
+
+    def set_bars(self, blocks, color):
+        """Barrita en el margen izquierdo junto a cada párrafo de blocks, como el control de cambios de Word: no
+        tapa el texto ni parece una selección."""
+        self.bars, self.bar_color = list(blocks), QColor(color)
+        self.viewport().update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.bars:
+            return
+        painter = QPainter(self.viewport())
+        layout, doc = self.document().documentLayout(), self.document()
+        dx, dy = self.horizontalScrollBar().value(), self.verticalScrollBar().value()
+        x = doc.documentMargin() / 2 - 1.5 - dx
+        for block in self.bars:
+            if block.isValid() and block.document() is doc:
+                box = layout.blockBoundingRect(block)
+                top = box.top() + block.blockFormat().topMargin() - dy
+                height = box.height() - block.blockFormat().topMargin() - block.blockFormat().bottomMargin()
+                painter.fillRect(QRectF(x, top, 3, max(height, 4)), self.bar_color)
+        painter.end()
 
     def set_zoom(self, percent):
         # En la hoja de estilo: la QSS de la ventana (9 pt para todo) pisaría un setFont o la fuente del documento

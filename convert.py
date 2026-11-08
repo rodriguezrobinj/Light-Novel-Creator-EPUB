@@ -1266,6 +1266,7 @@ class Issue:
     after: str = ""          # y con el arreglo ("" si el arreglo quita el párrafo)
     edit: tuple | None = None  # arreglo automático: (inicio, fin, texto) para edit_section
     text: str = ""           # texto que buscar en las vistas previas
+    span: tuple | None = None  # (inicio, fin) del problema en el párrafo como lo muestra el editor (_issue_span)
 
 
 def _cut(text, n=160, tail=False):
@@ -1655,6 +1656,47 @@ def seed_report_memos(memos):
         f.cache.update(memos.get(f.__name__, {}))
 
 
+def _words_around(shown, start, end):
+    """Amplía start..end a palabras enteras; si no abarca nada (falta algo, como un «de»), a la palabra de antes
+    y la de después: un subrayado de un espacio no se ve."""
+    if start == end:
+        while start > 0 and shown[start - 1].isspace():
+            start -= 1
+    while start > 0 and not shown[start - 1].isspace():
+        start -= 1
+    while end < len(shown) and not shown[end].isspace():
+        end += 1
+    return start, end
+
+
+def _issue_span(issue, blocks):
+    """(inicio, fin) del problema del aviso en el texto del párrafo como lo muestra el editor (sin etiquetas, con
+    «[Nota: …]»): el editor lo subraya ahí, como Word, y no el párrafo entero. None si no se sabe."""
+    b = blocks[issue.block]
+    shown = TAGS.sub("", _line(b, issue.block))
+    shown = shown[2:] if b.kind == "heading" else shown
+    text, lead = shown.strip(), len(shown) - len(shown.lstrip())
+    edit = issue.edit
+    if edit and edit[2] and edit[:2] == (issue.block, issue.block + 1):  # arreglo de este párrafo: lo que cambia
+        after = TAGS.sub("", edit[2])
+        start = len(os.path.commonprefix([shown, after]))
+        tail = len(os.path.commonprefix([shown[start:][::-1], after[start:][::-1]]))
+        return _words_around(shown, start, max(start, len(shown) - tail))
+    if b.kind != "p" or text != _plain(b).strip():  # con notas, las posiciones de _plain no valen aquí
+        return (lead, lead + len(text)) if text else None
+    if issue.kind == "capital":
+        start, end = _facts(text)[4]
+        return _words_around(shown, lead + start, lead + end)
+    if issue.kind == "broken":
+        m = MOJIBAKE.search(text) or re.search("�", text)
+        return _words_around(shown, lead + m.start(), lead + m.end()) if m else None
+    if issue.kind == "lower":
+        return lead, lead + len(text.split()[0])
+    if issue.kind == "end":
+        return lead + len(text) - len(text.split()[-1]), lead + len(text)
+    return lead, lead + len(text)
+
+
 def quality_report(book):
     """Lo sospechoso del libro, para revisarlo: [Issue], por página. Cada aviso dice el problema, la
     solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa."""
@@ -1796,6 +1838,9 @@ def quality_report(book):
                                     "Busca su título en el PDF (Ctrl+F) y márcalo como Capítulo (tecla C). Si "
                                     "el PDF tampoco lo tiene, ignora el aviso.", title, text=title))
             last = n
+    for issue in report:
+        if issue.block is not None:
+            issue.span = _issue_span(issue, blocks)
     return sorted(report, key=lambda r: (r.page, r.block if r.block is not None else -1))
 
 

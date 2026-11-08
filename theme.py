@@ -27,15 +27,13 @@ EDITOR = {False: {"italic": {"italic": True}, "bold": {"weight": "bold"},
                   "heading": {"foreground": "#1f6fd1", "weight": "bold", "size": 14},
                   "mark": {"foreground": "#737373"}, "token": {"background": "#e3efe5", "foreground": "#1b5e20"},
                   "scene": {"foreground": "#7a5c00"}, "broken": {"foreground": "#c62828", "underline": True},
-                  "spell": {"background": "#fde2e1", "underline": True},
-                  "changed": {"background": "#e4effc"}},  # párrafo editado en la hoja: franja de lado a lado
+                  "spell": {"background": "#fde2e1", "underline": True}},
           True: {"italic": {"italic": True}, "bold": {"weight": "bold"},
                  "bolditalic": {"italic": True, "weight": "bold"},
                  "heading": {"foreground": "#7aa7ff", "weight": "bold", "size": 14},
                  "mark": {"foreground": "#96969e"}, "token": {"background": "#24352a", "foreground": "#8fd694"},
                  "scene": {"foreground": "#d9b54a"}, "broken": {"foreground": "#ff6b6b", "underline": True},
-                 "spell": {"background": "#4a1f24", "underline": True},
-                 "changed": {"background": "#1d2b40"}}}
+                 "spell": {"background": "#4a1f24", "underline": True}}}
 # Vista previa del informe de calidad: lo que se quita y lo que entra
 DIFF = {False: {"old": {"background": "#f8d7da", "foreground": "#8a1c1c", "overstrike": True},
                 "new": {"background": "#d4edda", "foreground": "#1b5e20"}, "note": {"foreground": "#6b6b6b"}},
@@ -106,6 +104,16 @@ def colors(dark):
 
 def kind_colors(dark):
     return KINDS[bool(dark)]
+
+
+# Marcas de la hoja del editor, como Word: ondulado rojo (Grave), naranja (Revisar) y azul (Menor, como la
+# gramática de Word) bajo el problema; barrita verde en el margen de los párrafos cambiados
+MARKS = {False: {"Grave": "#d32f2f", "Revisar": "#e07b00", "Menor": "#1f6fd1", "changed": "#2e9d4a"},
+         True: {"Grave": "#ff6b6b", "Revisar": "#ffa94d", "Menor": "#6ea8ff", "changed": "#5cc777"}}
+
+
+def mark_colors(dark):
+    return MARKS[bool(dark)]
 
 
 def level_colors(dark):
