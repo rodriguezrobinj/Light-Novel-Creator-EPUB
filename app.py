@@ -1251,7 +1251,7 @@ class App:
         column.addWidget(self.find_results)
         self.tree = qtk.RowList(("inc", "title", "min", "page", "ok"),
                                 {"inc": "Tipo", "title": "Título", "min": "Lectura", "page": "Página", "ok": "✓"},
-                                {"inc": 92, "min": 64, "page": 60, "ok": 64})
+                                {"inc": 128, "min": 64, "page": 60, "ok": 64})  # «Subtítulo de p. 124»
         self.tree.setToolTip(SHORTCUTS)
         column.addWidget(self.tree, 1)
         split.addWidget(left)
@@ -1672,14 +1672,18 @@ class App:
         if not self.epub_cut:
             # EPUB mínimo con solo esta sección (del título al siguiente) o esta ilustración: rápido
             try:
-                blocks = self.book.blocks
+                inner = {}  # tipos de los títulos dentro del tramo (subtítulos de un capítulo), desde 0
                 if is_image:
                     part_blocks = [convert.Block("image", block.page, image=block.image, layout=LAYOUT.get(kind, ""))]
                 else:
-                    end = next((k for k in range(index + 1, len(blocks)) if blocks[k].kind == "heading"), len(blocks))
-                    part_blocks = blocks[index:end]
+                    # Un capítulo sigue con sus subtítulos, como en el EPUB: no se corta en el primero
+                    end = self.section_of(item)[1]
+                    part_blocks = self.book.blocks[index:end]
+                    inner = {k - index: self.tree.set(str(k), "inc") for k in range(index + 1, end)
+                             if self.tree.exists(str(k)) and self.is_title(str(k))}
                 part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [])
-                options = self.write_options([0] if kind == SEP else [])
+                options = self.write_options([0] * (kind == SEP) + [k for k, v in inner.items() if v == SEP])
+                options["removed"] = [k for k, v in inner.items() if v == CUT]
                 options.update(shrink=False, trim=False, epub2=False, credits=False)  # rápido: solo lo que se ve
                 chapters = [(0, self.tree.set(item, "title"))] if kind == ON else []
                 key = (self.book.title, self.book.cover, chapters, sorted(options.items()),
@@ -1768,8 +1772,14 @@ class App:
             self.draw_epub()
             return
         selected = self.tree.selection()
-        # Los separadores no son secciones: desde uno se sigue con la sección de antes o la de después
-        items = [i for i in self.tree.get_children() if not self.is_break(i)]
+        # Los separadores no son secciones: desde uno se sigue con la sección de antes o la de después.
+        # Los títulos de dentro de un capítulo (subtítulos) ya se leen con él: se saltan, salvo el elegido.
+        items, inside = [], False
+        for i in self.tree.get_children():
+            chapter = self.is_title(i) and self.tree.set(i, "inc") == ON
+            inside = inside or chapter
+            if not self.is_break(i) and (chapter or not inside or not self.is_title(i) or i in selected):
+                items.append(i)
         here = int(selected[0]) if selected else None
         if here is None:
             n = -1
@@ -1828,11 +1838,29 @@ class App:
         self.tree.item(item, tags=(KIND_TAG[kind],))
 
     def update_reviewed(self):
-        """Cabecera de la columna ✓: capítulos revisados de los que hay («✓ 12/30»)."""
+        """Cabecera de la columna ✓: capítulos revisados de los que hay («✓ 12/30»). De paso, cada subtítulo
+        dice en la columna Tipo de qué capítulo es: tras cualquier cambio de tipo se pasa por aquí."""
+        self.label_subtitles()
         chapters = [i for i in self.tree.get_children() if self.tree.set(i, "inc") == ON]
         done = sum(bool(self.tree.set(i, "ok")) for i in chapters)
         self.tree.headerItem().setText(self.tree.columns.index("ok"), f"✓ {done}/{len(chapters)}" if chapters else "✓")
         return done, len(chapters)
+
+    def label_subtitles(self):
+        """Columna Tipo de los subtítulos: «Subtítulo de 12» (número del capítulo en el que van) o, si su
+        título no lleva número, «Subtítulo de p. 71» (su página en la lista); el título entero, al pasar el ratón."""
+        chapter = None
+        for i in self.tree.get_children():
+            kind = self.tree.set(i, "inc")
+            if kind == ON:
+                chapter = i
+            elif kind == OFF and chapter:
+                title = self.tree.set(chapter, "title")
+                number = re.search(r"\d+", title)
+                where = number[0] if number else f"p. {self.tree.set(chapter, 'page')}"
+                self.tree.label(i, "inc", f"{OFF} de {where}", f"{OFF} de «{title}»")
+            elif kind == OFF:
+                self.tree.set(i, "inc", OFF)  # antes del primer capítulo: sin etiqueta
 
     def toggle_reviewed(self):
         """R: marca el título elegido como revisado y pasa al siguiente capítulo sin revisar; si ya lo estaba,
@@ -2005,8 +2033,11 @@ class App:
         blocks = self.book.blocks
         chapters = set(self.book.candidates)
         self.wide = {str(i) for i, b in enumerate(blocks) if b.kind == "image" and b.image and convert.is_wide(b.image)}
-        heads = [i for i, b in enumerate(blocks) if b.kind == "heading"] + [len(blocks)]
-        minutes = {k: convert.reading_minutes(blocks[k + 1:end]) for k, end in zip(heads, heads[1:])}
+        heads = [i for i, b in enumerate(blocks) if b.kind == "heading"]
+        on = {k for k in heads if rows.get(str(k), [ON if k in chapters else OFF])[0] == ON}
+        # Un capítulo se lee con sus subtítulos: sus minutos llegan hasta el siguiente capítulo
+        minutes = {k: convert.reading_minutes(blocks[k + 1:next((j for j in heads if j > k and (j in on or k not in on)),
+                                                                len(blocks))]) for k in heads}
         for i, block in enumerate(blocks):
             if block.kind == "heading":
                 mark, title = (ON if i in chapters else OFF), html.unescape(block.html)
@@ -2083,6 +2114,7 @@ class App:
             if text and text != self.tree.set(item, "title"):
                 self.history.append([self.row_state(item)])
                 self.tree.set(item, "title", text)
+                self.label_subtitles()  # el número del capítulo puede haber cambiado
             close()
             self.update_preview()
 

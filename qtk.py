@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHB
 
 IID = Qt.ItemDataRole.UserRole       # fila -> su iid (el índice del bloque, como texto)
 TAGS = Qt.ItemDataRole.UserRole + 1  # fila -> sus tags de aspecto
+VALUE = Qt.ItemDataRole.UserRole + 2  # celda con etiqueta (RowList.label) -> su valor de verdad
 SRC = QTextFormat.Property.UserProperty + 1  # carácter -> tag src<k> (bloque del que viene)
 
 
@@ -233,11 +234,22 @@ class RowList(QTreeWidget):
         return iid in self.rows
 
     def set(self, iid, column, value=None):
-        n = self.columns.index(column)
+        n, item = self.columns.index(column), self.rows[iid]
         if value is None:
-            return self.rows[iid].text(n)
-        self.rows[iid].setText(n, str(value))
+            shown = item.data(n, VALUE)
+            return item.text(n) if shown is None else shown
+        item.setData(n, VALUE, None)  # el valor nuevo se ve tal cual: fuera la etiqueta
+        item.setToolTip(n, "")
+        item.setText(n, str(value))
         return None
+
+    def label(self, iid, column, text, tip=""):
+        """Muestra en la celda un texto distinto de su valor; set sigue devolviendo el valor."""
+        n, item = self.columns.index(column), self.rows[iid]
+        if item.data(n, VALUE) is None:
+            item.setData(n, VALUE, item.text(n))
+        item.setText(n, text)
+        item.setToolTip(n, tip)
 
     def item(self, iid, tags=None):
         if tags is not None:

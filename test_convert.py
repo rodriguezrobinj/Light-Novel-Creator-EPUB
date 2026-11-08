@@ -1056,6 +1056,45 @@ def test_window_lists_all_headings_with_chapters_checked():
     assert rows == [(app.ON, "Capitulo 1: Inicio"), (app.OFF, "El lado de la bruja")], rows
 
 
+def test_window_subtitles_continue_their_chapter():
+    """Maryoku 6: la vista previa de un capítulo sigue con sus subtítulos («El lado del gran anciano»), no se
+    corta en el primero; un subtítulo quitado no sale. En la columna Tipo, cada subtítulo dice de qué
+    capítulo es (su número o, si no lo lleva, su página), sin dejar de valer «Subtítulo»."""
+    import app
+
+    root, window = visible_window()
+    book = convert.Book("Libro", "", b"", [
+        convert.Block("heading", 1, "Lado previo"), convert.Block("p", 1, "Antes."),
+        convert.Block("heading", 2, "Capítulo 22: Seguimos"), convert.Block("p", 2, "Uno."),
+        convert.Block("heading", 3, "El lado del gran anciano"), convert.Block("p", 3, "Texto A. " + "palabra " * 690),
+        convert.Block("heading", 4, "El lado quitado"), convert.Block("p", 4, "Texto B."),
+        convert.Block("heading", 5, "Cazadores furtivos"), convert.Block("p", 5, "Dos."),
+        convert.Block("heading", 6, "El lado de la bruja"), convert.Block("p", 6, "Texto C."),
+    ], [2, 8])
+    window.show_book(book)
+    window.tree.selection_set("6")
+    window.shortcut(app.CUT)
+    window.tree.selection_set("2")
+    root.update()
+    with zipfile.ZipFile(window.preview_path) as z:
+        body = "".join(z.read(n).decode() for n in z.namelist() if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n))
+    shown = [window.tree.rows[i].text(0) for i in ("0", "4", "10")]
+    values = [window.tree.set(i, "inc") for i in ("0", "4", "10")]
+    tip = window.tree.rows["10"].toolTip(0)
+    reading = window.tree.set("2", "min")  # el capítulo se lee con sus subtítulos: 3 min, no 1
+    window.tree.selection_set("8")
+    window.epub_step(-1)  # hacia atrás desde el capítulo siguiente: el capítulo 22, no su subtítulo
+    back = window.tree.selection()
+    window.close()
+    assert "El lado del gran anciano" in body and "Texto A." in body and "Uno." in body, body
+    assert "Texto B." not in body and "Dos." not in body, body
+    assert shown == [app.OFF, f"{app.OFF} de 22", f"{app.OFF} de p. 5"], shown
+    assert values == [app.OFF] * 3, values
+    assert "Cazadores furtivos" in tip, tip
+    assert back == ("2",), back
+    assert reading == "3 min", reading
+
+
 def test_window_previews_pdf_page_and_epub_for_selected_title():
     """Al seleccionar un título se ven su página del PDF y cómo quedará en el EPUB."""
     root, window = visible_window()
