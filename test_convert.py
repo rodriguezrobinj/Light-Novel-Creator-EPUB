@@ -2762,8 +2762,9 @@ def test_text_editor_marks_issues_and_changes():
 
 def test_text_editor_underlines_issues_like_word():
     """Como Word: ondulado solo bajo el trozo del problema, del color de su gravedad (azul el Menor), sin fondo
-    que parezca una selección; clic izquierdo sobre él abre su menú con «Arreglar» e «Ignorar este aviso»; un
-    párrafo cambiado lleva una barrita en el margen."""
+    que parezca una selección; el clic derecho sobre él abre su menú con «Arreglar» e «Ignorar este aviso» (el
+    izquierdo solo pone el cursor: un menú ahí no dejaba elegir texto); un párrafo cambiado lleva una barrita en
+    el margen."""
     import app
     import theme
     from PySide6.QtCore import QEvent, QPoint, Qt
@@ -2786,6 +2787,8 @@ def test_text_editor_underlines_issues_like_word():
     for _ in range(5):
         root.update()
         QApplication.processEvents()
+    left_menu = getattr(editor, "context", None)
+    editor.context_menu(sheet.cursorRect(sheet.document().find("cuenta")).center())  # tras el clic, por si se desplazó
     menu = editor.context
     labels = [a.text() for a in menu.actions() if a.text()]
     ignore = next(a for a in menu.actions() if a.text() == "Ignorar este aviso")
@@ -2800,6 +2803,7 @@ def test_text_editor_underlines_issues_like_word():
     window.close()
     blue = theme.mark_colors(False)["Menor"]
     assert ("cuenta que", QTextCharFormat.UnderlineStyle.WaveUnderline, blue, Qt.BrushStyle.NoBrush) in marks, marks
+    assert left_menu is None, left_menu  # el clic izquierdo no abre menú
     assert labels[0].startswith("Arreglar: «") and "de que" in labels[0] and "Ignorar este aviso" in labels, labels
     assert "cuenta que" not in left and len(ignored) == 1, (left, ignored)
     assert bars == ["Un párrafo sin nada raro que avisar aquí."], bars
