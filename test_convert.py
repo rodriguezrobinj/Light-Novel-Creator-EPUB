@@ -1058,8 +1058,8 @@ def test_window_lists_all_headings_with_chapters_checked():
 
 def test_window_subtitles_continue_their_chapter():
     """Maryoku 6: la vista previa de un capítulo sigue con sus subtítulos («El lado del gran anciano»), no se
-    corta en el primero; un subtítulo quitado no sale. En la columna Tipo, cada subtítulo dice de qué
-    capítulo es (su número o, si no lo lleva, su página), sin dejar de valer «Subtítulo»."""
+    corta en el primero; un subtítulo quitado no sale. En la columna Tipo, una flecha baja de cada capítulo a
+    sus filas (subtítulos, quitados…); lo de antes del primer capítulo no cuelga de nada."""
     import app
 
     root, window = visible_window()
@@ -1078,9 +1078,8 @@ def test_window_subtitles_continue_their_chapter():
     root.update()
     with zipfile.ZipFile(window.preview_path) as z:
         body = "".join(z.read(n).decode() for n in z.namelist() if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n))
-    shown = [window.tree.rows[i].text(0) for i in ("0", "4", "10")]
+    branches = dict(window.tree.branches)
     values = [window.tree.set(i, "inc") for i in ("0", "4", "10")]
-    tip = window.tree.rows["10"].toolTip(0)
     reading = window.tree.set("2", "min")  # el capítulo se lee con sus subtítulos: 3 min, no 1
     window.tree.selection_set("8")
     window.epub_step(-1)  # hacia atrás desde el capítulo siguiente: el capítulo 22, no su subtítulo
@@ -1088,9 +1087,8 @@ def test_window_subtitles_continue_their_chapter():
     window.close()
     assert "El lado del gran anciano" in body and "Texto A." in body and "Uno." in body, body
     assert "Texto B." not in body and "Dos." not in body, body
-    assert shown == [app.OFF, f"{app.OFF} de 22", f"{app.OFF} de p. 5"], shown
+    assert branches == {"2": "root", "4": "mid", "6": "last", "8": "root", "10": "last"}, branches
     assert values == [app.OFF] * 3, values
-    assert "Cazadores furtivos" in tip, tip
     assert back == ("2",), back
     assert reading == "3 min", reading
 
@@ -1339,6 +1337,23 @@ def test_window_device_preview_and_dark_mode():
     window.close()
     assert shapes["Celular"] > shapes["Tablet"], shapes  # el celular es más alargado
     assert light > 600 and dark < 150, (light, dark)
+
+
+def test_window_dark_mode_keeps_illustrations():
+    """Modo oscuro de las vistas previas (PDF y EPUB): invierte papel y texto, no las ilustraciones."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=400)
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40), False)
+    pix.set_rect(pix.irect, (200, 30, 30))  # ilustración roja
+    page.insert_image(pymupdf.Rect(100, 100, 200, 200), pixmap=pix)
+    page.insert_text((40, 300), "Texto de la novela", fontsize=14)
+    root, window = visible_window()
+    image, zoom = window.render(page, dark=True)
+    art = image.pixelColor(int(150 * zoom), int(150 * zoom)).getRgb()[:3]
+    paper = image.pixelColor(int(20 * zoom), int(20 * zoom)).getRgb()[:3]
+    window.close()
+    assert art[0] > 150 and art[1] < 80, art  # sigue roja, no cian
+    assert sum(paper) < 100, paper  # el papel, oscuro
 
 
 def test_window_thumbnail_strip():
@@ -3587,6 +3602,62 @@ def test_duplicate_images_and_trim():
     trimmed = pymupdf.Pixmap(convert._trim(pix.tobytes("jpg", jpg_quality=95)))
     assert abs(trimmed.width - 320) <= 4 and abs(trimmed.height - 400) <= 4, (trimmed.width, trimmed.height)
     assert convert._trim(other) == other  # sin margen blanco no cambia
+
+
+def test_printed_toc_finds_chapters_and_is_not_a_grave_warning():
+    """Maryoku 1: la página «Tabla de contenido» se omite y salía como aviso grave («Texto no incluido»). Ahora
+    se leen sus títulos (uno partido en dos líneas): un capítulo sin palabra clave antes del primero que la
+    lleva cuenta como capítulo, y la ventana avisa del título del índice que no está en la lista."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Tabla de contenido", 20, "hebo"),
+                      (72, 140, "El comienzo de un viaje muy largo .......... 2", 11, "helv"),
+                      (72, 160, "Capitulo 1: Inicio de la historia de la bruja y", 11, "helv"),
+                      (72, 174, "su golem .......... 3", 11, "helv"),
+                      (72, 194, "Capitulo 2: Perdido .......... 4", 11, "helv")])
+    body = [(72, 140 + 14 * n, line(f"Linea {n} del texto de la novela", 60), 11, "cour") for n in range(12)]
+    add_page(doc, 2, [(72, 100, "El comienzo de un viaje muy largo", 20, "helv")] + body)
+    add_page(doc, 3, [(72, 100, "Capitulo 1: Inicio de la historia de la bruja y su golem", 20, "helv")] + body)
+    add_page(doc, 4, body)
+    pdf = TMP / "indice-impreso.pdf"
+    doc.save(pdf)
+    book = convert.analyze(pdf)
+    titles = [convert._plain(book.blocks[k]) for k in book.candidates]
+    assert book.toc == [("El comienzo de un viaje muy largo", 2),
+                        ("Capitulo 1: Inicio de la historia de la bruja y su golem", 3),
+                        ("Capitulo 2: Perdido", 4)], book.toc
+    assert titles == ["El comienzo de un viaje muy largo", "Capitulo 1: Inicio de la historia de la bruja y su golem"], titles
+    assert not [i for i in convert.quality_report(book) if i.kind == "skipped"], "el índice leído no es un aviso grave"
+    root, window = visible_window()
+    window.pdf = pdf
+    window.show_book(book)
+    issues = [(i.kind, i.text, i.level) for i in window.toc_issues()]
+    status = window.status.text()
+    window.close()
+    assert issues == [("toc", "Capitulo 2: Perdido", "Menor")], issues  # sin título en el texto: menor
+    assert "índice del PDF en la página 1 (3 títulos)" in status, status
+
+
+def test_printed_toc_lines_and_matching():
+    """Índices reales: «| Prólogo | .... 15» (Kage 5), un número sin puntos antes del capítulo siguiente
+    (Maryoku 1: «… mundo . 36»), títulos partidos sin puntos ni páginas (Nageki 1). Al comparar, «Capítulo 1»
+    del índice es «Capítulo 1: …» de la página pero no «Capítulo 10: …», y la misma etiqueta con el título
+    traducido distinto («Thousand Tricks» / «Mil trucos») es el mismo capítulo."""
+    from types import SimpleNamespace as R
+
+    rows = lambda *texts: [R(text=t) for t in texts]
+    assert convert._toc_entries(rows("Contenido", "| Prólogo | .......... 15", "| Capítulo 1 | ...... 54")) == [
+        ("Prólogo", 15), ("Capítulo 1", 54)]
+    assert convert._toc_entries(rows("Tabla de contenido", "Capítulo 10: Los viajes y el encuentro con", "otro mundo . 36",
+                                     "Capítulo 11: Personas que vienen ......... 43")) == [
+        ("Capítulo 10: Los viajes y el encuentro con otro mundo", 36), ("Capítulo 11: Personas que vienen", 43)]
+    assert convert._toc_entries(rows("Contenido", "Capítulo 1: Hacer Frente Al Servicio", "Comunitario",
+                                     "Epílogo: Que se", "Retire (1)")) == [
+        ("Capítulo 1: Hacer Frente Al Servicio Comunitario", None), ("Epílogo: Que se Retire (1)", None)]
+    key = convert._key
+    assert convert._toc_match(key("Capítulo 1"), key("Capítulo 1: ¡Nee-san regresó!"))
+    assert not convert._toc_match(key("Capítulo 1"), key("Capítulo 10: Los viajes"))
+    assert convert._toc_match(key("Capítulo 4: Thousand Tricks"), key("Capítulo 4: Mil Trucos"))
+    assert not convert._toc_match(key("Capítulo 4: Mil Trucos"), key("Capítulo 5: Mil Trucos"))
 
 
 def test_quality_report():

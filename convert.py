@@ -48,7 +48,8 @@ KEYWORDS = re.compile(
     r"(cap[ií]tulo|pr[oó]logo|ep[ií]logo|interludio|historia paralela|palabras de cierre"
     r"|extra|parte|chapter|prologue|epilogue|afterword|interlude)\b", re.I)
 TOC_TITLE = re.compile(r"(contenidos?|[ií]ndice|tabla de contenidos?|contents|table of contents):?", re.I)
-DOT_LEADER = re.compile(r"[.\-_·…]{4,}\s*(?:p[áa]g\.?\s*)?\d+\s*\|?$", re.I)  # "..... 12", "---- Pág. 54"
+DOT_LEADER = re.compile(r"[.\-_·…]{4,}\s*(?:p[áa]g\.?\s*)?(\d+)\s*\|?$", re.I)  # "..... 12", "---- Pág. 54"
+TOC_SKIPPED = "se omitió como índice del PDF"  # motivo en Book.skipped de una página de índice
 SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈•·#~◎◯♠♣♥♤♧♡◊]+")
 # Fuente Symbol sin tabla Unicode: PyMuPDF da el código de la fuente (Mitsuha 6 [Bell T]: 0xAA es ♠, sale «ª»)
 SYMBOL_FONT = str.maketrans({"\xa7": "♣", "\xa8": "♦", "\xa9": "♥", "\xaa": "♠", "\xb7": "•", "\xe0": "◊",
@@ -105,6 +106,7 @@ class Book:
     subjects: str = ""     # géneros, separados por comas
     date: str = ""         # fecha de publicación (AAAA o AAAA-MM-DD)
     skipped: list = field(default_factory=list)  # [(página, letras, motivo)] de texto que no entró
+    toc: list = field(default_factory=list)  # [(título, página o None)] del índice impreso del PDF
 
 
 VOLUME = re.compile(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*0*(\d+(?:[.,]\d+)?)", re.I)
@@ -418,6 +420,49 @@ def _is_toc(rows):
     encima) o al menos tres líneas con puntos o guiones hasta el número de página."""
     return (any(TOC_TITLE.fullmatch(r.text) for r in rows[:3])
             or sum(bool(DOT_LEADER.search(r.text)) for r in rows) >= 3)
+
+
+def _toc_entries(rows):
+    """Títulos de una página de índice: [(título, página o None)]. Un título largo sigue en la línea de abajo
+    hasta la que acaba en puntos y número; una línea que empieza por palabra clave («Capítulo 11») abre otro
+    aunque el de antes acabe en un número sin puntos («… mundo . 36»). Sin puntos en la página, sin páginas."""
+    start = next((n + 1 for n, r in enumerate(rows[:3]) if TOC_TITLE.fullmatch(r.text.strip())), 0)  # tras «Contenido»
+    leaders = any(DOT_LEADER.search(r.text) for r in rows)
+    entries, text = [], ""
+
+    def flush():
+        m = re.search(r"[\s.…·]+(\d+)$", text) if leaders else None
+        entries.append(((text[:m.start()] if m else text).strip(LABEL_DECOR), int(m[1]) if m else None))
+
+    for r in rows[start:]:
+        line = r.text.strip(LABEL_DECOR)  # "| Prólogo | ...... 15"
+        if text and KEYWORDS.match(line):
+            flush()
+            text = ""
+        text = f"{text} {line}".strip()
+        m = DOT_LEADER.search(text)
+        if m:
+            entries.append((text[:m.start()].strip(LABEL_DECOR), int(m[1])))
+            text = ""
+    if text:
+        flush()
+    return [(title, page) for title, page in entries if title]
+
+
+TOC_LABEL = re.compile(r"(cap[ií]tulo|chapter|pr[oó]logo|prologue|ep[ií]logo|epilogue|interludio|interlude)\d*")
+
+
+def _toc_match(a, b):
+    """Dos títulos son el mismo (claves de _key): iguales; uno empieza como el otro (el índice dice solo
+    «Capítulo 1», o la página corta el título), sin confundir «Capítulo 1» con «Capítulo 10»; o la misma
+    etiqueta («Capítulo 4: Thousand Tricks» y «Capítulo 4: Mil trucos», traducidos distinto)."""
+    short, long_ = sorted((a, b), key=len)
+    if len(short) < 4:
+        return short == long_ and bool(short)
+    if long_.startswith(short) and (len(short) >= 10 or short == long_ or not long_[len(short)].isdigit()):
+        return True
+    la, lb = TOC_LABEL.match(a), TOC_LABEL.match(b)
+    return bool(la and lb and la[0] == lb[0] and (la[0][-1].isdigit() or not la[0].startswith(("cap", "chap"))))
 
 
 def _links_only(page, rows):
@@ -1705,7 +1750,8 @@ def quality_report(book):
                     f"La página {page} tiene texto que no entró en el libro: {why}.",
                     "Mira la página en la vista previa del PDF. Si era texto de la novela, cópialo en su "
                     "capítulo con «Editar texto…» (tecla E). Si era un índice o créditos, ignora el aviso.")
-              for page, letters, why in book.skipped if letters >= 20]
+              for page, letters, why in book.skipped
+              if letters >= 20 and not (why == TOC_SKIPPED and book.toc)]  # índice leído: lo compara la ventana
     lines = collections.Counter(_plain(b).strip() for b in blocks if b.kind == "p")
     heads = [k for k, b in enumerate(blocks) if b.kind == "heading"] + [len(blocks)]
     drop = (lambda k: (k, k + 1, ""))
@@ -1860,7 +1906,7 @@ def combine(parts, title):
         removed += [k + offset for k in part_removed]
         breaks += [k + offset for k in part_breaks]
     first = parts[0][0]
-    merged = replace(first, title=title, blocks=blocks, candidates=candidates, volume="", skipped=[])
+    merged = replace(first, title=title, blocks=blocks, candidates=candidates, volume="", skipped=[], toc=[])
     return merged, chapters, removed, breaks
 
 
@@ -1926,6 +1972,7 @@ def analyze(pdf_path, progress=None):
         blocks, skipped = [], []
         para, short, last_text = None, False, ""
         toc = False  # la página anterior era el índice
+        contents = []  # títulos del índice impreso
         repeated = ""  # título que la página anterior ya emitió junto a su ilustración
         digests = {}
         for i, (page, rows) in enumerate(zip(doc, pages)):
@@ -1954,7 +2001,8 @@ def analyze(pdf_path, progress=None):
                 continue
             toc = _is_toc(rows) or (toc and _links_only(page, rows))
             if toc:  # se apunta: si no era el índice, se habría perdido una página de texto
-                skipped.append((num, sum(map(_letters, (r.text for r in rows))), "se omitió como índice del PDF"))
+                skipped.append((num, sum(map(_letters, (r.text for r in rows))), TOC_SKIPPED))
+                contents += _toc_entries(rows)
                 continue
             # Página de diseño de los preliminares (portadilla con logo y créditos): poco texto y alguna
             # imagen propia. Se conserva entera, como imagen, para no perder su composición.
@@ -2077,6 +2125,11 @@ def analyze(pdf_path, progress=None):
             under = {lead(k) for k in candidates if k - 1 in candidates and KEYWORDS.match(text(k - 1))
                      and not KEYWORDS.match(text(k))}
             candidates = [k for k in candidates if KEYWORDS.match(text(k)) or lead(k) not in under]
+        # Un título que el índice impreso nombra es un capítulo, aunque no lleve palabra clave ("Un caballero
+        # al lado de Ischea"); los subtítulos ("El lado de…") no salen en el índice.
+        keys = [_key(title) for title, _ in contents]
+        candidates = sorted(set(candidates) | {k for k, b in enumerate(blocks) if b.kind == "heading" and any(
+            _toc_match(_key(html.unescape(b.html)), key) for key in keys)})
         # "Parte 1", "Parte 2"… sin nombre y con la numeración que vuelve a empezar en cada capítulo
         # (Re Zero) son apartados del capítulo: subtítulos. "Parte uno: Stifled Shadow" sí es una parte.
         bare = [k for k in candidates if SUBPART.fullmatch(html.unescape(blocks[k].html).strip())]
@@ -2094,7 +2147,8 @@ def analyze(pdf_path, progress=None):
         # El autor de los metadatos suele ser quien maquetó el PDF: manda la página de créditos
         return Book(title, credits.get("author") or meta.get("author") or "", cover, blocks, candidates, series,
                     volume, translator=credits.get("translator", ""), illustrator=credits.get("illustrator", ""),
-                    proofreader=credits.get("proofreader", ""), editor=credits.get("editor", ""), skipped=skipped)
+                    proofreader=credits.get("proofreader", ""), editor=credits.get("editor", ""), skipped=skipped,
+                    toc=contents)
 
 
 # Tipografía de libro impreso, común a todos los estilos: partición de palabras (el idioma ya va en

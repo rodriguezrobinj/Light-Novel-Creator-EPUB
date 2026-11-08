@@ -1251,7 +1251,7 @@ class App:
         column.addWidget(self.find_results)
         self.tree = qtk.RowList(("inc", "title", "min", "page", "ok"),
                                 {"inc": "Tipo", "title": "Título", "min": "Lectura", "page": "Página", "ok": "✓"},
-                                {"inc": 128, "min": 64, "page": 60, "ok": 64})  # «Subtítulo de p. 124»
+                                {"inc": 112, "min": 64, "page": 60, "ok": 64})  # con el margen de las flechas
         self.tree.setToolTip(SHORTCUTS)
         column.addWidget(self.tree, 1)
         split.addWidget(left)
@@ -1270,7 +1270,7 @@ class App:
         self.tabs.currentChanged.connect(lambda _: self.show_panes())
         device = _combo(self.device_var, list(DEVICES), 10, changed=self.draw_epub)
         dark = qtk.Var.check(self.dark_var, QCheckBox("Modo oscuro"))
-        dark.toggled.connect(lambda _: self.draw_epub())
+        dark.toggled.connect(lambda _: self.book and (self.draw_pdf(), self.draw_epub()))  # las dos vistas
         views.addLayout(_row(self.tabs, 1, device, dark, _button("Editar texto…", self.edit_text)))
         self.pages = qtk.Box()
         panes = QHBoxLayout(self.pages)
@@ -1648,9 +1648,15 @@ class App:
         """Imagen de una página (del PDF o del EPUB) ajustada a su marco, y su escala."""
         width, height = self.box_size()
         zoom = min(width / page.rect.width, height / page.rect.height)
-        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
-        if dark:  # aproximación del modo oscuro de los lectores: invierte también las ilustraciones
+        matrix = pymupdf.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=matrix)
+        if dark:  # como el modo oscuro de los lectores: invierte el papel y el texto, no las ilustraciones
+            art = pymupdf.Pixmap(pix, 0)  # copia, sin alfa como pix (copy exige el mismo)
             pix.invert_irect()
+            for info in page.get_image_info():
+                box = (pymupdf.Rect(info["bbox"]) * matrix).irect & pix.irect
+                if not box.is_empty:
+                    pix.copy(art, box)
         return qtk.qimage(pix), zoom
 
     def update_preview(self, _=None):
@@ -1715,7 +1721,7 @@ class App:
     def draw_pdf(self):
         canvas = self.pdf_view
         try:
-            image, zoom = self.render(self.pdf_doc[self.pdf_page])
+            image, zoom = self.render(self.pdf_doc[self.pdf_page], dark=self.dark_var.get())
         except Exception:
             self.blank(canvas, "Sin vista previa")
             return
@@ -1838,29 +1844,29 @@ class App:
         self.tree.item(item, tags=(KIND_TAG[kind],))
 
     def update_reviewed(self):
-        """Cabecera de la columna ✓: capítulos revisados de los que hay («✓ 12/30»). De paso, cada subtítulo
-        dice en la columna Tipo de qué capítulo es: tras cualquier cambio de tipo se pasa por aquí."""
-        self.label_subtitles()
+        """Cabecera de la columna ✓: capítulos revisados de los que hay («✓ 12/30»). De paso, las flechas de
+        pertenencia de la columna Tipo y los avisos del índice impreso: tras cualquier cambio de tipo se pasa por aquí."""
+        self.link_rows()
+        if self.book and self.book.toc:
+            self.update_quality()
         chapters = [i for i in self.tree.get_children() if self.tree.set(i, "inc") == ON]
         done = sum(bool(self.tree.set(i, "ok")) for i in chapters)
         self.tree.headerItem().setText(self.tree.columns.index("ok"), f"✓ {done}/{len(chapters)}" if chapters else "✓")
         return done, len(chapters)
 
-    def label_subtitles(self):
-        """Columna Tipo de los subtítulos: «Subtítulo de 12» (número del capítulo en el que van) o, si su
-        título no lleva número, «Subtítulo de p. 71» (su página en la lista); el título entero, al pasar el ratón."""
-        chapter = None
-        for i in self.tree.get_children():
-            kind = self.tree.set(i, "inc")
-            if kind == ON:
-                chapter = i
-            elif kind == OFF and chapter:
-                title = self.tree.set(chapter, "title")
-                number = re.search(r"\d+", title)
-                where = number[0] if number else f"p. {self.tree.set(chapter, 'page')}"
-                self.tree.label(i, "inc", f"{OFF} de {where}", f"{OFF} de «{title}»")
-            elif kind == OFF:
-                self.tree.set(i, "inc", OFF)  # antes del primer capítulo: sin etiqueta
+    def link_rows(self):
+        """Columna Tipo: una flecha baja de cada capítulo a las filas que van dentro de él en el EPUB
+        (subtítulos, ilustraciones, separadores), hasta el siguiente capítulo."""
+        shapes, group = {}, []
+        for i in self.tree.get_children() + ("",):  # "": cierra el último grupo
+            if not i or self.tree.set(i, "inc") == ON:
+                if len(group) > 1:
+                    shapes.update(dict.fromkeys(group[1:], "mid"))
+                    shapes[group[0]], shapes[group[-1]] = "root", "last"
+                group = [i]
+            elif group:
+                group.append(i)
+        self.tree.link(shapes, "inc")
 
     def toggle_reviewed(self):
         """R: marca el título elegido como revisado y pasa al siguiente capítulo sin revisar; si ya lo estaba,
@@ -2006,6 +2012,9 @@ class App:
         text += f" · {convert.counted(len(cut), 'sección', 'secciones')} del grupo en Quitar" if cut else ""
         twins_text = convert.counted(len(twins), "ilustración repetida descartada", "ilustraciones repetidas descartadas")
         text += f" · {twins_text}" if twins else ""
+        pages = [str(page) for page, _, why in book.skipped if why == convert.TOC_SKIPPED]
+        if book.toc:  # el índice impreso no se copia: se usa para encontrar y comprobar los capítulos
+            text += f" · índice del PDF en la página {', '.join(pages)} ({convert.counted(len(book.toc), 'título')})"
         text += f" · {convert.counted(scenes, 'separador', 'separadores')}" if scenes else ""  # al final: si no cabe, se corta esto
         if self.load_review():
             text = "Revisión anterior recuperada"
@@ -2114,7 +2123,6 @@ class App:
             if text and text != self.tree.set(item, "title"):
                 self.history.append([self.row_state(item)])
                 self.tree.set(item, "title", text)
-                self.label_subtitles()  # el número del capítulo puede haber cambiado
             close()
             self.update_preview()
 
@@ -3009,7 +3017,44 @@ class App:
             if len(self.reports) >= 8:  # los últimos estados: basta para deshacer varias veces
                 del self.reports[next(iter(self.reports))]
             self.reports[key] = convert.quality_report(self.book)
-        return list(self.reports[key])
+        return list(self.reports[key]) + self.toc_issues()
+
+    def toc_issues(self):
+        """Avisos del índice impreso del PDF frente a los capítulos de la lista: un título del índice sin
+        capítulo (se quedó como subtítulo o no se detectó) y, si el índice es completo, un capítulo que no nombra."""
+        toc = self.book.toc
+        if not toc:
+            return []
+        where = next((page for page, _, why in self.book.skipped if why == convert.TOC_SKIPPED), 0)
+        rows = [(i, self.tree.set(i, "inc"), convert._key(self.tree.set(i, "title"))) for i in self.tree.get_children()]
+        chapters = [(i, key) for i, kind, key in rows if kind == ON]
+        issues = []
+        for title, page in toc:
+            key = convert._key(title)
+            if any(convert._toc_match(key, other) for _, other in chapters):
+                continue
+            row = next((i for i, kind, other in rows if convert._toc_match(key, other)), None)
+            if row is not None:  # está en la lista, como subtítulo o quitado: casi seguro un error
+                solution = "Si es un capítulo, márcalo como capítulo en la lista (tecla C)."
+                block, page, level = int(row), self.book.blocks[int(row)].page, "Revisar"
+            else:  # sin título en el texto: a menudo una página de ilustraciones o una nota
+                solution = ("Busca el título en la vista previa del PDF; si es un capítulo, escríbelo con «Editar "
+                            "texto…» y el estilo Capítulo (Ctrl+T). Si no lo es (ilustraciones, notas), ignora el aviso.")
+                block, level = None, "Menor"
+            issues.append(convert.Issue("toc", block, page or where, level, f"Falta un capítulo del índice: «{title}»",
+                                        f"El índice del PDF (página {where}) lo nombra, pero en la lista no es un capítulo.",
+                                        solution, text=title))
+        if len(toc) >= 3:  # con dos o menos títulos, el índice no es la lista entera
+            keys = [convert._key(title) for title, _ in toc]
+            for i, key in chapters:
+                if not any(convert._toc_match(key, other) for other in keys):
+                    title = self.tree.set(i, "title")
+                    issues.append(convert.Issue("toc-extra", int(i), self.book.blocks[int(i)].page, "Menor",
+                                                f"Capítulo que no está en el índice: «{title}»",
+                                                f"El índice del PDF (página {where}) no lo nombra.",
+                                                "Si no es un capítulo (un apartado, una nota), cámbialo a Subtítulo "
+                                                "(tecla S) o quítalo (tecla Q).", text=title))
+        return issues
 
     def report_key(self):
         """Lo que mira convert.quality_report del libro: si no cambia, el informe tampoco."""
