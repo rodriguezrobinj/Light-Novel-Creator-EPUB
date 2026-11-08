@@ -119,14 +119,18 @@ nombre con mayúscula a mitad de frase («el Señor Pérez» → «el señor Pé
   `schema:accessModeSufficient` (textual), `schema:accessibilityFeature` (tableOfContents, readingOrder,
   structuralNavigation, alternativeText si hay ilustraciones), `schema:accessibilityHazard` none y
   `schema:accessibilitySummary` en español. Sin `dcterms:conformsTo`: no se ha verificado WCAG.
-- Texto alternativo de las ilustraciones: «Ilustración» + « del capítulo N» si cae en uno. Editable en
-  «Cambiar ilustración…» (campo «Descripción»), guardado en la revisión.
+- Texto alternativo de las ilustraciones: «Ilustración de «título del capítulo»» (o «Ilustración» antes del
+  primero). Herramientas → «Describir ilustración…» pone uno propio a la ilustración elegida en la lista
+  («Cambiar ilustración…» es un selector de archivo, sin diálogo propio). Se guarda en la revisión (`alts`) por
+  la huella de la imagen (`convert.image_key`, SHA-1), no por su índice, que cambia al editar.
 
 ### 12. EPUBCheck
 
-- «EPUB listo» → botón «Validar con EPUBCheck».
-- Sin Java: mensaje que lo explica. Sin el programa: ofrece descargarlo una vez (versión fijada de las
-  publicadas por w3c en GitHub) a la carpeta de preferencias; solo tras confirmar.
+- «EPUB listo» → botón «Validar con EPUBCheck», en su propia fila.
+- Sin Java: mensaje que lo explica. Sin el programa: ofrece descargarlo una vez (EPUBCheck 5.4.0, 33 MB, de
+  las versiones publicadas por w3c en GitHub) a la carpeta de preferencias; solo tras confirmar. El .zip solo
+  se descomprime si todo va dentro de su carpeta.
+- Comprobado con el EPUBCheck real: Re Zero 1 generado con accesibilidad, 0 errores y 0 advertencias (21 s).
 - Corre `java -jar epubcheck.jar <epub> --json <tmp> --locale es` fuera de la ventana y muestra
   errores y advertencias (gravedad, archivo, mensaje) en una lista; «Sin errores» si no hay.
 

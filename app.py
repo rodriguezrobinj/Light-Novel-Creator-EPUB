@@ -200,6 +200,63 @@ def _spell_server(requests, replies):
             replies.put(("suggestions", word, convert.spell_suggestions(word, good)))
 
 
+# EPUBCheck, el validador oficial de EPUB (W3C, licencia BSD): se descarga una vez, a petición, junto a las preferencias
+EPUBCHECK_VERSION = "5.4.0"
+EPUBCHECK_URL = (f"https://github.com/w3c/epubcheck/releases/download/v{EPUBCHECK_VERSION}/"
+                 f"epubcheck-{EPUBCHECK_VERSION}.zip")
+EPUBCHECK_LEVELS = {"FATAL": "Error grave", "ERROR": "Error", "WARNING": "Advertencia", "USAGE": "Sugerencia",
+                    "INFO": "Información"}
+
+
+def _epubcheck_jar():
+    return SETTINGS.parent / f"epubcheck-{EPUBCHECK_VERSION}" / "epubcheck.jar"
+
+
+def _download_epubcheck(folder):
+    """Descarga EPUBCheck y lo descomprime en folder (proceso de trabajo). Devuelve la ruta de su .jar."""
+    folder, inside = Path(folder), f"epubcheck-{EPUBCHECK_VERSION}/"
+    folder.mkdir(parents=True, exist_ok=True)
+    part = folder / "epubcheck.zip.part"
+    try:
+        with urllib.request.urlopen(EPUBCHECK_URL, timeout=60) as response, open(part, "wb") as f:
+            shutil.copyfileobj(response, f)
+    except OSError as e:
+        part.unlink(missing_ok=True)
+        raise RuntimeError("No se pudo descargar EPUBCheck: comprueba la conexión a internet.") from e
+    with zipfile.ZipFile(part) as z:
+        names = z.namelist()
+        # Solo su carpeta: un nombre con «..» o fuera de ella escribiría donde no debe
+        if not names or any(not n.startswith(inside) or ".." in Path(n).parts for n in names):
+            raise RuntimeError("El archivo descargado de EPUBCheck no es el esperado.")
+        z.extractall(folder)
+    part.unlink()
+    return str(folder / inside / "epubcheck.jar")
+
+
+def _epubcheck_messages(data):
+    """[(gravedad, dónde, mensaje)] del informe JSON de EPUBCheck, en español."""
+    found = []
+    for m in data.get("messages", []):
+        where = (m.get("locations") or [{}])[0]
+        place = where.get("path", "") + (f", línea {where['line']}" if (where.get("line") or -1) > 0 else "")
+        found.append((EPUBCHECK_LEVELS.get(m.get("severity"), str(m.get("severity"))), place,
+                      str(m.get("message", "")).strip()))
+    return found
+
+
+def _epubcheck(jar, epub):
+    """EPUBCheck sobre epub con sus mensajes en español (proceso de trabajo: tarda de 5 a 30 s)."""
+    with tempfile.TemporaryDirectory(prefix="lnepub-epubcheck-") as tmp:
+        report = Path(tmp) / "informe.json"
+        run = subprocess.run(["java", "-jar", jar, str(epub), "--json", str(report), "--locale", "es"],
+                             capture_output=True, timeout=600,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # sin consola negra
+        if not report.is_file():
+            detail = (run.stderr or run.stdout).decode("utf-8", "replace").strip().splitlines()[-1:]
+            raise RuntimeError("EPUBCheck no pudo revisar el libro." + (f"\n{detail[0]}" if detail else ""))
+        return _epubcheck_messages(json.loads(report.read_text(encoding="utf-8")))
+
+
 # Los errores de re vienen en inglés: los más comunes, dichos para el usuario
 REGEX_ERRORS = (("missing )", "falta cerrar un paréntesis"), ("unbalanced parenthesis", "sobra un «)»"),
                 ("unterminated character set", "falta cerrar un «[»"), ("nothing to repeat", "«*», «+» o «?» sin nada "
@@ -217,6 +274,12 @@ def _comment_block(blocks, texts, comment):
     near = [(difflib.SequenceMatcher(None, t[:len(start)], start).ratio(), k) for k, t in texts if blocks[k].page == page]
     ratio, k = max(near, default=(0, None))
     return k if ratio >= 0.6 else None
+
+
+def _ask_line(parent, title, label, text):
+    """Una línea de texto pedida al usuario, o None si cancela."""
+    value, ok = QInputDialog.getText(parent, title, label, text=text)
+    return value if ok else None
 
 
 def _ask_note(parent, note):
@@ -330,7 +393,8 @@ def _write_options(state, breaks=()):
             "font": font if font in convert.FONTS
             else path if path and Path(path).name == font and Path(path).is_file() else "",
             "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
-            "hyphenate": bool(state.get("hyphenate")), "breaks": list(breaks)}
+            "hyphenate": bool(state.get("hyphenate")), "breaks": list(breaks),
+            "alts": {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}}
 
 
 def _write_checked(book, chapters, out, removed, options):
@@ -451,6 +515,7 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
                 "words": "Diccionario de la serie", "glossary": "Glosario", "ignored": "Avisos ignorados", "comments": "Comentarios",
+                "alts": "Descripciones de ilustraciones",
                 "echoes": "Buscar ecos"}
 
 
@@ -1197,6 +1262,7 @@ class App:
         self.words = []                        # diccionario de la serie: palabras que la ortografía da por buenas
         self.glossary = []                     # glosario de la serie: los nombres como deben ir
         self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
+        self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
         self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
@@ -1255,6 +1321,7 @@ class App:
         tools.addAction("Añadir página…", self.add_page)
         tools.addAction("Página de personajes…", self.character_page)
         tools.addAction("Cambiar ilustración…", self.change_image)
+        tools.addAction("Describir ilustración…", self.describe_image)
         tools.addAction("Versiones…", self.versions)
         tools.addSeparator()
         tools.addAction("Panel de serie…", self.series_panel)
@@ -2047,7 +2114,8 @@ class App:
         self.book = book
         # El análisis tal cual, para restaurar versiones sin volver a analizar: las ediciones hacen listas nuevas
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
-        self.glossary, self.comments = [], []  # son del libro: llegan con la revisión (el glosario, o heredado)
+        # Son del libro: llegan con la revisión (el glosario, también heredado de otro tomo)
+        self.glossary, self.comments, self.alts = [], [], {}
         if report is not None and not self.echoes_var.get():  # el del proceso va sin opciones
             self.reports[self.report_key()] = report
         if memos:
@@ -2256,7 +2324,7 @@ class App:
     def write_options(self, breaks=()):
         """Opciones de write_epub según la ventana (ver _write_options)."""
         state = {name: var.get() for name, var in self.fields().items()}
-        state["replacements"] = self.replacements
+        state["replacements"], state["alts"] = self.replacements, self.alts
         return _write_options(state, breaks)
 
     def saved(self, out, problems=()):
@@ -2319,8 +2387,51 @@ class App:
                 buttons.append(_button("Enviar a Kindle…", lambda: self.send_to_kindle(out, win)))
         buttons.append(_button("Cerrar", win.close))
         column.addLayout(_row(*buttons, 1))
+        if is_file:  # en su propia fila: la de los botones ya llena 1093 px con un lector conectado
+            check = _button("Validar con EPUBCheck", lambda: self.validate_epub(out))
+            check.setToolTip("El validador oficial de EPUB del W3C: lo que aceptan las tiendas y los lectores exigentes")
+            column.addLayout(_row(check, 1))
         win.show()
         self.result_window = win
+
+    def validate_epub(self, out):
+        """«Validar con EPUBCheck»: necesita Java; el programa se descarga una vez si el usuario quiere."""
+        if not shutil.which("java"):
+            messagebox.showinfo("EPUBCheck", "EPUBCheck necesita Java, que no está instalado en este equipo.\n\n"
+                                "Instálalo gratis desde java.com y vuelve a pulsar «Validar con EPUBCheck».")
+            return
+        jar = _epubcheck_jar()
+        if not jar.is_file():
+            if messagebox.askyesno("EPUBCheck", "EPUBCheck es el validador oficial de EPUB del W3C. Hay que "
+                                   "descargarlo una vez (33 MB, desde GitHub).\n\n¿Descargarlo ahora?"):
+                self.run(_download_epubcheck, (str(SETTINGS.parent),), lambda _: self.validate_epub(out),
+                         busy="Descargando EPUBCheck…")
+            return
+        self.status.setText("Validando con EPUBCheck…")
+        self.run(_epubcheck, (str(jar), str(out)), lambda found: self.show_epubcheck(out, found),
+                 busy="Validando con EPUBCheck…")
+
+    def show_epubcheck(self, out, found):
+        """Lo que dijo EPUBCheck: errores y advertencias con su archivo, o que el EPUB cumple el estándar."""
+        errors = sum(level.startswith("Error") for level, _, _ in found)
+        self.status.setText(f"EPUBCheck: {convert.counted(errors, 'error', 'errores')}, "
+                            f"{convert.counted(len(found) - errors, 'advertencia')}")
+        win, column = self.dialog("EPUBCheck")
+        column.addWidget(_label(Path(out).name, "muted"))
+        if not found:
+            column.addWidget(_label("Sin errores ni advertencias: el EPUB cumple el estándar.", "title"))
+        else:
+            column.addWidget(_label(f"{convert.counted(errors, 'error', 'errores')} · "
+                                    f"{convert.counted(len(found) - errors, 'advertencia')}", "warn" if errors else "title"))
+            table = qtk.RowList(("level", "where", "message"), {"level": "Gravedad", "where": "Dónde",
+                                                                "message": "Mensaje"}, {"level": 110, "where": 200})
+            for n, row in enumerate(found):
+                table.insert("", "end", iid=str(n), values=row)
+            table.setMinimumSize(760, 260)
+            column.addWidget(table, 1)
+        column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
+        win.show()
+        self.epubcheck_window = win
 
     def copy_to(self, out, root, win):
         """Copia el EPUB al lector, en Books/ si la tiene, en el proceso de trabajo (USB lento)."""
@@ -2843,6 +2954,23 @@ class App:
         self.tree.see(item)
         self.update_preview()
         self.status.setText(f"Ilustración cambiada por {Path(path).name} · Ctrl+Z para deshacer")
+
+    def describe_image(self):
+        """Texto alternativo de la ilustración elegida: lo que dice un lector de pantalla en su lugar."""
+        selected = self.tree.selection()
+        if not self.book or not selected or not self.is_image(selected[0]):
+            messagebox.showinfo("Describir ilustración", "Elige primero una ilustración en la lista.")
+            return
+        key = convert.image_key(self.book.blocks[int(selected[0])].image)
+        text = _ask_line(self.root, "Describir ilustración", "Qué se ve, en una frase: lo lee en voz alta el lector de "
+                         "pantalla de quien no la ve.\nVacío: «Ilustración de «capítulo»».", self.alts.get(key, ""))
+        if text is None:
+            return
+        if text.strip():
+            self.alts[key] = text.strip()
+        else:
+            self.alts.pop(key, None)
+        self.status.setText("Descripción guardada" if text.strip() else "Sin descripción propia")
 
     def find(self, _=None):
         """Ctrl+F: barra de búsqueda sobre la lista; al elegir un resultado, las vistas previas van a él."""
@@ -3567,7 +3695,7 @@ class App:
         state = {name: var.get() for name, var in self.fields().items()}
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
-                     glossary=self.glossary, ignored=self.ignored, comments=self.comments)
+                     glossary=self.glossary, ignored=self.ignored, comments=self.comments, alts=self.alts)
         return state
 
     def save_review(self):
@@ -3627,6 +3755,7 @@ class App:
         self.description = state.get("description", "")
         self.last_problems = state.get("problems")
         self.ignored = state["ignored"] if isinstance(state.get("ignored"), list) else []
+        self.alts = {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}
         self.comments = [c for c in state.get("comments", []) if isinstance(c, dict)  # el .json se edita a mano
                          and isinstance(c.get("note"), str) and isinstance(c.get("text"), str)]
         if state.get("cover"):
