@@ -1,6 +1,7 @@
 """Hoja del editor de texto estilo Word: lo que se ve es lo que sale en el EPUB. Lee y escribe el formato de
 convert.section_text (un párrafo por línea con <i>/<b>, "# " delante de un título, las ilustraciones y los
 separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda convert.edit_section."""
+import html
 import re
 
 from PySide6.QtCore import QEvent, QMimeData, QObject, Qt, QUrl, Signal
@@ -285,10 +286,20 @@ class Look(QSyntaxHighlighter):
         self.tags = tags
         self.rehighlight()
 
-    def set_unknown(self, words):
+    def set_unknown(self, words, changed=None):
+        """Palabras que se subrayan. changed: solo se repintan los párrafos con esas (las nuevas o las que dejan
+        de estarlo); repintar la hoja entera tardaba 1 s en un capítulo largo."""
         self.unknown = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, sorted(words, key=len, reverse=True)))
                                   + r")(?!\w)", re.I) if words else None
-        self.rehighlight()
+        if changed is None:
+            self.rehighlight()
+            return
+        probe = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, changed)) + r")(?!\w)", re.I) if changed else None
+        block = self.document().firstBlock()
+        while probe and block.isValid():
+            if probe.search(block.text()):
+                self.rehighlightBlock(block)
+            block = block.next()
 
     def color(self, tag):
         return QColor(self.tags.get(tag, {}).get("foreground", "#888888"))
@@ -569,34 +580,44 @@ class Sheet(QTextEdit):
         cursor.setPosition(start + len(new), QTextCursor.MoveMode.KeepAnchor)
         self.setTextCursor(cursor)
 
-    def find_next(self, term, backward=False):
-        """Selecciona la siguiente aparición de term (sin distinguir mayúsculas) desde el cursor; False si no
-        hay más en esta hoja."""
-        flags = QTextDocument.FindFlag.FindBackward if backward else QTextDocument.FindFlag(0)
-        found = self.document().find(term, self.textCursor(), flags)
+    @staticmethod
+    def _flags(backward=False, whole=False, case=False):
+        flags = QTextDocument.FindFlag(0)
+        for on, flag in ((backward, QTextDocument.FindFlag.FindBackward),
+                         (whole, QTextDocument.FindFlag.FindWholeWords),
+                         (case, QTextDocument.FindFlag.FindCaseSensitively)):
+            if on:
+                flags |= flag
+        return flags
+
+    def find_next(self, term, backward=False, whole=False, case=False):
+        """Selecciona la siguiente aparición de term desde el cursor (whole: palabra completa; case: distingue
+        mayúsculas); False si no hay más en esta hoja."""
+        found = self.document().find(term, self.textCursor(), self._flags(backward, whole, case))
         if found.isNull():
             return False
         self.setTextCursor(found)
         return True
 
-    def replace_current(self, term, new):
+    def replace_current(self, term, new, case=False):
         """Si la selección es term, la cambia por new (con su formato). True si cambió algo."""
         cursor = self.textCursor()
-        if not cursor.hasSelection() or cursor.selectedText().lower() != term.lower():
+        same = cursor.selectedText() == term if case else cursor.selectedText().lower() == term.lower()
+        if not cursor.hasSelection() or not same:
             return False
         cursor.beginEditBlock()
         cursor.insertText(new, cursor.charFormat())
         cursor.endEditBlock()
         return True
 
-    def replace_all(self, term, new):
+    def replace_all(self, term, new, whole=False, case=False):
         """Cambia todas las apariciones de term en la hoja, en un solo paso de deshacer. Devuelve cuántas."""
         doc, count = self.document(), 0
         cursor = QTextCursor(doc)
         edit = QTextCursor(doc)
         edit.beginEditBlock()
         while True:
-            cursor = doc.find(term, cursor)
+            cursor = doc.find(term, cursor, self._flags(False, whole, case))
             if cursor.isNull():
                 break
             cursor.insertText(new, cursor.charFormat())
@@ -642,6 +663,187 @@ class Sheet(QTextEdit):
         cursor.endEditBlock()
         self.setTextCursor(cursor)
 
+    # Símbolos y tipografía
+    def insert_symbol(self, text):
+        """Inserta text en el cursor (en lugar de lo elegido), con el formato de ahí: un paso de deshacer."""
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.insertText(text)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    def wrap(self, opening, closing):
+        """Envuelve lo elegido en opening…closing («», ¿?, ¡!); sin selección, pone los dos con el cursor en
+        medio para escribir dentro."""
+        cursor = self.textCursor()
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        cursor.beginEditBlock()
+        cursor.setPosition(end)
+        cursor.insertText(closing)
+        cursor.setPosition(start)
+        cursor.insertText(opening)
+        cursor.endEditBlock()
+        cursor.setPosition(start + len(opening))
+        if end > start:
+            cursor.setPosition(end + len(opening), QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(cursor)
+
+    def fix_typography(self):
+        """La limpieza tipográfica del EPUB (convert._typography) escrita en la hoja: rayas de diálogo,
+        comillas «», puntos suspensivos. Conserva cursiva, notas y enlaces. Devuelve cuántos párrafos cambió."""
+        doc, changed = self.document(), 0
+        edit = QTextCursor(doc)
+        edit.beginEditBlock()
+        block = doc.firstBlock()
+        while block.isValid():
+            lines = [] if objects_of(block) or not block.text().strip() else _lines(block)
+            if len(lines) == 1:
+                heading = bool(block.blockFormat().property(HEADING))
+                prefix = "# " if heading else convert.CENTER if block.blockFormat().property(CENTERED) else ""
+                body = lines[0][len(prefix):]
+                typed = convert._typography(convert._inline(body), dashes=not heading)
+                new = html.unescape(convert.NOTE.sub(r"[Nota: \1]", typed))
+                if new != body:
+                    self._set_block_text(block, new)
+                    changed += 1
+            block = block.next()
+        edit.endEditBlock()
+        return changed
+
+    def _set_block_text(self, block, line):
+        """Cambia el texto del párrafo por line (con <i>/<b>/<a href>), sin tocar su formato de párrafo."""
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(block.position())
+        cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        _insert_marked(cursor, line)
+
+    # Cambios frente a lo cargado
+    def changed_blocks(self):
+        """Párrafos con texto distinto del cargado, o nuevos (sin línea original)."""
+        found, block = [], self.document().firstBlock()
+        while block.isValid():
+            lines = [line for line in block_lines(block) if line.strip()]
+            original = block.blockFormat().property(ORIGINAL)
+            if lines and (original is None or lines != [original]):
+                found.append(block)
+            block = block.next()
+        return found
+
+    def can_restore(self, block, loaded):
+        """¿Se puede devolver el párrafo a su línea original? No si se partió (otro párrafo tiene su origen) o
+        se le unió el siguiente (el origen que lo seguía ya no está). loaded: orígenes cargados, en orden."""
+        f = block.blockFormat()
+        k = f.property(SOURCE)
+        if f.property(ORIGINAL) is None or k is None or objects_of(block) or block not in self.changed_blocks():
+            return False
+        sources, other = [], self.document().firstBlock()
+        while other.isValid():
+            sources.append(source_of(other))
+            other = other.next()
+        if sources.count(k) != 1:
+            return False
+        later = loaded[loaded.index(k) + 1:] if k in loaded else []
+        return not later or later[0] in sources
+
+    def restore(self, block):
+        """Devuelve el párrafo a su línea original (título, centrado y texto): un paso de deshacer."""
+        original = block.blockFormat().property(ORIGINAL)
+        heading, centered = original.startswith("# "), original.startswith(convert.CENTER)
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(block.position())
+        cursor.beginEditBlock()
+        f = block.blockFormat()
+        if heading:
+            f.setProperty(HEADING, True)
+        else:
+            f.clearProperty(HEADING)
+            f.clearProperty(LEVEL)
+        if centered:
+            f.setProperty(CENTERED, True)
+        else:
+            f.clearProperty(CENTERED)
+        f.setAlignment(Qt.AlignmentFlag.AlignHCenter if centered else Qt.AlignmentFlag.AlignLeft)
+        cursor.setBlockFormat(f)
+        self._set_block_text(block, original[2:] if heading else original[len(convert.CENTER):] if centered
+                             else original)
+        cursor.endEditBlock()
+        self.look.rehighlightBlock(block)
+
+    def block_of(self, k):
+        """Párrafos (en orden) cuyo origen es el bloque k del libro."""
+        found, block = [], self.document().firstBlock()
+        while block.isValid():
+            if source_of(block) == k:
+                found.append(block)
+            block = block.next()
+        return found
+
+    def replace_sources(self, start, end, text):
+        """Cambia los párrafos de los bloques start..end-1 por text (líneas de section_text separadas por línea
+        en blanco; vacío los quita): el arreglo de un aviso del informe. Un paso de deshacer. False si alguno
+        de esos bloques no está en la hoja."""
+        first = self.block_of(start)
+        last = next((self.block_of(k) for k in range(end - 1, start - 1, -1) if self.block_of(k)), [])
+        if not first or not last:
+            return False
+        first, last = first[0], last[-1]
+        cursor = QTextCursor(self.document())
+        cursor.beginEditBlock()
+        lines = [line for line in text.split("\n\n") if line.strip()]
+        if lines:
+            cursor.setPosition(first.position())
+            cursor.setPosition(last.position() + last.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            insert_lines(cursor, [(start, line) for line in lines], self.pictures, color=self.color)
+        else:  # quitar: también el salto de párrafo, para no dejar uno vacío
+            following = last.next()
+            if following.isValid():
+                cursor.setPosition(first.position())
+                cursor.setPosition(following.position(), QTextCursor.MoveMode.KeepAnchor)
+            else:
+                previous = first.previous()
+                cursor.setPosition(previous.position() + previous.length() - 1 if previous.isValid()
+                                   else first.position())
+                cursor.setPosition(last.position() + last.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        return True
+
+    def split_chapter(self, title):
+        """Capítulo nuevo desde el cursor: parte el párrafo ahí (si está en medio) y pone antes del resto un
+        título de tipo Capítulo. Un paso de deshacer. False en un título o una ilustración."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not title.strip() or block.blockFormat().property(HEADING) or objects_of(block):
+            QApplication.beep()
+            return False
+        k = source_of(block)
+        cursor.beginEditBlock()
+        at_end = cursor.position() == block.position() + block.length() - 1 and block.text().strip()
+        if at_end:  # tras el párrafo: el título va después
+            cursor.insertBlock()
+        else:
+            cursor.insertBlock()  # el resto pasa a un párrafo nuevo; el título ocupa el sitio del corte
+            cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock)
+            if cursor.block().text().strip():  # el cursor estaba en medio: hace falta un párrafo para el título
+                cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+                cursor.insertBlock()
+        f = QTextBlockFormat()
+        f.setBottomMargin(SPACE)
+        f.setTopMargin(SPACE * 2)
+        if k is not None:
+            f.setProperty(SOURCE, k)
+        f.setProperty(HEADING, True)
+        f.setProperty(LEVEL, "Capítulo")
+        cursor.setBlockFormat(f)
+        cursor.insertText(title.strip(), _plain_format())
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self.look.rehighlightBlock(cursor.block())
+        return True
+
     def keyPressEvent(self, event):
         mods = event.modifiers()
         ctrl, alt = mods & Qt.KeyboardModifier.ControlModifier, mods & Qt.KeyboardModifier.AltModifier
@@ -650,8 +852,19 @@ class Sheet(QTextEdit):
                    Qt.Key.Key_N: self.toggle_bold, Qt.Key.Key_B: self.toggle_bold,
                    Qt.Key.Key_T: self.toggle_heading, Qt.Key.Key_J: self.join_next, Qt.Key.Key_E: self.toggle_center,
                    Qt.Key.Key_F: lambda: self.command.emit("find"), Qt.Key.Key_H: lambda: self.command.emit("replace")}
+        typed = event.text()
+        symbols = {Qt.Key.Key_Minus: lambda: self.insert_symbol("—"), Qt.Key.Key_Period: lambda: self.insert_symbol("…"),
+                   Qt.Key.Key_Q: lambda: self.wrap("«", "»")}
         if ctrl and alt and key == Qt.Key.Key_K:  # como Word en español: Ctrl+K ya es cursiva
             self.command.emit("link")
+        elif ctrl and alt and key in symbols and not (typed and typed.isprintable()):
+            symbols[key]()  # AltGr es Ctrl+Alt: si escribe un carácter (AltGr+2 = @), se deja escribir
+        elif ctrl and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.command.emit("reviewed")
+        elif key == Qt.Key.Key_F7:
+            self.command.emit("next_change")
+        elif key == Qt.Key.Key_F8:
+            self.command.emit("next_issue")
         elif ctrl and not alt and key in actions:
             actions[key]()
         elif key == Qt.Key.Key_F3 and mods & Qt.KeyboardModifier.ShiftModifier:

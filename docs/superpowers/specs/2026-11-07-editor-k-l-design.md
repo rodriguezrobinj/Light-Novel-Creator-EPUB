@@ -48,10 +48,16 @@ El escritorio gris deja 16 px alrededor de la hoja también abajo (hoy 0: la hoj
 - Al abrir revisa todas las palabras del libro; luego, tras 1 s sin escribir, las palabras nuevas de la
   hoja. Mismas reglas que «Ortografía…» (`convert.spell_candidate`): minúscula, 3 letras o más, sin el
   diccionario de la serie, honoríficos ni onomatopeyas.
-- Subrayado rojo ondulado (el de hoy). Sugerencias calculadas en segundo plano, primero las del capítulo.
+- Subrayado rojo ondulado (el de hoy); al llegar palabras nuevas solo se repintan sus párrafos (repintar
+  la hoja entera tardaba 1 s).
+- Sugerencias como en «Ortografía…»: la palabra con o sin tilde y las correctas parecidas del propio libro,
+  al instante. Las de Hunspell tardaban de 1 a más de 15 s por palabra y el clic derecho se quedaba en
+  «Buscando sugerencias…». Se piden las del capítulo abierto; la del clic derecho, la primera, y si llega
+  con el menú abierto aparece en él.
 - Clic derecho sobre una palabra subrayada: sus sugerencias (o «Buscando sugerencias…»), «Ignorar» (hasta
   cerrar el editor) y «Añadir al diccionario de la serie» (`App.words`, el de «Ortografía…»).
-- Si el proceso no arranca o muere, el editor sigue sin subrayado nuevo (sin aviso que bloquee).
+- Si el proceso no arranca o muere, el editor sigue sin subrayado nuevo (sin aviso que bloquee). Si
+  muere la ventana, el proceso lo nota y termina (si no, quedaba esperando para siempre).
 
 ## L1. Revisado y siguiente
 
@@ -80,6 +86,22 @@ El escritorio gris deja 16 px alrededor de la hoja también abajo (hoy 0: la hoj
   palabras, párrafos, minutos de lectura (230 por minuto, como `reading_minutes`) y el porcentaje de
   palabras en diálogo (párrafos que empiezan por raya, guion o comillas) frente a narración; de la
   selección, sus palabras; del libro, palabras, capítulos y minutos.
+
+## Cinta adaptable
+
+Con las herramientas nuevas la cinta pedía ~1800 px. Si no cabe en la pantalla (1366 px, o 1093 con el zoom
+de Windows al 125 %), por niveles: deshacer, insertar y buscar se quedan en su icono y el botón de capítulo
+se estrecha; luego párrafo y revisar; al final los grupos se juntan y «✓ 3/25» pasa a «✓». El texto de
+cada botón sigue en su ayuda. Se mide contra la pantalla antes de mostrar el editor (maximizada con una
+cinta ancha, la ventana quedaba más ancha que la pantalla).
+
+## Arreglos que salieron al probar
+
+- Esc en el campo de buscar, reemplazar, enlace o dividir cerraba el editor («¿Descartar cambios?») cuando
+  la ventana no estaba activa (tras la lista de «Todos»): un filtro de eventos cierra la barra.
+- El clic derecho de la hoja sale en español (el estándar de Qt salía en inglés).
+- La lista de capítulos («•» en los cambiados) se rehace al abrirla, no en cada cambio de capítulo ni tras
+  cada pausa al escribir (volcaba todos los capítulos visitados).
 
 ## Pruebas
 

@@ -940,16 +940,56 @@ def _hunspell():
     return Dictionary.from_files(str(SPELL_DIR / "es_ES"))
 
 
+def spell_words(text):
+    """Palabras de un texto, como las cuenta la ortografía."""
+    return re.findall(r"[^\W\d_]+", unicodedata.normalize("NFC", text))
+
+
+def spell_skip(known=()):
+    """Lo que la ortografía no revisa: el diccionario de la serie (known) y los honoríficos."""
+    return {w.lower() for w in known} | HONORIFICS
+
+
+def spell_candidate(word, skip):
+    """¿Se revisa la palabra? Solo en minúscula y de 3 letras o más (con mayúscula suelen ser nombres), fuera
+    de skip (spell_skip) y sin onomatopeyas ("aaah")."""
+    return word[:1].islower() and len(word) >= 3 and word not in skip and not re.search(r"(.)\1\1", word)
+
+
+def spell_suggestions(word, good=(), limit=4):
+    """Sugerencias para una palabra que no está, como en «Ortografía…»: primero la que solo cambia en tildes,
+    luego las palabras correctas parecidas de good (las del libro). Las de Hunspell tardaban de 1 a más de 15 s
+    por palabra: el clic derecho se quedaba en «Buscando sugerencias…»."""
+    spell = _hunspell()
+    accents = [v for v in _accents(word) if v != word and spell.lookup(v)]
+    near = difflib.get_close_matches(word, [g for g in good if abs(len(g) - len(word)) <= 2], limit, 0.75)
+    return list(dict.fromkeys(accents + near))[:limit]
+
+
+DIALOG_START = ("—", "–", "-", "«", "“", '"', "'", "‘")  # un párrafo de diálogo empieza por raya o comillas
+
+
+def text_stats(texts):
+    """Cifras de unos párrafos: palabras, párrafos, minutos de lectura (230 por minuto, como
+    reading_minutes) y el porcentaje de palabras en párrafos de diálogo."""
+    texts = [t.strip() for t in texts if t.strip()]
+    counts = [len(t.split()) for t in texts]
+    words = sum(counts)
+    dialog = sum(n for t, n in zip(texts, counts) if t.startswith(DIALOG_START))
+    return {"words": words, "paragraphs": len(texts), "minutes": max(1, round(words / 230)) if words else 0,
+            "dialog": round(100 * dialog / words) if words else 0}
+
+
 def unknown_words(texts, known=()):
     """Palabras de texts que no están en el diccionario: [(palabra, veces, [sugerencias])], las más repetidas
     primero. Solo en minúscula y de 3 letras o más: con mayúscula suelen ser nombres. No cuentan known (el
     diccionario de la serie), los honoríficos ni las onomatopeyas ("aaah"). Se sugieren palabras correctas
     del propio libro, primero la que solo cambia en tildes: las de Hunspell tardan ~1 s cada una."""
-    words = collections.Counter(w for t in texts for w in re.findall(r"[^\W\d_]+", unicodedata.normalize("NFC", t)))
-    skip = {w.lower() for w in known} | HONORIFICS
+    words = collections.Counter(w for t in texts for w in spell_words(t))
+    skip = spell_skip(known)
     spell, good, bad = _hunspell(), [], []
     for w, n in words.items():
-        if w[:1].islower() and len(w) >= 3 and w not in skip and not re.search(r"(.)\1\1", w):
+        if spell_candidate(w, skip):
             (good if spell.lookup(w) else bad).append(w)
     folded = {_fold(w): w for w in sorted(good, key=lambda w: words[w])}  # la más usada gana
     found = []
