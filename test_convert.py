@@ -2687,6 +2687,158 @@ def sheet_with(lines):
     return sheet
 
 
+
+def test_sheet_regex_find_and_replace_with_groups():
+    """Con expresión regular, buscar casa el patrón y reemplazar admite grupos; una expresión que casa vacío no
+    se queda en un bucle."""
+    sheet = sheet_with(["Tenía 12 años y <i>3</i> gatos.", "Nada aquí."])
+    found = sheet.find_next("[0-9]+", regex=True) and sheet.textCursor().selectedText()
+    replaced = sheet.replace_current("([0-9]+)", r"«\1»", regex=True)
+    count = sheet.replace_all("([0-9]+) gatos", r"\1 perros", regex=True)
+    empty = sheet.replace_all("x*", "y", regex=True)
+    text = sheet.toPlainText()
+    plain = sheet.replace_all("[0-9]", "N")  # sin regex, los corchetes son texto
+    assert found == "12" and replaced, (found, replaced)
+    assert count == 1 and empty == 0 and plain == 0, (count, empty, plain)
+    assert text.startswith("Tenía «12» años y 3 perros."), text
+
+
+def test_window_editor_regex_box_marks_bad_expressions():
+    """La casilla «.*» de la barra de búsqueda: una expresión mal escrita pone el aviso y no busca ni reemplaza;
+    bien escrita, «Reemplazar todo» usa los grupos en todo el libro."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.tree.selection_set([i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON][0])
+    editor = window.edit_text()
+    root.update()
+    editor.show_find_bar(True)
+    editor.regex_box.setChecked(True)
+    editor.find_entry.setText("(linea")
+    bad = editor.find_info.text(), editor.find(1)
+    editor.replace_everywhere()
+    editor.find_entry.setText(r"(l)inea")
+    ok = editor.find_info.text()
+    editor.replace_entry.setText(r"\1ínea")
+    editor.replace_everywhere()
+    editor.save()
+    text = " ".join(b.html for b in window.book.blocks)
+    window.close()
+    assert bad[0] == "Expresión no válida: falta cerrar un paréntesis (carácter 1)" and bad[1] is False, bad
+    assert ok == "", ok
+    assert "linea" not in text and "línea" in text, text[:300]
+
+
+def test_window_editor_reads_aloud_paragraph_by_paragraph():
+    """«Leer» lee desde el párrafo del cursor, uno a uno, saltando ilustraciones, con el fondo del que se lee; un
+    clic en la hoja, Esc o cambiar de capítulo la paran; sin voz en español, un aviso lo explica."""
+    import app
+    from PySide6.QtCore import QObject, Signal
+
+    class FakeSpeaker(QObject):
+        done, failed = Signal(), Signal(str)
+        said, stops = [], []
+
+        def say(self, text):
+            self.said.append(text)
+
+        def stop(self):
+            self.stops.append(1)
+
+    original, info = app.Speaker, app.messagebox.showinfo
+    told = []
+    app.Speaker = FakeSpeaker
+    app.messagebox.showinfo = lambda title, message, **_: told.append(message)
+    try:
+        root, window = visible_window()
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
+        window.tree.selection_set([i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON][0])
+        editor = window.edit_text()
+        root.update()
+        sheet = editor.sheet
+        first = sheet.document().firstBlock().next()  # tras el título
+        sheet.setTextCursor(app.QTextCursor(first))
+        editor.read_btn.click()
+        speaker = editor.speaker
+        speaker.done.emit()
+        two = list(speaker.said)
+        marked = any(s.cursor.block() == editor.reading for s in sheet.extraSelections())
+        checked = editor.read_btn.isChecked()
+        sheet.setTextCursor(app.QTextCursor(sheet.document().firstBlock()))  # como un clic en otro sitio
+        clicked = editor.reading, editor.read_btn.isChecked()
+        editor.read_btn.click()
+        editor.win.reject()  # Esc: calla la voz y no cierra el editor
+        escaped = editor.reading, editor.win.isVisible()
+        editor.read_btn.click()
+        speaker.failed.emit(app.NO_VOICE)
+        failed = editor.reading
+        window.close()
+    finally:
+        app.Speaker, app.messagebox.showinfo = original, info
+    texts = [first.text(), first.next().next().text()]  # en medio, una ilustración: se salta
+    assert first.next().text() == "￼" and two == texts, (two, texts)
+    assert told == [app.NO_VOICE], told
+    assert marked and checked, (marked, checked)
+    assert clicked == (None, False), clicked
+    assert escaped == (None, True), escaped
+    assert failed is None
+
+
+def test_window_reviewer_comments():
+    """Un comentario puesto con clic derecho en el editor: fondo amarillo, aviso «Comentario del revisor» en el
+    informe, guardado en la revisión y no en el EPUB; sobrevive a reabrir y a editar un poco el párrafo; «Quitar
+    comentario» lo borra."""
+    import app
+
+    original = app._ask_note
+    app._ask_note = lambda parent, note: "Revisar con el traductor: ¿«Tino» o «Tiño»?"
+    try:
+        root, window = visible_window()
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
+        window.tree.selection_set([i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON][0])
+        editor = window.edit_text()
+        root.update()
+        sheet = editor.sheet
+        block = sheet.document().firstBlock().next()
+        k = app.editor.source_of(block)
+        menu = editor.mark_menu(sheet.cursorRect(app.QTextCursor(block)).center())
+        [add] = [a for a in menu.actions() if a.text() == "Comentario…"]
+        title = editor.mark_menu(sheet.cursorRect(app.QTextCursor(sheet.document().firstBlock())).center())
+        on_title = [a.text() for a in title.actions() if "omentario" in a.text()]  # Re Zero: «Parte 1» fallaba
+        add.trigger()
+        marked = [s for s in sheet.extraSelections() if s.format.background().color().name() ==
+                  app.theme.mark_colors(False)["comment"]]
+        editor.save()
+        report = [i for i in window.quality_report() if i.kind == "comment"]
+        state = window.review_state()
+        epub = TMP / "comentario.epub"
+        chapters, removed, breaks = app._plan(window.book, window.rows())
+        convert.write_epub(window.book, chapters, epub, removed=removed)
+        in_epub = "traductor" in epub_text(epub)
+        window.save_review()
+        # El párrafo cambia un poco (otra edición): el comentario sigue con él
+        b = window.book.blocks[k]
+        window.book.blocks[k] = convert.Block(b.kind, b.page, b.html.replace("relleno", "Relleno", 1))
+        kept = [i.block for i in window.comment_issues()]
+        window.show_book(convert.analyze(window.pdf))  # reabrir: la revisión guardada trae el comentario
+        reopened = [i.block for i in window.comment_issues()]
+        window.remove_comment(window.comment_issues()[0])
+        left = window.comments
+        window.close()
+    finally:
+        app._ask_note = original
+    assert marked, "sin fondo amarillo en el párrafo comentado"
+    assert on_title == [], on_title
+    assert [(i.block, i.level, i.problem) for i in report] == [
+        (k, "Revisar", "Revisar con el traductor: ¿«Tino» o «Tiño»?")], report
+    assert state["comments"][0]["note"].startswith("Revisar con el traductor") and not in_epub, state["comments"]
+    assert kept == [k] and reopened == [k], (kept, reopened, k)
+    assert left == [], left
+
 def test_sheet_symbols_and_typography():
     """Raya, puntos y comillas con Ctrl+Alt como Word; con texto elegido, las comillas lo envuelven. AltGr+2
     (Ctrl+Alt) sigue escribiendo «@». «Corregir tipografía» pone rayas y comillas conservando la cursiva, en
@@ -4477,6 +4629,53 @@ def test_window_echoes_and_glossary_in_quality_report():
     assert proposed == "Emilia  # 5 veces", proposed
     assert state["glossary"] == ["Emilia"] and state["echoes"] is True, state["glossary"]
     assert "glossary" in kinds and "echo" in kinds, kinds
+
+
+def test_quality_score_and_export():
+    """La nota resta 10, 3 o 1 por aviso según su gravedad, cada 10 000 palabras, entre 0 y 100. El informe se
+    exporta a .csv para Excel («;», UTF-8 con BOM) y a .html que escapa el texto del libro."""
+    issue = lambda level, text: convert.Issue("x", 1, 7, level, "Aviso <b>", "Problema", "Solución", text)
+    report = [issue("Grave", "Tom & <Jerry>"), issue("Revisar", "a"), issue("Menor", "«b»")]
+    assert convert.quality_score(report, 10000) == 86
+    assert convert.quality_score(report, 1000) == 0 and convert.quality_score([], 0) == 100
+    csv_path, html_path = TMP / "informe.csv", TMP / "informe.html"
+    convert.export_report(report, csv_path, "Libro", 86)
+    convert.export_report(report, html_path, "Libro & Co", 86)
+    raw = csv_path.read_bytes()
+    page = html_path.read_text(encoding="utf-8")
+    assert raw.startswith(b"\xef\xbb\xbf") and raw.decode("utf-8-sig").splitlines()[1] == \
+        "Grave;7;Aviso <b>;Problema;Solución;Tom & <Jerry>", raw[:200]
+    assert "Nota 86/100" in page and "Tom &amp; &lt;Jerry&gt;" in page and "Libro &amp; Co" in page, page[:400]
+    assert "<Jerry>" not in page
+
+
+def test_window_quality_dialog_score_and_export():
+    """El informe dice la nota del libro y «Exportar…» guarda el .html con los avisos no ignorados."""
+    import app
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella abrió la puerta y dijo que"), B("p", 2, "nadie vendría."),
+              B("p", 2, "12")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.quality()
+    root.update()
+    parts = root.dialogs()[-1].parts
+    summary = parts["summary"].text()
+    out = TMP / "exportado.html"
+    asked = []
+    original = app.filedialog.asksaveasfilename
+    app.filedialog.asksaveasfilename = lambda **options: asked.append(options) or str(out)
+    try:
+        [export] = [b for b in root.dialogs()[-1].findChildren(app.QPushButton) if b.text() == "Exportar…"]
+        export.click()
+    finally:
+        app.filedialog.asksaveasfilename = original
+    window.close()
+    page = out.read_text(encoding="utf-8")
+    assert summary.startswith("Nota 0/100 · "), summary  # 2 avisos «Revisar» en 11 palabras
+    assert "Párrafo partido" in page and "Número suelto" in page, page[:300]
+    assert asked[0]["initialfile"].endswith("informe de calidad.html"), asked
 
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de

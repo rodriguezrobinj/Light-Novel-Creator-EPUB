@@ -1,4 +1,5 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
+import base64
 import collections
 import contextlib
 import ctypes
@@ -31,10 +32,11 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QProcess, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPixmap,
                            QShortcut, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit,
                                QProgressBar,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QStackedWidget, QTabBar,
@@ -196,6 +198,88 @@ def _spell_server(requests, replies):
             word = pending.pop(0)[1]
             done.add(word)
             replies.put(("suggestions", word, convert.spell_suggestions(word, good)))
+
+
+# Los errores de re vienen en inglés: los más comunes, dichos para el usuario
+REGEX_ERRORS = (("missing )", "falta cerrar un paréntesis"), ("unbalanced parenthesis", "sobra un «)»"),
+                ("unterminated character set", "falta cerrar un «[»"), ("nothing to repeat", "«*», «+» o «?» sin nada "
+                 "delante"), ("multiple repeat", "dos repeticiones seguidas"), ("bad escape", "barra invertida no "
+                 "válida"), ("bad character range", "rango de letras al revés"), ("unknown extension", "«(?» no válido"))
+
+
+def _comment_block(blocks, texts, comment):
+    """Párrafo del libro de un comentario: el que empieza por su texto (mejor en su página) o, si se editó, el más
+    parecido de su página. texts: [(índice, texto)] de los párrafos. None si ya no está."""
+    start, page = comment["text"], comment.get("page")
+    hits = [k for k, t in texts if t.startswith(start)]
+    if hits:
+        return min(hits, key=lambda k: blocks[k].page != page)
+    near = [(difflib.SequenceMatcher(None, t[:len(start)], start).ratio(), k) for k, t in texts if blocks[k].page == page]
+    ratio, k = max(near, default=(0, None))
+    return k if ratio >= 0.6 else None
+
+
+def _ask_note(parent, note):
+    """Texto del comentario del revisor (note: el de ahora), o None si se cancela."""
+    text, ok = QInputDialog.getMultiLineText(parent, "Comentario del revisor",
+                                             "Nota sobre este párrafo, para ti o para el traductor (no sale en el "
+                                             "EPUB). Vacía, quita el comentario:", note)
+    return text if ok else None
+
+
+NO_VOICE = ("Windows no tiene ninguna voz en español instalada.\n\nInstálala en Configuración → Hora e idioma → "
+            "Voz → Agregar voces, elige Español y vuelve a pulsar «Leer».")
+# Voz de Windows (System.Speech): lee una línea de la entrada, la dice y responde «ok». Sin voz en español, «novoice»
+SPEECH_SCRIPT = r"""
+[Console]::InputEncoding = [Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$v = $s.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -like 'es*' } | Select-Object -First 1
+if (-not $v) { [Console]::Out.WriteLine('novoice'); exit }
+$s.SelectVoice($v.VoiceInfo.Name)
+while ($null -ne ($line = [Console]::In.ReadLine())) { $s.Speak($line); [Console]::Out.WriteLine('ok') }
+"""
+
+
+class Speaker(QObject):
+    """Lee en voz alta con la voz de Windows, sin dependencias: un PowerShell que vive mientras se lee y recibe un
+    párrafo por línea. Parar lo cierra (la voz se calla en el acto); el siguiente «Leer» abre otro."""
+    done = Signal()       # acabó el párrafo
+    failed = Signal(str)  # el motivo, para el usuario
+
+    def __init__(self):
+        super().__init__()
+        self.proc = None
+
+    def say(self, text):
+        if self.proc is None:
+            self.proc = QProcess(self)
+            self.proc.readyReadStandardOutput.connect(self._read)
+            self.proc.errorOccurred.connect(lambda _: self._fail("No se pudo abrir la voz de Windows (PowerShell)."))
+            script = SPEECH_SCRIPT.encode("utf-16-le")  # -EncodedCommand: sin líos de comillas
+            self.proc.start("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                           "-EncodedCommand", base64.b64encode(script).decode()])
+        self.proc.write((" ".join(text.split()) + "\n").encode("utf-8"))
+
+    def _read(self):
+        for line in bytes(self.proc.readAllStandardOutput()).decode("utf-8", "replace").split():
+            if line == "ok":
+                self.done.emit()
+            elif line == "novoice":
+                self._fail(NO_VOICE)
+
+    def _fail(self, message):
+        self.stop()
+        self.failed.emit(message)
+
+    def stop(self):
+        proc, self.proc = self.proc, None
+        if proc is not None:
+            proc.readyReadStandardOutput.disconnect()
+            proc.errorOccurred.disconnect()  # matarlo no es un fallo
+            proc.kill()
+            proc.waitForFinished(1000)
+            proc.deleteLater()
 
 
 def _start_spell_process():
@@ -366,7 +450,7 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "credits": "Página de créditos", "reading": "Minutos de lectura", "epub2": "EPUB 2",
                 "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
-                "words": "Diccionario de la serie", "glossary": "Glosario", "ignored": "Avisos ignorados",
+                "words": "Diccionario de la serie", "glossary": "Glosario", "ignored": "Avisos ignorados", "comments": "Comentarios",
                 "echoes": "Buscar ecos"}
 
 
@@ -1112,6 +1196,7 @@ class App:
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
         self.words = []                        # diccionario de la serie: palabras que la ortografía da por buenas
         self.glossary = []                     # glosario de la serie: los nombres como deben ir
+        self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
         self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
@@ -1962,7 +2047,8 @@ class App:
         self.book = book
         # El análisis tal cual, para restaurar versiones sin volver a analizar: las ediciones hacen listas nuevas
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
-        if report is not None and not (self.echoes_var.get() or self.glossary):  # el del proceso va sin opciones
+        self.glossary, self.comments = [], []  # son del libro: llegan con la revisión (el glosario, o heredado)
+        if report is not None and not self.echoes_var.get():  # el del proceso va sin opciones
             self.reports[self.report_key()] = report
         if memos:
             convert.seed_report_memos(memos)
@@ -3058,7 +3144,37 @@ class App:
             if len(self.reports) >= 8:  # los últimos estados: basta para deshacer varias veces
                 del self.reports[next(iter(self.reports))]
             self.reports[key] = convert.quality_report(self.book, self.echoes_var.get(), self.glossary)
-        return list(self.reports[key]) + self.toc_issues()
+        return list(self.reports[key]) + self.toc_issues() + self.comment_issues()
+
+    def comment_issues(self):
+        """Los comentarios del revisor como avisos «Revisar»: salen en F8, en el informe y al exportarlo. El de un
+        párrafo que ya no está sale con su página."""
+        if not self.comments:
+            return []
+        texts = [(k, convert._plain(b).strip()) for k, b in enumerate(self.book.blocks) if b.kind == "p"]
+        by_block, issues = dict(texts), []
+        for c in self.comments:
+            k = _comment_block(self.book.blocks, texts, c)
+            text = by_block[k] if k is not None else c["text"]
+            issues.append(convert.Issue("comment", k, self.book.blocks[k].page if k is not None else c.get("page", 0),
+                                        "Revisar", "Comentario del revisor", c["note"],
+                                        "Cuando esté resuelto, quítalo con «Ignorar» (o en el editor, clic derecho → "
+                                        "«Quitar comentario»).", convert._cut(text), text=text))
+        return issues
+
+    def set_comment(self, k, note):
+        """Pone (o cambia, o con note vacía quita) el comentario del párrafo k del libro."""
+        texts = [(j, convert._plain(b).strip()) for j, b in enumerate(self.book.blocks) if b.kind == "p"]
+        self.comments = [c for c in self.comments if _comment_block(self.book.blocks, texts, c) != k]
+        if note.strip():
+            self.comments.append({"text": dict(texts)[k][:80], "page": self.book.blocks[k].page, "note": note.strip()})
+        self.update_quality()
+
+    def remove_comment(self, issue):
+        texts = [(j, convert._plain(b).strip()) for j, b in enumerate(self.book.blocks) if b.kind == "p"]
+        self.comments = [c for c in self.comments if not (c["note"] == issue.problem and
+                                                          _comment_block(self.book.blocks, texts, c) == issue.block)]
+        self.update_quality()
 
     def toc_issues(self):
         """Avisos del índice impreso del PDF frente a los capítulos de la lista: un título del índice sin
@@ -3097,6 +3213,26 @@ class App:
                                                 "(tecla S) o quítalo (tecla Q).", text=title))
         return issues
 
+    def word_count(self):
+        """Palabras de los párrafos del libro: la nota del informe se mide por cada 10 000."""
+        return convert.text_stats(convert._plain(b) for b in self.book.blocks if b.kind == "p")["words"]
+
+    def export_report(self, report, score, parent):
+        """«Exportar…» del informe de calidad: .html para leerlo sin la app o .csv para Excel."""
+        name = f"{self.pdf.stem if self.pdf else self.book.title} - informe de calidad.html"
+        path = filedialog.asksaveasfilename(defaultextension=".html", initialfile=name, parent=parent,
+                                            initialdir=str(self.pdf.parent) if self.pdf else None,
+                                            filetypes=[("Página web", "*.html"), ("Tabla para Excel", "*.csv")],
+                                            title="Exportar el informe de calidad")
+        if not path:
+            return
+        try:
+            convert.export_report(report, path, self.title_var.get() or self.book.title, score)
+        except OSError as e:
+            messagebox.showerror("Exportar", f"No se pudo guardar el informe:\n{e.strerror or e}", parent=parent)
+            return
+        self.status.setText(f"Informe guardado: {Path(path).name}")
+
     def report_key(self):
         """Lo que mira convert.quality_report del libro: si no cambia, el informe tampoco."""
         b = self.book
@@ -3131,13 +3267,16 @@ class App:
         win.resize(1060, 600)
         levels = theme.level_colors(self.dark)
         summary = _label("", "title")
+        summary.setWordWrap(True)  # nota, recuentos e ignorados: en 1093 px (125 %) baja a dos líneas
         show = qtk.Var("Todos")
         shown = _combo(show, ["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS] + ["Ignorados"],
                        12, changed=lambda: fill())
         echoes = QCheckBox("Buscar ecos (palabras repetidas cerca)", checked=self.echoes_var.get())
         # Sin Var.check: el diálogo se cierra y la variable no debe seguir poniendo valor a una casilla borrada
         echoes.toggled.connect(lambda on: (self.echoes_var.set(on), fill(), self.update_quality()))
-        column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown))
+        export_btn = _button("Exportar…", lambda: self.export_report(state["all"], state["score"], win))
+        export_btn.setToolTip("Guardar el informe como página web (.html) o tabla para Excel (.csv), para otra persona")
+        column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown, export_btn))
         panes = QSplitter(Qt.Orientation.Horizontal)
         column.addWidget(panes, 1)
         table = qtk.RowList(("level", "page", "title"), {"level": "Gravedad", "page": "Pág.", "title": "Aviso"},
@@ -3180,7 +3319,8 @@ class App:
             everything = self.quality_report()
             ignored = [i for i in everything if _issue_key(i) in self.ignored]
             report = [i for i in everything if _issue_key(i) not in self.ignored]
-            summary.setText((_quality_summary(report) or "No se encontró nada sospechoso.")
+            state["all"], state["score"] = report, convert.quality_score(report, self.word_count())
+            summary.setText(f"Nota {state['score']}/100 · " + (_quality_summary(report) or "No se encontró nada sospechoso.")
                             + (f" · {convert.counted(len(ignored), 'ignorado')}" if ignored else ""))
             graves = any(i.level == "Grave" for i in report)
             summary.setStyleSheet(f"color: {levels['Grave']};" if graves else "")
@@ -3252,9 +3392,12 @@ class App:
             fill(int(table.selection()[0]) if table.selection() else 0)
 
         def ignore(issue):
-            """Ignorar (o volver a mostrar) un aviso: se recuerda en la revisión."""
+            """Ignorar (o volver a mostrar) un aviso: se recuerda en la revisión. Un comentario del revisor se quita."""
             key = _issue_key(issue)
-            self.ignored = [k for k in self.ignored if k != key] if key in self.ignored else self.ignored + [key]
+            if issue.kind == "comment":
+                self.remove_comment(issue)
+            else:
+                self.ignored = [k for k in self.ignored if k != key] if key in self.ignored else self.ignored + [key]
             self.update_quality()
             fill(int(table.selection()[0]) if table.selection() else 0)
 
@@ -3424,7 +3567,7 @@ class App:
         state = {name: var.get() for name, var in self.fields().items()}
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
-                     glossary=self.glossary, ignored=self.ignored)
+                     glossary=self.glossary, ignored=self.ignored, comments=self.comments)
         return state
 
     def save_review(self):
@@ -3484,6 +3627,8 @@ class App:
         self.description = state.get("description", "")
         self.last_problems = state.get("problems")
         self.ignored = state["ignored"] if isinstance(state.get("ignored"), list) else []
+        self.comments = [c for c in state.get("comments", []) if isinstance(c, dict)  # el .json se edita a mano
+                         and isinstance(c.get("note"), str) and isinstance(c.get("text"), str)]
         if state.get("cover"):
             try:
                 self.set_cover(state["cover"])
@@ -3771,7 +3916,9 @@ class TextEditor:
         self.app, self.item = app, item
         self.win = win = Dialog(app.root)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        win.on_reject = self.cancel  # Esc y la X de la ventana preguntan antes de descartar cambios
+        # Esc y la X de la ventana preguntan antes de descartar cambios; leyendo en voz alta, Esc solo calla la voz
+        win.on_reject = lambda: self.stop_reading() if self.reading is not None else self.cancel()
+        self.reading, self.speaker = None, None  # párrafo que se lee en voz alta (QTextBlock) y la voz (Speaker)
         self.colors = theme.colors(app.dark)
         self.sheet = sheet = editor.Sheet()
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
@@ -3846,6 +3993,9 @@ class TextEditor:
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
         sheet.cursorPositionChanged.connect(self.update_tools)
+        # Un clic o una tecla en la hoja mientras se lee: la voz se calla, como al pulsar Parar
+        sheet.cursorPositionChanged.connect(lambda: self.reading is not None and self.sheet.textCursor().position()
+                                            != self.reading.position() and self.stop_reading())
         sheet.currentCharFormatChanged.connect(lambda _: self.update_tools())
         sheet.undoAvailable.connect(self.undo_btn.setEnabled)
         sheet.redoAvailable.connect(self.redo_btn.setEnabled)
@@ -3969,9 +4119,11 @@ class TextEditor:
             info.setEnabled(False)
             menu.insertAction(menu.actions()[0], info)
             menu.insertSeparator(menu.actions()[1])
+        self.read_btn = tool("🔊 Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
+                             "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, short="🔊", level=2)
         group("Revisar", self.changes_btn, self.issues_btn,
               tool("Σ Cifras", "Cifras: palabras, párrafos, minutos de lectura y diálogo del capítulo y del libro",
-                   self.show_stats, short="Σ", level=2))
+                   self.show_stats, short="Σ", level=2), self.read_btn)
         row.addStretch(1)
         # A la derecha, como el panel de navegación de Word pero sin quitar sitio: dónde estás y a dónde ir
         self.prev_chapter = tool("◀", "Capítulo anterior", lambda: self.step_section(-1))
@@ -4072,12 +4224,17 @@ class TextEditor:
         self.find_info = _label("", "muted")
         self.whole_box, self.case_box = QCheckBox("Palabra completa"), QCheckBox("Mayúsculas")
         self.case_box.setToolTip("Distinguir mayúsculas y minúsculas")
+        self.regex_box = QCheckBox(".*")
+        self.regex_box.setToolTip(r"Expresión regular: \d+ cifras, (\w+) una palabra… En el reemplazo, \1 es lo "
+                                  "del primer paréntesis")
+        for widget in (self.find_entry, self.regex_box):  # la expresión se revisa al escribirla
+            (widget.textChanged if widget is self.find_entry else widget.toggled).connect(lambda _: self.regex_error())
         close = _button("✕", lambda: (bar.hide(), self.sheet.setFocus()))
         close.setToolTip("Cerrar (Esc)")
         all_btn = _button("Todos", self.show_all_matches)
         all_btn.setToolTip("Lista de todos los resultados del libro")
         bar.setLayout(_row(self.find_entry, _button("◀", lambda: self.find(-1)), _button("▶", lambda: self.find(1)),
-                           all_btn, self.whole_box, self.case_box,
+                           all_btn, self.whole_box, self.case_box, self.regex_box,
                            self.replace_entry, _button("Reemplazar", self.replace_one),
                            _button("Reemplazar todo", self.replace_everywhere), self.find_info, 1, close,
                            margins=(10, 6, 10, 6)))
@@ -4165,7 +4322,7 @@ class TextEditor:
     def find(self, delta):
         """Siguiente (o anterior) aparición en la hoja; al acabarse, sigue en los capítulos siguientes."""
         term = self.find_entry.text()
-        if not term:
+        if not term or self.regex_error():
             return False
         if self.sheet.find_next(term, delta < 0, *self.find_options()):
             self.find_info.setText("")
@@ -4188,7 +4345,9 @@ class TextEditor:
 
     def replace_one(self):
         """Cambia la aparición elegida y busca la siguiente, como Word."""
-        if not self.sheet.replace_current(self.find_entry.text(), self.replace_entry.text(), self.case_box.isChecked()):
+        if self.regex_error():
+            return
+        if not self.sheet.replace_current(self.find_entry.text(), self.replace_entry.text(), *self.find_options()):
             self.find(1)
             return
         self.find(1)
@@ -4196,7 +4355,7 @@ class TextEditor:
     def replace_everywhere(self):
         """Cambia todas las apariciones en todos los capítulos; cada capítulo, un paso de su deshacer."""
         term, new = self.find_entry.text(), self.replace_entry.text()
-        if not term:
+        if not term or self.regex_error():
             return
         here, total = self.current, 0
         for _, start, end, _ in self.sections:
@@ -4297,14 +4456,23 @@ class TextEditor:
             for issue in self.block_issues(block):
                 start, end = self.issue_range(block, issue)
                 selection = QTextEdit.ExtraSelection()
-                selection.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
-                selection.format.setUnderlineColor(QColor(colors[issue.level]))
+                if issue.kind == "comment":  # como una nota adhesiva: fondo amarillo, no ondulado de error
+                    selection.format.setBackground(QColor(colors["comment"]))  # la nota, en el clic derecho
+                else:
+                    selection.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+                    selection.format.setUnderlineColor(QColor(colors[issue.level]))
                 cursor = QTextCursor(block)
                 cursor.setPosition(block.position() + start)
                 cursor.setPosition(block.position() + end, QTextCursor.MoveMode.KeepAnchor)
                 selection.cursor = cursor
                 selections.append(selection)
                 issues += 1
+            if block == self.reading:  # el párrafo que se lee en voz alta, de fondo: sin elegirlo, que teclear no lo borre
+                selection = QTextEdit.ExtraSelection()
+                selection.format.setBackground(QColor(colors["reading"]))
+                selection.cursor = QTextCursor(block)
+                selection.cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+                selections.insert(0, selection)
             block = block.next()
         self.sheet.setExtraSelections(selections)
         self.sheet.set_bars(changed, colors["changed"])
@@ -4402,20 +4570,41 @@ class TextEditor:
         return ("…" if left else "") + after[left:right].strip() + ("…" if right < len(after) else "")
 
     def ignore_issue(self, issue):
-        """«Ignorar este aviso»: como en el informe de calidad, se recuerda en la revisión."""
+        """«Ignorar este aviso»: como en el informe de calidad, se recuerda en la revisión. Un comentario se quita."""
         key = _issue_key(issue)
-        if key not in self.app.ignored:
+        if issue.kind == "comment":
+            self.app.remove_comment(issue)
+        elif key not in self.app.ignored:
             self.app.ignored.append(key)
             self.app.update_quality()
-        left = [i for i in self.issues.get(issue.block, []) if i is not issue]
-        if left:
-            self.issues[issue.block] = left
-        else:
-            self.issues.pop(issue.block, None)
+        self.drop_issues(issue.block, lambda i: i is issue)
         if self.shown_issue is issue:
             self.issue_frame.hide()
         self.refresh_marks()
-        self.tell("Aviso ignorado: no vuelve a salir en este libro")
+        self.tell("Comentario quitado" if issue.kind == "comment" else "Aviso ignorado: no vuelve a salir en este libro")
+
+    def drop_issues(self, k, which):
+        """Quita de los avisos del párrafo k los que cumplen which."""
+        left = [i for i in self.issues.get(k, []) if not which(i)]
+        if left:
+            self.issues[k] = left
+        else:
+            self.issues.pop(k, None)
+
+    def edit_comment(self, block):
+        """Clic derecho → «Comentario…»: pone, cambia o (vacío) quita el comentario del párrafo."""
+        k = editor.source_of(block)
+        old = next((i for i in self.issues.get(k, []) if i.kind == "comment"), None)
+        note = _ask_note(self.win, old.problem if old else "")
+        if note is None or k is None:
+            return
+        self.app.set_comment(k, note)
+        self.drop_issues(k, lambda i: i.kind == "comment")
+        for issue in self.app.comment_issues():
+            if issue.block == k:
+                self.issues.setdefault(k, []).append(issue)
+        self.refresh_marks()
+        self.tell("Comentario guardado" if note.strip() else "Comentario quitado")
 
     # Símbolos, revisado, cifras
     def fix_typography(self):
@@ -4504,17 +4693,31 @@ class TextEditor:
 
     # Buscar: opciones y todos los resultados
     def find_options(self):
-        return self.whole_box.isChecked(), self.case_box.isChecked()
+        return self.whole_box.isChecked(), self.case_box.isChecked(), self.regex_box.isChecked()
 
     def find_pattern(self):
-        """El término de la barra como expresión, con las opciones: para mirar capítulos sin abrirlos."""
-        whole, case = self.find_options()
-        term = re.escape(self.find_entry.text())
-        return re.compile(rf"(?<!\w){term}(?!\w)" if whole else term, 0 if case else re.I)
+        """El término de la barra como expresión, con las opciones: para mirar capítulos sin abrirlos. Lanza
+        re.error si es una expresión regular mal escrita."""
+        whole, case, regex = self.find_options()
+        term = self.find_entry.text() if regex else re.escape(self.find_entry.text())
+        return re.compile(rf"(?<!\w)(?:{term})(?!\w)" if whole else term, 0 if case else re.I)
+
+    def regex_error(self):
+        """Con «.*», el error de la expresión escrita (y el campo en rojo), o "" si vale."""
+        error = ""
+        if self.regex_box.isChecked() and self.find_entry.text():
+            try:
+                self.find_pattern()
+            except re.error as e:
+                why = next((text for start, text in REGEX_ERRORS if e.msg.startswith(start)), "revísala")
+                error = f"Expresión no válida: {why} (carácter {(e.pos or 0) + 1})"
+        self.find_entry.setStyleSheet(f"color: {theme.level_colors(self.app.dark)['Grave']}" if error else "")
+        self.find_info.setText(error)
+        return error
 
     def all_matches(self):
         """Cada resultado del libro: [(fila de sections, número de aparición en esa sección, texto)]."""
-        if not self.find_entry.text():
+        if not self.find_entry.text() or self.regex_error():
             return []
         pattern, found = self.find_pattern(), []
         for n, (title, start, end, _) in enumerate(self.sections):
@@ -4729,9 +4932,14 @@ class TextEditor:
                 change = self.fix_preview(issue)
                 menu.addAction(f"Arreglar: «{change}»" if issue.edit[2] else "Arreglar: quitar este párrafo",
                                lambda i=issue: self.fix_issue(i, go_next=False))
-            menu.addAction("Ignorar este aviso", lambda i=issue: self.ignore_issue(i))
+            menu.addAction("Quitar comentario" if issue.kind == "comment" else "Ignorar este aviso",
+                           lambda i=issue: self.ignore_issue(i))
             menu.addAction("Aviso siguiente   (F8)", self.next_issue)
             menu.addSeparator()
+        k = editor.source_of(block)  # solo párrafos de texto del libro: un subtítulo («Parte 1») no lleva comentario
+        if k is not None and editor._is_text(block) and self.app.book.blocks[k].kind == "p":
+            has = any(i.kind == "comment" for i in self.block_issues(block))
+            menu.addAction("Cambiar comentario…" if has else "Comentario…", lambda: self.edit_comment(block))
         if sheet.can_restore(block, self.loaded()):
             menu.addAction("Volver al original", lambda: (sheet.setTextCursor(QTextCursor(block)), self.restore_current()))
         if menu.actions() and not menu.actions()[-1].isSeparator():
@@ -4789,6 +4997,8 @@ class TextEditor:
 
     def open_section(self, start, end, focus=None):
         """Muestra el capítulo start..end en la hoja (el ya editado si se visitó) y lo dice en la cinta."""
+        if self.reading is not None:
+            self.stop_reading()
         page = self.pages.get((start, end))
         if page is None:
             # Un título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)
@@ -4892,6 +5102,46 @@ class TextEditor:
         if self.spell:
             self.spell[2].terminate()  # nada que guardar: lo aprendido ya está en App.words
             self.spell = None
+        if self.speaker:
+            self.speaker.stop()
+
+    # Leer en voz alta
+    def toggle_reading(self):
+        if self.reading is not None:
+            self.stop_reading()
+            return
+        if self.speaker is None:
+            self.speaker = Speaker()
+            self.speaker.done.connect(lambda: self.reading is not None and self.read_block(self.reading.next()))
+            self.speaker.failed.connect(self.reading_failed)
+        self.read_block(self.sheet.textCursor().block())
+
+    def read_block(self, block):
+        """Lee el párrafo block (o el siguiente con texto) con el cursor al principio y su fondo marcado; al acabar
+        el capítulo, para."""
+        while block.isValid() and not block.text().replace("\ufffc", "").strip():  # ilustraciones, separadores
+            block = block.next()
+        if not block.isValid():
+            self.stop_reading()
+            return
+        self.reading = block
+        self.sheet.setTextCursor(QTextCursor(block))
+        self.sheet.ensureCursorVisible()
+        self.read_btn.setChecked(True)
+        self.refresh_marks()
+        self.speaker.say(block.text().replace("\ufffc", " "))
+
+    def stop_reading(self):
+        self.reading = None
+        if self.speaker:
+            self.speaker.stop()
+        if shiboken6.isValid(self.read_btn):
+            self.read_btn.setChecked(False)
+            self.refresh_marks()
+
+    def reading_failed(self, message):
+        self.stop_reading()
+        messagebox.showinfo("Leer en voz alta", message, parent=self.win)
 
     def on_panel_event(self, event):
         """Ctrl+rueda amplía la página; al cambiar el tamaño del panel se vuelve a ajustar."""

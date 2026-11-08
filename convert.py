@@ -1,6 +1,7 @@
 """Convierte PDFs de novelas ligeras en EPUB con texto fluido."""
 import collections
 import colorsys
+import csv
 import difflib
 import functools
 import html
@@ -2062,6 +2063,51 @@ def quality_report(book, echoes=False, glossary=()):
         if issue.block is not None:
             issue.span = _issue_span(issue, blocks)
     return sorted(report, key=lambda r: (r.page, r.block if r.block is not None else -1))
+
+
+SCORE_WEIGHTS = {"Grave": 10, "Revisar": 3, "Menor": 1}
+
+
+def quality_score(report, words):
+    """Nota del libro de 0 a 100: cada aviso resta según su gravedad, por cada 10 000 palabras, para que un libro
+    largo y uno corto se comparen igual."""
+    if not words:
+        return 100
+    penalty = sum(SCORE_WEIGHTS.get(i.level, 0) for i in report) * 10000 / words
+    return max(0, min(100, round(100 - penalty)))
+
+
+def export_report(report, path, title, score):
+    """Guarda el informe para otra persona: .csv (para Excel en español: «;» y UTF-8 con BOM) o una página .html
+    que se lee sin la app."""
+    rows = [(i.level, str(i.page), i.title, i.problem, i.solution, i.before) for i in report]
+    head = ("Gravedad", "Página", "Aviso", "Problema", "Solución", "Texto")
+    if str(path).lower().endswith(".csv"):
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            csv.writer(f, delimiter=";").writerows([head, *rows])
+        return
+    counts = collections.Counter(i.level for i in report)
+    summary = " · ".join(f"{counts[level]} {level.lower()}" for level in LEVELS if counts[level]) or "Sin avisos"
+    color = {"Grave": "#c62828", "Revisar": "#b26a00", "Menor": "#1f5fb4"}
+    cells = "\n".join(f'<tr><td class="lvl" style="color:{color.get(level, "#333")}">{html.escape(level)}</td>'
+                      + "".join(f"<td>{html.escape(c)}</td>" for c in rest) + "</tr>" for level, *rest in rows)
+    page = f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><title>Informe de calidad · {html.escape(title)}</title>
+<style>
+body {{ font: 15px/1.45 "Segoe UI", sans-serif; margin: 24px; color: #222; background: #fff; }}
+h1 {{ font-size: 22px; margin: 0 0 4px; }} .muted {{ color: #666; margin: 0 0 16px; }}
+.score {{ font-size: 18px; font-weight: 600; }}
+table {{ border-collapse: collapse; width: 100%; }} th, td {{ border-bottom: 1px solid #ddd; padding: 6px 8px;
+text-align: left; vertical-align: top; }} th {{ background: #f3f3f3; }} .lvl {{ font-weight: 600; white-space: nowrap; }}
+</style></head><body>
+<h1>Informe de calidad · {html.escape(title)}</h1>
+<p class="muted"><span class="score">Nota {score}/100</span> · {html.escape(summary)}</p>
+<table><tr>{"".join(f"<th>{h}</th>" for h in head)}</tr>
+{cells}
+</table></body></html>
+"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(page)
 
 
 def combine(parts, title):
