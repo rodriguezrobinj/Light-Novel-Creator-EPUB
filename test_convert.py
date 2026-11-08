@@ -3253,17 +3253,24 @@ def test_quality_report_unifies_honorific_variants():
              "<i>Subaru kun</i> dijo.", "Subarukun es raro.",
              "Senpai, espera.", "Mi senpai es genial.", "Sempai, ¿qué haces?",
              "Fueron a San Pedro.", "La Ciudad San Marcos.", "Emilia-san sonrió.", "Emilia-san asintió.",
-             "Onee-san, ayuda.", "La onee-san sonrió.", "Hassan saludó."]
+             "Onee-san, ayuda.", "La onee-san sonrió.", "Hassan saludó.",
+             # Volumen 7 World Project: «Akakidōkutsuno sama» 2 veces y «-sama» 1; con guion es lo habitual
+             "Rem sama llegó.", "Gracias, Rem sama.", "Rem-sama sonrió."]
     blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
     book = convert.Book("Libro", "", b"", blocks, [0])
     report = [i for i in convert.quality_report(book) if i.kind == "honorific"]
-    assert [(i.block, i.level) for i in report] == [(4, "Menor"), (5, "Menor"), (6, "Menor"), (9, "Menor")], \
+    assert [(i.block, i.level) for i in report] == [(4, "Menor"), (5, "Menor"), (6, "Menor"), (9, "Menor"),
+                                                    (17, "Menor"), (18, "Menor")], \
         [(i.block, i.title, i.problem) for i in report]
-    assert "«Subaru-kun»" in report[0].problem and "«Subaru kun»" in report[0].problem, report[0].problem
+    assert report[0].problem == "El libro escribe «Subaru-kun» 3 veces y «Subaru kun» 2 veces: mejor una sola forma.", \
+        report[0].problem
+    assert report[-1].problem == "El libro escribe «Rem-sama» 1 vez y «Rem sama» 2 veces: mejor una sola forma.", \
+        report[-1].problem
     for issue in sorted(report, key=lambda i: -i.edit[0]):
         convert.edit_section(book, *issue.edit)
-    assert [book.blocks[k].html for k in (4, 5, 6, 9)] == [
-        "Hola, Subaru-kun.", "<i>Subaru-kun</i> dijo.", "Subaru-kun es raro.", "Senpai, ¿qué haces?"], \
+    assert [book.blocks[k].html for k in (4, 5, 6, 9, 17, 18)] == [
+        "Hola, Subaru-kun.", "<i>Subaru-kun</i> dijo.", "Subaru-kun es raro.", "Senpai, ¿qué haces?",
+        "Rem-sama llegó.", "Gracias, Rem-sama."], \
         [b.html for b in book.blocks]
 
 
@@ -4055,6 +4062,33 @@ def test_window_series_panel_shows_missing_and_sent():
     assert "Falta el tomo 2" in labels, labels
 
 
+def test_window_status_line_elides_and_warms_report():
+    """Una línea de estado larga acaba en «…» con el texto entero al pasar el ratón; tras abrir, la ventana
+    prepara por tandas lo que el informe recuerda de cada párrafo (si no, la primera edición la paraba 2–3 s)."""
+    import time
+
+    import app
+    import qtk
+    root, window = visible_window()
+    window.pdf = make_group_pdf()
+    book = convert.analyze(window.pdf)
+    convert._facts.cache_clear()
+    window.show_book(book)
+    long_text = "Estado " + "muy largo " * 80 + "FINAL"
+    window.status.setText(long_text)
+    root.update()
+    shown = window.status.fontMetrics().elidedText(long_text, app.Qt.TextElideMode.ElideRight, window.status.width())
+    tip, text = window.status.toolTip(), window.status.text()
+    for _ in range(50):
+        qtk.pump()
+        time.sleep(0.01)
+    paragraphs = {convert._plain(b).strip() for b in book.blocks if b.kind == "p"}
+    warmed = convert._facts.cache_info().currsize
+    window.close()
+    assert shown.endswith("…") and tip == long_text and text == long_text, (tip[-10:], text[-10:])
+    assert warmed >= len(paragraphs), (warmed, len(paragraphs))
+
+
 def test_custom_font_is_embedded():
     """Una fuente propia (.ttf/.otf) va dentro del EPUB; si el archivo desaparece, la ventana vuelve a la del
     lector y lo dice."""
@@ -4252,7 +4286,7 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
     window.close()
     backup = review.with_name(review.name + ".bak")
     assert backup.is_file() and json.loads(backup.read_text(encoding="utf-8")) == state, "se perdió la revisión vieja"
-    assert backup.name in status, status
+    assert status.startswith("La revisión guardada no coincide") and backup.name in status, status  # delante: no se corta
 
 
 def test_window_does_not_start_a_second_job():

@@ -30,7 +30,8 @@ import pymupdf
 import segno
 import shiboken6
 from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
-from PySide6.QtGui import QActionGroup, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut, QTextCursor
+from PySide6.QtGui import (QActionGroup, QFont, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut,
+                           QTextCursor)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit,
                                QProgressBar,
@@ -88,6 +89,7 @@ PREVIEW_CHROME = 40       # alto de la fila ◀ leyenda ▶ de cada vista previa
 DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
 THUMB_HEIGHT = 64         # alto de las miniaturas del PDF, en píxeles
 THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe congelaría la ventana
+WARM_PER_TICK = 50        # párrafos por tanda al preparar el informe de calidad (~30 ms)
 MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
 # Aspecto de las marcas en el editor de texto (theme.editor_tags); "broken" es lo que edit_section quitaría
@@ -801,6 +803,21 @@ def _combo(var, values, width, editable=False, changed=None):
     return box
 
 
+class StatusLabel(QLabel):
+    """Línea de estado: si no cabe acaba en «…», y el texto entero sale al pasar el ratón. text() sigue
+    siendo el texto entero."""
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.width()))
+
+
 def _label(text="", name=None):
     label = QLabel(text)
     if name:
@@ -829,6 +846,9 @@ class App:
         self.view = None                       # última posición del scroll de la lista
         self.pdf_doc = None                    # PDF abierto para la vista previa
         self.preview_path = os.path.join(tempfile.gettempdir(), f"lnepub-vista-{os.getpid()}.epub")
+        # Lo que se escribió en preview_path y ese EPUB ya maquetado ((ancho, alto), documento, páginas): un
+        # cambio pedía la vista previa hasta 4 veces y maquetarla cada vez paraba la ventana medio segundo
+        self.preview_key, self.preview_doc = None, None
         self.pdf_page = 0                      # página del PDF que muestra la vista previa (desde 0)
         self.highlight = None                  # (página, rectángulo) del título seleccionado
         self.epub_page, self.epub_pages = 0, 0  # página mostrada y total de la sección en el EPUB
@@ -1060,7 +1080,7 @@ class App:
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setFixedWidth(160)
-        self.status = _label("", "muted")
+        self.status = StatusLabel(objectName="muted")
         # Un estado largo se recorta en vez de ensanchar la ventana más allá de la pantalla
         self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         status_row = _row(self.progress, self.status, self.quality_btn)
@@ -1327,6 +1347,8 @@ class App:
         if self.pdf_doc:
             self.pdf_doc.close()
             self.pdf_doc = None
+        if self.preview_doc:
+            self.preview_doc[1].close()
         Path(self.preview_path).unlink(missing_ok=True)
         self.root.on_close, self.closed = None, True
         self.root.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # libera la ventana y sus diálogos
@@ -1422,9 +1444,15 @@ class App:
                 part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [])
                 options = self.write_options([0] if kind == SEP else [])
                 options.update(shrink=False, trim=False, epub2=False, credits=False)  # rápido: solo lo que se ve
-                convert.write_epub(part, [(0, self.tree.set(item, "title"))] if kind == ON else [], self.preview_path,
-                                   contents=False,  # sin página de índice: el capítulo 1 es la sección
-                                   **options)
+                chapters = [(0, self.tree.set(item, "title"))] if kind == ON else []
+                key = (self.book.title, self.book.cover, chapters, sorted(options.items()),
+                       [(b.kind, b.page, b.html, b.image, b.layout, b.align, b.keep) for b in part_blocks])
+                if key != self.preview_key:  # lo mismo que ya está escrito y maquetado: no se rehace
+                    self.preview_key, self.preview_doc = None, self.preview_doc and self.preview_doc[1].close()
+                    convert.write_epub(part, chapters, self.preview_path,
+                                       contents=False,  # sin página de índice: el capítulo 1 es la sección
+                                       **options)
+                    self.preview_key = key
             except Exception:
                 self.epub_pages = -1  # no se pudo generar
         self.draw_epub()
@@ -1437,11 +1465,8 @@ class App:
         self.pdf_page, self.highlight = page - 1, None
         self.draw_pdf()
         try:
-            with pymupdf.open(self.preview_path) as epub:
-                width, height = DEVICES[self.device_var.get()]
-                epub.layout(width=width, height=height, fontsize=11)
-                self.epub_page = next((n for n in range(epub.chapter_page_count(1))
-                                       if epub.load_page((1, n)).search_for(term)), 0)
+            epub, pages = self.preview_epub()
+            self.epub_page = next((n for n in range(pages) if epub.load_page((1, n)).search_for(term)), 0)
         except Exception:
             pass  # sin vista previa del EPUB: se queda en su primera página
         self.draw_epub()
@@ -1461,6 +1486,20 @@ class App:
         self.pdf_caption.setText(f"{self.source_name()} · página {self.pdf_page + 1}")
         self.mark_current()
 
+    def preview_epub(self):
+        """El EPUB de la vista previa maquetado para el dispositivo elegido, y sus páginas: recordado mientras
+        no se reescriba ni cambie el dispositivo."""
+        size = DEVICES[self.device_var.get()]
+        if not self.preview_doc or self.preview_doc[0] != size:
+            if self.preview_doc:
+                self.preview_doc[1].close()
+            self.preview_doc = None
+            # Desde los bytes: abierto por ruta, Windows no dejaría reescribir el archivo
+            epub = pymupdf.open(stream=Path(self.preview_path).read_bytes(), filetype="epub")
+            epub.layout(width=size[0], height=size[1], fontsize=11)
+            self.preview_doc = size, epub, epub.chapter_page_count(1)  # el capítulo 0 es la portada
+        return self.preview_doc[1:]
+
     def draw_epub(self):
         view = self.epub_view
         if self.epub_cut or self.epub_pages < 0:
@@ -1468,12 +1507,9 @@ class App:
             self.epub_caption.setText("EPUB")
             return
         try:
-            with pymupdf.open(self.preview_path) as epub:
-                width, height = DEVICES[self.device_var.get()]
-                epub.layout(width=width, height=height, fontsize=11)
-                self.epub_pages = epub.chapter_page_count(1)  # el capítulo 0 es la portada
-                self.epub_page = max(0, min(self.epub_page, self.epub_pages - 1))
-                image, _ = self.render(epub.load_page((1, self.epub_page)), dark=self.dark_var.get())
+            epub, self.epub_pages = self.preview_epub()
+            self.epub_page = max(0, min(self.epub_page, self.epub_pages - 1))
+            image, _ = self.render(epub.load_page((1, self.epub_page)), dark=self.dark_var.get())
         except Exception:
             self.blank(view, "Sin vista previa")
             return
@@ -1532,6 +1568,16 @@ class App:
         self.mark_current()
         if end < self.pdf_doc.page_count:
             qtk.after(10, self.add_thumbs, job, end, titles, images)
+
+    def warm_report(self, book, start):
+        """Prepara por tandas, con la ventana libre, lo que el informe de calidad recuerda de cada párrafo: sin
+        esto la primera edición tras abrir paraba la ventana 2–3 s recalculándolo entero."""
+        if book is not self.book or self.closed:
+            return
+        end = start + WARM_PER_TICK
+        convert.warm_report(book.blocks[start:end])
+        if end < len(book.blocks):
+            qtk.after(1, self.warm_report, book, end)
 
     def mark_current(self):
         """Destaca en la tira la miniatura de la página que muestra la vista previa del PDF."""
@@ -1651,6 +1697,7 @@ class App:
         self.book = book
         if report is not None:
             self.reports[self.report_key()] = report
+        qtk.after(50, self.warm_report, book, 0)
         if self.pdf_doc:
             self.pdf_doc.close()
         self.pdf_doc = pymupdf.open(self.pdf)
@@ -1706,8 +1753,8 @@ class App:
             text = "Revisión anterior recuperada"
         elif self.pdf:
             backup = _set_aside(self.pdf)
-            if backup:
-                text += f" · la revisión guardada no coincide con este análisis: copia en {backup.name}"
+            if backup:  # delante: si la línea no cabe, se corta el recuento y no esto
+                text = f"La revisión guardada no coincide con este análisis: copia en {backup.name} · {text}"
             inherited = _inherited(self.pdf, book.series)
             if book.author:
                 inherited.pop("author", None)  # el del PDF manda

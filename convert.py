@@ -144,6 +144,7 @@ def _dashes(chunks):
         opened = opening
 
 
+@functools.lru_cache(maxsize=50000)  # la vista previa reescribe el capítulo en cada cambio: casi todo igual
 def _typography(html_text, dashes=True):
     """Tipografía de un párrafo al estilo RAE: «…» (y “…” dentro), ‘…’, puntos suspensivos, raya
     de diálogo e incisos (_dashes) y espacios. No toca las etiquetas <i>/<b>: la posición de cada
@@ -627,8 +628,12 @@ def _gray(data):
 def is_wide(data):
     """Ilustración doble (dos páginas del libro en una imagen apaisada): en un celular en vertical
     se ve diminuta, así que la ventana ofrece dividirla o girarla."""
-    pix = pymupdf.Pixmap(data)
-    return pix.width > pix.height * 1.15
+    try:
+        width, height = Image.open(io.BytesIO(data)).size  # solo la cabecera: decodificarla costaba ~30 ms
+    except Exception:  # un formato que Pillow no lee
+        pix = pymupdf.Pixmap(data)
+        width, height = pix.width, pix.height
+    return width > height * 1.15
 
 
 def _spread(data, layout):
@@ -857,26 +862,33 @@ def name_variants(book):
 HONORIFIC = re.compile(r"(?<![\w-])([^\W\d_]+)(-| )((?i:" + "|".join(sorted(HONORIFICS, key=len, reverse=True))
                        + r"))(?![\w-])")
 SOLE_WORD = re.compile(r"(?<![\w-])[^\W\d_]+(?![\w-])")
+HONORIFIC_ENDS = tuple(HONORIFICS)  # solo una palabra que acaba en honorífico puede ser una forma junta
 
 
+@functools.lru_cache(maxsize=50000)
 def _honorific_key(form):
     """Clave de un honorífico: «Subaru-kun», «Subaru kun» y «Subarukun» son el mismo; «sempai» es «senpai»."""
     return _fold(form).replace("sempai", "senpai")
 
 
+@functools.lru_cache(maxsize=50000)  # el informe lo pide para todo el libro tras cada edición
+def _honorific_forms(text):
+    """(formas con guion o espacio, palabras que acaban en honorífico) de un párrafo."""
+    compounds = tuple(m[0] for m in HONORIFIC.finditer(text) if m[2] == "-"
+                      or (m[3].islower() and (m[1][:1].isupper() or m[1].lower() in HONORIFICS)))
+    return compounds, tuple(w for w in SOLE_WORD.findall(text) if w.lower().endswith(HONORIFIC_ENDS))
+
+
 def honorific_fixes(texts):
-    """Honoríficos escritos de varias formas en el libro: {forma en minúsculas: forma más usada}, solo de las
-    que no son la más usada. Con espacio solo cuentan en minúscula («San Pedro» no es uno). Juntas
+    """Honoríficos escritos de varias formas en el libro: {forma en minúsculas: (forma elegida, sus veces, veces
+    de esta)}, solo de las que no son la elegida: la más usada, o la de guion si la otra no le dobla. Con espacio solo cuentan en minúscula («San Pedro» no es uno). Juntas
     («Subarukun») solo si la separada también sale: «Hassan» no es «Has-san»."""
     forms = collections.Counter()
     for text in texts:
-        for m in HONORIFIC.finditer(text):
-            name, sep, hon = m.groups()
-            if sep == "-" or (hon.islower() and (name[:1].isupper() or name.lower() in HONORIFICS)):
-                forms[m[0]] += 1
+        forms.update(_honorific_forms(text)[0])
     keys = {_honorific_key(f) for f in forms} | {"senpai"}
     for text in texts:
-        forms.update(w for w in SOLE_WORD.findall(text) if _honorific_key(w) in keys)
+        forms.update(w for w in _honorific_forms(text)[1] if _honorific_key(w) in keys)
     groups = collections.defaultdict(collections.Counter)
     for form, n in forms.items():
         groups[_honorific_key(form)][form] += n
@@ -887,8 +899,12 @@ def honorific_fixes(texts):
             same[form.lower()] += n
         if len(same) > 1:
             top = same.most_common(1)[0][0]
+            # Con guion es lo habitual en las traducciones: gana si la más usada no le dobla («sama» 2, «-sama» 1)
+            hyphen = max((low for low in same if "-" in low), key=same.__getitem__, default=None)
+            if hyphen and same[top] <= 2 * same[hyphen]:
+                top = hyphen
             best = max((f for f in group if f.lower() == top), key=group.__getitem__)
-            fixes.update({low: best for low in same if low != top})
+            fixes.update({low: (best, same[top], n) for low, n in same.items() if low != top})
     return fixes
 
 
@@ -1038,12 +1054,18 @@ def counted(n, one, many=None):
     return f"{n} {one if n == 1 else (many or one + 's')}"
 
 
+@functools.lru_cache(maxsize=50000)  # el informe de calidad lo pide por párrafo tras cada edición
 def _letters(text):
-    return sum(c.isalpha() for c in text)
+    return sum(map(str.isalpha, text))
 
 
 def _plain(block):
-    return html.unescape(TAGS.sub("", block.html))
+    return _unhtml(block.html)
+
+
+@functools.lru_cache(maxsize=50000)  # tras una edición casi todos los párrafos siguen igual
+def _unhtml(text):
+    return html.unescape(TAGS.sub("", text))
 
 
 NUMBER_WORDS = ("cero uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince dieciséis"
@@ -1542,6 +1564,31 @@ def _typos(line):
     return tuple(found)
 
 
+@functools.lru_cache(maxsize=50000)  # tras una edición casi todos los párrafos siguen igual
+def _facts(text):
+    """Lo que el informe mira de un párrafo sin sus vecinos: (número suelto, enlace, caracteres rotos, inglés,
+    posición de la minúscula tras un punto o None, acaba en letra)."""
+    words = re.findall(r"[a-záéíóúñü']+", text.lower())
+    english = sum(w in ENGLISH for w in words)
+    capital = next((m.span() for m in CAPITAL.finditer(text) if m[1].lower() not in ABBREVIATIONS), None)
+    return (bool(re.fullmatch(r"\W*\d+\W*", text)), bool(LINKS.search(text)),
+            "\ufffd" in text or bool(MOJIBAKE.search(text)),
+            len(words) >= 6 and english >= 0.35 * len(words) and sum(w in SPANISH for w in words) < english,
+            capital, bool(re.search(r"[^\W\d_]$", text)))
+
+
+def warm_report(blocks):
+    """Calcula lo que quality_report recuerda de cada párrafo. La ventana lo llama por tandas tras abrir un
+    libro: su primer informe se hizo en el proceso de trabajo, y la primera edición lo recalculaba entero."""
+    for b in blocks:
+        if b.kind == "p":
+            text = _plain(b)
+            _honorific_forms(text)
+            _letters(text)
+            if not _facts(text.strip())[1]:  # con enlace, las erratas no se miran
+                _typos(_line(b, 0))
+
+
 def quality_report(book):
     """Lo sospechoso del libro, para revisarlo: [Issue], por página. Cada aviso dice el problema, la
     solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa."""
@@ -1563,6 +1610,7 @@ def quality_report(book):
             prev_text = None if b.kind == "heading" else prev_text
             continue
         text = _plain(b).strip()
+        number, link, broken, english, capital, letter_end = _facts(text)
         if text[:1].islower():
             # El párrafo anterior, saltando ilustraciones y separadores (la página se cortó con una imagen)
             j = next((j for j in range(k - 1, -1, -1) if blocks[j].kind in ("p", "heading")), None)
@@ -1588,7 +1636,7 @@ def quality_report(book):
                                 "empieza cada uno.",
                                 "Ábrelo con «Editar texto…» (tecla E) y deja una línea en blanco donde empiece "
                                 "cada párrafo.", _cut(text, 400), text=text))
-        if re.fullmatch(r"\W*\d+\W*", text):
+        if number:
             report.append(Issue("number", k, b.page, "Revisar", "Número suelto",
                                 "Un párrafo que solo es un número suele ser el número de página del PDF.",
                                 "Quitarlo.", text, "", drop(k), text))
@@ -1602,13 +1650,13 @@ def quality_report(book):
             report.append(Issue("duplicate", k, b.page, "Revisar", "Párrafo duplicado",
                                 "Es igual que el párrafo anterior: el PDF lo repetía o se pegó dos veces.",
                                 "Quitar la copia.", _cut(text), "", drop(k), text))
-        if LINKS.search(text):
+        if link:
             short = len(text) < 200  # un aviso del grupo; uno largo puede ser texto de la novela con un nombre
             report.append(Issue("link", k, b.page, "Menor", "Enlace o red social",
                                 "Enlaces y redes del grupo de traducción: en un lector no se pueden abrir.",
                                 "Quitarlo." if short else "Quita el enlace con «Editar texto…» (tecla E).",
                                 _cut(text), "", drop(k) if short else None, text))
-        if "�" in text or MOJIBAKE.search(text):
+        if broken:
             m = MOJIBAKE.search(text) or re.search("�", text)
             fixed = _remojibake(_line(b, k)) if MOJIBAKE.search(text) else None
             report.append(Issue("broken", k, b.page, "Grave", "Caracteres rotos",
@@ -1618,15 +1666,13 @@ def quality_report(book):
                                 _around(text, m.start(), m.end()),
                                 _around(_remojibake(text) or "", m.start(), m.end()) if fixed else "",
                                 (k, k + 1, fixed) if fixed else None, text))
-        words = re.findall(r"[a-záéíóúñü']+", text.lower())
-        english = sum(w in ENGLISH for w in words)
-        if len(words) >= 6 and english >= 0.35 * len(words) and sum(w in SPANISH for w in words) < english:
+        if english:
             report.append(Issue("english", k, b.page, "Revisar", "Texto sin traducir",
                                 "El párrafo parece estar en inglés: el traductor se lo saltó o es una nota del "
                                 "grupo.", "Tradúcelo o quítalo con «Editar texto…» (tecla E).", _cut(text),
                                 text=text))
         line = _line(b, k)
-        for t, fixed in _typos(line) if not LINKS.search(text) else ():
+        for t, fixed in _typos(line) if not link else ():
             kind, title, _, why, solution = TYPOS[t]
             before, after = TAGS.sub("", line), TAGS.sub("", fixed)
             n = len(os.path.commonprefix([before, after]))
@@ -1636,22 +1682,23 @@ def quality_report(book):
         m = honorific.search(line) if honorific else None
         if m:
             fixed = honorific.sub(lambda h: (str.upper if h[0][:1].isupper() else str.lower)(
-                honorifics[h[0].lower()][:1]) + honorifics[h[0].lower()][1:], line)
+                honorifics[h[0].lower()][0][:1]) + honorifics[h[0].lower()][0][1:], line)
+            best, n_best, n_here = honorifics[m[0].lower()]
             before, after = TAGS.sub("", line), TAGS.sub("", fixed)
             n = len(os.path.commonprefix([before, after]))
             report.append(Issue("honorific", k, b.page, "Menor", "Honorífico escrito de varias formas",
-                                f"El libro escribe casi siempre «{honorifics[m[0].lower()]}», y aquí «{m[0]}».",
-                                "Unificarlo en la forma más usada.", _around(before, n, n),
+                                f"El libro escribe «{best}» {counted(n_best, 'vez', 'veces')} y «{m[0]}» "
+                                f"{counted(n_here, 'vez', 'veces')}: mejor una sola forma.",
+                                f"Unificarlo en «{best}».", _around(before, n, n),
                                 _around(after, n, n + len(after) - len(before)), (k, k + 1, fixed), text))
-        m = next((m for m in CAPITAL.finditer(text) if m[1].lower() not in ABBREVIATIONS), None)
-        if m and not LINKS.search(text):
+        if capital and not link:
             report.append(Issue("capital", k, b.page, "Menor", "Minúscula tras un punto",
                                 "Tras un punto la frase nueva empieza en mayúscula. Si la frase sigue, el punto "
                                 "sobra: suele quedar de un salto de línea del PDF.",
                                 "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E): quita el punto o "
-                                "pon la mayúscula.", _around(text, m.start(), m.end()), text=text))
+                                "pon la mayúscula.", _around(text, *capital), text=text))
         nxt = _plain(blocks[k + 1]).strip() if k + 1 < len(blocks) and blocks[k + 1].kind == "p" else ""
-        if (len(text) >= 40 and re.search(r"[^\W\d_]$", text) and nxt[:1].isupper() and not LINKS.search(text)
+        if (len(text) >= 40 and letter_end and nxt[:1].isupper() and not link
                 and not LABEL.match(text.strip()) and not LABEL.match(nxt)):
             report.append(Issue("end", k, b.page, "Menor", "Falta el punto final",
                                 "El párrafo acaba sin punto y el siguiente empieza en mayúscula: falta el punto, "
