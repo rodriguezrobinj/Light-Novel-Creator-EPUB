@@ -15,6 +15,7 @@ import convert
 # Nombre visible -> tipo de API, URL base y modelo por defecto (los modelos se pueden cambiar en la ventana)
 ENGINES = {
     "Google (gratis, sin clave)": {"kind": "google"},
+    "Google Cloud (clave)": {"kind": "gcloud", "key": True},  # la API oficial: no bloquea, 500.000 caracteres gratis
     "DeepL": {"kind": "deepl", "key": True},
     "OpenAI (ChatGPT)": {"kind": "openai", "base": "https://api.openai.com/v1", "model": "gpt-4.1-mini", "key": True},
     "DeepSeek": {"kind": "openai", "base": "https://api.deepseek.com", "model": "deepseek-chat", "key": True},
@@ -34,7 +35,7 @@ LANG_NAMES = {"auto": "the original language (detect it)", "es": "Spanish", "en"
               "zh": "Chinese", "ko": "Korean", "pt": "Portuguese", "fr": "French", "it": "Italian", "de": "German",
               "ru": "Russian"}
 DEEPL_TARGET = {"en": "EN-US", "pt": "PT-BR", "zh": "ZH-HANS"}  # DeepL ya no acepta "EN" ni "PT" como destino
-LIMITS = {"google": (1, 4500), "deepl": (50, 30000), "openai": (30, 5000), "anthropic": (30, 5000)}  # párrafos, letras
+LIMITS = {"google": (1, 4500), "gcloud": (100, 25000), "deepl": (50, 30000), "openai": (30, 5000), "anthropic": (30, 5000)}  # párrafos, letras
 CONTEXT = 5  # párrafos anteriores que ve la IA: el tono y quién habla no se pierden entre lotes
 RETRIES = 3
 LETTER = re.compile(r"[^\W\d_]")
@@ -60,8 +61,8 @@ def _post(url, headers, body):
         return json.loads(response.read().decode("utf-8"))
 
 
-def _get(url):
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+def _get(url, headers=None):
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"} | (headers or {}))
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -125,41 +126,72 @@ def _fix(source, out):
     return NOTE_WORD.sub("[Nota: ", out) if "[Nota: " in source else out
 
 
-def _request(name, call):
-    """Hace la petición con reintentos ante límites de uso y cortes de red; los demás fallos, en español."""
+GOOGLE_TIP = (" Google gratis corta cuando se le pide mucho seguido: espera un rato, o usa Google Cloud, DeepL "
+              "o una IA.")
+
+
+def _request(name, call, tip="", model=""):
+    """Hace la petición con reintentos ante límites de uso y cortes de red; los demás fallos, en español. tip: qué
+    hacer si el motor sigue sin responder. model: el pedido, para decir si es él lo que no existe."""
     for attempt in range(RETRIES + 1):
         try:
             return call()
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
-                raise TranslateError(f"{name}: la clave no es válida o no tiene permiso.") from e
+                raise TranslateError(f"{name}: la clave no es válida o no tiene permiso.{tip}") from e
             if e.code == 456:
                 raise TranslateError("Se acabaron los caracteres de DeepL de este mes.") from e
             if e.code != 429 and e.code < 500:
                 detail = e.read().decode("utf-8", "replace")[:300] if e.fp else ""
+                if model and e.code in (400, 404) and "model" in detail.lower():
+                    raise TranslateError(f"{name}: el modelo «{model}» no existe o no está disponible. Pulsa «Buscar "
+                                         f"modelos» y elige otro.") from e
                 raise TranslateError(f"{name} respondió con un error {e.code}. {detail}".strip()) from e
             reason = f"error {e.code}" + (" (demasiadas peticiones)" if e.code == 429 else "")
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             reason = str(getattr(e, "reason", e) or type(e).__name__)
+        except ValueError as e:  # una página de aviso o de captcha en vez de la respuesta
+            raise TranslateError(f"{name} devolvió una respuesta que no se entiende.{tip}") from e
         if attempt < RETRIES:
             _sleep(2 ** attempt * 2)
-    raise TranslateError(f"No se pudo traducir con {name}: {reason}. Revisa la conexión y vuelve a intentarlo.")
+    raise TranslateError(f"No se pudo traducir con {name}: {reason}. Revisa la conexión y vuelve a "
+                         f"intentarlo.{tip}")
 
 
 def _google(texts, src, dst):
     out = []
     for text in texts:
         query = urllib.parse.urlencode({"client": "gtx", "sl": src, "tl": dst, "dt": "t", "q": text})
-        data = _request("Google", lambda: _get("https://translate.googleapis.com/translate_a/single?" + query))
-        out.append("".join(part[0] for part in data[0] or () if part and part[0]))
+        data = _request("Google", lambda: _get("https://translate.googleapis.com/translate_a/single?" + query),
+                        GOOGLE_TIP)
+        try:
+            out.append("".join(part[0] for part in data[0] or () if part and part[0]))
+        except (TypeError, IndexError, KeyError):
+            raise TranslateError("Google devolvió una respuesta que no se entiende." + GOOGLE_TIP) from None
     return out
+
+
+def _markup(text):
+    """Línea como XML/HTML para DeepL y Google Cloud: escapada, salvo <i> y <b>."""
+    return convert.INLINE.sub(r"<\1\2>", html.escape(text, quote=False))
+
+
+def _gcloud(texts, src, dst, api_key):
+    if not api_key:
+        raise TranslateError("Falta la clave de Google Cloud.")
+    body = {"q": [_markup(t) for t in texts], "target": dst, "format": "html"}
+    if src != "auto":
+        body["source"] = src
+    url = "https://translation.googleapis.com/language/translate/v2?" + urllib.parse.urlencode({"key": api_key.strip()})
+    data = _request("Google Cloud", lambda: _post(url, {}, body))
+    return [html.unescape(t["translatedText"]) for t in data["data"]["translations"]]
 
 
 def _deepl(texts, src, dst, api_key, context):
     if not api_key:
         raise TranslateError("Falta la clave de DeepL.")
     host = "api-free.deepl.com" if api_key.strip().endswith(":fx") else "api.deepl.com"  # las gratuitas acaban en :fx
-    body = {"text": [convert.INLINE.sub(r"<\1\2>", html.escape(t, quote=False)) for t in texts],
+    body = {"text": [_markup(t) for t in texts],
             "target_lang": DEEPL_TARGET.get(dst, dst.upper()), "tag_handling": "xml"}
     if src != "auto":
         body["source_lang"] = src.upper()
@@ -231,14 +263,14 @@ def _ai(name, engine, texts, src, dst, api_key, model, base, glossary, context):
         data = _request(name, lambda: _post(f"{base}/messages",
                                             {"x-api-key": api_key, "anthropic-version": "2023-06-01"},
                                             {"model": model, "max_tokens": 8192, "temperature": 0.3, "system": system,
-                                             "messages": [{"role": "user", "content": user}]}))
+                                             "messages": [{"role": "user", "content": user}]}), model=model)
         reply = "".join(part.get("text", "") for part in data.get("content", ()))
     else:
         data = _request(name, lambda: _post(f"{base}/chat/completions",
                                             {"Authorization": f"Bearer {api_key}"} if api_key else {},
                                             {"model": model, "temperature": 0.3,
                                              "messages": [{"role": "system", "content": system},
-                                                          {"role": "user", "content": user}]}))
+                                                          {"role": "user", "content": user}]}), model=model)
         reply = data["choices"][0]["message"]["content"] or ""
     return _parse(reply, len(texts))
 
@@ -249,6 +281,8 @@ def translate(name, texts, src, dst, api_key="", model="", base="", glossary=(),
     engine = ENGINES[name]
     if engine["kind"] == "google":
         out = _google(texts, src, dst)
+    elif engine["kind"] == "gcloud":
+        out = _gcloud(texts, src, dst, api_key)
     elif engine["kind"] == "deepl":
         out = _deepl(texts, src, dst, api_key, context)
     else:
@@ -267,6 +301,21 @@ def translate(name, texts, src, dst, api_key="", model="", base="", glossary=(),
 
         out = run(list(texts), list(context)[-CONTEXT:])
     return [_fix(source, t) for source, t in zip(texts, out)]
+
+
+def models(name, api_key="", base=""):
+    """Modelos que la API del motor ofrece hoy con esa clave, ordenados: los de ENGINES envejecen."""
+    engine = ENGINES[name]
+    base = (base or engine.get("base", "")).rstrip("/")
+    if engine["kind"] == "anthropic":
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+    else:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    data = _request(name, lambda: _get(f"{base}/models", headers))
+    try:
+        return sorted({str(m["id"]).removeprefix("models/") for m in data["data"] if m.get("id")})
+    except (TypeError, KeyError, AttributeError):
+        raise TranslateError(f"{name} devolvió una lista de modelos que no se entiende.") from None
 
 
 # Claves API cifradas con DPAPI de Windows: solo este usuario en este equipo las puede leer

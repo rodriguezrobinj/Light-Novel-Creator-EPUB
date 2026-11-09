@@ -4123,6 +4123,23 @@ def test_quality_report_finds_untranslated_text():
     assert found == [(1, "Revisar", None), (2, "Revisar", None)], found
 
 
+def test_quality_report_by_book_language():
+    """Un libro traducido a otro idioma: las erratas de fansub, calcos y ecos son del español y no saltan; en un
+    libro en inglés tampoco «Texto sin traducir». Lo que vale en cualquier idioma (número suelto) sigue."""
+    texts = ["The castle stood on the hill above the village, and its towers were dark.", "Haber si llegas pronto.",
+             "Lo vi de de lejos.", "42", "El tejado viejo cruje y el tejado nuevo brilla al sol."]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+
+    def kinds(lang):
+        return {i.kind for i in convert.quality_report(book, echoes=True, lang=lang)}
+
+    spanish, english, french = kinds("es"), kinds("en"), kinds("fr")
+    assert {"english", "aver", "doubled", "echo", "number"} <= spanish, spanish
+    assert "number" in english and not {"english", "aver", "doubled", "echo"} & english, english
+    assert "english" in french and not {"aver", "doubled", "echo"} & french, french
+
+
 def test_quality_report_fixes_fansub_typos():
     """Signo de apertura que falta, palabra repetida, «haber si» y «¿porque»: avisos con arreglo; lo que
     ya está bien escrito o es «haber» de verdad no salta."""
@@ -6198,7 +6215,7 @@ def test_translate_google_deepl_and_errors():
 
     saved = translate._get, translate._post, translate._sleep
     gets, posts, sleeps = [], [], []
-    translate._get = lambda url: gets.append(url) or [[["Hola ", "Hello "], ["mundo", "world"]]]
+    translate._get = lambda url, headers=None: gets.append(url) or [[["Hola ", "Hello "], ["mundo", "world"]]]
     translate._post = lambda url, headers, body: posts.append((url, headers, body)) or {
         "translations": [{"text": t.replace("Tom", "Tomás")} for t in body["text"]]}
     translate._sleep = sleeps.append
@@ -6232,6 +6249,61 @@ def test_translate_google_deepl_and_errors():
             raise AssertionError("debía fallar")
         except translate.TranslateError as e:
             assert "Falta la clave de Claude" in str(e), e
+    finally:
+        translate._get, translate._post, translate._sleep = saved
+
+
+def test_translate_gcloud_models_and_hints():
+    """Google Cloud: API oficial por lotes con la clave en la URL. Google gratis con una página de captcha o sin
+    respuesta: el aviso dice qué hacer. Un modelo que ya no existe se nombra, y «Buscar modelos» trae los de hoy."""
+    import io
+    import urllib.error
+    import translate
+
+    saved = translate._get, translate._post, translate._sleep
+    posts, gets = [], []
+    translate._post = lambda url, headers, body: posts.append((url, body)) or {
+        "data": {"translations": [{"translatedText": t.replace("Tom", "Tomás")} for t in body["q"]]}}
+    translate._sleep = lambda s: None
+    try:
+        assert translate.translate("Google Cloud (clave)", ["Tom &amp; <i>Jerry</i>", "Hi"], "auto", "es",
+                                   api_key="AIza") == ["Tomás &amp; <i>Jerry</i>", "Hi"]
+        url, body = posts[0]
+        assert url.endswith("/language/translate/v2?key=AIza") and body["format"] == "html", (url, body)
+        assert body["q"][0] == "Tom &amp;amp; <i>Jerry</i>" and "source" not in body and body["target"] == "es"
+        assert translate.batches(["x"] * 150, "gcloud") == [list(range(100)), list(range(100, 150))]
+
+        def captcha(url, headers=None):
+            raise ValueError("<html>captcha</html>")
+
+        def down(url, headers=None):
+            raise urllib.error.HTTPError(url, 429, "x", {}, io.BytesIO(b""))
+
+        for fake in (captcha, down, lambda url, headers=None: {"raro": 1}):
+            translate._get = fake
+            try:
+                translate.translate("Google (gratis, sin clave)", ["Hi"], "en", "es")
+                raise AssertionError("debía fallar")
+            except translate.TranslateError as e:
+                assert "Google Cloud, DeepL o una IA" in str(e), e
+
+        def no_model(url, headers, body):
+            raise urllib.error.HTTPError(url, 404, "x", {}, io.BytesIO(b'{"error": "The model `gpt-9` does not exist"}'))
+
+        translate._post = no_model
+        try:
+            translate.translate("OpenAI (ChatGPT)", ["Hi"], "en", "es", api_key="k", model="gpt-9")
+            raise AssertionError("debía fallar")
+        except translate.TranslateError as e:
+            assert "«gpt-9» no existe" in str(e) and "Buscar modelos" in str(e), e
+        translate._get = lambda url, headers=None: gets.append((url, headers)) or {
+            "data": [{"id": "models/gemini-x"}, {"id": "b"}, {"id": "a"}, {"id": "b"}]}
+        assert translate.models("Gemini", "g") == ["a", "b", "gemini-x"]
+        assert translate.models("Claude", "c") == ["a", "b", "gemini-x"]
+        assert gets[0] == ("https://generativelanguage.googleapis.com/v1beta/openai/models", {"Authorization": "Bearer g"})
+        assert gets[1][0] == "https://api.anthropic.com/v1/models" and gets[1][1]["x-api-key"] == "c", gets
+        translate.models("Compatible con OpenAI (Ollama, LM Studio…)", "", "http://127.0.0.1:1234/v1/")
+        assert gets[2] == ("http://127.0.0.1:1234/v1/models", {}), gets
     finally:
         translate._get, translate._post, translate._sleep = saved
 
@@ -6310,6 +6382,105 @@ def test_window_translate_apply_and_undo():
         again.parts["close"]()
     finally:
         translate._post = original
+        window.close()
+
+
+def test_window_translate_close_mid_batch():
+    """Cerrar «Traducir» con un lote en camino no lo pierde: la ventana se oculta, lo termina, lo guarda y se
+    cierra. Abrirla otra vez mientras tanto devuelve la misma. Salir de la app pregunta antes de perderlo."""
+    import threading
+    import shiboken6
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    gate, fake, original = threading.Event(), FakeAI(), translate._post
+    translate._post = lambda url, headers, body: gate.wait(10) and fake(url, headers, body)
+    asked = []
+    saved_ask = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda title, message, **kwargs: asked.append(message) or False
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        parts["key"].setText("k")
+        parts["src"].setCurrentIndex(parts["src"].findData("es"))
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        parts["run"]()
+        total = len(parts["table"].get_children())
+        assert window.close() is False and "traducción en curso" in asked[0], asked  # no sale: se perdería el lote
+        parts["close"]()
+        root.update()
+        assert not win.isVisible() and parts["work"]["thread"] is not None
+        assert window.translate_book() is win and win.isVisible(), "abrirla otra vez debía devolver la misma"
+        parts["close"]()
+        gate.set()
+        wait_translation(root, win)
+        root.update()
+        done = app._read_translation(window.pdf)["done"]
+        assert len(done) == total > 3, (len(done), total)
+        assert not window.translations_running() and not shiboken6.isValid(win), "la ventana no se cerró"
+    finally:
+        gate.set()
+        translate._post = original
+        app.messagebox.askyesno = saved_ask
+        window.close()
+
+
+def test_window_translate_models_and_book_language():
+    """«Buscar modelos» llena la lista con los de la API; Google Cloud pide clave. Un libro en inglés: el informe
+    no da erratas del español, «Ortografía…» lo dice y el editor no revisa la ortografía."""
+    import time
+    import app
+    import translate
+
+    root, window = versioned_window()
+    original = translate._get
+    translate._get = lambda url, headers=None: {"data": [{"id": "deepseek-reasoner"}, {"id": "deepseek-chat"}]}
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        parts["key"].setText("k")
+        parts["models"]()
+        end = time.time() + 5
+        while parts["model"].count() < 2 and time.time() < end:
+            root.update()
+            time.sleep(0.02)
+        assert [parts["model"].itemText(n) for n in range(parts["model"].count())] == ["deepseek-chat",
+                                                                                     "deepseek-reasoner"]
+        assert parts["model"].currentText() == "deepseek-chat" and "2 modelos" in parts["status"].text()
+        parts["engine"].setCurrentIndex(parts["engine"].findText("Google Cloud (clave)"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        assert parts["key"].isVisible() and not parts["model"].isVisible()
+        parts["close"]()
+    finally:
+        translate._get = original
+    item = first_title(window)
+    start, end = window.section_bounds(int(item))
+    text = convert.section_text(window.book, start + 1, end)
+    window.apply_edit((start + 1, end, text + "\n\nHaber si llegas pronto."), item)
+    kinds = lambda: {i.kind for i in window.quality_report()}
+    assert "aver" in kinds()
+    window.lang_var.set("en")
+    assert "aver" not in kinds(), "un libro en inglés no tiene erratas del español"
+    infos = []
+    saved_info = app.messagebox.showinfo
+    app.messagebox.showinfo = lambda title, message, **kwargs: infos.append(message)
+    started = []
+    saved_spell = app._start_spell_process
+    app._start_spell_process = lambda: started.append(1)
+    try:
+        window.spelling()
+        editor = window.edit_text()
+        assert infos and "solo revisa libros en español" in infos[0] and not started, (infos, started)
+        editor.win.done(0)
+    finally:
+        app.messagebox.showinfo = saved_info
+        app._start_spell_process = saved_spell
         window.close()
 
 
