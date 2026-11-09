@@ -1959,6 +1959,34 @@ def test_write_pdf_bookmarks_numbers_and_metadata():
     assert numbered and all(feet[n] == str(n + 1) for n in numbered), feet
     assert not list(TMP.glob("libro.pdf.tmp")), "queda el .tmp"
 
+
+def test_pdf_illustrations_fill_their_own_page():
+    """En el PDF cada ilustración ocupa una página entera: la que estaba sola con márgenes se amplía, la que
+    compartía página con unas líneas de texto (Re Zero 1, págs. 108, 140, 256) sale a su propia página tras el
+    texto, que se queda; un adorno de separador pequeño no se toca."""
+    pic, small = jpeg(600, 860), jpeg(60, 20)
+    pdf = pymupdf.open()
+    alone = pdf.new_page(width=420, height=595)
+    alone.insert_image(pymupdf.Rect(60, 80, 360, 510), stream=pic)
+    shared = pdf.new_page(width=420, height=595)
+    shared.insert_text((40, 60), "Rom le hizo un guiño a Subaru.", fontsize=11)
+    shared.insert_image(pymupdf.Rect(40, 100, 380, 560), stream=pic)
+    ornament = pdf.new_page(width=420, height=595)
+    ornament.insert_text((40, 60), "Fin de la escena.", fontsize=11)
+    ornament.insert_image(pymupdf.Rect(180, 80, 240, 100), stream=small)
+    moved = convert._full_page_images(pdf)  # en su sitio
+    out = pdf
+    pages = []
+    for page in out:
+        boxes = [page.get_image_bbox(i) for i in page.get_images(full=True)]
+        big = [b for b in boxes if b.width * b.height > 0.25 * 420 * 595]
+        pages.append((page.get_text().strip(), [(round(b.width), round(b.height)) for b in big], len(boxes)))
+    assert moved == [0, 1, 3], moved
+    assert [p[0] for p in pages] == ["", "Rom le hizo un guiño a Subaru.", "", "Fin de la escena."], pages
+    full = [p[1][0] for p in pages if p[1]]
+    assert len(full) == 2 and all(w >= 410 or h >= 585 for w, h in full), full  # a toda la página, sin recortar
+    assert not pages[1][1] and pages[3][2] == 1, pages  # el texto sin la imagen; el adorno sigue
+
 def jpeg(width, height):
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
     pix.set_rect(pix.irect, (200, 120, 40))
