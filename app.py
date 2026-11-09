@@ -1395,7 +1395,7 @@ class _Cards(QStyledItemDelegate):
             original, translation = item.text(0), item.text(1)
             head = QFont(opt.font)
             head.setBold(original.startswith("# "))
-            original = MARKUP.sub("", original.removeprefix("# ").removeprefix(convert.CENTER))
+            original = MARKUP.sub("", original.removeprefix("# ").removeprefix(convert.CENTER).removeprefix(convert.FRAME))
             hint = QFont(opt.font)
             hint.setItalic(True)
             blocks = [(original, head, tones["muted"]),
@@ -4772,7 +4772,8 @@ class App:
                     code = translate.key(text)
                     rows[str(k)] = code, prefix, text
                     index.setdefault(code, []).append(str(k))
-                    table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER) + text,
+                    table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER)
+                                                                 .removeprefix(convert.FRAME) + text,
                                                                  done.get(code, {}).get("text", ""),
                                                                  state_of(code, text, texts)))
                     mark_langs(str(k))
@@ -5741,7 +5742,9 @@ class TextEditor:
                                                 self.update_tools()))
         self.center_btn = tool("≡ Centrar", "Centrar el párrafo: cartas, carteles (Ctrl+E)", sheet.toggle_center, True,
                                short="≡", level=2)
-        group("Párrafo", self.style, self.center_btn,
+        self.frame_btn = tool("▭ Recuadro", "Meter los párrafos elegidos en un recuadro, como las ventanas de estado, "
+                              "o sacarlos de él", sheet.toggle_frame, True, short="▭", level=2)
+        group("Párrafo", self.style, self.center_btn, self.frame_btn,
               tool("⤒ Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
                    sheet.join_next, short="Unir", level=2),  # «⤒» solo se veía poco
               tool("✂ Dividir", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo que el PDF unió "
@@ -6675,6 +6678,7 @@ class TextEditor:
         level = self.sheet.heading_level()
         self.style.setCurrentIndex(0 if level is None else 1 if level == ON else 2)
         self.center_btn.setChecked(self.sheet.is_centered())
+        self.frame_btn.setChecked(self.sheet.is_framed())
 
     def outline(self):
         """Secciones del libro para el panel de navegación: [(título, inicio, fin, sangría)], una por capítulo.

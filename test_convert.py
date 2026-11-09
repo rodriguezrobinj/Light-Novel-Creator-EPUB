@@ -4118,6 +4118,122 @@ def test_bookmarked_chapter_name_joins_bare_label():
                      ("Capitulo 2: Llore y grite", True)], heads
 
 
+def framed_pdf():
+    """Página como la ventana de estado de Witch 1: doble línea de tiras finas alrededor de líneas cortas en negrita
+    con viñetas en imagen (■ y ◆) y, debajo, un recuadro con prosa de dos líneas."""
+    import io
+    from PIL import Image, ImageDraw
+
+    def bullet(diamond):
+        image = Image.new("RGB", (24, 24), "white")
+        draw = ImageDraw.Draw(image)
+        if diamond:
+            draw.polygon([(12, 0), (23, 12), (12, 23), (0, 12)], fill="black")
+        else:
+            draw.rectangle([0, 0, 23, 23], fill="black")
+        out = io.BytesIO()
+        image.save(out, "PNG")
+        return out.getvalue()
+
+    doc = pymupdf.open()
+    page = add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"),
+                             (92, 140, line("Abrio su ventana de estado y la miro un rato largo", 60), 11, "cour"),
+                             (72, 154, "con calma.", 11, "cour"),
+                             (106, 200, "Lorna Hermit, Lv. 1", 11, "hebo"), (110, 214, "HP: 10/10", 11, "hebo"),
+                             (106, 236, "Equipment", 11, "hebo"), (110, 250, "Weapon: None", 11, "hebo"),
+                             (92, 300, "Siguio andando por el bosque.", 11, "cour"),
+                             (100, 350, line("Aviso del sistema que ocupa dos lineas dentro del", 55), 11, "cour"),
+                             (100, 364, "recuadro y acaba aqui.", 11, "cour")])
+    for x0, y0, x1, y1, gap in ((80, 180, 520, 262, 0), (80, 180, 520, 262, 3), (80, 332, 520, 376, 0)):
+        for r in ((x0 + gap, y0 + gap, x1 - gap, y0 + gap + 1.5), (x0 + gap, y1 - gap - 1.5, x1 - gap, y1 - gap),
+                  (x0 + gap, y0 + gap, x0 + gap + 1.5, y1 - gap), (x1 - gap - 1.5, y0 + gap, x1 - gap, y1 - gap)):
+            page.draw_rect(pymupdf.Rect(r), color=None, fill=(0, 0, 0), width=0)
+    page.insert_image(pymupdf.Rect(95, 192, 102, 199), stream=bullet(False))
+    page.insert_image(pymupdf.Rect(94, 228, 102, 236), stream=bullet(True))
+    path = TMP / "recuadro-estado.pdf"
+    doc.save(path)
+    return path
+
+
+def test_status_box_keeps_frame_bullets_and_survives_edits():
+    """The World's Strongest Witch 1: las ventanas de estado van en un recuadro de doble línea con viñetas en imagen
+    (■, ◆), y salían como párrafos sueltos sin borde ni viñeta. Ahora cada línea va en recuadro («<marco>» en el
+    texto del editor), con su viñeta como letra; la prosa de un recuadro se une como siempre; el EPUB los mete en un
+    div con borde y sangra las líneas sin viñeta. Traducido sin la marca, sigue en su recuadro."""
+    import translate
+
+    book = convert.analyze(framed_pdf())
+    rows = [(b.align, convert._plain(b)) for b in book.blocks[book.candidates[0] + 1:] if b.kind == "p"
+            and "Grupo Traductor" not in b.html]
+    assert rows == [("", "Abrio su ventana de estado y la miro un rato largo relleno r con calma."),
+                    ("frame", "■ Lorna Hermit, Lv. 1"), ("frame", "HP: 10/10"), ("frame", "◆ Equipment"),
+                    ("frame", "Weapon: None"), ("", "Siguio andando por el bosque."),
+                    ("frame", "Aviso del sistema que ocupa dos lineas dentro del relle recuadro y acaba aqui.")], rows
+    start = book.candidates[0] + 1
+    text = convert.section_text(book, start, len(book.blocks))
+    assert "\n\n<marco>■ <b>Lorna Hermit, Lv. 1</b>\n\n<marco><b>HP: 10/10</b>\n\n" in text, text
+    units = translate.units(book, start, len(book.blocks))
+    assert ("<marco>", "<b>HP: 10/10</b>") in [(p, t) for _, p, t in units], units
+    # La traducción vuelve con su prefijo; una revisión de antes de los recuadros, sin él y sin viñeta, también
+    old = convert.section_text(book, start, len(book.blocks))
+    lines = old.split("\n\n")
+    lines[1] = "<b>Lorna Hermit, nv. 1</b>"
+    lines[2] = "<marco><b>PV: 10/10</b>"
+    convert.edit_section(book, start, len(book.blocks), "\n\n".join(lines))
+    again = [(b.align, convert._plain(b)) for b in book.blocks[start:start + 3]]
+    assert again[1:] == [("frame", "■ Lorna Hermit, nv. 1"), ("frame", "PV: 10/10")], again
+    lines = convert.section_text(book, start, len(book.blocks)).split("\n\n")
+    lines[3] = lines[3].removeprefix("<marco>")  # quitar solo el recuadro: se queda sin él
+    convert.edit_section(book, start, len(book.blocks), "\n\n".join(lines))
+    assert book.blocks[start + 3].align == "" and book.blocks[start + 2].align == "frame"
+    out = TMP / "recuadro.epub"
+    convert.write_epub(book, [(book.candidates[0], "Capitulo 1")], out)
+    import zipfile
+    with zipfile.ZipFile(out) as z:
+        page = next(z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml") and b"Lorna" in z.read(n))
+    box = page[page.index('<div class="marco">'):page.index("</div>", page.index('<div class="marco">'))]
+    assert box.count("<p") == 2 and '<p class="sub">' in box and "■" in box, box
+    assert '<p class="head">◆' not in page  # «◆ Equipment» quedó fuera del recuadro
+    assert page.count('<div class="marco">') == 3, page  # el «◆ Equipment» sacado parte el recuadro en dos
+    assert convert.check_epub(out) == [], convert.check_epub(out)
+
+
+def test_editor_sheet_frames_round_trip_and_toggle():
+    """Los párrafos en recuadro se ven juntos y con borde en la hoja, vuelven igual al texto («<marco>») y el botón
+    «Recuadro» los mete y los saca, con un solo deshacer."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    lines = [(1, "Antes."), (2, "<marco>■ <b>Lorna</b>"), (3, "<marco><b>HP: 10/10</b>"), (4, "Después.")]
+    sheet.set_content(lines, {})
+    assert sheet.content() == "\n\n".join(line for _, line in lines), sheet.content()
+    doc = sheet.document()
+    second, third = doc.findBlockByNumber(1).blockFormat(), doc.findBlockByNumber(2).blockFormat()
+    assert second.topMargin() > 0 and second.bottomMargin() == 0 and third.leftMargin() > second.leftMargin()
+    sheet.resize(500, 400)
+    image = sheet.viewport().grab().toImage()  # el doble borde: dos líneas largas arriba y dos abajo
+    back = image.pixelColor(5, 5)
+    long = [y for y in range(image.height()) if sum(image.pixelColor(x, y) != back for x in range(60, 440, 4)) > 80]
+    assert len(long) == 4, long
+    c = sheet.textCursor()
+    c.setPosition(doc.findBlockByNumber(3).position())
+    sheet.setTextCursor(c)
+    assert not sheet.is_framed()
+    sheet.toggle_frame()
+    assert sheet.is_framed() and sheet.content().endswith("<marco>Después."), sheet.content()
+    c.setPosition(doc.findBlockByNumber(1).position())
+    c.setPosition(doc.findBlockByNumber(3).position() + 2, QTextCursor.MoveMode.KeepAnchor)
+    sheet.setTextCursor(c)
+    sheet.toggle_frame()
+    assert "<marco>" not in sheet.content(), sheet.content()
+    sheet.undo()
+    assert sheet.content().count("<marco>") == 3, sheet.content()
+
+
 def test_bookmarked_page_starts_new_paragraph_without_indent():
     """The World's Strongest Witch 1 (EPUB, pág. 204): el Afterword lleva el título solo en una imagen y su primera
     línea va sin sangría; con párrafos marcados por sangría se unía al último párrafo del capítulo anterior, antes
