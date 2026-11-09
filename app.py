@@ -1428,7 +1428,7 @@ class App:
         page = QWidget()
         self.stack.addWidget(page)
         body = QVBoxLayout(page)
-        body.setContentsMargins(10, 8, 10, 0)
+        body.setContentsMargins(10, 8, 10, 8)  # abajo también: la lista y la tira de páginas tocaban el borde
         body.setSpacing(8)
 
         # Tarjeta del libro: lo esencial a la vista; «Editar datos» despliega el resto

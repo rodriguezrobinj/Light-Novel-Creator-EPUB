@@ -72,6 +72,7 @@ QTreeWidget {{ background: {card}; border: 1px solid {line}; border-radius: 8px;
     selection-background-color: {sel}; selection-color: {ink}; outline: 0; }}
 QTreeWidget::item {{ padding: 2px 0; }}
 QTreeWidget::item:selected {{ background: {sel}; color: {ink}; }}
+QListWidget {{ show-decoration-selected: 1; outline: 0; }}
 QListWidget::item:selected {{ background: {sel}; color: {ink}; }}
 QHeaderView::section {{ background: {card}; border: 0; border-bottom: 1px solid {line}; padding: 4px 6px;
     color: {muted}; }}
