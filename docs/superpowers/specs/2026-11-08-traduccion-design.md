@@ -65,3 +65,12 @@ EPUB bilingüe. Avisos de calidad para destinos que no son español (los de hoy 
 Motor falso (`_post` cambiado): lotes, partir lote al no cuadrar, marcas conservadas, caché por clave, DPAPI
 ida y vuelta, `translated_section`. Ventana offscreen: traducir con motor falso, editar a mano, aplicar,
 deshacer, idioma cambiado, versión creada. Luego `/verificar-ventana` en pantalla real.
+
+## Ampliación 2026-11-09: más natural y más rápida
+
+- **Capítulos a la vez**: cada capítulo es un grupo con su contexto; 3 en paralelo con las API en la nube, 1 con Google gratis y con modelos locales.
+- **Capítulo entero como contexto** (solo IA en la nube, hasta 60.000 letras): al final de la instrucción, para que la caché del proveedor lo cobre rebajado; en Claude, con `cache_control`.
+- **«Glosario y estilo…»**: glosario y ficha de personajes (`tr_notes`, de la serie), variante del español, honoríficos y capítulo entero (preferencias). «Proponer con la IA» los saca de los primeros 30.000 caracteres del libro.
+- **Ejemplos**: las últimas 5 correcciones a mano van en la instrucción como estilo de referencia.
+- **Segunda pasada**: `translate.doubts` marca lo dudoso (sin ¿/¡, comillas por raya, sin traducir, cortado, marcas perdidas, glosario sin aplicar); la IA lo repasa una vez con el motivo y lo que siga mal queda «Dudoso» en la lista.
+- **Menos peticiones**: lotes de IA de 40 párrafos o 9.000 letras (el japonés pesa el triple), modo JSON, Google gratis con 25 párrafos por petición, `Retry-After`. Un parámetro que la API rechaza (`temperature`, `response_format`) se quita y no se repite.
