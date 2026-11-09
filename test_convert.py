@@ -6248,6 +6248,71 @@ def test_translate_batches_and_dpapi():
     assert translate.unprotect("no es base64 válido!") == "" and translate.protect("") == ""
 
 
+def wait_translation(root, win, seconds=10):
+    import time
+    end = time.time() + seconds
+    while win.parts["work"]["thread"] is not None and time.time() < end:
+        root.update()
+        time.sleep(0.02)
+    assert win.parts["work"]["thread"] is None, "la traducción no terminó"
+
+
+def test_window_translate_apply_and_undo():
+    """«Traducir…»: la IA traduce el libro entero, un párrafo se corrige a mano, «Aplicar al libro» cambia el texto
+    con una versión de antes, los títulos siguen con su tipo y el idioma pasa al destino; Ctrl+Z lo deshace. La
+    clave queda cifrada en las preferencias y lo traducido, guardado para la próxima vez."""
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    kinds = [window.tree.set(i, "inc") for i in window.tree.get_children()]
+    original = translate._post
+    translate._post = fake = FakeAI()
+    window.tr_glossary = [["Inicio", "Start"]]
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        parts["key"].setText("sk-prueba")
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        parts["src"].setCurrentIndex(parts["src"].findData("es"))
+        parts["run"]()
+        wait_translation(root, win)
+        assert "Inicio = Start" in fake.calls[0][2]["messages"][0]["content"], "el glosario no llegó a la IA"
+        assert window.review_state()["tr_glossary"] == [["Inicio", "Start"]]
+        table = parts["table"]
+        states = {table.set(i, "state") for i in table.get_children()}
+        assert states == {"Traducido"}, states
+        row = next(i for i in table.get_children() if "fin del primer parrafo" in table.set(i, "orig"))
+        table.selection_set(row)
+        root.update()
+        parts["translation"].setPlainText("Corregido <i>a mano</i>.")
+        parts["apply"]()
+        text = book_text(window)
+        assert "ES:" in text and "Corregido a mano." in text and "fin del primer parrafo" not in text, text
+        assert [window.tree.set(i, "inc") for i in window.tree.get_children()] == kinds
+        assert window.tree.set(first_title(window), "title").startswith("ES:"), "el título de la lista no cambió"
+        assert window.lang_var.get() == "en" and app._load_versions(window.pdf)[0][-1]["name"] == "Antes de traducir"
+        assert {table.set(i, "state") for i in table.get_children()} == {"Aplicado"}
+        saved = app._read_translation(window.pdf)
+        assert saved["dst"] == "en" and any(v["hand"] and "a mano" in v["text"] for v in saved["done"].values())
+        window.undo()
+        assert "fin del primer parrafo" in book_text(window) and "ES:" not in book_text(window)
+        parts["close"]()
+        secret = window.settings["translate"]["keys"]["DeepSeek"]
+        assert "sk-prueba" not in secret and translate.unprotect(secret) == "sk-prueba", secret
+        again = window.translate_book()  # al volver, lo traducido sigue ahí: no se paga dos veces
+        rows = again.parts["table"]
+        found = [(rows.set(i, "state"), rows.set(i, "orig")) for i in rows.get_children()]
+        assert {s for s, _ in found} == {"Traducido", "A mano"}, found
+        again.parts["close"]()
+    finally:
+        translate._post = original
+        window.close()
+
+
 def no_modal_dialogs():
     """Sin pantalla, un aviso modal bloquearía la prueba: los que ninguna prueba espera se apuntan y responden «No»."""
     import qtk
