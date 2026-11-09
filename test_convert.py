@@ -6768,9 +6768,14 @@ def test_window_translate_chapters_style_and_doubts():
         parts["key"].setText("k")
         parts["src"].setCurrentIndex(parts["src"].findData("es"))
         parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        # Un libro largo se lee en cuatro trozos a la vez (la ventana lo toma al abrirse)
+        window.book.blocks.append(convert.Block("p", 1, "Texto largo del libro. " * 2000))
         parts["glossary"]()
         box = win.glossary_box
-        box["notes"].setPlainText("Emilia: chica, formal")
+        box["add_person"]("Emilia", "chica, formal")
+        box["general"].setPlainText("Tono ligero")
+        box["add_term"]("Witch", "Bruja")
+        assert box["tabs"].tabText(0) == "Glosario (1)" and box["tabs"].tabText(1) == "Personajes (1)"
         box["variant"].setCurrentIndex(box["variant"].findData("es-419"))
         box["honorifics"].setChecked(False)
         reply = {"glossary": {"Culto": "Cult"}, "characters": {"Subaru": "chico, informal"}}
@@ -6778,7 +6783,6 @@ def test_window_translate_chapters_style_and_doubts():
         translate._post = lambda url, headers, body: asked.append(body) or gate.wait(10) and {
             "choices": [{"message": {"content": json.dumps(reply)}}]}
         # Un libro largo se lee en cuatro trozos a la vez; mientras, el botón y la nota dicen cuánto va
-        window.book.blocks.append(convert.Block("p", 1, "Texto largo del libro. " * 2000))
         box["suggest"]()
         end = time.time() + 5
         while len(asked) < 4 and time.time() < end:
@@ -6793,15 +6797,18 @@ def test_window_translate_chapters_style_and_doubts():
             len(asked), buttons, box["note"].text())
         gate.set()
         end = time.time() + 5
-        while "Subaru" not in box["notes"].toPlainText() and time.time() < end:
+        while "Subaru" not in box["notes"]() and time.time() < end:
             root.update()
             time.sleep(0.02)
-        assert box["notes"].toPlainText() == "Emilia: chica, formal\nSubaru: chico, informal", box["notes"].toPlainText()
-        assert "Culto = Cult" in box["text"].toPlainText() and "1 término nuevo y 1 personaje nuevo" in box["note"].text()
-        box["text"].setPlainText("")
+        assert box["notes"]() == "Tono ligero\nEmilia: chica, formal\nSubaru: chico, informal", box["notes"]()
+        assert ["Culto", "Cult"] in box["pairs"]() and "1 término nuevo y 1 personaje nuevo" in box["note"].text()
+        assert box["terms"].item(1, 2).text() == "0 veces" and box["tabs"].tabText(0) == "Glosario (2)"
+        box["terms"].selectAll()  # la IA de pega no aplica el glosario: sin él no hay dudosos
+        next(b for b in box["box"].findChildren(QPushButton) if b.text() == "Quitar" and b.isVisible()).click()
+        assert box["pairs"]() == [] and box["tabs"].tabText(0) == "Glosario (0)", box["pairs"]()
         box["accept"]()
         translate._post = fake
-        assert window.review_state()["tr_notes"] == "Emilia: chica, formal\nSubaru: chico, informal"
+        assert window.review_state()["tr_notes"] == "Tono ligero\nEmilia: chica, formal\nSubaru: chico, informal"
         assert "tr_notes" in app.INHERITED and window.settings["translate"]["variant"] == "es-419"
         assert window.settings["translate"]["honorifics"] is False
 
@@ -6837,6 +6844,25 @@ def test_window_translate_chapters_style_and_doubts():
         table.selection_set(other)
         root.update()
         assert "Dudoso: el glosario pide «Zzyzx»" in parts["status"].text(), parts["status"].text()
+        assert parts["doubt"].text().startswith("⚠ Dudoso: el glosario pide «Zzyzx»"), parts["doubt"].text()
+
+        # Filtros con su cuenta, buscador y «Anterior/Siguiente» entre lo que se ve
+        chips, total = parts["chips"], len(table.get_children())
+        visible = lambda: [i for i in table.get_children() if not table.rows[i].isHidden()]
+        assert chips["all"].text() == f"Todos {total}" and chips["Dudoso"].text() == "Dudosos 1", chips["Dudoso"].text()
+        assert chips["A mano"].text() == "A mano 1" and chips["done"].text() == f"Traducidos {total - 2}"
+        chips["Dudoso"].click()
+        assert visible() == [other], visible()
+        chips["all"].click()
+        parts["search"].setText("fin del primer")
+        assert visible() == [row], visible()
+        parts["search"].clear()
+        table.selection_set(row)
+        root.update()
+        parts["step"](1)
+        root.update()
+        assert table.selection() == (table.get_children()[table.get_children().index(row) + 1],), table.selection()
+        assert not parts["progress"].isVisible()
         parts["close"]()
     finally:
         translate._post = original

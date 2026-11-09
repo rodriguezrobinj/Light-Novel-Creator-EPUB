@@ -35,13 +35,15 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QProcess, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPixmap,
-                           QShortcut, QTextCharFormat, QTextCursor)
+from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
+                           QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QInputDialog,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit,
                                QProgressBar,
+                               QAbstractItemView, QButtonGroup, QHeaderView, QStyle, QStyledItemDelegate,
+                               QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTabWidget,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QStackedWidget, QTabBar,
                                QLayout, QTextEdit, QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
@@ -1334,6 +1336,84 @@ class StatusLabel(QLabel):
         painter.setPen(self.palette().color(self.foregroundRole()))
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.width()))
+
+
+MARKUP = re.compile(r"</?[ib]>")  # cursiva y negrita de section_text: en la lista no se leen las etiquetas
+
+
+def _two_lines(text, font, width):
+    """Las dos primeras líneas de text a ese ancho; la segunda acaba en «…» si queda más."""
+    layout = QTextLayout(text, font)
+    layout.beginLayout()
+    line = layout.createLine()
+    if not line.isValid():
+        layout.endLayout()
+        return ["", ""]
+    line.setLineWidth(width)
+    end = line.textStart() + line.textLength()
+    layout.endLayout()
+    return [text[:end].rstrip(), QFontMetrics(font).elidedText(text[end:].strip(), Qt.TextElideMode.ElideRight, width)]
+
+
+class _Cards(QStyledItemDelegate):
+    """Fila de «Traducir» como tarjeta: el original arriba y su traducción debajo, dos líneas cada uno, sin las
+    etiquetas <i> y <b>; en la columna del estado, un punto de su color. Con columnas de una línea, un párrafo
+    largo y su traducción se leían como un solo bloque."""
+    PAD = 7
+
+    def __init__(self, tree, colors):
+        super().__init__(tree)
+        self.colors = colors  # () -> (colores del tema, de los estados): cambian al cambiar de tema
+
+    def sizeHint(self, option, index):
+        return QSize(super().sizeHint(option, index).width(),
+                     4 * QFontMetrics(option.font).lineSpacing() + 3 * self.PAD)
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        opt.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        tones, states = self.colors()
+        item = self.parent().itemFromIndex(index)
+        step = QFontMetrics(opt.font).lineSpacing()
+        box = option.rect.adjusted(self.PAD + 4, self.PAD, -self.PAD, -self.PAD)
+        painter.save()
+        painter.setPen(QColor(tones["line"]))
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+        if index.column() == 0:
+            original, translation = item.text(0), item.text(1)
+            head = QFont(opt.font)
+            head.setBold(original.startswith("# "))
+            original = MARKUP.sub("", original.removeprefix("# ").removeprefix(convert.CENTER))
+            hint = QFont(opt.font)
+            hint.setItalic(True)
+            blocks = [(original, head, tones["muted"]),
+                      (MARKUP.sub("", translation), head, tones["ink"]) if translation
+                      else ("Sin traducir", hint, tones["hint"])]
+            parts = [(font, color, [p for p in _two_lines(text, font, box.width()) if p]) for text, font, color in blocks]
+            # Los dos juntos y en el centro de la fila: un original de una línea no deja hueco antes de su traducción
+            y = option.rect.top() + (option.rect.height() - step * sum(len(p) for *_, p in parts) - self.PAD // 2) // 2
+            for font, color, lines in parts:
+                painter.setFont(font)
+                painter.setPen(QColor(color))
+                for part in lines:
+                    painter.drawText(QRect(box.left(), y, box.width(), step),
+                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, part)
+                    y += step
+                y += self.PAD // 2
+        else:
+            state = item.text(index.column())
+            color = QColor(states.get(state, tones["muted"]))
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setBrush(color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            middle = option.rect.center().y()
+            painter.drawEllipse(QRectF(box.left(), middle - 4, 8, 8))
+            painter.setPen(color)
+            painter.drawText(QRect(box.left() + 14, option.rect.top(), box.width() - 14, option.rect.height()),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, state)
+        painter.restore()
 
 
 def _label(text="", name=None):
@@ -4501,7 +4581,7 @@ class App:
                 prefs[name] = {}
         win, column = self.dialog("Traducir")
         self.translate_window = win
-        win.resize(1040, 680)
+        win.resize(1100, 760)
         src, dst, engine, scope = QComboBox(), QComboBox(), QComboBox(), QComboBox()
         for code, name in translate.LANGS.items():
             src.addItem(name, code)
@@ -4527,31 +4607,72 @@ class App:
         base.setMinimumWidth(260)
         model_label, base_label, key_label = QLabel("Modelo:"), QLabel("URL:"), QLabel("Clave:")
         glossary_btn = _button("Glosario y estilo…", lambda: edit_glossary())
-        column.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, QLabel("Motor:"), engine, 1, QLabel("Traducir:"),
+        settings = QFrame()
+        settings.setObjectName("card")
+        inside = QVBoxLayout(settings)
+        inside.setContentsMargins(12, 10, 12, 10)
+        inside.setSpacing(8)
+        inside.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, QLabel("Motor:"), engine, 1, QLabel("Traducir:"),
                               scope))
-        column.addLayout(_row(model_label, model, models_btn, base_label, base, key_label, api_key, 1, glossary_btn))
+        inside.addLayout(_row(model_label, model, models_btn, base_label, base, key_label, api_key, 1, glossary_btn))
         hint = _label("", "muted")
         hint.setWordWrap(True)
-        column.addWidget(hint)
+        inside.addWidget(hint)
+        column.addWidget(settings)
+        # Filtros por estado con su cuenta y buscador: entre miles de párrafos se va directo a lo que falta
+        chips, chip_group = {}, QButtonGroup(win)
+        for key, label in (("all", "Todos"), ("Pendiente", "Pendientes"), ("Dudoso", "Dudosos"), ("A mano", "A mano"),
+                           ("done", "Traducidos")):
+            chip = QPushButton(label)
+            chip.setObjectName("chip")
+            chip.setCheckable(True)
+            chip.clicked.connect(lambda _=False: show_rows())
+            chip_group.addButton(chip)
+            chips[key] = chip
+        chips["all"].setChecked(True)
+        search = QLineEdit()
+        search.setPlaceholderText("Buscar en el original o en la traducción")
+        search.setClearButtonEnabled(True)
+        search.setMinimumWidth(280)
+        search.textChanged.connect(lambda _: show_rows())
+        column.addLayout(_row(*chips.values(), 1, search))
         panes = QSplitter(Qt.Orientation.Vertical)
         column.addWidget(panes, 1)
         table = qtk.RowList(("orig", "trans", "state"), {"orig": "Original", "trans": "Traducción", "state": "Estado"},
-                            {"trans": 400, "state": 90}, stretch="orig")
-        table.header().setSectionResizeMode(1, table.header().ResizeMode.Stretch)  # las dos columnas de texto, a medias
-        table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignLeft)
+                            {"state": 120}, stretch="orig")
+        table.setHeaderHidden(True)
+        table.setColumnHidden(1, True)  # la traducción va dentro de la tarjeta, bajo el original
+        table.setItemDelegate(_Cards(table, lambda: (theme.colors(self.dark), theme.state_colors(self.dark))))
         table.setSelectionMode(table.SelectionMode.ExtendedSelection)  # varios con Ctrl o Mayús: «Retraducir selección»
         panes.addWidget(table)
         bottom = QWidget()
-        lower = QHBoxLayout(bottom)
-        lower.setContentsMargins(0, 6, 0, 0)
+        lower = QGridLayout(bottom)
+        lower.setContentsMargins(0, 8, 0, 0)
+        lower.setHorizontalSpacing(10)
         original_box, translation_box = QPlainTextEdit(), QPlainTextEdit()
+        for pane in (original_box, translation_box):
+            font = pane.font()
+            font.setPointSizeF(10.5)
+            pane.setFont(font)
         original_box.setReadOnly(True)
-        original_box.setPlaceholderText("Original del párrafo elegido")
-        translation_box.setPlaceholderText("Su traducción: se puede corregir a mano")
-        lower.addWidget(original_box)
-        lower.addWidget(translation_box)
+        original_box.setPlaceholderText("Elige un párrafo de la lista")
+        translation_box.setPlaceholderText("Su traducción: se corrige aquí, a mano")
+        doubt = _label("", "warn")
+        doubt.setWordWrap(True)
+        prev_btn, next_btn = _button("◀ Anterior", lambda: step(-1)), _button("Siguiente ▶", lambda: step(1))
+        lower.addWidget(_label("ORIGINAL", "muted"), 0, 0)
+        lower.addWidget(_label("TRADUCCIÓN · SE CORRIGE AQUÍ", "muted"), 0, 1)
+        lower.addWidget(original_box, 1, 0)
+        lower.addWidget(translation_box, 1, 1)
+        lower.addLayout(_row(prev_btn, next_btn, 1), 2, 0)
+        lower.addWidget(doubt, 2, 1)
         panes.addWidget(bottom)
-        panes.setSizes([430, 140])
+        panes.setSizes([470, 200])
+        panes.setStretchFactor(0, 3)  # al encoger la ventana (zoom de Windows), la lista conserva más alto
+        progress = QProgressBar()
+        progress.setTextVisible(False)
+        progress.hide()
+        column.addWidget(progress)
         status = StatusLabel()
         column.addWidget(status)
         run_btn = _button("Traducir", lambda: run(), "primary")
@@ -4629,7 +4750,6 @@ class App:
                     table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER) + text,
                                                                  done.get(code, {}).get("text", ""),
                                                                  state_of(code, text, texts)))
-                    table.rows[str(k)].setTextAlignment(1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             pick()
             count()
 
@@ -4639,6 +4759,34 @@ class App:
             status.setText(f"{convert.counted(len(todo), 'párrafo pendiente', 'párrafos pendientes')} de {len(rows)} · "
                            f"{letters} caracteres por traducir")
             apply_btn.setEnabled(bool(done) and work["thread"] is None)
+            states = collections.Counter(item.text(2) for item in table.rows.values())
+            for key, chip in chips.items():
+                label = chip.text().rsplit(" ", 1)[0] if chip.text()[-1:].isdigit() else chip.text()
+                many = (len(rows) if key == "all" else states["Traducido"] + states["Aplicado"] if key == "done"
+                        else states[key])
+                chip.setText(f"{label} {many}")
+            show_rows()
+
+        def show_rows():
+            """Solo las filas del filtro elegido que tienen lo buscado, en el original o en la traducción."""
+            want = next(key for key, chip in chips.items() if chip.isChecked())
+            query = search.text().strip().lower()
+            for item in table.rows.values():
+                state = item.text(2)
+                shown = want == "all" or state == want or (want == "done" and state in ("Traducido", "Aplicado"))
+                item.setHidden(not shown or bool(query and query not in item.text(0).lower()
+                                                  and query not in item.text(1).lower()))
+
+        def step(delta):
+            """«Anterior» y «Siguiente»: la fila de al lado que se ve, sin perder lo corregido."""
+            current = table.currentItem()
+            item = (table.itemBelow if delta > 0 else table.itemAbove)(current) if current else table.topLevelItem(0)
+            while item is not None and item.isHidden():
+                item = (table.itemBelow if delta > 0 else table.itemAbove)(item)
+            if item is not None:
+                table.selection_set(item.data(0, qtk.IID))
+                table.see(item.data(0, qtk.IID))
+                translation_box.setFocus()
 
         def refresh(keys):
             texts = applied()
@@ -4648,6 +4796,7 @@ class App:
                     table.set(iid, "state", state_of(k, rows[iid][2], texts))
                     if iid == work["shown"]:
                         translation_box.setPlainText(done.get(k, {}).get("text", ""))
+            count()
 
         def save():
             try:
@@ -4679,13 +4828,19 @@ class App:
             original_box.setPlainText(rows[iid][2] if iid else "")
             translation_box.setPlainText(done.get(rows[iid][0], {}).get("text", "") if iid else "")
             translation_box.setEnabled(iid is not None)
+            doubt.setText("")
             if iid and table.set(iid, "state") == "Dudoso":  # por qué: la IA ya lo repasó una vez y sigue así
-                status.setText("Dudoso: " + "; ".join(translate.doubts(
-                    rows[iid][2], done[rows[iid][0]]["text"], dst.currentData(), self.tr_glossary)) + ".")
+                why = "Dudoso: " + "; ".join(translate.doubts(
+                    rows[iid][2], done[rows[iid][0]]["text"], dst.currentData(), self.tr_glossary)) + "."
+                status.setText(why)
+                doubt.setText("⚠ " + why)
 
         def busy(on):
             run_btn.setText("Pausar" if on else "Traducir")
             run_btn.setEnabled(True)
+            progress.setVisible(on)
+            progress.setRange(0, max(1, work["total"]))
+            progress.setValue(work["count"])
             for widget in (again_btn, src, dst, engine, scope, model, models_btn, base, api_key, glossary_btn):
                 widget.setEnabled(not on)
             count()
@@ -4773,7 +4928,9 @@ class App:
                 for twin in twins:
                     twin.parts["merge"](arrived, work["again"])
                 work["count"] += len(arrived)
-                status.setText(f"Traduciendo… {work['count']} de {work['total']} párrafos")
+                progress.setValue(work["count"])
+                status.setText(f"Traduciendo… {work['count']} de {work['total']} párrafos "
+                               f"({100 * work['count'] // max(1, work['total'])} %)")
             for event in events:
                 if event[0] == "error" and not work["closing"]:  # cerrada: nadie lo leería
                     messagebox.showerror("Traducir", event[1], parent=win)
@@ -4852,22 +5009,117 @@ class App:
                            if changed else "Nada que cambiar: lo traducido ya está en el libro.")
 
         def edit_glossary():
-            """Lo que guía a la IA: glosario y ficha de personajes (de la serie), variante del español, honoríficos
-            y si ve el capítulo entero (preferencias)."""
+            """Lo que guía a la IA, en pestañas: glosario (tabla con las veces que sale cada término), personajes (una
+            fila por personaje) y estilo. Glosario y personajes son de la serie; el estilo, de las preferencias. En
+            dos cajas de texto, con muchos términos y notas largas, todo se leía como un solo párrafo."""
             box, inner = self.dialog("Glosario y estilo de traducción", modal=True)
-            inner.addWidget(QLabel("Glosario. Un término por línea: original = traducción («Witch Cult = Culto de la "
-                                   "Bruja»). La IA lo usa siempre;\nGoogle y DeepL no. Lo que va tras # no cuenta. "
-                                   "Pasa a los demás tomos de la serie."))
-            text = QPlainTextEdit("\n".join(f"{a} = {b}" for a, b in self.tr_glossary))
-            text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-            text.setMinimumSize(600, 200)
-            inner.addWidget(text, 2)
-            inner.addWidget(QLabel("Personajes y estilo. Una línea por personaje: género, cómo habla y a quién trata "
-                                   "de tú o de usted\n(«Emilia: chica, amable y formal; trata de usted a Roswaal»). La "
-                                   "IA no equivoca así el género ni el trato. También pasa a la serie."))
-            notes = QPlainTextEdit(self.tr_notes)
-            notes.setMinimumHeight(130)
-            inner.addWidget(notes, 1)
+            box.resize(820, 600)
+            whole = "\n".join(t for _, _, t in translate.units(self.book, 0, len(self.book.blocks)))
+            tabs = QTabWidget()
+            inner.addWidget(tabs, 1)
+
+            def table(headings):
+                grid = QTableWidget(0, len(headings))
+                grid.setHorizontalHeaderLabels(headings)
+                grid.verticalHeader().hide()
+                grid.setAlternatingRowColors(True)
+                grid.setShowGrid(False)
+                grid.setWordWrap(True)
+                grid.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+                grid.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
+                return grid
+
+            def page(*parts):
+                widget = QWidget()
+                lay = QVBoxLayout(widget)
+                lay.setContentsMargins(0, 10, 0, 0)
+                lay.setSpacing(8)
+                for part in parts:
+                    if isinstance(part, QHBoxLayout):
+                        lay.addLayout(part)
+                    else:
+                        lay.addWidget(part, 1 if isinstance(part, (QTableWidget, QPlainTextEdit)) else 0)
+                return widget
+
+            def explain(text):
+                label = _label(text, "muted")
+                label.setWordWrap(True)
+                return label
+
+            # Glosario
+            terms = table(["Original", "Traducción", "En el tomo"])
+            head = terms.horizontalHeader()
+            head.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            head.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            head.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+
+            def add_term(a="", b=""):
+                n = terms.rowCount()
+                terms.insertRow(n)
+                times = whole.count(a) if a else 0
+                cells = [QTableWidgetItem(a), QTableWidgetItem(b),
+                         QTableWidgetItem(convert.counted(times, "vez", "veces") if a else "")]
+                cells[2].setFlags(cells[2].flags() & ~Qt.ItemFlag.ItemIsEditable)  # se cuenta, no se escribe
+                cells[2].setForeground(QColor(theme.colors(self.dark)["muted"]))
+                for c, cell in enumerate(cells):
+                    terms.setItem(n, c, cell)
+                return n
+
+            term_search = QLineEdit()
+            term_search.setPlaceholderText("Buscar término")
+            term_search.setClearButtonEnabled(True)
+
+            def find_terms():
+                query = term_search.text().strip().lower()
+                for n in range(terms.rowCount()):
+                    terms.setRowHidden(n, bool(query) and not any(
+                        query in (terms.item(n, c).text() if terms.item(n, c) else "").lower() for c in (0, 1)))
+
+            term_search.textChanged.connect(lambda _: find_terms())
+
+            def new_row(grid, add):
+                term_search.clear()
+                n = add()
+                grid.setCurrentCell(n, 0)
+                grid.scrollToItem(grid.item(n, 0))
+                grid.editItem(grid.item(n, 0))
+
+            def remove(grid):
+                for n in sorted({i.row() for i in grid.selectedIndexes()}, reverse=True):
+                    grid.removeRow(n)
+                titles()
+
+            tabs.addTab(page(explain("Cada término se traduce siempre así («Witch Cult» → «Culto de la Bruja»). Lo usa "
+                                     "la IA; Google y DeepL no. Pasa a los demás tomos de la serie. Doble clic en una "
+                                     "celda para cambiarla."),
+                             _row(term_search, 1, _button("Añadir término", lambda: new_row(terms, add_term)),
+                                  _button("Quitar", lambda: remove(terms))), terms), "")
+
+            # Personajes
+            people = table(["Personaje", "Cómo es, cómo habla y a quién trata de tú o de usted"])
+            people.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+            people.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            people.setColumnWidth(0, 190)
+
+            def add_person(name="", about=""):
+                n = people.rowCount()
+                people.insertRow(n)
+                first = QTableWidgetItem(name)
+                bold = first.font()
+                bold.setBold(True)
+                first.setFont(bold)
+                people.setItem(n, 0, first)
+                people.setItem(n, 1, QTableWidgetItem(about))
+                people.resizeRowToContents(n)
+                return n
+
+            people.itemChanged.connect(lambda item: people.resizeRowToContents(item.row()))
+            tabs.addTab(page(explain("Una fila por personaje: así la IA no equivoca el género ni el trato. Pasa a los "
+                                     "demás tomos de la serie."),
+                             _row(1, _button("Añadir personaje", lambda: new_row(people, add_person)),
+                                  _button("Quitar", lambda: remove(people))), people), "")
+
+            # Estilo
             variant, honorifics = QComboBox(), QCheckBox("Mantener honoríficos (-san, -kun…)")
             chapter = QCheckBox("La IA ve el capítulo entero")
             for code, label in translate.VARIANTS.items():
@@ -4875,39 +5127,74 @@ class App:
             variant.setCurrentIndex(max(0, variant.findData(prefs.get("variant", ""))))
             honorifics.setChecked(bool(prefs.get("honorifics", True)))
             chapter.setChecked(bool(prefs.get("chapter", True)))
-            chapter.setToolTip("Con el capítulo original delante, la IA sabe quién habla y qué viene después.\nGasta "
-                               "más texto de entrada, que las API cobran rebajado al repetirse. Los modelos en tu "
-                               "equipo no lo reciben: no les suele caber.")
-            inner.addLayout(_row(QLabel("Español de:"), variant, honorifics, chapter, 1))
-            note = _label("", "muted")
-            inner.addWidget(note)
+            general = QPlainTextEdit()
+            general.setPlaceholderText("Indicaciones para todo el libro, una por línea (p. ej. «Los monstruos hablan "
+                                       "en tercera persona»)")
+            tabs.addTab(page(_row(QLabel("Español de:"), variant, 1),
+                             explain("Solo cuando el destino es español: España usa «vosotros» y su vocabulario; "
+                                     "Latinoamérica, «ustedes» y palabras que se entienden en todos los países."),
+                             honorifics,
+                             explain("Marcado, «Subaru-kun» se queda igual. Sin marcar, la IA lo cambia por la forma "
+                                     "de tratarse del español (el tono, «señorita», «maestro»…)."),
+                             chapter,
+                             explain("Con el capítulo original delante, la IA sabe quién habla y qué viene después. "
+                                     "Gasta más texto de entrada, que las API cobran rebajado al repetirse; los "
+                                     "modelos en tu equipo no lo reciben."),
+                             _label("INDICACIONES GENERALES", "muted"), general), "Estilo")
+
+            # tr_notes guarda personajes («Nombre: nota») e indicaciones generales, una por línea
+            for line in self.tr_notes.splitlines():
+                found = re.match(r"\s*([^:]{1,40}?)\s*:\s*(\S.*)", line)
+                if found and len(found[1].split()) <= 4:
+                    add_person(found[1], found[2].strip())
+                elif line.strip():
+                    general.appendPlainText(line.strip())
+            for a, b in self.tr_glossary:
+                add_term(a, b)
+
+            def cells(grid):
+                return [[(grid.item(n, c).text() if grid.item(n, c) else "").strip() for c in (0, 1)]
+                        for n in range(grid.rowCount())]
 
             def pairs():
                 out = {}
-                for line in text.toPlainText().splitlines():
-                    a, sep, b = line.split("#")[0].partition("=")
-                    if sep and a.strip() and b.strip():
-                        out[a.strip()] = b.strip()
+                for a, b in cells(terms):
+                    if a and b:
+                        out.setdefault(a, b)
                 return [[a, b] for a, b in out.items()]
 
-            def append(edit, lines):
-                if lines:
-                    lead = "\n" if edit.toPlainText().strip() else ""
-                    edit.setPlainText(edit.toPlainText().rstrip("\n") + lead + "\n".join(lines))
+            def notes():
+                lines = [line.strip() for line in general.toPlainText().splitlines() if line.strip()]
+                return "\n".join(lines + [f"{a}: {b}" for a, b in cells(people) if a and b])
+
+            def titles():
+                tabs.setTabText(0, f"Glosario ({terms.rowCount()})")
+                tabs.setTabText(1, f"Personajes ({people.rowCount()})")
+
+            terms.model().rowsInserted.connect(lambda *_: titles())
+            people.model().rowsInserted.connect(lambda *_: titles())
+            titles()
+            note = _label("", "muted")
+            note.setWordWrap(True)
+            inner.addWidget(note)
 
             def add_names():
                 """Los nombres propios de este tomo que salen 5 veces o más, iguales en los dos lados para corregir."""
-                have = {a for a, _ in pairs()}
+                have = {a for a, _ in cells(terms)}
                 names = sorted(((n, f) for f, n in convert.proper_names(self.book).items() if n >= 5 and f not in have),
                                reverse=True)
                 if not names:
                     messagebox.showinfo("Glosario de traducción", "No hay nombres nuevos que salgan 5 veces o más en "
                                                                   "este tomo.", parent=box)
                     return
-                append(text, [f"{f} = {f}  # {convert.counted(n, 'vez', 'veces')}" for n, f in names])
+                for _, f in names:
+                    add_term(f, f)
+                tabs.setCurrentIndex(0)
+                note.setText(f"{convert.counted(len(names), 'nombre añadido', 'nombres añadidos')} al glosario, igual "
+                             f"en los dos lados: cambia la traducción de los que no se queden así.")
 
             def suggest():
-                """La IA lee el principio del libro y propone términos y personajes; nada se guarda sin «Aceptar»."""
+                """La IA lee el libro y propone términos y personajes; nada se guarda sin «Aceptar»."""
                 name, info = engine.currentText(), translate.ENGINES[engine.currentText()]
                 if info["kind"] not in translate.AI:
                     messagebox.showinfo("Glosario y estilo", "Esto lo propone una IA: elige una en «Motor» (OpenAI, "
@@ -4916,7 +5203,6 @@ class App:
                 if info.get("key") and not api_key.text().strip():
                     messagebox.showerror("Glosario y estilo", f"Falta la clave de {name}.", parent=box)
                     return
-                whole = "\n".join(t for _, _, t in translate.units(self.book, 0, len(self.book.blocks)))
                 # Cuatro trozos repartidos por el libro (el principio solo trae créditos y pocos personajes), pedidos a
                 # la vez: tarda lo que uno y la ventana puede decir cuántos van
                 step = max(1, (len(whole) - 7500) // 3)
@@ -4927,18 +5213,18 @@ class App:
                 found, started = queue.Queue(), time.time()
 
                 def ask():
-                    terms, people = {}, {}
+                    got_terms, got_people = {}, {}
                     try:
                         with concurrent.futures.ThreadPoolExecutor(len(samples)) as pool:
                             jobs = [pool.submit(translate.propose, name, sample, *args) for sample in samples]
                             for n, job in enumerate(concurrent.futures.as_completed(jobs), 1):
                                 got = job.result()
                                 for a, b in got[0]:
-                                    terms.setdefault(a, b)
+                                    got_terms.setdefault(a, b)
                                 for line in got[1]:  # el mismo personaje en dos trozos: vale la primera nota
-                                    people.setdefault(line.split(":")[0], line)
+                                    got_people.setdefault(line.split(":")[0], line)
                                 found.put(("progress", n))
-                        found.put(([[a, b] for a, b in terms.items()], list(people.values())))
+                        found.put(([[a, b] for a, b in got_terms.items()], list(got_people.values())))
                     except Exception as e:  # TranslateError ya viene en español
                         found.put(str(e) or type(e).__name__)
 
@@ -4962,21 +5248,24 @@ class App:
                     suggest_btn.setText("Proponer con la IA")
                     suggest_btn.setEnabled(True)
                     if isinstance(result, str):
+                        note.setText("")
                         messagebox.showerror("Glosario y estilo", result, parent=box)
                         return
-                    have, known = {a for a, _ in pairs()}, notes.toPlainText()
-                    terms = [f"{a} = {b}" for a, b in result[0] if a not in have]
-                    people = [line for line in result[1] if line.split(":")[0] not in known]
-                    append(text, terms)
-                    append(notes, people)
-                    note.setText(f"La IA propone {convert.counted(len(terms), 'término nuevo', 'términos nuevos')} y "
-                                 f"{convert.counted(len(people), 'personaje nuevo', 'personajes nuevos')}: revísalos "
+                    have, known = {a for a, _ in cells(terms)}, {a for a, _ in cells(people)}
+                    new_terms = [(a, b) for a, b in result[0] if a not in have]
+                    new_people = [line.partition(":")[::2] for line in result[1] if line.split(":")[0] not in known]
+                    for a, b in new_terms:
+                        add_term(a, b)
+                    for a, b in new_people:
+                        add_person(a.strip(), b.strip())
+                    note.setText(f"La IA propone {convert.counted(len(new_terms), 'término nuevo', 'términos nuevos')} y "
+                                 f"{convert.counted(len(new_people), 'personaje nuevo', 'personajes nuevos')}: revísalos "
                                  f"antes de aceptar.")
 
                 qtk.after(200, wait)
 
             def accept():
-                self.tr_glossary, self.tr_notes = pairs(), notes.toPlainText().strip()
+                self.tr_glossary, self.tr_notes = pairs(), notes()
                 prefs.update(variant=variant.currentData(), honorifics=honorifics.isChecked(),
                              chapter=chapter.isChecked())
                 self.settings["translate"] = prefs
@@ -4989,8 +5278,10 @@ class App:
             inner.addLayout(_row(_button("Añadir nombres de este tomo", add_names), suggest_btn, 1,
                                  _button("Aceptar", accept, "primary")))
             box.show()
-            win.glossary_box = {"box": box, "text": text, "notes": notes, "variant": variant, "honorifics": honorifics,
-                                "chapter": chapter, "suggest": suggest, "accept": accept, "note": note}
+            win.glossary_box = {"box": box, "terms": terms, "people": people, "general": general, "tabs": tabs,
+                                "variant": variant, "honorifics": honorifics, "chapter": chapter, "suggest": suggest,
+                                "accept": accept, "note": note, "add_term": add_term, "add_person": add_person,
+                                "add_names": add_names, "pairs": pairs, "notes": notes}
 
         def close():
             keep()
@@ -5017,7 +5308,8 @@ class App:
         win.parts = {"table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
                      "scope": scope, "dst": dst, "src": src, "key": api_key, "status": status, "work": work, "done": done,
                      "glossary": edit_glossary, "close": close, "merge": merge, "pdf": pdf, "book": self.book,
-                     "model": model, "models": find_models}
+                     "model": model, "models": find_models, "chips": chips, "search": search, "step": step,
+                     "doubt": doubt, "progress": progress}
         win.show()
         return win
 
