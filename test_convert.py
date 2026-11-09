@@ -986,6 +986,22 @@ def visible_window():
     return root, window
 
 
+def test_bold_line_with_paragraph_indent_is_not_a_subtitle():
+    """Una línea en negrita algo más grande que el texto (×1,15) que empieza con la sangría del párrafo y no va
+    centrada es texto destacado («Obtained Title: …» de The World's Strongest Witch), no un subtítulo; la misma
+    línea pegada al margen («El lado de la bruja», Maryoku) sí lo es."""
+    doc = pymupdf.open()
+    text = [(92, 150, line("Un parrafo cualquiera del capitulo", 57), 11, "cour"), (72, 164, "fin uno.", 11, "cour")]
+    after = [(92, 230, line("Otro parrafo despues de la linea", 57), 11, "cour"), (72, 244, "fin dos.", 11, "cour")]
+    add_page(doc, 1, [(72, 110, "Capitulo 1: Inicio", 20, "helv")] + text + [(92, 196, "Titulo obtenido: Bruja", 12.6, "hebo")]
+             + after)
+    add_page(doc, 2, text + [(72, 196, "El lado de la bruja", 12.6, "hebo")] + after)
+    path = TMP / "negrita-sangria.pdf"
+    doc.save(path)
+    heads = [(b.page, plain(b.html)) for b in convert.analyze(path).blocks if b.kind == "heading"]
+    assert heads == [(1, "Capitulo 1: Inicio"), (2, "El lado de la bruja")], heads
+
+
 def test_bookmarked_subtitles_at_body_size_are_headings():
     """Subtítulos del tamaño del texto ("El lado de la bruja") que el PDF marca como nivel 2:
     se reconocen como títulos por el marcador, sin ser capítulos."""
