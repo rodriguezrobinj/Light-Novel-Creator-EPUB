@@ -2658,6 +2658,56 @@ class App:
         end = min((j for j in heads if j > start), default=len(self.book.blocks))
         return start, end
 
+    def issue_places(self, issues):
+        """Dónde está cada aviso, en una pasada por el libro: [(corto, completo)], como «Capítulo 0 · ¶4» y
+        «Capítulo 0: El discípulo… › Lado de Teto · párrafo 4 de 38 · pág. 4». El número de párrafo es el de la
+        barra de estado del editor: solo párrafos de texto."""
+        blocks, heads = self.book.blocks, set(self.section_heads())
+        where, totals, start, sub, n = [], {}, 0, None, 0
+        for k, b in enumerate(blocks):
+            if k in heads:
+                start, sub, n = k, None, 0
+            elif b.kind == "heading":
+                sub = k
+            elif b.kind == "p":
+                plain = convert._plain(b).strip()
+                n += bool(plain) and not convert.SCENE_BREAK.fullmatch(plain)
+            where.append((start, sub, n))
+            totals[start] = n
+        title = (lambda j: self.tree.set(str(j), "title") if self.tree.exists(str(j)) else convert._plain(blocks[j]))
+        places = []
+        for issue in issues:
+            if issue.block is None or issue.block >= len(blocks):
+                places.append(("", f"Pág. {issue.page} del PDF: texto que no entró en el libro"))
+                continue
+            start, sub, n = where[issue.block]
+            chapter = title(start) if start in heads else "Inicio del libro"
+            short = chapter.split(":")[0].strip() if ":" in chapter else chapter
+            if issue.block == start or blocks[issue.block].kind == "heading":
+                spot = "el título"
+            else:
+                spot = f"párrafo {n} de {totals[start]}"
+            places.append((f"{short} · " + (f"¶{n}" if spot.startswith("párrafo") else "título"),
+                           chapter + (f" › {title(sub)}" if sub is not None and sub != issue.block else "")
+                           + f" · {spot} · pág. {issue.page}"))
+        return places
+
+    def edit_issue(self, issue):
+        """Abre el editor en el aviso: su capítulo, su párrafo y el trozo exacto elegido, con su barra."""
+        if not self.book:
+            return None
+        if issue.block is None or issue.block >= len(self.book.blocks):
+            return self.edit_text()  # texto que no entró en el libro: la sección elegida en la lista
+        editor = self.text_editor
+        if editor is None or not shiboken6.isValid(editor.win):
+            start, end = self.section_bounds(issue.block)
+            item = next((str(j) for j in range(issue.block, -1, -1) if self.tree.exists(str(j))),
+                        self.tree.get_children()[0])
+            editor = TextEditor(self, item, start, end)
+        editor.win.raise_()
+        editor.goto_issue(issue)
+        return editor
+
     def apply_edit(self, edit, item):
         self.apply_edits([edit], item)
 
@@ -3407,10 +3457,11 @@ class App:
         column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown, export_btn))
         panes = QSplitter(Qt.Orientation.Horizontal)
         column.addWidget(panes, 1)
-        table = qtk.RowList(("level", "page", "title"), {"level": "Gravedad", "page": "Pág.", "title": "Aviso"},
-                            {"level": 100, "page": 50})
+        table = qtk.RowList(("level", "page", "where", "title"), {"level": "Gravedad", "page": "Pág.", "where": "Dónde",
+                                                                  "title": "Aviso"}, {"level": 90, "page": 44, "where": 130})
         for level, color in levels.items():
             table.tag_configure(level, foreground=color)
+        table.double_clicked.connect(lambda _: open_issue())  # doble clic: al editor, en el trozo exacto
         panes.addWidget(table)
         right = QWidget()
         side = QVBoxLayout(right)
@@ -3418,6 +3469,9 @@ class App:
         heading = _label("", "title")
         heading.setWordWrap(True)
         side.addWidget(heading)
+        place = _label("", "muted")  # capítulo › subtítulo · párrafo N de M · página
+        place.setWordWrap(True)
+        side.addWidget(place)
         texts = {}
         for name, caption in (("problem", "Problema"), ("solution", "Solución")):
             side.addWidget(_label(caption, "muted"))
@@ -3437,11 +3491,18 @@ class App:
         fix_btn = _button("Arreglar", lambda: apply([state["report"][int(table.selection()[0])]]), "primary")
         all_btn = _button("Arreglar todos", lambda: apply(same_kind(state["report"][int(table.selection()[0])])))
         ignore_btn = _button("Ignorar", lambda: ignore(state["report"][int(table.selection()[0])]))
-        side.addLayout(_row(fix_btn, all_btn, _button("Editar texto…", lambda: self.edit_text()), 1, ignore_btn))
+        edit_btn = _button("Abrir en el editor", lambda: open_issue())
+        edit_btn.setToolTip("Abre el capítulo con el trozo del aviso elegido (también con doble clic en la lista)")
+        side.addLayout(_row(fix_btn, all_btn, edit_btn, 1, ignore_btn))
         side.addStretch(1)
         panes.addWidget(right)
-        panes.setSizes([420, 640])
-        state = {"report": []}
+        panes.setSizes([470, 590])
+        state = {"report": [], "places": []}
+
+        def open_issue():
+            chosen = table.selection()
+            if chosen:
+                self.edit_issue(state["report"][int(chosen[0])])
 
         def fill(select=0):
             everything = self.quality_report()
@@ -3457,9 +3518,10 @@ class App:
             ignore_btn.setText("No ignorar" if show.get() == "Ignorados" else "Ignorar")
             win.setWindowTitle(f"Informe de calidad · {convert.counted(len(report), 'aviso')}")
             table.delete(*table.get_children())
+            state["places"] = self.issue_places(state["report"])
             for n, issue in enumerate(state["report"]):
-                table.insert("", "end", iid=str(n), values=(f"● {issue.level}", issue.page, issue.title),
-                             tags=(issue.level,))
+                table.insert("", "end", iid=str(n), values=(f"● {issue.level}", issue.page, state["places"][n][0],
+                                                            issue.title), tags=(issue.level,))
             if state["report"]:
                 item = str(min(select, len(state["report"]) - 1))
                 table.selection_set(item)
@@ -3485,6 +3547,7 @@ class App:
             issue = state["report"][int(chosen[0])] if chosen else None
             heading.setText(issue.title if issue else "")
             heading.setStyleSheet(f"color: {levels[issue.level]};" if issue else "")
+            place.setText(state["places"][int(chosen[0])][1] if issue else "")
             texts["problem"].setText(issue.problem if issue else "")
             texts["solution"].setText(issue.solution if issue else "")
             for box in previews.values():
@@ -3533,7 +3596,8 @@ class App:
         fill()
         win.show()
         win.parts = {"table": table, "summary": summary, "heading": heading, "texts": texts, "previews": previews,
-                     "fix": fix_btn, "all": all_btn, "ignore": ignore_btn, "show": show, "fill": fill, "echoes": echoes}
+                     "fix": fix_btn, "all": all_btn, "ignore": ignore_btn, "show": show, "fill": fill, "echoes": echoes,
+                     "place": place, "edit": edit_btn}
         self.quality_window = win
 
     def series_panel(self):
@@ -4666,9 +4730,36 @@ class TextEditor:
         self.issue_frame.hide()
         self.tell("No quedan avisos sin arreglar")
 
-    def show_issue(self, block):
-        issue = self.shown_issue = self.block_issue(block)
-        self.goto_block(block)
+    def goto_issue(self, issue):
+        """Va al aviso del informe de calidad: su capítulo, su párrafo y su trozo. Si el párrafo ya se cambió en el
+        editor, el aviso ya no vale: solo se va al párrafo."""
+        k = issue.block
+        bounds = next((s[1:3] for s in self.sections if s[1] <= k < s[2]), None)
+        if bounds and bounds != self.current:
+            self.open_section(*bounds)
+        block = self.sheet.document().firstBlock()
+        while block.isValid() and editor.source_of(block) != k:
+            block = block.next()
+        if not block.isValid():
+            return False
+        same = next((i for i in self.block_issues(block) if (i.kind, i.span, i.text) == (issue.kind, issue.span, issue.text)),
+                    None)
+        if same:
+            self.show_issue(block, same)
+        else:
+            self.goto_block(block)
+            self.tell("Este párrafo cambió desde el informe: revísalo a mano")
+        return True
+
+    def show_issue(self, block, issue=None):
+        """El aviso del párrafo (o issue) con su barra y el trozo exacto elegido, como un resultado de Buscar."""
+        issue = self.shown_issue = issue or self.block_issue(block)
+        start, end = self.issue_range(block, issue)
+        cursor = QTextCursor(block)
+        cursor.setPosition(block.position() + end)
+        cursor.setPosition(block.position() + start, QTextCursor.MoveMode.KeepAnchor)  # el cursor, al principio
+        self.sheet.setTextCursor(cursor)
+        self.sheet.ensureCursorVisible()
         self.hide_bars()
         self.issue_title.setText(f"● {issue.level} · {issue.title}")
         self.issue_title.setStyleSheet(f"color: {theme.mark_colors(self.app.dark)[issue.level]};")
