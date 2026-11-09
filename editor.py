@@ -356,6 +356,7 @@ class Sheet(QTextEdit):
         self.tags, self.unknown = {}, set()  # colores y palabras desconocidas de cada hoja nueva
         self.pictures, self.color = {}, "#888888"
         self.bars, self.bar_color = [], QColor("#2e9d4a")  # párrafos cambiados: barrita en el margen
+        self.origins = {}  # documento -> [(bloque, línea)] tal como se cargó
         self.set_zoom(100)
 
     def set_content(self, lines, pictures, color="#888888", levels=None):
@@ -366,6 +367,7 @@ class Sheet(QTextEdit):
         document = QTextDocument(self)
         document.setDocumentMargin(48)
         load(document, lines, self.pictures, color, levels)
+        self.origins[document] = list(lines)
         loaded = {}  # cómo se volcaba cada párrafo al cargar -> [(bloque, línea)], para reconocerlo si vuelve
         for k, line in lines:
             if k is not None and not convert.TOKEN.fullmatch(line.strip()):
@@ -459,6 +461,27 @@ class Sheet(QTextEdit):
                 return True
             block = block.next()
         return False
+
+    def current_sources(self):
+        """Bloques del libro que hay en el párrafo del cursor: el suyo y los siguientes que se le unieron (ya sin
+        párrafo propio y con su texto dentro de este). Uno borrado no cuenta. Vacía si no tiene origen."""
+        k, block = self.current_source(), self.textCursor().block()
+        lines = dict(self.origins.get(self.document(), ()))
+        order = [j for j, _ in self.origins.get(self.document(), ())]
+        if k is None or source_of(block) != k or k not in order:
+            return [k] if k is not None else []
+        present, other = set(), self.document().firstBlock()
+        while other.isValid():
+            present.add(source_of(other))
+            other = other.next()
+        here, found = block.text(), [k]
+        for j in order[order.index(k) + 1:]:
+            if j in present:
+                break
+            start = convert.TAGS.sub("", lines[j]).removeprefix(convert.CENTER).strip()[:25]
+            if start and start in here:
+                found.append(j)
+        return found
 
     def current_source(self):
         """Bloque del libro del párrafo del cursor o, en uno nuevo sin origen, el del anterior que lo tenga."""

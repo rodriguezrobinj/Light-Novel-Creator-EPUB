@@ -5134,7 +5134,7 @@ class TextEditor:
                           _button("Cancelar", self.cancel), margins=(12, 8, 12, 0))
         column.addLayout(status_row)
         self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
-        self.drawn = None  # (bloque, PDF) del dibujo actual del panel
+        self.drawn = None  # source_key() del dibujo actual del panel
         self.pending = {}  # trabajo diferido: nombre -> temporizador
         self.set_text_zoom(100)
         self.open_section(start, end, int(item))
@@ -6348,14 +6348,23 @@ class TextEditor:
         k = self.sheet.current_source()
         return k if k is not None and k < len(self.app.book.blocks) else int(self.item)
 
+    def source_key(self):
+        """(bloque del cursor, bloques unidos a su párrafo en la misma página, PDF): lo que dibuja el panel. Los
+        párrafos unidos en la hoja se recuadran todos, no solo el primero."""
+        k, blocks = self.source_block(), self.app.book.blocks
+        joined = [j for j in self.sheet.current_sources()[1:] if j < len(blocks) and blocks[j].page == blocks[k].page]
+        return k, joined, id(self.app.pdf_doc)
+
     def draw_source(self):
         """Panel: la ilustración del bloque del cursor, o su página del PDF con el párrafo recuadrado."""
-        k = self.source_block()
-        block = self.app.book.blocks[k]
-        if (k, id(self.app.pdf_doc)) == self.drawn:  # mismo bloque: la página ya está dibujada
+        key = self.source_key()
+        k, joined = key[:2]
+        blocks = self.app.book.blocks
+        block = blocks[k]
+        if key == self.drawn:  # mismo párrafo: la página ya está dibujada
             self.update_status()
             return
-        self.drawn = (k, id(self.app.pdf_doc))
+        self.drawn = key
         if block.kind == "image" and block.image:
             pix = pymupdf.Pixmap(block.image)
             scale = min(self.panel_width() * self.pdf_zoom / pix.width, 1.5)
@@ -6373,7 +6382,12 @@ class TextEditor:
             self.page_label.setText("")
         else:
             page = self.app.pdf_doc[block.page - 1]
-            self.box = pymupdf.Rect(block.rect) if block.rect else self.find_box(page, block)
+            boxes = [pymupdf.Rect(b.rect) if b.rect else self.find_box(page, b)
+                     for b in [block] + [blocks[j] for j in joined]]
+            boxes = [box for box in boxes if box]
+            self.box = boxes[0] if boxes else None
+            for box in boxes[1:]:
+                self.box |= box
             self.show_page(block.page - 1)
         self.update_status()
 
@@ -6419,7 +6433,7 @@ class TextEditor:
             self.open_section(*bounds, focus=k)
         else:
             self.sheet.goto_source(k)
-        self.drawn = (self.source_block(), id(self.app.pdf_doc))  # la página ya está dibujada
+        self.drawn = self.source_key()  # la página ya está dibujada
         self.sheet.ensureCursorVisible()
 
     @staticmethod

@@ -3301,6 +3301,38 @@ def test_window_editor_split_back_keeps_paragraph_source():
     assert undone == before, undone
 
 
+def test_window_editor_joined_paragraphs_box_both():
+    """Dos párrafos unidos en el editor: la vista del PDF recuadra los dos originales, no solo el primero. Un
+    párrafo borrado no entra en el recuadro del anterior."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"),
+                                      B("p", 1, "Primer párrafo.", rect=(72, 100, 300, 120)),
+                                      B("p", 1, "Segundo párrafo.", rect=(80, 130, 320, 150)),
+                                      B("p", 1, "Tercero.", rect=(72, 160, 200, 180)),
+                                      B("p", 1, "Cuarto.", rect=(72, 190, 200, 210))], [0])
+    sheet = editor.sheet
+    sheet.setTextCursor(QTextCursor(sheet.document().findBlockByNumber(2)))
+    QTest.keyClick(sheet, Qt.Key.Key_Backspace)  # «Segundo» se une a «Primer»
+    root.update()
+    editor.draw_source()
+    joined = tuple(editor.box) if editor.box else None
+    cursor = QTextCursor(sheet.document().findBlockByNumber(2))  # «Tercero»: se borra entero
+    cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+    cursor.removeSelectedText()
+    sheet.setTextCursor(QTextCursor(sheet.document().findBlockByNumber(1)))
+    root.update()
+    editor.draw_source()
+    after_delete = tuple(editor.box) if editor.box else None
+    editor.win.done(0)
+    window.close()
+    assert joined == (72, 100, 320, 150), joined
+    assert after_delete == (72, 100, 320, 150), after_delete
+
+
 def test_text_editor_marks_issues_and_changes():
     """Los avisos del informe se marcan en su párrafo; F8 abre su barra y «Arreglar» une el párrafo partido en
     la hoja; lo cambiado se marca, «Volver al original» lo devuelve y Ctrl+Z deshace el arreglo."""
