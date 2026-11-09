@@ -4452,11 +4452,12 @@ class App:
         scope.addItem("Todo el libro", None)
         for n, (_, _, title) in enumerate(sections):
             scope.addItem(title, n)
-        scope.setMinimumContentsLength(26)
+        scope.setMinimumContentsLength(30)
         scope.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         model, base, api_key = QLineEdit(), QLineEdit(), QLineEdit()
         api_key.setEchoMode(QLineEdit.EchoMode.Password)
         base.setPlaceholderText("http://localhost:11434/v1")
+        base.setMinimumWidth(260)
         model_label, base_label, key_label = QLabel("Modelo:"), QLabel("URL:"), QLabel("Clave:")
         glossary_btn = _button("Glosario de traducción…", lambda: edit_glossary())
         column.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, QLabel("Motor:"), engine, 1, QLabel("Traducir:"),
@@ -4470,6 +4471,7 @@ class App:
         table = qtk.RowList(("orig", "trans", "state"), {"orig": "Original", "trans": "Traducción", "state": "Estado"},
                             {"trans": 400, "state": 90}, stretch="orig")
         table.header().setSectionResizeMode(1, table.header().ResizeMode.Stretch)  # las dos columnas de texto, a medias
+        table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignLeft)
         table.setSelectionMode(table.SelectionMode.ExtendedSelection)  # varios con Ctrl o Mayús: «Retraducir selección»
         panes.addWidget(table)
         bottom = QWidget()
@@ -4492,8 +4494,9 @@ class App:
         work = {"thread": None, "stop": None, "queue": None, "shown": None, "again": set(), "engine": "", "count": 0,
                 "total": 0}
         rows = {}  # fila (índice del bloque) -> (clave, prefijo, texto original)
+        index = {}  # clave -> sus filas: un lote no recorre la lista entera (miles de párrafos)
         hints = {"google": "Gratis y sin cuenta, frase a frase: los diálogos salen más literales. Si Google corta por "
-                           "exceso de peticiones, la traducción espera y reintenta.",
+                           "exceso de peticiones, la traducción espera y lo vuelve a intentar.",
                  "deepl": "Más natural que Google, frase a frase. La clave gratuita (acaba en «:fx») trae 500.000 "
                           "caracteres al mes. No usa el glosario.",
                  "openai": "La IA traduce por lotes de hasta 30 párrafos viendo los anteriores y el glosario: diálogos "
@@ -4543,14 +4546,17 @@ class App:
             work["shown"] = None
             table.delete(*table.get_children())
             rows.clear()
+            index.clear()
             texts = applied()
             for start, end, _ in sections if scope.currentData() is None else [sections[scope.currentData()]]:
                 for k, prefix, text in translate.units(self.book, start, end):
                     code = translate.key(text)
                     rows[str(k)] = code, prefix, text
+                    index.setdefault(code, []).append(str(k))
                     table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER) + text,
                                                                  done.get(code, {}).get("text", ""),
                                                                  state_of(code, text, texts)))
+                    table.rows[str(k)].setTextAlignment(1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             pick()
             count()
 
@@ -4563,11 +4569,10 @@ class App:
 
         def refresh(keys):
             texts = applied()
-            for iid in table.get_children():
-                k, _, text = rows[iid]
-                if k in keys:
+            for k in keys:
+                for iid in index.get(k, ()):
                     table.set(iid, "trans", done.get(k, {}).get("text", ""))
-                    table.set(iid, "state", state_of(k, text, texts))
+                    table.set(iid, "state", state_of(k, rows[iid][2], texts))
                     if iid == work["shown"]:
                         translation_box.setPlainText(done.get(k, {}).get("text", ""))
 
@@ -4637,38 +4642,44 @@ class App:
             before = [rows[i] for i in order[:order.index(ids[0])]]
             job = {"engine": name, "src": src.currentData(), "dst": dst.currentData(), "key": api_key.text().strip(),
                    "model": model.text().strip(), "base": base.text().strip() if info.get("custom") else "",
-                   "glossary": list(self.tr_glossary), "items": [(rows[i][0], rows[i][2]) for i in ids],
+                   "glossary": list(self.tr_glossary),
+                   "items": list(dict.fromkeys((rows[i][0], rows[i][2]) for i in ids)),  # «—¿Eh?» repetido, una vez
                    "context": [(t, done[k]["text"]) for k, _, t in before if k in done][-translate.CONTEXT:]}
-            work.update(stop=threading.Event(), queue=queue.Queue(), count=0, total=len(ids),
+            work.update(stop=threading.Event(), queue=queue.Queue(), count=0, total=len(job["items"]),
                         again={k for k, _ in job["items"]} if again else set())
             work["thread"] = threading.Thread(target=_translate_thread, args=(job, work["queue"], work["stop"]),
                                               daemon=True)
             work["thread"].start()
             busy(True)
-            status.setText(f"Traduciendo con {name}… 0 de {len(ids)} párrafos")
+            status.setText(f"Traduciendo con {name}… 0 de {len(job['items'])} párrafos")
             qtk.after(200, poll)
 
         def poll():
             if not shiboken6.isValid(win):
                 return
+            events, arrived = [], {}
             while True:
                 try:
-                    event = work["queue"].get_nowait()
+                    events.append(work["queue"].get_nowait())
                 except queue.Empty:
                     break
+            for event in events:
                 if event[0] == "done":
-                    for k, text in event[1].items():
-                        if not (done.get(k, {}).get("hand") and k not in work["again"]):  # lo corregido mientras tanto
-                            done[k] = {"text": text, "hand": False}
-                    work["count"] += len(event[1])
-                    refresh(set(event[1]))
-                    save()
-                    status.setText(f"Traduciendo… {work['count']} de {work['total']} párrafos")
-                elif event[0] == "error":
+                    arrived.update(event[1])
+            if arrived:  # todos los lotes llegados, de una vez: con Google llegan muchos y cada guardado escribe todo
+                for k, text in arrived.items():
+                    if not (done.get(k, {}).get("hand") and k not in work["again"]):  # lo corregido mientras tanto
+                        done[k] = {"text": text, "hand": False}
+                work["count"] += len(arrived)
+                refresh(set(arrived))
+                save()
+                status.setText(f"Traduciendo… {work['count']} de {work['total']} párrafos")
+            for event in events:
+                if event[0] == "error":
                     messagebox.showerror("Traducir", event[1], parent=win)
                 elif event[0] == "log":
                     _log(event[1])
-                else:
+                elif event[0] == "end":
                     work["thread"] = None
                     busy(False)
                     return
