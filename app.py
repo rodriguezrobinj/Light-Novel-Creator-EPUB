@@ -33,7 +33,7 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QProcess, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QProcess, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPixmap,
                            QShortcut, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -263,6 +263,30 @@ REGEX_ERRORS = (("missing )", "falta cerrar un paréntesis"), ("unbalanced paren
                 ("unterminated character set", "falta cerrar un «[»"), ("nothing to repeat", "«*», «+» o «?» sin nada "
                  "delante"), ("multiple repeat", "dos repeticiones seguidas"), ("bad escape", "barra invertida no "
                  "válida"), ("bad character range", "rango de letras al revés"), ("unknown extension", "«(?» no válido"))
+
+
+IMAGE_TYPES = [("Imagen", "*.jpg *.jpeg *.png *.webp")]
+
+
+def _image_ext(data):
+    return "png" if data[:4] == b"\x89PNG" else "jpg"
+
+
+def _image_info(data):
+    """«1200×1700 px · 340 KB · JPEG» de una imagen."""
+    image = QImage.fromData(data)
+    return f"{image.width()}×{image.height()} px · {max(1, round(len(data) / 1024))} KB · {_image_ext(data).upper()}"
+
+
+def _store_image(path):
+    """Copia la imagen elegida junto a las preferencias y devuelve esa ruta: la revisión la guarda, y la del usuario
+    (una carpeta de exportación) puede borrarse; entonces, al reabrir, el cambio se perdía."""
+    data = Path(path).read_bytes()
+    dest = SETTINGS.parent / "ilustraciones" / (hashlib.sha1(data).hexdigest()[:16] + Path(path).suffix.lower())
+    if not dest.is_file():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    return str(dest)
 
 
 def _thumb_path(path):
@@ -1352,7 +1376,8 @@ class App:
         self.book_actions = [tools.addAction(text, action) for text, action in (
             ("Buscar en el libro…  (Ctrl+F)", self.find), ("Informe de calidad…", self.quality),
             ("Ortografía…", self.spelling), ("Añadir página…", self.add_page),
-            ("Página de personajes…", self.character_page), ("Cambiar ilustración…", self.change_image),
+            ("Página de personajes…", self.character_page), ("Ilustraciones…", self.images_dialog),
+            ("Cambiar ilustración…", self.change_image),
             ("Describir ilustración…", self.describe_image), ("Versiones…", self.versions))]
         self.book_actions.append(tools.addSeparator())
         tools.addAction("Panel de serie…", self.series_panel)
@@ -3130,26 +3155,228 @@ class App:
         if not self.book or not selected or not self.is_image(selected[0]):
             messagebox.showinfo("Cambiar ilustración", "Elige primero una ilustración en la lista.")
             return
-        path = filedialog.askopenfilename(filetypes=[("Imagen", "*.jpg *.jpeg *.png *.webp")])
+        self.replace_image(int(selected[0]))
+
+    def replace_image(self, k, parent=None):
+        """Elige un archivo para la ilustración del bloque k y, tras ver el antes y el después, la cambia."""
+        path = filedialog.askopenfilename(filetypes=IMAGE_TYPES, parent=parent)
         if not path:
-            return
+            return False
         try:
             data = convert.load_cover(path)
         except ValueError as e:
-            messagebox.showerror("Error", str(e))
-            return
-        item, rows = selected[0], self.rows()
+            messagebox.showerror("Error", str(e), parent=parent)
+            return False
+        if self.confirm_image(k, data) != "replace":
+            return False
+        self.replace_images([(k, data, _store_image(path))])
+        self.status.setText(f"Ilustración cambiada por {Path(path).name} · Ctrl+Z para deshacer")
+        return True
+
+    def replace_images(self, changes):
+        """Cambia ilustraciones [(bloque, imagen, archivo guardado)] en un solo paso de deshacer. Se apuntan en la
+        revisión como ["image", bloque, archivo]."""
+        rows = self.rows()
+        item = self.tree.selection()[0] if self.tree.selection() else None
         self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})
-        _swap_image(self.book, int(item), data)
-        self.edits.append(["image", int(item), path])
-        if rows[item][0] in (SPLIT, ROTATED) and not convert.is_wide(data):  # si no, el EPUB la partiría en dos
-            rows[item] = [IMG] + rows[item][1:]
+        for k, data, path in changes:
+            _swap_image(self.book, k, data)
+            self.edits.append(["image", k, path])
+            if rows[str(k)][0] in (SPLIT, ROTATED) and not convert.is_wide(data):  # si no, el EPUB la partiría
+                rows[str(k)] = [IMG] + rows[str(k)][1:]
         self.fill_tree(rows)
-        self.tree.selection_set(item)
-        self.tree.see(item)
+        if item and self.tree.exists(item):
+            self.tree.selection_set(item)
+            self.tree.see(item)
         self.update_preview()
-        self.status.setText(f"Ilustración cambiada por {Path(path).name} · Ctrl+Z para deshacer")
+
+    def image_blocks(self):
+        return [k for k, b in enumerate(self.book.blocks) if b.kind == "image" and b.image]
+
+    def image_name(self, n, k):
+        """Nombre del archivo exportado de la ilustración número n (desde 1): «Reemplazar desde carpeta» lo busca."""
+        return f"ilustracion-{n:02d}-pag-{self.book.blocks[k].page:03d}.{_image_ext(self.book.blocks[k].image)}"
+
+    def image_title(self, n, k):
+        """«Ilustración 3 · pág. 12 · Capítulo 2: …», y «(descartada)» si no va al EPUB."""
+        start = self.section_bounds(k)[0]
+        chapter = (self.tree.set(str(start), "title") if start in self.section_heads() and self.tree.exists(str(start))
+                   else "Inicio del libro")
+        dropped = self.tree.exists(str(k)) and self.tree.set(str(k), "inc") == DROPPED
+        return f"Ilustración {n} · pág. {self.book.blocks[k].page} · {chapter}" + (" (descartada)" if dropped else "")
+
+    def confirm_image(self, k, new, batch=False):
+        """Antes y después de cambiar la ilustración del bloque k: "replace", "skip" (solo en lote) o None si se
+        cancela. Nada cambia hasta pulsar Reemplazar."""
+        n = self.image_blocks().index(k) + 1
+        win, column = self.dialog("Reemplazar ilustración", modal=True)
+        column.addWidget(_label(self.image_title(n, k), "title"))
+        sides = []
+        for caption, data in (("Antes", self.book.blocks[k].image), ("Después", new)):
+            picture = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            picture.setPixmap(pixmap.scaled(380, 470, Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation))
+            picture.setMinimumSize(380, 470)
+            side = QVBoxLayout()
+            side.addWidget(_label(caption, "title"), 0, Qt.AlignmentFlag.AlignHCenter)
+            side.addWidget(picture, 1)
+            side.addWidget(_label(_image_info(data), "muted"), 0, Qt.AlignmentFlag.AlignHCenter)
+            sides.append(side)
+        column.addLayout(_row(*sides, spacing=16))
+        answer = {"value": None}
+
+        def choose(value):
+            answer["value"] = value
+            win.accept()
+
+        buttons = [1, _button("Cancelar", win.reject)]
+        if batch:
+            buttons.append(_button("Saltar esta", lambda: choose("skip")))
+        buttons.append(_button("Reemplazar", lambda: choose("replace"), "primary"))
+        column.addLayout(_row(*buttons))
+        self.image_compare = win
+        win.exec()
+        return answer["value"]
+
+    def export_images(self, ks, folder):
+        """Guarda las ilustraciones ks en folder tal como salieron del PDF (sin reducir). Devuelve cuántas."""
+        order = self.image_blocks()
+        folder = Path(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        for k in ks:
+            (folder / self.image_name(order.index(k) + 1, k)).write_bytes(self.book.blocks[k].image)
+        return len(ks)
+
+    def replace_from_folder(self, folder, parent=None):
+        """Empareja los archivos de folder con las ilustraciones por el nombre de la exportación (con cualquier
+        extensión de imagen) y, para cada uno que cambió, pregunta con el antes y el después. Lo aceptado se
+        aplica de una vez. Devuelve (reemplazadas, saltadas) o None si se canceló."""
+        files = {f.stem.lower(): f for f in Path(folder).iterdir()
+                 if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")}
+        changes, skipped, found = [], 0, 0
+        for n, k in enumerate(self.image_blocks(), 1):
+            match = files.get(Path(self.image_name(n, k)).stem)
+            if match is None or match.read_bytes() == self.book.blocks[k].image:  # igual que la exportada: sin cambio
+                continue
+            found += 1
+            try:
+                data = convert.load_cover(match)
+            except ValueError:
+                continue
+            answer = self.confirm_image(k, data, batch=True)
+            if answer is None:
+                return None
+            if answer == "replace":
+                changes.append((k, data, _store_image(match)))
+            else:
+                skipped += 1
+        if changes:
+            self.replace_images(changes)
+        return len(changes), skipped, found
+
+    def images_dialog(self):
+        """Herramientas → «Ilustraciones…»: todas las del libro con su miniatura, para exportarlas (una o todas) y
+        reemplazarlas (una, o las de una carpeta con los nombres de la exportación) viendo antes y después."""
+        if not self.book:
+            return
+        order = self.image_blocks()
+        if not order:
+            messagebox.showinfo("Ilustraciones", "Este libro no tiene ilustraciones.")
+            return
+        win, column = self.dialog("Ilustraciones")
+        win.resize(980, 600)
+        listing = QListWidget()
+        listing.setIconSize(QSize(48, 68))
+        listing.setMinimumWidth(420)
+        preview = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        preview.setMinimumSize(360, 440)
+        info = _label("", "muted")
+        info.setWordWrap(True)
+        right = QVBoxLayout()
+        right.addWidget(preview, 1)
+        right.addWidget(info)
+        body = _row(listing, right, spacing=16)
+        body.setStretch(1, 1)
+        column.addLayout(body, 1)
+        note = _label("", "muted")
+
+        def fill(row=0):
+            listing.clear()
+            for n, k in enumerate(order, 1):
+                pixmap = QPixmap()
+                pixmap.loadFromData(self.book.blocks[k].image)
+                item = QListWidgetItem(QIcon(pixmap.scaled(48, 68, Qt.AspectRatioMode.KeepAspectRatio,
+                                                           Qt.TransformationMode.SmoothTransformation)),
+                                       f"{self.image_title(n, k)}\n{_image_info(self.book.blocks[k].image)}")
+                item.setData(Qt.ItemDataRole.UserRole, k)
+                listing.addItem(item)
+            listing.setCurrentRow(min(row, listing.count() - 1))
+
+        def show(row):
+            if row < 0:
+                return
+            k = order[row]
+            pixmap = QPixmap()
+            pixmap.loadFromData(self.book.blocks[k].image)
+            preview.setPixmap(pixmap.scaled(360, 440, Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation))
+            info.setText(f"{self.image_title(row + 1, k)}\n{_image_info(self.book.blocks[k].image)} · "
+                         f"se exporta como {self.image_name(row + 1, k)}")
+
+        def folder_of_book():
+            return str(self.pdf.parent) if self.pdf else self.settings.get("folder")
+
+        def export_all():
+            folder = filedialog.askdirectory(initialdir=folder_of_book(), title="Carpeta para las ilustraciones",
+                                             parent=win)
+            if folder:
+                n = self.export_images(order, folder)
+                note.setText(f"{convert.counted(n, 'ilustración', 'ilustraciones')} exportadas en {folder}")
+
+        def export_one():
+            row = listing.currentRow()
+            name = self.image_name(row + 1, order[row])
+            path = filedialog.asksaveasfilename(defaultextension=Path(name).suffix, initialfile=name,
+                                                initialdir=folder_of_book(), filetypes=IMAGE_TYPES, parent=win)
+            if path:
+                Path(path).write_bytes(self.book.blocks[order[row]].image)
+                note.setText(f"Exportada en {path}")
+
+        def replace_one():
+            row = listing.currentRow()
+            if self.replace_image(order[row], win):
+                fill(row)
+                note.setText("Ilustración reemplazada · Ctrl+Z en la ventana principal para deshacer")
+
+        def replace_folder():
+            folder = filedialog.askdirectory(initialdir=folder_of_book(), title="Carpeta con las ilustraciones nuevas",
+                                             parent=win)
+            if not folder:
+                return
+            result = self.replace_from_folder(folder, win)
+            if result is None:
+                note.setText("Cancelado: no se cambió ninguna ilustración")
+            elif not result[2]:
+                note.setText("En esa carpeta no hay ilustraciones cambiadas con los nombres de la exportación "
+                             "(ilustracion-01-pag-005.jpg…)")
+            else:
+                fill(listing.currentRow())
+                note.setText(f"{convert.counted(result[0], 'ilustración reemplazada', 'ilustraciones reemplazadas')}"
+                             + (f" · {result[1]} saltadas" if result[1] else "")
+                             + (" · Ctrl+Z en la ventana principal para deshacer" if result[0] else ""))
+
+        listing.currentRowChanged.connect(show)
+        column.addWidget(note)
+        column.addLayout(_row(_button("Exportar todas…", export_all), _button("Exportar esta…", export_one), 1,
+                              _button("Reemplazar…", replace_one),
+                              _button("Reemplazar desde carpeta…", replace_folder), _button("Cerrar", win.close)))
+        fill()
+        win.show()
+        win.parts = {"list": listing, "note": note, "preview": preview}
+        self.images_window = win
 
     def describe_image(self):
         """Texto alternativo de la ilustración elegida: lo que dice un lector de pantalla en su lugar."""
