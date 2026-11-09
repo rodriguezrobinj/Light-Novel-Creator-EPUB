@@ -548,16 +548,26 @@ def _images(page, infos):
     return sorted(found.items(), key=lambda item: -item[1])
 
 
-def _ornaments(page, rows, infos):
+def _ornaments(page, rows, infos, before=()):
     """Posición vertical de los adornos que hacen de separador de escena (Kage, Nageki): imágenes
-    pequeñas, centradas, fuera de los márgenes, con texto encima y debajo y solas en su altura."""
+    pequeñas, centradas, con texto debajo y solas en su altura; con texto encima, fuera de los márgenes. before:
+    los bbox de las imágenes de la página anterior."""
     width, height = page.rect.width, page.rect.height
     found = []
     for info in infos:
         x0, y0, x1, y1 = info["bbox"]
+        below = [r for r in rows if r.y > y1]
+        # The World's Strongest Witch 86 y 144, Nageki, Megami, Kage: la escena cambia con la página y el adorno la
+        # abre, sin texto encima. No lo es: lo que sigue a un título (decoración del capítulo), la misma imagen en
+        # el mismo sitio de la página anterior (cabecera), una imagen ancha (título hecho imagen de Mitsuha, logo
+        # de J-Novel: los adornos son de ancho/alto ≤ 1,22) ni otra con una imagen entre ella y el texto
+        first = min(below, key=lambda r: r.y) if below else None
+        top = (first and not first.heading and not any(r.y < y0 for r in rows) and x1 - x0 <= 1.5 * (y1 - y0)
+               and not any(other is not info and y1 - 1 <= other["bbox"][1] < first.y for other in infos)
+               and not any(all(abs(a - b) < 1 for a, b in zip(info["bbox"], box)) for box in before))
         if (x1 - x0 < 0.3 * width and y1 - y0 < 0.1 * height and abs((x0 + x1) / 2 - width / 2) < 0.15 * width
-                and BAND * height < (y0 + y1) / 2 < (1 - BAND) * height
-                and any(r.y < y0 for r in rows) and any(r.y > y1 for r in rows)
+                and (top or BAND * height < (y0 + y1) / 2 < (1 - BAND) * height and any(r.y < y0 for r in rows))
+                and below
                 # The World's Strongest Witch: la flecha de «Lv. 2 → Lv. 3» y el ♡ o ♪ al final de una línea corta son
                 # imágenes en la línea (una línea base cruza su altura); la línea que empieza justo debajo de un adorno
                 # (Kage 5, pág. 99) no cuenta
@@ -2203,7 +2213,7 @@ def analyze(pdf_path, progress=None):
         toc = False  # la página anterior era el índice
         contents = []  # títulos del índice impreso
         repeated = ""  # título que la página anterior ya emitió junto a su ilustración
-        digests = {}
+        digests, last_boxes = {}, []
         for i, (page, rows) in enumerate(zip(doc, pages)):
             num = i + 1
             if progress:
@@ -2211,6 +2221,7 @@ def analyze(pdf_path, progress=None):
             pending, repeated = repeated, ""
             headings = [r for r in rows if r.heading]
             infos = _image_info(page, digests)
+            before, last_boxes = last_boxes, [info["bbox"] for info in infos]  # las de la anterior: cabeceras
             images = _images(page, infos)
             # ponytail: solo ilustraciones a página completa; las pequeñas dentro del texto se descartan
             covered = sum(len(r.text) for r in rows) < 200 and _image_coverage(page, infos) > 0.5
@@ -2258,7 +2269,7 @@ def analyze(pdf_path, progress=None):
             left = min((r.x0 for r in normal), default=0)
             right = max((r.x1 for r in normal), default=0)
             prev = None
-            ornaments = _ornaments(page, rows, infos)  # adornos-separador, de arriba abajo
+            ornaments = _ornaments(page, rows, infos, before)  # adornos-separador, de arriba abajo
             for r in rows:
                 while ornaments and ornaments[0][0] < r.y:  # el adorno queda por encima de esta línea
                     xref = ornaments.pop(0)[1]

@@ -499,6 +499,38 @@ def test_inline_image_in_a_text_line_is_not_a_scene_break():
     assert [b.kind for b in blocks if b.page == 2] == ["p", "break", "p"], [b.kind for b in blocks]
 
 
+def test_ornament_at_page_top_opens_a_scene():
+    """Un adorno arriba del todo, sin texto encima (la escena cambia con la página: The World's Strongest Witch
+    86 y 144), es un separador. Con un título debajo es la decoración del capítulo, y la misma imagen en el mismo
+    sitio de la página anterior es una cabecera; una imagen ancha es un título hecho imagen (Mitsuha), y lo que
+    tiene otra imagen debajo, su decoración: nada de eso."""
+    doc = pymupdf.open()
+    ornament = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 50, 50), False)
+    ornament.clear_with(40)
+    text = [(92, 150, line("Un parrafo cualquiera de la escena", 57), 11, "cour"), (72, 164, "fin uno.", 11, "cour"),
+            (92, 192, line("Otro parrafo de la misma escena", 57), 11, "cour"), (72, 206, "fin dos.", 11, "cour")]
+    top = pymupdf.Rect(288, 62, 307, 81)  # dentro del margen de arriba, por encima de todo el texto
+    add_page(doc, 1, [(72, 110, "Capitulo 1: Inicio", 20, "helv")] + text)
+    add_page(doc, 2, text)  # 2: adorno arriba y texto: separador
+    doc[1].insert_image(top, pixmap=ornament)
+    add_page(doc, 3, [(72, 110, "Capitulo 2: Otro", 20, "helv")] + text)  # 3: adorno sobre un título
+    doc[2].insert_image(top, pixmap=ornament)
+    add_page(doc, 4, text)  # 4 y 5: la misma imagen arriba en las dos, una cabecera
+    add_page(doc, 5, text)
+    doc[3].insert_image(top, pixmap=ornament)
+    doc[4].insert_image(top, pixmap=ornament)
+    # 6: título de capítulo hecho imagen, ancho (Mitsuha). 7: adorno pequeño sobre esa imagen
+    add_page(doc, 6, text)
+    doc[5].insert_image(pymupdf.Rect(230, 92, 368, 132), pixmap=ornament, keep_proportion=False)
+    add_page(doc, 7, text)
+    doc[6].insert_image(pymupdf.Rect(290, 50, 305, 59), pixmap=ornament, keep_proportion=False)
+    doc[6].insert_image(pymupdf.Rect(230, 92, 368, 132), pixmap=ornament, keep_proportion=False)
+    path = TMP / "adorno-arriba.pdf"
+    doc.save(path)
+    breaks = [b.page for b in convert.analyze(path).blocks if b.kind == "break"]
+    assert breaks == [2], breaks
+
+
 def test_image_info_matches_pymupdf_xrefs():
     """_image_info guarda las huellas para todo el PDF: da los mismos xref que get_image_info(xrefs=True)."""
     with pymupdf.open(make_ornament_pdf()) as doc:
