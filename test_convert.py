@@ -3710,7 +3710,7 @@ def test_window_remembers_settings_and_recent_pdfs():
     window = app.App(app.Window())
     got = (window.style_var.get(), window.gray_var.get(), window.recent_menu.actions()[0].text(),
            window.settings["folder"], window.theme_var.get(), window.dark)
-    recent = window.recent_list.item(0).text()  # pantalla vacía: el tomo y su estado
+    recent = card_text(window, 0)  # pantalla vacía: el tomo y su estado
     window.root.on_close = None
     window.close()
     import qtk
@@ -3718,7 +3718,7 @@ def test_window_remembers_settings_and_recent_pdfs():
     theme.apply(qtk.app(), "Claro")  # las demás pruebas, en claro
     assert loaded
     assert got == ("Moderno", True, "novela.pdf", str(pdf.parent.resolve()), "Oscuro", True), got
-    assert recent.startswith("novela") and ("Revisado" in recent or "EPUB" in recent), recent
+    assert "novela" in recent and ("Revisado" in recent or "EPUB" in recent), recent
 
 
 def test_window_epub_preview_continues_into_next_section():
@@ -5577,6 +5577,53 @@ def test_epub_sources_and_output_name():
     assert app._out(folder / "A.pdf") == folder / "A" and app._out(folder / "B.epub") == folder / "B (LNC)"
     assert app._has_epub(folder / "B.epub") and app._has_epub(folder / "A.pdf") and not app._has_epub(folder / "D.EPUB")
 
+
+
+def card_text(window, n):
+    """Texto de la tarjeta n de recientes en la pantalla de inicio (o del aviso «Aún no has abierto…»)."""
+    from PySide6.QtWidgets import QLabel
+
+    item = window.recent_list.item(n)
+    card = window.recent_list.itemWidget(item)
+    if card is None:
+        return item.text()
+    return " ".join(label.text() for label in card.findChildren(QLabel))
+
+
+def test_window_start_screen_shows_only_what_needs_no_book():
+    """Sin libro abierto: ni las opciones del EPUB, ni Generar, Calidad, Buscar, «Ningún archivo» o el botón
+    Recientes; las herramientas del libro, en gris. Con el libro, todo vuelve. Los recientes son tarjetas con PDF o
+    EPUB, estado, portada guardada al abrir y «Quitar de recientes»."""
+    import app
+
+    root, window = visible_window()
+    hidden = [w.isVisible() for w in (window.bottom, window.options_row, window.gen_btn, window.quality_btn,
+                                      window.find_btn, window.recent_btn, window.file_label)]
+    tools_off = [a.isEnabled() for a in window.book_actions]
+    pdf = TMP / "inicio.pdf"  # copia propia: otras pruebas dejan revisión y EPUB junto a novela.pdf
+    pdf.write_bytes(make_novel().read_bytes())
+    gone = TMP / "perdido.epub"
+    window.settings["recent"] = [str(pdf), str(gone)]
+    window.fill_recent()
+    cards = [card_text(window, 0), card_text(window, 1)]
+    window.pdf = pdf
+    window.show_book(convert.Book("Libro", "", jpeg(300, 420), [convert.Block("heading", 1, "Capítulo 1"),
+                                                                 convert.Block("p", 1, "Texto.")], [0]))
+    shown = [w.isVisible() for w in (window.bottom, window.options_row, window.gen_btn, window.quality_btn,
+                                     window.find_btn, window.recent_btn, window.file_label)]
+    tools_on = [a.isEnabled() for a in window.book_actions]
+    thumb = app._thumb_path(pdf).is_file()
+    card = window.recent_card(str(pdf))
+    with_cover = any(not label.pixmap().isNull() for label in card.findChildren(app.QLabel))
+    window.forget_recent(str(gone))
+    left = window.settings["recent"], window.recent_list.count()
+    window.close()
+    assert hidden == [False] * 7 and not any(tools_off), (hidden, tools_off)
+    assert shown == [True] * 7 and all(tools_on), (shown, tools_on)
+    assert "inicio" in cards[0] and "PDF" in cards[0] and "Sin revisar" in cards[0], cards[0]
+    assert "perdido" in cards[1] and "EPUB" in cards[1] and "No se encuentra" in cards[1], cards[1]
+    assert thumb and with_cover, (thumb, with_cover)
+    assert left == ([str(pdf)], 1), left
 
 def test_window_empty_screen_and_dropped_pdf():
     """Sin PDF: la pantalla vacía con los recientes. Soltar archivos sobre la ventana abre el primer .pdf y
