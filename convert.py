@@ -9,6 +9,7 @@ import html
 import io
 import os
 import re
+import tempfile
 import unicodedata
 import uuid
 import xml.etree.ElementTree as ET
@@ -2815,6 +2816,35 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
 
 XHTML = "{http://www.w3.org/1999/xhtml}"
 PART_TITLE = re.compile(r"(parte|volumen|libro|part|book)\b", re.I)  # portadillas: sin texto a propósito
+
+# Tamaños del PDF: (ancho, alto en puntos, letra). A5 para leer o imprimir; 6″ para lectores que leen mal el EPUB
+PDF_SIZES = {"A5": (420, 595, 10.5), "e-reader 6″": (300, 400, 9), "A4": (595, 842, 12)}
+
+
+def write_pdf(book, chapters, out_path, size="A5", **options):
+    """PDF maquetado: el mismo libro que write_epub (con sus opciones), compuesto por MuPDF al tamaño de
+    PDF_SIZES, con el índice como marcadores, título y autor en las propiedades y número de página al pie
+    (no en la portada ni en las ilustraciones a página completa). Se escribe en out_path + ".tmp" y se renombra."""
+    width, height, fontsize = PDF_SIZES[size]
+    with tempfile.TemporaryDirectory(prefix="lnepub-pdf-") as tmp:
+        epub = Path(tmp) / "libro.epub"
+        write_epub(book, chapters, epub, **{**options, "kepub": False, "epub2": False})
+        with pymupdf.open(epub) as source:
+            source.layout(width=width, height=height, fontsize=fontsize)
+            toc = source.get_toc()
+            pdf = pymupdf.open("pdf", source.convert_to_pdf())
+    pdf.set_toc(toc)
+    pdf.set_metadata({"title": book.title, "author": book.author, "subject": book.series,
+                      "creator": "Light Novel Creator", "producer": "Light Novel Creator"})
+    for n, page in enumerate(pdf):
+        if n == 0 or (not page.get_text().strip() and page.get_images()):  # portada, ilustración a página completa
+            continue
+        page.insert_textbox(pymupdf.Rect(0, height - 26, width, height - 10), str(n + 1), fontsize=fontsize * 0.75,
+                            fontname="tiro", color=(0.45, 0.45, 0.45), align=pymupdf.TEXT_ALIGN_CENTER)
+    partial = f"{out_path}.tmp"
+    pdf.save(partial, garbage=3, deflate=True)
+    pdf.close()
+    os.replace(partial, out_path)
 
 
 def check_epub(path):

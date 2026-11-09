@@ -468,6 +468,12 @@ def _write_options(state, breaks=()):
             "alts": {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}}
 
 
+def _write_pdf(book, chapters, out, removed, options, size):
+    """convert.write_pdf en el proceso de trabajo (maquetar un libro largo tarda unos segundos)."""
+    convert.write_pdf(book, chapters, out, size, removed=removed, **options)
+    return []
+
+
 def _write_checked(book, chapters, out, removed, options):
     """write_epub y, en el mismo proceso de trabajo, check_epub: devuelve los problemas del EPUB."""
     convert.write_epub(book, chapters, out, removed=removed, **options)
@@ -1532,7 +1538,13 @@ class App:
         self.quality_btn = _button("Calidad", self.quality)
         self.quality_btn.setEnabled(False)
         self.gen_btn = _button("Generar EPUB…", self.generate, "primary")
+        pdf_menu = QMenu(root)
+        for size, label in (("A5", "A5, para leer o imprimir"), ("e-reader 6″", "e-reader 6″"), ("A4", "A4")):
+            pdf_menu.addAction(f"Generar PDF ({label})…", lambda size=size: self.generate_pdf(size))
+        self.pdf_btn = _menu_button("PDF", pdf_menu)
+        self.pdf_btn.setToolTip("El libro maquetado en PDF, con las mismas opciones que el EPUB")
         self.gen_btn.setEnabled(False)
+        self.pdf_btn.setEnabled(False)
         self.options_row = QWidget()  # opciones del EPUB y «Generar»: solo con un libro abierto (update_chrome)
         rows.addWidget(self.options_row)
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
@@ -1542,7 +1554,7 @@ class App:
                             _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
                                                       changed=self.update_preview),
                             _label("Letra:"), self.font_box,
-                            _menu_button("Opciones", extras), 1, self.gen_btn))
+                            _menu_button("Opciones", extras), 1, self.pdf_btn, self.gen_btn))
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setFixedWidth(160)
@@ -1737,6 +1749,7 @@ class App:
         self.open_btn.setEnabled(False)
         self.batch_btn.setEnabled(False)
         self.gen_btn.setEnabled(False)
+        self.pdf_btn.setEnabled(False)
         self.done, self.busy = done, busy
         self.update_chrome()  # sin libro, la barra de abajo aparece para el progreso
         # Los datos van en un archivo: por la tubería del proceso nuevo, la ventana esperaba a que arrancara
@@ -1797,6 +1810,7 @@ class App:
         self.batch_btn.setEnabled(True)
         if self.book:
             self.gen_btn.setEnabled(True)
+            self.pdf_btn.setEnabled(True)
         if event[0] == "done":
             done(event[1])
         else:
@@ -2251,6 +2265,7 @@ class App:
         self.blank(self.epub_view, self.idle_text)
         self.start_thumbs()
         self.gen_btn.setEnabled(True)
+        self.pdf_btn.setEnabled(True)
         self.progress.setValue(0)
         items = self.tree.get_children()
         found = len(book.candidates)
@@ -2403,6 +2418,32 @@ class App:
         if not out:
             return
         out = _epub_name(out, self.kepub_var.get())
+        chapters, removed, breaks = self.prepare_output()
+        self.status.setText("Generando EPUB…")
+        if self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
+                    lambda problems: self.saved(out, problems)):
+            self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
+
+    def generate_pdf(self, size):
+        """«PDF ▾»: el libro maquetado en PDF al tamaño elegido (convert.PDF_SIZES), con las opciones del EPUB."""
+        if not self.book:
+            return
+        out = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")],
+                                           initialdir=self.pdf.parent,
+                                           initialfile=f"{_out(self.pdf).name} ({size}).pdf")
+        if not out:
+            return
+        if Path(out).resolve() == Path(self.pdf).resolve():  # mismo nombre que el original: lo pisaría
+            messagebox.showerror("Generar PDF", "Ese es el PDF original: elige otro nombre.")
+            return
+        chapters, removed, breaks = self.prepare_output()
+        self.status.setText(f"Generando PDF {size}…")
+        if self.run(_write_pdf, (self.book, chapters, out, removed, self.write_options(breaks), size),
+                    lambda problems: self.saved(out, problems), busy="Maquetando el PDF…"):
+            self.partial = f"{out}.tmp"
+
+    def prepare_output(self):
+        """Los datos de la ventana al libro y la revisión guardada antes de generar: (capítulos, quitados, separadores)."""
         for name in BOOK_FIELDS:
             if hasattr(self, f"{name}_var"):
                 setattr(self.book, name, getattr(self, f"{name}_var").get().strip())
@@ -2411,11 +2452,7 @@ class App:
         if self.cover_choice and self.cover_choice[0] == "text":  # con el título y la serie de ahora
             self.book.cover = convert.text_cover(self.book)
         self.save_review()
-        chapters, removed, breaks = _plan(self.book, self.rows())
-        self.status.setText("Generando EPUB…")
-        if self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
-                    lambda problems: self.saved(out, problems)):
-            self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
+        return _plan(self.book, self.rows())
 
     def write_options(self, breaks=()):
         """Opciones de write_epub según la ventana (ver _write_options)."""
@@ -2427,7 +2464,8 @@ class App:
         self.status.setText(f"Guardado: {Path(out).name}" + (" (con avisos)" if problems else ""))
         self.last_problems = list(problems)
         self.save_review()  # el panel de serie muestra los avisos del último EPUB
-        self.add_version(f"EPUB generado · {Path(out).name}", auto=True)  # lo publicado, para compararlo luego
+        kind = "PDF" if str(out).lower().endswith(".pdf") else "EPUB"
+        self.add_version(f"{kind} generado · {Path(out).name}", auto=True)  # lo publicado, para compararlo luego
         self.result_dialog(out, problems)
 
     def dialog(self, title, modal=False):
@@ -2445,10 +2483,11 @@ class App:
         """Tras generar: dónde quedó, cuánto pesa, qué avisos dio la revisión y, sin buscarlo, abrirlo, abrir
         su carpeta, copiarlo al lector o enviarlo al Kindle. Un solo diálogo (antes eran dos seguidos)."""
         problems = list(problems or ())
-        is_file, kindle = Path(out).is_file(), self.profile_var.get() == "Kindle"
-        win, column = self.dialog("EPUB guardado con avisos" if problems else "EPUB listo")
-        heading = _label("La revisión encontró avisos" if problems else "Revisado: sin problemas.",
-                         "warn" if problems else "title")
+        is_pdf = str(out).lower().endswith(".pdf")
+        is_file, kindle = Path(out).is_file(), self.profile_var.get() == "Kindle" and not is_pdf
+        win, column = self.dialog("PDF listo" if is_pdf else "EPUB guardado con avisos" if problems else "EPUB listo")
+        heading = _label("PDF maquetado." if is_pdf else "La revisión encontró avisos" if problems
+                         else "Revisado: sin problemas.", "warn" if problems else "title")
         column.addWidget(heading)
         text = str(out)
         if is_file:
@@ -2466,14 +2505,15 @@ class App:
             column.addWidget(found)
         buttons = []
         if is_file:
-            buttons.append(_button("Abrir EPUB", lambda: self.open_external(out, win), "primary"))
+            buttons.append(_button("Abrir PDF" if is_pdf else "Abrir EPUB", lambda: self.open_external(out, win),
+                                   "primary"))
         buttons.append(_button("Abrir carpeta", lambda: self.open_external(out, win, folder=True)))
         if is_file:
             buttons.append(_button("Enviar al móvil", lambda: self.send_to_phone(out)))
             if _calibre():
                 buttons.append(_button("Añadir a Calibre", lambda: self.add_to_calibre(out)))
             for root, label in _drives():
-                if _reader_kind(root) == "kindle":  # el Kindle no lee EPUB por USB: solo por Send to Kindle
+                if _reader_kind(root) == "kindle" and not is_pdf:  # el Kindle no lee EPUB por USB: Send to Kindle
                     kindle = True
                     column.addWidget(_label(f"{label} ({root[:2]}) es un Kindle: no lee EPUB por USB. "
                                             "Usa «Enviar a Kindle…».", "muted"))
@@ -2483,7 +2523,7 @@ class App:
                 buttons.append(_button("Enviar a Kindle…", lambda: self.send_to_kindle(out, win)))
         buttons.append(_button("Cerrar", win.close))
         column.addLayout(_row(*buttons, 1))
-        if is_file:  # en su propia fila: la de los botones ya llena 1093 px con un lector conectado
+        if is_file and not is_pdf:  # en su propia fila: la de los botones ya llena 1093 px con un lector conectado
             check = _button("Validar con EPUBCheck", lambda: self.validate_epub(out))
             check.setToolTip("El validador oficial de EPUB del W3C: lo que aceptan las tiendas y los lectores exigentes")
             column.addLayout(_row(check, 1))
