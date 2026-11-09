@@ -85,8 +85,9 @@ def key(text):
 
 
 def _split(line, kind):
-    """(prefijo, texto) de una línea de section_text: "# " de un título, "<center>" de un párrafo centrado."""
-    for prefix in ("# ",) if kind == "heading" else (convert.CENTER,):
+    """(prefijo, texto) de una línea de section_text: "# " de un título, "<center>" de un párrafo centrado,
+    "<marco>" de uno en recuadro. El prefijo no se traduce ni cuenta para la clave."""
+    for prefix in ("# ",) if kind == "heading" else (convert.CENTER, convert.FRAME):
         if line.startswith(prefix):
             return prefix, line[len(prefix):]
     return "", line

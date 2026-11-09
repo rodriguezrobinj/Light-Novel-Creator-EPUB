@@ -19,6 +19,9 @@ HEADING = _USER + 4   # párrafo: es un título ("# ")
 OBJECT = _USER + 5    # imagen: "Ilustración 12" / "Separador 7", la marca que vuelve a section_text
 LEVEL = _USER + 6     # título: tipo de su fila ("Capítulo", "Subtítulo"); al aceptar, la fila queda así
 CENTERED = _USER + 7  # párrafo centrado (carta, cartel): vuelve a section_text con <center> delante
+FRAMED = _USER + 8    # párrafo dentro de un recuadro (ventana de estado): vuelve con <marco> delante
+FRAME_PAD = 16        # píxeles entre el recuadro y su texto
+SUB = 18              # sangría de una línea sin viñeta en un recuadro con viñetas («HP: 10/10» bajo «■ Lorna»)
 MIME = "application/x-lnc-hoja"  # copiar y pegar dentro de la hoja conserva formato e ilustraciones
 MARKS = re.compile(r'(</?[ib]>|<a href="[^"]*">|</a>)')
 LINK = re.compile(r'<a href="([^"]*)">')
@@ -102,18 +105,54 @@ def _insert_object(cursor, kind, n, pictures, color):
     cursor.insertImage(f)
 
 
+def _strip(line):
+    """La línea sin su prefijo de section_text: "# ", "<center>" o "<marco>"."""
+    for prefix in ("# ", convert.CENTER, convert.FRAME):
+        if line.startswith(prefix):
+            return line[len(prefix):]
+    return line
+
+
+def frame_format(f, first=False, last=False, sub=False):
+    """Formato de un párrafo en recuadro: juntos, sin el espacio entre párrafos, y con sitio para el borde."""
+    f.setProperty(FRAMED, True)
+    f.setAlignment(Qt.AlignmentFlag.AlignLeft)
+    f.setLeftMargin(FRAME_PAD + (SUB if sub else 0))
+    f.setRightMargin(FRAME_PAD)
+    f.setTopMargin(FRAME_PAD if first else 0)
+    f.setBottomMargin(FRAME_PAD + SPACE if last else 0)
+    return f
+
+
+def _frame_runs(lines):
+    """{posición en lines: (primera de su recuadro, última, sangrada)} de las líneas con <marco>."""
+    out, run = {}, []
+    for i, (_, line) in enumerate(lines + [(None, "")]):
+        if line.startswith(convert.FRAME):
+            run.append(i)
+            continue
+        bulleted = any(lines[j][1][len(convert.FRAME):].lstrip()[:1] in convert.BULLETS for j in run)
+        for j in run:
+            out[j] = (j == run[0], j == run[-1],
+                      bulleted and lines[j][1][len(convert.FRAME):].lstrip()[:1] not in convert.BULLETS)
+        run = []
+    return out
+
+
 def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888888", levels=None):
     """Pone lines ([(bloque, línea de section_text)]) en el cursor. La primera línea de texto va dentro del
     párrafo del cursor (pegar una palabra no parte el párrafo); el resto, en párrafos nuevos. remember: carga
     del editor, cada párrafo recuerda su línea. raw: texto de fuera, sin leer marcas. levels: {bloque: tipo
     de su fila} de los títulos."""
+    frames = {} if raw else _frame_runs(list(lines))
     for i, (k, line) in enumerate(lines):
         bare = line.strip()
         token = None if raw else convert.TOKEN.fullmatch(bare)
         heading = not raw and line.startswith("# ")
         centered = not raw and line.startswith(convert.CENTER)
+        framed = i in frames
         scene = not raw and not token and bool(bare) and bool(convert.SCENE_BREAK.fullmatch(bare))
-        special = bool(token or heading or scene or centered)
+        special = bool(token or heading or scene or centered or framed)
         if i or (special and cursor.block().length() > 1):
             cursor.insertBlock(QTextBlockFormat(), _plain_format())
         if i or special or remember:
@@ -125,6 +164,8 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
                 f.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             if centered:
                 f.setProperty(CENTERED, True)
+            if framed:
+                frame_format(f, *frames[i])
             if heading:
                 f.setProperty(HEADING, True)
                 f.setTopMargin(SPACE * 2)
@@ -136,7 +177,7 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
         elif raw:
             cursor.insertText(line, _plain_format())
         else:
-            _insert_marked(cursor, line[2:] if heading else line[len(convert.CENTER):] if centered else line)
+            _insert_marked(cursor, line if raw else _strip(line))
         if remember:
             f = cursor.blockFormat()
             f.setProperty(ORIGINAL, line)
@@ -178,17 +219,16 @@ def _canonical(line):
     bare = line.strip()
     if convert.TOKEN.fullmatch(bare):
         return bare
-    heading = line.startswith("# ")
-    centered = not heading and line.startswith(convert.CENTER)
-    text = _marked(_runs(line[2:] if heading else line[len(convert.CENTER):] if centered else line)).strip()
-    return ("# " if heading else convert.CENTER if centered else "") + text if text else ""
+    text = _marked(_runs(_strip(line))).strip()
+    return line[:len(line) - len(_strip(line))] + text if text else ""
 
 
 def _lines(block):
     """Líneas de section_text de un párrafo de la hoja: su texto con marcas, y cada objeto en su línea."""
     f = block.blockFormat()
     heading = bool(f.property(HEADING))
-    prefix = "# " if heading else convert.CENTER if f.property(CENTERED) else ""
+    prefix = ("# " if heading else convert.CENTER if f.property(CENTERED) else convert.FRAME if f.property(FRAMED)
+              else "")
     out, runs = [], []
 
     def flush():
@@ -431,11 +471,13 @@ class Sheet(QTextEdit):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self.bars:
-            return
         painter = QPainter(self.viewport())
         layout, doc = self.document().documentLayout(), self.document()
         dx, dy = self.horizontalScrollBar().value(), self.verticalScrollBar().value()
+        self.paint_frames(painter, layout, doc, dx, dy, event.rect())
+        if not self.bars:
+            painter.end()
+            return
         x = doc.documentMargin() / 2 - 1.5 - dx
         for block in self.bars:
             if block.isValid() and block.document() is doc:
@@ -444,6 +486,37 @@ class Sheet(QTextEdit):
                 height = box.height() - block.blockFormat().topMargin() - block.blockFormat().bottomMargin()
                 painter.fillRect(QRectF(x, top, 3, max(height, 4)), self.bar_color)
         painter.end()
+
+    def paint_frames(self, painter, layout, doc, dx, dy, area):
+        """Doble borde alrededor de cada grupo de párrafos seguidos en recuadro, como en el libro. Se mide por el
+        texto de cada párrafo (su layout), no por blockBoundingRect, que no cuenta igual los márgenes."""
+        pen = QColor(self.palette().color(self.foregroundRole()))
+        pen.setAlpha(150)
+        painter.setPen(pen)
+        width = doc.textWidth() if doc.textWidth() > 0 else self.viewport().width()
+        margin, gap = doc.documentMargin(), FRAME_PAD / 2
+
+        def draw(top, bottom):
+            for inset in (0, 3):
+                painter.drawRect(QRectF(margin + 2 + inset - dx, top + inset - dy,
+                                        width - 2 * margin - 4 - 2 * inset, bottom - top - 2 * inset))
+
+        block, top, bottom = doc.firstBlock(), None, None
+        while block.isValid():
+            text = block.layout()
+            y = text.position().y()
+            if block.blockFormat().property(FRAMED):
+                if top is None:
+                    top = y - gap
+                bottom = y + text.boundingRect().height() + gap
+            elif top is not None:
+                draw(top, bottom)
+                top = None
+            if y - dy > area.bottom():  # lo de más abajo no se ve: el recuadro abierto sigue fuera de la vista
+                break
+            block = block.next()
+        if top is not None:
+            draw(top, bottom if not block.isValid() else max(bottom, area.bottom() + dy + 10))
 
     def set_zoom(self, percent):
         # En la hoja de estilo: la QSS de la ventana (9 pt para todo) pisaría un setFont o la fuente del documento
@@ -478,7 +551,7 @@ class Sheet(QTextEdit):
         for j in order[order.index(k) + 1:]:
             if j in present:
                 break
-            start = convert.TAGS.sub("", lines[j]).removeprefix(convert.CENTER).strip()[:25]
+            start = _strip(convert.TAGS.sub("", lines[j])).strip()[:25]
             if start and start in here:
                 found.append(j)
         return found
@@ -570,6 +643,11 @@ class Sheet(QTextEdit):
             f.setProperty(HEADING, True)
             f.setProperty(LEVEL, level)
             f.clearProperty(CENTERED)
+            if f.property(FRAMED):  # un título no va en recuadro
+                f.clearProperty(FRAMED)
+                f.setLeftMargin(0)
+                f.setRightMargin(0)
+                f.setBottomMargin(SPACE)
             f.setAlignment(Qt.AlignmentFlag.AlignLeft)
         else:
             f.clearProperty(HEADING)
@@ -599,6 +677,46 @@ class Sheet(QTextEdit):
 
     def is_centered(self):
         return bool(self.textCursor().blockFormat().property(CENTERED))
+
+    def toggle_frame(self):
+        """Mete en un recuadro los párrafos de la selección (ventana de estado, cartel) o los saca. Solo texto."""
+        cursor = self.textCursor()
+        doc = self.document()
+        first, last = doc.findBlock(cursor.selectionStart()), doc.findBlock(cursor.selectionEnd())
+        blocks, block = [], first
+        while block.isValid():
+            if _is_text(block):
+                blocks.append(block)
+            if block == last:
+                break
+            block = block.next()
+        if not blocks:
+            QApplication.beep()
+            return
+        on = not first.blockFormat().property(FRAMED)
+        edit = QTextCursor(doc)
+        edit.beginEditBlock()
+        for n, block in enumerate(blocks):
+            f = block.blockFormat()
+            if on:
+                f.clearProperty(CENTERED)
+                f.clearProperty(HEADING)
+                f.clearProperty(LEVEL)
+                frame_format(f, n == 0 and not block.previous().blockFormat().property(FRAMED),
+                             n == len(blocks) - 1 and not block.next().blockFormat().property(FRAMED))
+            else:
+                f.clearProperty(FRAMED)
+                f.setLeftMargin(0)
+                f.setRightMargin(0)
+                f.setTopMargin(0)
+                f.setBottomMargin(SPACE)
+            edit.setPosition(block.position())
+            edit.setBlockFormat(f)
+        edit.endEditBlock()
+        self.viewport().update()
+
+    def is_framed(self):
+        return bool(self.textCursor().blockFormat().property(FRAMED))
 
     def link_at(self):
         """Dirección del enlace donde está el cursor (o el principio de la selección), o ""."""
@@ -807,8 +925,7 @@ class Sheet(QTextEdit):
             lines = [] if objects_of(block) or not block.text().strip() else _lines(block)
             if len(lines) == 1:
                 heading = bool(block.blockFormat().property(HEADING))
-                prefix = "# " if heading else convert.CENTER if block.blockFormat().property(CENTERED) else ""
-                body = lines[0][len(prefix):]
+                body = _strip(lines[0])
                 typed = convert._typography(convert._inline(body), dashes=not heading)
                 new = html.unescape(convert.NOTE.sub(r"[Nota: \1]", typed))
                 if new != body:
@@ -858,6 +975,7 @@ class Sheet(QTextEdit):
         """Devuelve el párrafo a su línea original (título, centrado y texto): un paso de deshacer."""
         original = block.blockFormat().property(ORIGINAL)
         heading, centered = original.startswith("# "), original.startswith(convert.CENTER)
+        framed = original.startswith(convert.FRAME)
         cursor = QTextCursor(self.document())
         cursor.setPosition(block.position())
         cursor.beginEditBlock()
@@ -872,9 +990,17 @@ class Sheet(QTextEdit):
         else:
             f.clearProperty(CENTERED)
         f.setAlignment(Qt.AlignmentFlag.AlignHCenter if centered else Qt.AlignmentFlag.AlignLeft)
+        if framed:
+            frame_format(f, not block.previous().blockFormat().property(FRAMED),
+                         not block.next().blockFormat().property(FRAMED))
+        elif f.property(FRAMED):
+            f.clearProperty(FRAMED)
+            f.setLeftMargin(0)
+            f.setRightMargin(0)
+            f.setTopMargin(0)
+            f.setBottomMargin(SPACE)
         cursor.setBlockFormat(f)
-        self._set_block_text(block, original[2:] if heading else original[len(convert.CENTER):] if centered
-                             else original)
+        self._set_block_text(block, _strip(original))
         cursor.endEditBlock()
         self.look.rehighlightBlock(block)
 

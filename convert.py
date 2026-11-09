@@ -505,6 +505,52 @@ def _title(rows):
     return _key(" ".join(r.text for r in _first_group(heads))) if heads else ""
 
 
+def _frames(page):
+    """Recuadros dibujados alrededor de un texto: The World's Strongest Witch 1 pone las ventanas de estado en una
+    doble línea hecha de tiras finas. Un marco son tiras que se tocan con lados a izquierda y derecha y algún borde
+    arriba o abajo (partido entre páginas le falta uno); también vale un rectángulo trazado de una vez."""
+    pieces, boxes = [], []
+    for d in page.get_drawings():
+        r = pymupdf.Rect(d["rect"])
+        if min(r.width, r.height) <= 4 and max(r.width, r.height) >= 20:
+            pieces.append(r)
+        elif ("s" in (d.get("type") or "") and r.width >= 40 and r.height >= 20
+              and any(item[0] == "re" for item in d["items"])):
+            boxes.append(r)
+    groups = []
+    for p in pieces:
+        near = [g for g in groups if any((p + (-3, -3, 3, 3)).intersects(q) for q in g)]
+        groups = [g for g in groups if all(g is not h for h in near)] + [[p] + [q for g in near for q in g]]
+    for g in groups:
+        box = pymupdf.Rect(g[0])
+        for q in g[1:]:
+            box |= q
+        flat, tall = [q for q in g if q.width > q.height], [q for q in g if q.width <= q.height]
+        if (any(abs(q.x0 - box.x0) < 6 for q in tall) and any(abs(q.x1 - box.x1) < 6 for q in tall)
+                and any(abs(q.y0 - box.y0) < 6 or abs(q.y1 - box.y1) < 6 for q in flat)):
+            boxes.append(box)
+    area = page.rect.width * page.rect.height
+    return [b for b in boxes if b.height >= 20 and b.width * b.height < 0.85 * area]
+
+
+def _bullets(page, rows, infos):
+    """Viñeta en imagen diminuta delante de una línea (Witch 1: ■ y ◆ en las ventanas de estado), como su letra:
+    sin ella la línea perdía la viñeta. La forma sale de cuánto tapa su recuadro: lleno ■, redondo ●, rombo ◆."""
+    for info in infos:
+        box = pymupdf.Rect(info["bbox"])
+        if not (3 <= box.width <= 14 and 3 <= box.height <= 14):
+            continue
+        middle = (box.y0 + box.y1) / 2
+        row = next((r for r in rows if abs(r.y - r.size * 0.35 - middle) < r.size * 0.6
+                    and -2 <= r.x0 - box.x1 <= r.size * 1.5), None)
+        if row is None or row.text[:1] in BULLETS:
+            continue
+        pix = page.get_pixmap(clip=box, matrix=pymupdf.Matrix(4, 4), colorspace=pymupdf.csGRAY)
+        ink = sum(b < 128 for b in pix.samples) / max(1, len(pix.samples))
+        mark = "■" if ink > 0.85 else "●" if ink > 0.68 else "◆"
+        row.text, row.html, row.x0 = f"{mark} {row.text}", f"{mark} {row.html}", box.x0
+
+
 def _image_info(page, digests):
     """Imágenes dibujadas en la página, con su xref y el bbox en coordenadas de la página girada.
     La xref sale del tamaño en píxeles y los bits por componente, que no obligan a decodificar. Si dos imágenes
@@ -831,6 +877,8 @@ NOTE_MARK = re.compile(r"\[Nota: (.+?)\]")  # nota al pie en el editor de texto
 # Enlace escrito en el editor, ya escapado: solo direcciones web (un javascript: no sirve en un libro)
 LINK_MARK = re.compile(r'&lt;a href="(https?://[^"\s<>]+)"&gt;(.*?)&lt;/a&gt;')
 CENTER = "<center>"  # al principio de una línea del editor: párrafo centrado (carta, cartel)
+FRAME = "<marco>"  # al principio de una línea del editor: párrafo dentro de un recuadro (ventana de estado)
+BULLETS = "■◆●▪•◇□▶►◼"  # viñetas: dentro de un recuadro, las líneas sin ella van sangradas bajo la anterior
 
 
 def section_text(book, start, end):
@@ -843,7 +891,8 @@ def section_text(book, start, end):
 def _line(b, k):
     """Línea de section_text del bloque b, que es el número k del libro."""
     if b.kind == "p":
-        return (CENTER if b.align == "center" else "") + html.unescape(NOTE.sub(r"[Nota: \1]", b.html))
+        prefix = CENTER if b.align == "center" else FRAME if b.align == "frame" else ""
+        return prefix + html.unescape(NOTE.sub(r"[Nota: \1]", b.html))
     if b.kind == "heading":
         return "# " + html.unescape(b.html)
     return f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]"
@@ -909,11 +958,22 @@ def edit_section(book, start, end, text):
             new.append(Block("break", page, html.escape(line, quote=False)))
         elif line.startswith(CENTER):
             new.append(Block("p", page, _inline(line[len(CENTER):].strip()), align="center"))
+        elif line.startswith(FRAME):
+            new.append(Block("p", page, _inline(line[len(FRAME):].strip()), align="frame"))
         else:
             new.append(Block("p", page, _inline(line)))
         if j in origin and new[-1].kind in ("p", "heading") and not (m or line in same):
             page = new[-1].page = origin[j].page
             new[-1].rect = origin[j].rect
+            was, now = origin[j], new[-1]
+            # Traducido sin la marca (revisiones de antes de los recuadros, o la IA la quitó): sigue en su recuadro
+            # y con su viñeta. Quitar solo el recuadro deja el mismo texto, y eso no se toca.
+            if (was.kind == now.kind == "p" and was.align == "frame" and not now.align
+                    and _plain(was) != _plain(now)):
+                now.align = "frame"
+                bullet = _plain(was)[:1]
+                if bullet in BULLETS and _plain(now)[:1] not in BULLETS:
+                    now.html = f"{bullet} {now.html}"
     delta = len(new) - (end - start)
     book.blocks = old[:start] + new + old[end:]
     mapping = {k: k for k in range(start)} | kept | {k: k + delta for k in range(end, len(old))}
@@ -2229,6 +2289,10 @@ def analyze(pdf_path, progress=None):
         toc = False  # la página anterior era el índice
         contents = []  # títulos del índice impreso
         repeated = ""  # título que la página anterior ya emitió junto a su ilustración
+        frames = [_frames(page) for page in doc]
+        repeats = collections.Counter(tuple(round(v) for v in b) for page_frames in frames for b in page_frames)
+        frames = [[b for b in page_frames if repeats[tuple(round(v) for v in b)] <= max(3, n // 5)]
+                  for page_frames in frames]
         digests, last_boxes = {}, []
         for i, (page, rows) in enumerate(zip(doc, pages)):
             num = i + 1
@@ -2277,6 +2341,17 @@ def analyze(pdf_path, progress=None):
             rows = _join_labels(rows)
             rows, notes = _footnotes(rows, body, page.rect.height)
             start = len(blocks)
+            inside = {id(r): f for r in rows for f in frames[i]
+                      if pymupdf.Point((r.x0 + r.x1) / 2, r.y - r.size * 0.35) in f}
+            # Solo dentro de un recuadro: en la prosa, un ♡ en imagen al principio de línea no es viñeta (Witch 1)
+            _bullets(page, [r for r in rows if id(r) in inside], infos)
+            # Márgenes de cada recuadro: dentro, la sangría y la línea corta se miden respecto a él
+            edges = {}
+            for r in rows:
+                if id(r) in inside and not r.heading:
+                    key = id(inside[id(r)])
+                    lo, hi = edges.get(key, (r.x0, r.x1))
+                    edges[key] = (min(lo, r.x0), max(hi, r.x1))
             normal = [r for r in rows if not r.heading]
             # Ilustración con el texto de la novela encima: se guardan las dos cosas, la imagen tras el texto
             # de la página (es la escena que se lee ahí, Maryoku 5). El párrafo abierto sigue abierto, así que
@@ -2306,13 +2381,17 @@ def analyze(pdf_path, progress=None):
                         blocks.append(Block("heading", num, html.escape(r.text), rect=_rect([r])))
                     para = None
                 else:
-                    indented = r.x0 > left + body * 0.8
+                    framed = id(r) in inside
+                    lo, hi = edges[id(inside[id(r)])] if framed else (left, right)
+                    indented = r.x0 > lo + body * 0.8
                     # Línea centrada (carta, cartel, aviso): lejos de los dos márgenes y con el centro en el
                     # del texto. La última línea corta de un párrafo empieza en el margen: no cuenta.
-                    width = right - left
-                    centered = (width > 0 and r.x0 > left + width * 0.1 and r.x1 < right - width * 0.1
-                                and abs((r.x0 + r.x1) / 2 - (left + right) / 2) < width * 0.05)
-                    if para is None or indented or short or centered:
+                    width = hi - lo
+                    centered = not framed and (width > 0 and r.x0 > lo + width * 0.1 and r.x1 < hi - width * 0.1
+                                               and abs((r.x0 + r.x1) / 2 - (lo + hi) / 2) < width * 0.05)
+                    # Entrar o salir de un recuadro siempre abre párrafo: el de dentro no se une al de fuera
+                    switch = para is not None and (para.align == "frame") != framed
+                    if para is None or indented or short or centered or switch or r.text[:1] in BULLETS:
                         new = True
                     elif prev is None:  # primera línea de la página: ¿sigue el párrafo anterior?
                         # Witch 1: el Afterword (título solo en imagen) empieza sin sangría en una página que el
@@ -2320,16 +2399,18 @@ def analyze(pdf_path, progress=None):
                         new = last_text.endswith(END_PUNCT) and (not indent_style or bool(bookmarks.get(num - 1)))
                     else:
                         new = r.y - prev.y > line_gap * 1.3
-                    if new and para is not None and r.text[:1].islower() and not last_text.endswith(END_PUNCT):
+                    if (new and para is not None and not switch and r.text[:1].islower()
+                            and not last_text.endswith(END_PUNCT)):
                         new = False  # algunos PDF ponen con sangría el final de una frase sin acabar
                     if new:
-                        para = Block("p", num, r.html, align="center" if centered else "", rect=_rect([r]))
+                        para = Block("p", num, r.html, align="frame" if framed else "center" if centered else "",
+                                     rect=_rect([r]))
                         blocks.append(para)
                     else:
                         para.html = _join(para.html, r.html)
                         if para.page == num:  # el recuadro, solo en la página donde empieza el párrafo
                             para.rect = _rect([para, r])
-                    short = r.x1 < right - (right - left) * 0.2
+                    short = r.x1 < hi - (hi - lo) * 0.2
                     last_text = r.text
                 prev = r
             # Desde el párrafo que venía abierto de la página anterior: también puede llevar llamadas de esta
@@ -2432,6 +2513,11 @@ ol.toc li { margin: 0.35em 0; }
 ol.toc a { text-decoration: none; color: inherit; }
 p.credits { text-indent: 0; text-align: center; margin: 0.6em 0; }
 p.center { text-indent: 0; text-align: center; }
+div.marco { border: 3px double #777777; padding: 0.5em 0.9em; margin: 1em 0; font-family: sans-serif;
+  font-size: 0.95em; }
+div.marco p { text-indent: 0; margin: 0; text-align: left; }
+div.marco p.sub { padding-left: 1.3em; }
+div.marco p.head { margin-top: 0.6em; }
 p.status { text-indent: 0; text-align: center; font-family: sans-serif; font-size: 0.9em; margin: 0.8em 8%;
   padding: 0.4em; border: 1px solid #888888; }
 p.status + p.status { margin-top: -0.85em; border-top: 0; }
@@ -2642,10 +2728,22 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             pages.append((name, page))
             return f'<span epub:type="pagebreak" role="doc-pagebreak" id="pg{page}" title="{page}"></span>'
 
-        for k, b in blocks:
+        framed = [b.kind == "p" and b.align == "frame" for _, b in blocks]
+        # Con viñetas en el recuadro, las líneas sin viñeta son sus datos y van sangradas (Witch 1: «HP: 10/10»)
+        bulleted, run = set(), []
+        for at, inside in enumerate(framed):
+            if inside:
+                run.append(at)
+            if not inside or at == len(blocks) - 1:
+                if any(_plain(blocks[j][1])[:1] in BULLETS for j in run):
+                    bulleted |= set(run)
+                run = []
+        for at, (k, b) in enumerate(blocks):
             if b.page not in marked:
                 marked.add(b.page)
                 pending = b.page
+            if framed[at] and (at == 0 or not framed[at - 1]):
+                parts.append('<div class="marco">')
             if b.kind == "image":
                 alt = (alts or {}).get(image_key(b.image)) or (f"Ilustración de «{title}»" if is_chapter else "Ilustración")
                 for i, data in enumerate(_spread(b.image, b.layout) if b.layout else [b.image]):
@@ -2659,10 +2757,17 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 parts.append(f'{mark()}<h2 id="t{k}">{fix(b.html)}</h2>')  # fuera: el título queda limpio
                 subtitles.setdefault(name, []).append((f"t{k}", fix(b.html)))
             else:
-                css = "status" if STATUS.fullmatch(_plain(b)) else "center" if b.align else ""
+                if framed[at]:
+                    bullet = _plain(b)[:1] in BULLETS  # un apartado nuevo del recuadro («◆ Equipment») se separa
+                    css = ("sub" if at in bulleted and not bullet else "head" if bullet and at and framed[at - 1]
+                           else "")
+                else:
+                    css = "status" if STATUS.fullmatch(_plain(b)) else "center" if b.align else ""
                 attr = f' class="{css}"' if css else ""
-                body = NOTE.sub(noteref, fix(b.html, dashes=True))  # la nota sale del párrafo: no se parte
+                body = NOTE.sub(noteref, fix(b.html, dashes=not framed[at]))  # la nota sale del párrafo: no se parte
                 parts.append(f"<p{attr}>{mark()}{_hyphenate(body) if hyphenate else body}</p>")
+            if framed[at] and (at == len(blocks) - 1 or not framed[at + 1]):
+                parts.append("</div>")
         # Los lectores con notas emergentes (Kobo, Kindle, Apple Books) ocultan el aside y lo muestran
         # al tocar la llamada; los demás lo dejan al final de la sección, con enlace de vuelta.
         tag, kind = ("div", "") if epub2 else ("aside", ' epub:type="footnote"')
