@@ -4901,10 +4901,14 @@ class App:
                 if info.get("key") and not api_key.text().strip():
                     messagebox.showerror("Glosario y estilo", f"Falta la clave de {name}.", parent=box)
                     return
-                sample = "\n".join(t for _, _, t in translate.units(self.book, 0, len(self.book.blocks)))[:30000]
+                whole = "\n".join(t for _, _, t in translate.units(self.book, 0, len(self.book.blocks)))
+                # Cuatro trozos repartidos por el libro: el principio solo trae créditos y pocos personajes
+                step = max(1, (len(whole) - 7500) // 3)
+                sample = "\n[…]\n".join(whole[n * step:n * step + 7500] for n in range(4)) if len(whole) > 30000 \
+                    else whole
                 names = [f for f, _ in sorted(convert.proper_names(self.book).items(), key=lambda p: -p[1])[:60]]
                 args = (name, sample, src.currentData(), dst.currentData(), api_key.text().strip(),
-                        model.currentText().strip(), base.text().strip() if info.get("custom") else "", names)
+                        model.currentText().strip(), base.text().strip() if info.get("custom") else "", names, whole)
                 found = queue.Queue()
 
                 def ask():

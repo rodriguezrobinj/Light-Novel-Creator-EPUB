@@ -158,9 +158,20 @@ def doubts(source, text, dst, glossary=()):
             out.append("falta el signo de apertura (¿ o ¡)")
     low = text.lower()
     for a, b in glossary:
-        if a and b and a in source and b.lower() not in low and re.search(rf"(?<!\w){re.escape(a)}(?!\w)", source):
+        if a and b and a in source and re.search(rf"(?<!\w){re.escape(a)}(?!\w)", source) and not all(
+                _stem(w) in low for w in b.lower().split() if w not in ARTICLES):
             out.append(f"el glosario pide «{b}» para «{a}»")
     return out
+
+
+ARTICLES = {"el", "la", "los", "las", "lo", "un", "una", "unos", "unas", "the", "a", "an", "le", "les", "il", "o", "os",
+            "as", "der", "die", "das"}
+
+
+def _stem(word):
+    """Raíz sin género ni número: «Encantado» vale como «Encantadas», «Guugelheit» como «los Guugelheit»."""
+    word = word.removesuffix("s")
+    return word[:-1] if len(word) > 4 and word[-1] in "aoe" else word
 
 
 def _fix(source, out):
@@ -436,18 +447,21 @@ def translate(name, texts, src, dst, api_key="", model="", base="", glossary=(),
     return [_fix(source, t) for source, t in zip(texts, out)]
 
 
-def propose(name, sample, src, dst, api_key="", model="", base="", names=()):
+def propose(name, sample, src, dst, api_key="", model="", base="", names=(), text=""):
     """Glosario y ficha de personajes que la IA saca de una muestra del libro, para que el usuario los revise:
-    ([[original, traducción]], ["Nombre: género, cómo habla…"]). names: nombres propios frecuentes del tomo."""
+    ([[original, traducción]], ["Nombre: género, cómo habla…"]). names: nombres propios frecuentes del tomo. text: el
+    libro entero, para quitar las palabras comunes que la IA propone con mayúscula («Dress», «Twelve»)."""
     engine = ENGINES[name]
     if engine["kind"] not in AI:
         raise TranslateError("El glosario y los personajes solo los puede proponer una IA: elige una en «Motor».")
     target = LANG_NAMES.get(dst, dst)
     system = (f"You prepare the translation of a light novel from {LANG_NAMES.get(src, src)} into {target}. Read the "
               f"sample and reply only with a JSON object with two keys:\n"
-              f"\"glossary\": an object that maps each recurring term in the original (character names, places, "
-              f"organizations, techniques, titles, invented words; 60 at most) to the translation to use always in "
-              f"{target}. Names keep their usual romanization.\n"
+              f"\"glossary\": an object that maps each recurring term of this story in the original (character "
+              f"names, places, organizations, skills, spells, items, ranks, titles, invented words; 60 at most) to "
+              f"the translation to use always in {target}. Names keep their usual romanization. Never include common "
+              f"words that only appear capitalized in a heading or a game status screen (Chapter, Dress, Twelve, "
+              f"Killer), nor the names of the author, illustrator or translators.\n"
               f"\"characters\": an object that maps each character's name to a short note written in Spanish: "
               f"gender, approximate age or role, how they speak (formal, rough, childish...) and how they address "
               f"the others (de tú, de usted). Only what the sample shows; do not invent.")
@@ -460,7 +474,10 @@ def propose(name, sample, src, dst, api_key="", model="", base="", names=()):
     both = [data.get(k) if isinstance(data.get(k), dict) else {} for k in ("glossary", "characters")]
     clean = [[(" ".join(str(a).split()), " ".join(str(b).split())) for a, b in d.items() if str(a).strip()
               and isinstance(b, str) and b.strip()] for d in both]
-    return [[a, b] for a, b in clean[0]], [f"{a}: {b}" for a, b in clean[1]]
+    lower = set(re.findall(r"(?<![^\W\d_])[a-zà-ÿ]+(?![^\W\d_])", text))
+    # Una palabra sola que el libro también usa en minúscula es común: la IA ya la traduce bien según la frase
+    terms = [[a, b] for a, b in clean[0] if " " in a or a.lower() not in lower or a.lower() == a]
+    return terms, [f"{a}: {b}" for a, b in clean[1]]
 
 
 def models(name, api_key="", base=""):
