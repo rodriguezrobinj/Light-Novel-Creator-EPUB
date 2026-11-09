@@ -558,9 +558,10 @@ def _ornaments(page, rows, infos):
         if (x1 - x0 < 0.3 * width and y1 - y0 < 0.1 * height and abs((x0 + x1) / 2 - width / 2) < 0.15 * width
                 and BAND * height < (y0 + y1) / 2 < (1 - BAND) * height
                 and any(r.y < y0 for r in rows) and any(r.y > y1 for r in rows)
-                # The World's Strongest Witch: la flecha de «Lv. 2 → Lv. 3» es una imagen dentro de la línea (su línea
-                # base cruza la imagen); la línea que empieza justo debajo de un adorno (Kage 5, pág. 99) no cuenta
-                and not any(r.x0 < x1 and r.x1 > x0 and y0 < r.y < y1 + 0.3 * r.size for r in rows)):
+                # The World's Strongest Witch: la flecha de «Lv. 2 → Lv. 3» y el ♡ o ♪ al final de una línea corta son
+                # imágenes en la línea (una línea base cruza su altura); la línea que empieza justo debajo de un adorno
+                # (Kage 5, pág. 99) no cuenta
+                and not any(y0 < r.y < y1 + 0.3 * r.size for r in rows)):
             found.append(((y0 + y1) / 2, info["xref"]))
     return sorted(found)  # [(posición vertical, xref)], de arriba abajo
 
