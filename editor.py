@@ -366,12 +366,51 @@ class Sheet(QTextEdit):
         document = QTextDocument(self)
         document.setDocumentMargin(48)
         load(document, lines, self.pictures, color, levels)
+        loaded = {}  # cómo se volcaba cada párrafo al cargar -> [(bloque, línea)], para reconocerlo si vuelve
+        for k, line in lines:
+            if k is not None and not convert.TOKEN.fullmatch(line.strip()):
+                loaded.setdefault(_canonical(line), []).append((k, line))
+        document.contentsChange.connect(lambda pos, removed, added: self.relink(document, loaded, pos, added))
         look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
         look.tags = self.tags
         look.set_unknown(self.unknown)
         self.use(document, look)
         self.moveCursor(QTextCursor.MoveOperation.Start)
         return document, look
+
+    def relink(self, document, loaded, pos, added):
+        """Al partir un párrafo, el nuevo copia el formato del de arriba y con él su origen. Si el trozo nuevo
+        vuelve a ser un párrafo cargado cuyo bloque ya no tiene párrafo (se unió y se vuelve a separar),
+        recupera ese bloque: el PDF lo recuadra a él y se guarda tal cual. En el mismo paso de deshacer."""
+        if getattr(self, "relinking", False):
+            return
+        block, last = document.findBlock(pos), document.findBlock(pos + added)
+        while block.isValid():
+            prev = block.previous()
+            k = source_of(block)
+            if prev.isValid() and k is not None and k == source_of(prev) and not objects_of(block):
+                used, other = set(), document.firstBlock()
+                while other.isValid():
+                    used.add(source_of(other))
+                    other = other.next()
+                text = "\n\n".join(_lines(block))
+                match = next(((j, line) for j, line in loaded.get(text, ()) if j not in used), None)
+                if match:
+                    f = block.blockFormat()
+                    f.setProperty(SOURCE, match[0])
+                    f.setProperty(ORIGINAL, match[1])
+                    f.setProperty(CANON, text)
+                    cursor = QTextCursor(block)
+                    self.relinking = True
+                    try:
+                        cursor.joinPreviousEditBlock()
+                        cursor.setBlockFormat(f)
+                        cursor.endEditBlock()
+                    finally:
+                        self.relinking = False
+            if block == last:
+                break
+            block = block.next()
 
     def use(self, document, look):
         """Muestra otra hoja ya cargada, con el tamaño de letra de ahora."""

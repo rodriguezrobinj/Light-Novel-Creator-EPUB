@@ -3265,6 +3265,42 @@ def editor_on(blocks, candidates):
     return root, window, app.TextEditor(window, "0", *window.section_bounds(0))
 
 
+def test_window_editor_split_back_keeps_paragraph_source():
+    """Unir dos párrafos (Retroceso) y volver a partirlos (Intro) donde estaban: el segundo recupera su origen, la
+    vista del PDF lo recuadra a él y no al primero, y se guarda como estaba (sin cambios). Ctrl+Z deshace todo."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    import editor as ed
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Primer párrafo."),
+                                      B("p", 2, "Segundo párrafo."), B("p", 3, "Tercero.")], [0])
+    sheet = editor.sheet
+    before = sheet.content()
+    second = sheet.document().findBlockByNumber(2)
+    cursor = QTextCursor(second)
+    sheet.setTextCursor(cursor)
+    QTest.keyClick(sheet, Qt.Key.Key_Backspace)  # une «Segundo» al primero
+    root.update()
+    joined = sheet.document().blockCount()
+    QTest.keyClick(sheet, Qt.Key.Key_Return)  # lo vuelve a partir en el mismo sitio
+    root.update()
+    block = sheet.textCursor().block()
+    source, shown = ed.source_of(block), editor.source_block()
+    changed = [b.text() for b in sheet.changed_blocks()]
+    after = sheet.content()
+    for _ in range(2):
+        QTest.keyClick(sheet, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    undone = sheet.content()
+    editor.win.done(0)
+    window.close()
+    assert joined == 3 and block.text() == "Segundo párrafo.", (joined, block.text())
+    assert source == 2 and shown == 2, (source, shown)
+    assert changed == [] and after == before, (changed, after)
+    assert undone == before, undone
+
+
 def test_text_editor_marks_issues_and_changes():
     """Los avisos del informe se marcan en su párrafo; F8 abre su barra y «Arreglar» une el párrafo partido en
     la hoja; lo cambiado se marca, «Volver al original» lo devuelve y Ctrl+Z deshace el arreglo."""
