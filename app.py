@@ -47,6 +47,7 @@ import convert
 import editor
 import qtk
 import theme
+import translate
 from qtk import filedialog, messagebox
 
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
@@ -69,7 +70,7 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
-             "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary")
+             "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
@@ -546,6 +547,44 @@ def _review_path(pdf):
     return Path(pdf).with_name(Path(pdf).stem + ".lnepub.json")
 
 
+def _translation_path(pdf):
+    return Path(pdf).with_name(Path(pdf).stem + ".lnepub.traduccion.json")
+
+
+def _read_translation(pdf):
+    """Traducciones guardadas de este libro: {"src", "dst", "done": {clave del original: {"text", "hand"}}}."""
+    empty = {"src": "auto", "dst": "es", "done": {}}
+    try:
+        data = json.loads(_translation_path(pdf).read_text(encoding="utf-8"))
+        done = {str(k): {"text": str(v["text"]), "hand": bool(v.get("hand"))} for k, v in data["done"].items()
+                if isinstance(v, dict) and str(v.get("text") or "").strip()}  # el .json se puede editar a mano
+        return {"src": str(data.get("src") or "auto"), "dst": str(data.get("dst") or "es"), "done": done}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return empty
+
+
+def _translate_thread(job, out, stop):
+    """Traduce job["items"] [(clave, texto)] por lotes y pone en out ("done", {clave: traducción}) tras cada uno,
+    ("error", mensaje) si falla y ("end",) al acabar. Es un hilo, no un proceso: la red no retiene el GIL (PyMuPDF
+    sí) y así pausar es solo marcar stop."""
+    texts, context = [t for _, t in job["items"]], list(job["context"])
+    try:
+        for batch in translate.batches(texts, translate.ENGINES[job["engine"]]["kind"]):
+            if stop.is_set():
+                break
+            part = [texts[n] for n in batch]
+            result = translate.translate(job["engine"], part, job["src"], job["dst"], job["key"], job["model"],
+                                         job["base"], job["glossary"], context)
+            context = (context + list(zip(part, result)))[-translate.CONTEXT:]
+            out.put(("done", {job["items"][n][0]: t for n, t in zip(batch, result)}))
+    except translate.TranslateError as e:
+        out.put(("error", str(e)))
+    except Exception as e:
+        out.put(("error", f"Fallo inesperado al traducir: {e or type(e).__name__}"))
+        out.put(("log", traceback.format_exc()))
+    out.put(("end",))
+
+
 def _fingerprint(pdf):
     """Tamaño y fecha del PDF: si cambian, la revisión guardada es de otro PDF y no se usa."""
     stat = Path(pdf).stat()
@@ -591,7 +630,7 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "credits": "Página de créditos", "reading": "Minutos de lectura", "epub2": "EPUB 2",
                 "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
-                "words": "Diccionario de la serie", "glossary": "Glosario", "ignored": "Avisos ignorados", "comments": "Comentarios",
+                "words": "Diccionario de la serie", "glossary": "Glosario", "tr_glossary": "Glosario de traducción", "ignored": "Avisos ignorados", "comments": "Comentarios",
                 "alts": "Descripciones de ilustraciones",
                 "echoes": "Buscar ecos"}
 
@@ -1338,6 +1377,7 @@ class App:
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
         self.words = []                        # diccionario de la serie: palabras que la ortografía da por buenas
         self.glossary = []                     # glosario de la serie: los nombres como deben ir
+        self.tr_glossary = []                  # glosario de traducción de la serie: [[original, traducción]]
         self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
         self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
         self.thumbs, self.thumbs_tried = None, set()  # proceso de miniaturas de recientes y archivos ya probados
@@ -1399,7 +1439,8 @@ class App:
             ("Ortografía…", self.spelling), ("Añadir página…", self.add_page),
             ("Página de personajes…", self.character_page), ("Ilustraciones…", self.images_dialog),
             ("Cambiar ilustración…", self.change_image),
-            ("Describir ilustración…", self.describe_image), ("Versiones…", self.versions))]
+            ("Describir ilustración…", self.describe_image), ("Traducir…", self.translate_book),
+            ("Versiones…", self.versions))]
         self.book_actions.append(tools.addSeparator())
         tools.addAction("Panel de serie…", self.series_panel)
         tools.addAction("Volumen recopilatorio…", self.omnibus)
@@ -2200,7 +2241,8 @@ class App:
             messagebox.showerror("Error", f"No se encuentra el archivo:\n{path}")
             return
         self.save_review()
-        for win in (getattr(self, "spelling_window", None), getattr(self, "page_window", None)):
+        for win in (getattr(self, "spelling_window", None), getattr(self, "page_window", None),
+                    getattr(self, "translate_window", None)):
             if win and shiboken6.isValid(win):  # sin cerrar, cambiarían el libro nuevo con datos del anterior
                 win.close()
         path = str(Path(path).resolve())
@@ -2223,7 +2265,7 @@ class App:
         # El análisis tal cual, para restaurar versiones sin volver a analizar: las ediciones hacen listas nuevas
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
         # Son del libro: llegan con la revisión (el glosario, también heredado de otro tomo)
-        self.glossary, self.comments, self.alts = [], [], {}
+        self.glossary, self.tr_glossary, self.comments, self.alts = [], [], [], {}
         if report is not None and not self.echoes_var.get():  # el del proceso va sin opciones
             self.reports[self.report_key()] = report
         if memos:
@@ -2957,7 +2999,7 @@ class App:
                 count = sum(1 for line in edit[2].splitlines() if line.strip())
                 heads = [j for j in range(edit[0], edit[0] + count) if self.book.blocks[j].kind == "heading"]
                 for j, kind in zip(heads, kinds[n]):
-                    if kind in (ON, OFF):
+                    if kind in NEXT:  # el editor da Capítulo o Subtítulo; la traducción, el que tenía la fila
                         rows[str(j)] = [kind, html.unescape(self.book.blocks[j].html), ""]
             if follow and item is not None:
                 item = str(mapping[int(item)]) if int(item) in mapping else None
@@ -4192,7 +4234,8 @@ class App:
         state = {name: var.get() for name, var in self.fields().items()}
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
-                     glossary=self.glossary, ignored=self.ignored, comments=self.comments, alts=self.alts)
+                     glossary=self.glossary, tr_glossary=self.tr_glossary, ignored=self.ignored, comments=self.comments,
+                     alts=self.alts)
         return state
 
     def save_review(self):
@@ -4233,6 +4276,9 @@ class App:
             self.words = [str(w) for w in state["words"]]
         if isinstance(state.get("glossary"), list):
             self.glossary = [str(w) for w in state["glossary"]]
+        if isinstance(state.get("tr_glossary"), list):
+            self.tr_glossary = [[str(a), str(b)] for a, b in (p for p in state["tr_glossary"]
+                                                               if isinstance(p, list) and len(p) == 2)]
 
     def load_review(self, state=None):
         """Recupera la revisión guardada de este PDF, o la de una versión (state). False si no hay o si el PDF
@@ -4340,6 +4386,376 @@ class App:
         self.save_review()
         self.status.setText(f"Versión «{version['name']}» restaurada · lo de antes quedó en Versiones")
         return True
+
+    def translation_sections(self):
+        """[(inicio, fin, nombre)] de lo que se puede traducir por partes: lo de antes del primer capítulo y cada
+        capítulo con sus subtítulos, como las secciones del editor."""
+        heads = self.section_heads()
+        starts = sorted({0, *heads})
+        return [(a, b, self.tree.set(str(a), "title") if a in heads else "Inicio del libro")
+                for a, b in zip(starts, starts[1:] + [len(self.book.blocks)])]
+
+    def apply_translation(self, done, dst):
+        """Cambia cada párrafo del libro que tiene traducción en done ({clave: {"text"}}) de una vez (un Ctrl+Z lo
+        deshace), tras guardar lo de antes como versión «Antes de traducir». Los títulos conservan su tipo y el
+        idioma del libro pasa a dst. Devuelve los párrafos cambiados, o None si no se pudo guardar la versión."""
+        texts = {k: v["text"] for k, v in done.items()}
+        edits, kinds, changed = [], [], 0
+        for start, end, _ in reversed(self.translation_sections()):  # de atrás adelante, como apply_edits pide
+            old, new = convert.section_text(self.book, start, end), translate.translated_section(self.book, start, end, texts)
+            if new != old:
+                changed += sum(a != b for a, b in zip(old.split("\n\n"), new.split("\n\n")))
+                edits.append([start, end, new])
+                # edit_section rehace los bloques de la sección: sus títulos recuperan aquí el tipo de su fila
+                kinds.append([self.tree.set(str(j), "inc") for j in range(start, end)
+                              if self.book.blocks[j].kind == "heading" and self.tree.exists(str(j))])
+        if not edits:
+            return 0
+        if not self.add_version("Antes de traducir", auto=True):
+            return None
+        selected = self.tree.selection()
+        self.apply_edits(edits, selected[0] if selected else next(iter(self.tree.get_children()), None), kinds=kinds)
+        self.lang_var.set(dst)
+        self.save_review()
+        return changed
+
+    def translate_book(self):
+        """Traducción automática con revisión lado a lado, como Ebook Translator de Calibre: cada párrafo con su
+        traducción, que se corrige a mano o se pide otra vez; «Aplicar al libro» los cambia de una vez. Lo traducido
+        se guarda junto al PDF tras cada lote: se puede cerrar y seguir otro día sin pagar dos veces lo mismo."""
+        if not (self.book and self.pdf):
+            return None
+        old = getattr(self, "translate_window", None)
+        if old and shiboken6.isValid(old) and old.isVisible():  # cerrada, Qt la borra más tarde
+            old.raise_()
+            old.activateWindow()
+            return old
+        saved = _read_translation(self.pdf)
+        done = saved["done"]
+        prefs = self.settings.get("translate") if isinstance(self.settings.get("translate"), dict) else {}
+        for name in ("models", "keys"):
+            if not isinstance(prefs.get(name), dict):
+                prefs[name] = {}
+        win, column = self.dialog("Traducir")
+        self.translate_window = win
+        win.resize(1040, 680)
+        src, dst, engine, scope = QComboBox(), QComboBox(), QComboBox(), QComboBox()
+        for code, name in translate.LANGS.items():
+            src.addItem(name, code)
+            if code != "auto":
+                dst.addItem(name, code)
+        src.setCurrentIndex(max(0, src.findData(saved["src"] if done else prefs.get("src", "auto"))))
+        dst.setCurrentIndex(max(0, dst.findData(saved["dst"] if done else prefs.get("dst", "es"))))
+        engine.addItems(list(translate.ENGINES))
+        engine.setCurrentIndex(max(0, engine.findText(str(prefs.get("engine", "")))))
+        sections = self.translation_sections()
+        scope.addItem("Todo el libro", None)
+        for n, (_, _, title) in enumerate(sections):
+            scope.addItem(title, n)
+        scope.setMinimumContentsLength(30)
+        scope.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        model, base, api_key = QLineEdit(), QLineEdit(), QLineEdit()
+        api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        base.setPlaceholderText("http://localhost:11434/v1")
+        base.setMinimumWidth(260)
+        model_label, base_label, key_label = QLabel("Modelo:"), QLabel("URL:"), QLabel("Clave:")
+        glossary_btn = _button("Glosario de traducción…", lambda: edit_glossary())
+        column.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, QLabel("Motor:"), engine, 1, QLabel("Traducir:"),
+                              scope))
+        column.addLayout(_row(model_label, model, base_label, base, key_label, api_key, 1, glossary_btn))
+        hint = _label("", "muted")
+        hint.setWordWrap(True)
+        column.addWidget(hint)
+        panes = QSplitter(Qt.Orientation.Vertical)
+        column.addWidget(panes, 1)
+        table = qtk.RowList(("orig", "trans", "state"), {"orig": "Original", "trans": "Traducción", "state": "Estado"},
+                            {"trans": 400, "state": 90}, stretch="orig")
+        table.header().setSectionResizeMode(1, table.header().ResizeMode.Stretch)  # las dos columnas de texto, a medias
+        table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignLeft)
+        table.setSelectionMode(table.SelectionMode.ExtendedSelection)  # varios con Ctrl o Mayús: «Retraducir selección»
+        panes.addWidget(table)
+        bottom = QWidget()
+        lower = QHBoxLayout(bottom)
+        lower.setContentsMargins(0, 6, 0, 0)
+        original_box, translation_box = QPlainTextEdit(), QPlainTextEdit()
+        original_box.setReadOnly(True)
+        original_box.setPlaceholderText("Original del párrafo elegido")
+        translation_box.setPlaceholderText("Su traducción: se puede corregir a mano")
+        lower.addWidget(original_box)
+        lower.addWidget(translation_box)
+        panes.addWidget(bottom)
+        panes.setSizes([430, 140])
+        status = StatusLabel()
+        column.addWidget(status)
+        run_btn = _button("Traducir", lambda: run(), "primary")
+        again_btn = _button("Retraducir selección", lambda: run(again=True))
+        apply_btn = _button("Aplicar al libro", lambda: apply())
+        column.addLayout(_row(run_btn, again_btn, 1, apply_btn, _button("Cerrar", lambda: close())))
+        work = {"thread": None, "stop": None, "queue": None, "shown": None, "again": set(), "engine": "", "count": 0,
+                "total": 0}
+        rows = {}  # fila (índice del bloque) -> (clave, prefijo, texto original)
+        index = {}  # clave -> sus filas: un lote no recorre la lista entera (miles de párrafos)
+        hints = {"google": "Gratis y sin cuenta, frase a frase: los diálogos salen más literales. Si Google corta por "
+                           "exceso de peticiones, la traducción espera y lo vuelve a intentar.",
+                 "deepl": "Más natural que Google, frase a frase. La clave gratuita (acaba en «:fx») trae 500.000 "
+                          "caracteres al mes. No usa el glosario.",
+                 "openai": "La IA traduce por lotes de hasta 30 párrafos viendo los anteriores y el glosario: diálogos "
+                           "naturales. Se paga por uso con tu clave.",
+                 "custom": "Modelo en tu equipo (Ollama, LM Studio): gratis y privado, lento sin una buena tarjeta "
+                           "gráfica. Escribe la URL de su API y el nombre del modelo."}
+
+        def remember():
+            """Guarda en las preferencias lo escrito para el motor elegido; la clave, cifrada."""
+            name = work["engine"]
+            if name:
+                prefs["models"][name] = model.text().strip()
+                try:
+                    prefs["keys"][name] = translate.protect(api_key.text().strip())
+                except OSError:
+                    prefs["keys"].pop(name, None)  # sin cifrar no se guarda: se vuelve a pedir
+                if translate.ENGINES[name].get("custom"):
+                    prefs["base"] = base.text().strip()
+            prefs.update(engine=engine.currentText(), src=src.currentData(), dst=dst.currentData())
+            self.settings["translate"] = prefs
+            self.save_settings()
+
+        def show_engine():
+            name = work["engine"] = engine.currentText()
+            info = translate.ENGINES[name]
+            model.setText(prefs["models"].get(name) or info.get("model", ""))
+            api_key.setText(translate.unprotect(prefs["keys"].get(name, "")))
+            base.setText(prefs.get("base") or info.get("base", ""))
+            for widget, shown in ((model_label, "model" in info), (model, "model" in info),
+                                  (base_label, info.get("custom")), (base, info.get("custom")),
+                                  (key_label, info["kind"] != "google"), (api_key, info["kind"] != "google")):
+                widget.setVisible(bool(shown))
+            api_key.setPlaceholderText("Opcional" if info.get("custom") else "Clave API")
+            hint.setText(hints["custom" if info.get("custom") else "openai" if "model" in info else info["kind"]])
+
+        def applied():
+            """Textos ya puestos en el libro: un párrafo así está «Aplicado», no pendiente."""
+            return {" ".join(v["text"].split()) for v in done.values()}
+
+        def state_of(k, text, texts):
+            if k in done:
+                return "A mano" if done[k]["hand"] else "Traducido"
+            return "Aplicado" if " ".join(text.split()) in texts else "Pendiente"
+
+        def fill():
+            keep()
+            work["shown"] = None
+            table.delete(*table.get_children())
+            rows.clear()
+            index.clear()
+            texts = applied()
+            for start, end, _ in sections if scope.currentData() is None else [sections[scope.currentData()]]:
+                for k, prefix, text in translate.units(self.book, start, end):
+                    code = translate.key(text)
+                    rows[str(k)] = code, prefix, text
+                    index.setdefault(code, []).append(str(k))
+                    table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER) + text,
+                                                                 done.get(code, {}).get("text", ""),
+                                                                 state_of(code, text, texts)))
+                    table.rows[str(k)].setTextAlignment(1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            pick()
+            count()
+
+        def count():
+            todo = [rows[i][2] for i in table.get_children() if table.set(i, "state") == "Pendiente"]
+            letters = f"{sum(map(len, todo)):,}".replace(",", ".")
+            status.setText(f"{convert.counted(len(todo), 'párrafo pendiente', 'párrafos pendientes')} de {len(rows)} · "
+                           f"{letters} caracteres por traducir")
+            apply_btn.setEnabled(bool(done) and work["thread"] is None)
+
+        def refresh(keys):
+            texts = applied()
+            for k in keys:
+                for iid in index.get(k, ()):
+                    table.set(iid, "trans", done.get(k, {}).get("text", ""))
+                    table.set(iid, "state", state_of(k, rows[iid][2], texts))
+                    if iid == work["shown"]:
+                        translation_box.setPlainText(done.get(k, {}).get("text", ""))
+
+        def save():
+            try:
+                _write_json(_translation_path(self.pdf), {"src": src.currentData(), "dst": dst.currentData(),
+                                                          "done": done})
+            except OSError as e:
+                status.setText(f"No se pudo guardar la traducción: {e.strerror or e}")
+
+        def keep():
+            """Lo corregido a mano en el párrafo que se estaba viendo."""
+            iid = work["shown"]
+            if iid not in rows:
+                return
+            k = rows[iid][0]
+            new = " ".join(translation_box.toPlainText().split())
+            if new == " ".join(done.get(k, {}).get("text", "").split()):
+                return
+            if new:
+                done[k] = {"text": new, "hand": True}
+            else:
+                done.pop(k, None)
+            refresh({k})
+            save()
+            count()
+
+        def pick():
+            keep()
+            selected = table.selection()
+            iid = work["shown"] = selected[0] if selected else None
+            original_box.setPlainText(rows[iid][2] if iid else "")
+            translation_box.setPlainText(done.get(rows[iid][0], {}).get("text", "") if iid else "")
+            translation_box.setEnabled(iid is not None)
+
+        def busy(on):
+            run_btn.setText("Pausar" if on else "Traducir")
+            run_btn.setEnabled(True)
+            for widget in (again_btn, src, dst, engine, scope, model, base, api_key, glossary_btn):
+                widget.setEnabled(not on)
+            count()
+
+        def run(again=False):
+            if work["thread"]:  # «Pausar»: el lote en curso termina y se guarda
+                work["stop"].set()
+                run_btn.setEnabled(False)
+                run_btn.setText("Pausando…")
+                return
+            keep()
+            if src.currentData() == dst.currentData():
+                messagebox.showinfo("Traducir", "El idioma de origen y el de destino son el mismo.", parent=win)
+                return
+            picked = set(table.selection())
+            ids = [i for i in table.get_children() if (i in picked if again else table.set(i, "state") == "Pendiente")]
+            if not ids:
+                messagebox.showinfo("Traducir", "Elige en la lista los párrafos que quieres volver a traducir." if again
+                                    else "No queda nada pendiente de traducir aquí.", parent=win)
+                return
+            name = engine.currentText()
+            info = translate.ENGINES[name]
+            if info.get("key") and not api_key.text().strip():
+                messagebox.showerror("Traducir", f"Falta la clave de {name}.", parent=win)
+                api_key.setFocus()
+                return
+            remember()
+            order = table.get_children()
+            before = [rows[i] for i in order[:order.index(ids[0])]]
+            job = {"engine": name, "src": src.currentData(), "dst": dst.currentData(), "key": api_key.text().strip(),
+                   "model": model.text().strip(), "base": base.text().strip() if info.get("custom") else "",
+                   "glossary": list(self.tr_glossary),
+                   "items": list(dict.fromkeys((rows[i][0], rows[i][2]) for i in ids)),  # «—¿Eh?» repetido, una vez
+                   "context": [(t, done[k]["text"]) for k, _, t in before if k in done][-translate.CONTEXT:]}
+            work.update(stop=threading.Event(), queue=queue.Queue(), count=0, total=len(job["items"]),
+                        again={k for k, _ in job["items"]} if again else set())
+            work["thread"] = threading.Thread(target=_translate_thread, args=(job, work["queue"], work["stop"]),
+                                              daemon=True)
+            work["thread"].start()
+            busy(True)
+            status.setText(f"Traduciendo con {name}… 0 de {len(job['items'])} párrafos")
+            qtk.after(200, poll)
+
+        def poll():
+            if not shiboken6.isValid(win):
+                return
+            events, arrived = [], {}
+            while True:
+                try:
+                    events.append(work["queue"].get_nowait())
+                except queue.Empty:
+                    break
+            for event in events:
+                if event[0] == "done":
+                    arrived.update(event[1])
+            if arrived:  # todos los lotes llegados, de una vez: con Google llegan muchos y cada guardado escribe todo
+                for k, text in arrived.items():
+                    if not (done.get(k, {}).get("hand") and k not in work["again"]):  # lo corregido mientras tanto
+                        done[k] = {"text": text, "hand": False}
+                work["count"] += len(arrived)
+                refresh(set(arrived))
+                save()
+                status.setText(f"Traduciendo… {work['count']} de {work['total']} párrafos")
+            for event in events:
+                if event[0] == "error":
+                    messagebox.showerror("Traducir", event[1], parent=win)
+                elif event[0] == "log":
+                    _log(event[1])
+                elif event[0] == "end":
+                    work["thread"] = None
+                    busy(False)
+                    return
+            qtk.after(200, poll)
+
+        def apply():
+            keep()
+            changed = self.apply_translation(done, dst.currentData())
+            if changed is None:
+                messagebox.showerror("Traducir", "No se pudo guardar la versión «Antes de traducir»: el libro queda "
+                                                 "como estaba.", parent=win)
+                return
+            fill()
+            status.setText(f"{convert.counted(changed, 'párrafo cambiado', 'párrafos cambiados')} en el libro; el idioma "
+                           f"pasa a {dst.currentText()}. Ctrl+Z en la lista lo deshace."
+                           if changed else "Nada que cambiar: lo traducido ya está en el libro.")
+
+        def edit_glossary():
+            box, inner = self.dialog("Glosario de traducción", modal=True)
+            inner.addWidget(QLabel("Un término por línea: original = traducción («Witch Cult = Culto de la Bruja»). "
+                                   "La IA lo usa siempre;\nGoogle y DeepL no. Lo que va tras # no cuenta. Pasa a los "
+                                   "demás tomos de la serie."))
+            text = QPlainTextEdit("\n".join(f"{a} = {b}" for a, b in self.tr_glossary))
+            text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            text.setMinimumSize(560, 260)
+            inner.addWidget(text, 1)
+
+            def pairs():
+                out = {}
+                for line in text.toPlainText().splitlines():
+                    a, sep, b = line.split("#")[0].partition("=")
+                    if sep and a.strip() and b.strip():
+                        out[a.strip()] = b.strip()
+                return [[a, b] for a, b in out.items()]
+
+            def add_names():
+                """Los nombres propios de este tomo que salen 5 veces o más, iguales en los dos lados para corregir."""
+                have = {a for a, _ in pairs()}
+                names = sorted(((n, f) for f, n in convert.proper_names(self.book).items() if n >= 5 and f not in have),
+                               reverse=True)
+                if not names:
+                    messagebox.showinfo("Glosario de traducción", "No hay nombres nuevos que salgan 5 veces o más en "
+                                                                  "este tomo.", parent=box)
+                    return
+                lead = "\n" if text.toPlainText().strip() else ""
+                text.setPlainText(text.toPlainText() + lead + "\n".join(f"{f} = {f}  # {convert.counted(n, 'vez', 'veces')}"
+                                                                        for n, f in names))
+
+            def accept():
+                self.tr_glossary = pairs()
+                box.close()
+
+            inner.addLayout(_row(_button("Añadir nombres de este tomo", add_names), 1,
+                                 _button("Aceptar", accept, "primary")))
+            box.show()
+            win.glossary_box = box, text, accept
+
+        def close():
+            keep()
+            if work["stop"]:
+                work["stop"].set()  # el hilo acaba su lote; lo que llegue después ya no se guarda
+            remember()
+            win.on_reject = None
+            win.close()
+
+        win.on_reject = close
+        table.selected.connect(pick)
+        engine.activated.connect(lambda _: (remember(), show_engine()))
+        scope.activated.connect(lambda _: fill())
+        show_engine()
+        fill()
+        win.parts = {"table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
+                     "scope": scope, "dst": dst, "src": src, "key": api_key, "status": status, "work": work, "done": done,
+                     "glossary": edit_glossary, "close": close}
+        win.show()
+        return win
 
     def versions(self):
         """Versiones del libro, como los commits de git: guardar, comparar (con lo de ahora, o dos entre sí),
