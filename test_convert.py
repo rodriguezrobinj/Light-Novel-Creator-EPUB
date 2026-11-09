@@ -1928,6 +1928,37 @@ def test_window_epubcheck_asks_before_downloading():
     assert clean == "Sin errores ni advertencias: el EPUB cumple el estándar.", clean
     assert status == "EPUBCheck: 1 error, 1 advertencia", status
 
+
+def test_write_pdf_bookmarks_numbers_and_metadata():
+    """PDF maquetado desde el libro: tamaño elegido, índice como marcadores, título y autor en las propiedades,
+    número de página al pie salvo en la portada y en las ilustraciones a página completa; sin restos .tmp."""
+    B = convert.Block
+    text = "Ella abrió la puerta y miró el pasillo vacío antes de seguir. " * 12
+    blocks = ([B("heading", 1, "Capítulo 1: Inicio")] + [B("p", 1, text) for _ in range(10)]
+              + [B("image", 2, image=jpeg(600, 900))]
+              + [B("heading", 3, "Capítulo 2: Final")] + [B("p", 3, text) for _ in range(4)])
+    book = convert.Book("Mi novela", "Autora X", jpeg(400, 600), blocks, [0, 12])
+    out = TMP / "libro.pdf"
+    convert.write_pdf(book, [(0, "Capítulo 1: Inicio"), (12, "Capítulo 2: Final")], out, size="A5",
+                      typography=True)
+    pdf = pymupdf.open(out)
+    width, height = pdf[0].rect.width, pdf[0].rect.height
+    toc = [title for _, title, _ in pdf.get_toc()]
+    meta = pdf.metadata["title"], pdf.metadata["author"]
+    foot = lambda page: page.get_text(clip=pymupdf.Rect(0, height - 30, width, height)).strip()
+    feet = [foot(page) for page in pdf]
+    image_pages = [n for n, page in enumerate(pdf) if not page.get_text(clip=pymupdf.Rect(0, 0, width, height - 30)).strip()
+                   and page.get_images()]
+    pages = len(pdf)
+    pdf.close()
+    assert (round(width), round(height)) == (420, 595), (width, height)
+    assert "Capítulo 1: Inicio" in toc and "Capítulo 2: Final" in toc, toc
+    assert meta == ("Mi novela", "Autora X"), meta
+    assert feet[0] == "" and all(feet[n] == "" for n in image_pages) and image_pages, (feet, image_pages)
+    numbered = [n for n in range(1, pages) if n not in image_pages and feet[n]]
+    assert numbered and all(feet[n] == str(n + 1) for n in numbered), feet
+    assert not list(TMP.glob("libro.pdf.tmp")), "queda el .tmp"
+
 def jpeg(width, height):
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
     pix.set_rect(pix.irect, (200, 120, 40))
@@ -5765,6 +5796,44 @@ def test_window_empty_screen_and_dropped_pdf():
     assert len(opened) == 1 and Path(opened[0]) == pdf, opened
     assert book_page == 1
 
+
+
+def test_window_generates_pdf_from_menu():
+    """«PDF ▾» → «Generar PDF (A5…)»: el PDF sale en el proceso de trabajo, abre «PDF listo» con «Abrir PDF» y sin
+    EPUBCheck, y no deja pisar el PDF original."""
+    import time
+
+    import app
+    from PySide6.QtWidgets import QPushButton
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    out = TMP / "desde-menu.pdf"
+    saved, errors = app.filedialog.asksaveasfilename, []
+    showerror = app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message, **_: errors.append(message)
+    try:
+        app.filedialog.asksaveasfilename = lambda **options: str(window.pdf)  # el original: no
+        window.generate_pdf("A5")
+        app.filedialog.asksaveasfilename = lambda **options: str(out)
+        [action] = [a for a in window.pdf_btn.menu().actions() if a.text().startswith("Generar PDF (A5")]
+        action.trigger()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+        root.update()
+        dialog = root.dialogs()[-1]
+        title = dialog.windowTitle()
+        buttons = [b.text() for b in dialog.findChildren(QPushButton)]
+        pages = len(pymupdf.open(out))
+        window.close()
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.showerror = saved, showerror
+    assert errors == ["Ese es el PDF original: elige otro nombre."], errors
+    assert title == "PDF listo" and "Abrir PDF" in buttons and "Validar con EPUBCheck" not in buttons, (title, buttons)
+    assert pages > 1, pages
 
 def test_window_find_bar_and_result_dialog():
     """Ctrl+F abre la barra sobre la lista; elegir un resultado lleva la vista previa a su página. Al generar,
