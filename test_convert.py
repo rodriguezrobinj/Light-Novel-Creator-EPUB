@@ -1759,6 +1759,73 @@ def test_epub_accessibility_metadata_and_alt_text():
     assert not convert.check_epub(out), convert.check_epub(out)
 
 
+
+def test_window_illustrations_export_and_replace_with_comparison():
+    """«Ilustraciones…»: exportar todas con nombres estables; «Reemplazar desde carpeta» empareja por nombre, se
+    salta las que no cambiaron y pregunta con antes y después (aceptar una, saltar otra); cancelar no cambia nada;
+    un Ctrl+Z lo deshace todo, y la revisión guarda una copia propia: borrar la carpeta no pierde el cambio."""
+    import app
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QPushButton
+
+    B = convert.Block
+    pics = [jpeg(300, 400), jpeg(320, 440), jpeg(340, 480)]
+    blocks = [B("heading", 1, "Capítulo 1"), B("image", 1, image=pics[0]), B("p", 1, "Texto."),
+              B("heading", 2, "Capítulo 2"), B("image", 2, image=pics[1]), B("image", 3, image=pics[2])]
+    folder = TMP / "ilustraciones-exportadas"
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", list(blocks), [0, 3]))
+    saved = app.filedialog.askdirectory, app.filedialog.askopenfilename
+    answers = ["replace", "skip"]
+    asked = []
+    try:
+        app.filedialog.askdirectory = lambda **options: str(folder)
+        window.images_dialog()
+        root.update()
+        dialog = root.dialogs()[-1]
+        listed = dialog.parts["list"].count()
+        click = lambda text: next(b for b in dialog.findChildren(QPushButton) if b.text() == text).click()
+        click("Exportar todas…")
+        exported = sorted(f.name for f in folder.iterdir())
+        new2, new3 = jpeg(640, 880), jpeg(680, 960)
+        (folder / exported[1]).write_bytes(new2)
+        (folder / exported[2]).write_bytes(new3)
+        window.confirm_image = lambda k, data, batch=False: asked.append((k, batch)) or answers.pop(0)
+        click("Reemplazar desde carpeta…")
+        note = dialog.parts["note"].text()
+        after = [b.image for b in window.book.blocks if b.kind == "image"]
+        state = app.json.loads(app.json.dumps(window.review_state()))  # como se guarda: Ctrl+Z ya no la toca
+        # Cancelar a mitad de un lote: nada cambia
+        window.confirm_image = lambda k, data, batch=False: None
+        before_cancel = [b.image for b in window.book.blocks]
+        cancelled = window.replace_from_folder(folder)
+        unchanged = [b.image for b in window.book.blocks] == before_cancel
+        window.undo()
+        undone = [b.image for b in window.book.blocks if b.kind == "image"]
+        # La comparación de verdad: Reemplazar responde "replace"
+        del window.confirm_image
+        QTimer.singleShot(300, lambda: next(b for b in window.image_compare.findChildren(QPushButton)
+                                            if b.text() == "Reemplazar").click())
+        real = window.confirm_image(1, new2)
+        window.close()
+    finally:
+        app.filedialog.askdirectory, app.filedialog.askopenfilename = saved
+    for f in folder.iterdir():  # la carpeta de exportación ya no está
+        f.unlink()
+    folder.rmdir()
+    fresh = convert.Book("Libro", "", b"", list(blocks), [0, 3])
+    app._replay(fresh, state)
+    assert listed == 3, listed
+    assert exported == ["ilustracion-01-pag-001.jpg", "ilustracion-02-pag-002.jpg", "ilustracion-03-pag-003.jpg"], \
+        exported
+    assert asked == [(4, True), (5, True)], asked
+    assert after == [pics[0], new2, pics[2]], "la aceptada cambia; la saltada y la igual, no"
+    assert note.startswith("1 ilustración reemplazada · 1 saltadas"), note
+    assert cancelled is None and unchanged
+    assert undone == pics, "un Ctrl+Z deshace el lote"
+    assert real == "replace", real
+    assert fresh.blocks[4].image == new2, "al reabrir, sin la carpeta de exportación, el cambio sigue"
+
 def test_window_describe_image_reaches_the_epub():
     """«Describir ilustración…» guarda la descripción por la imagen (no por la fila) en la revisión, y el EPUB la
     lleva como texto alternativo; sin una ilustración elegida, un aviso lo pide."""
@@ -4466,6 +4533,7 @@ def test_window_add_page_change_image_and_reviewed():
         window.fill_tree(window.rows())
         image = str(len(window.book.blocks) - 1)
         window.tree.selection_set(image)
+        window.confirm_image = lambda k, data, batch=False: "replace"  # el antes y después: Reemplazar
         window.change_image()
     finally:
         app.filedialog.askopenfilename = original
@@ -4503,6 +4571,7 @@ def test_window_change_double_image_for_single():
     split = window.tree.set("1", "inc")
     original = app.filedialog.askopenfilename
     app.filedialog.askopenfilename = lambda **kwargs: str(picture)
+    window.confirm_image = lambda k, data, batch=False: "replace"  # el antes y después: Reemplazar
     try:
         window.change_image()
     finally:
