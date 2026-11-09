@@ -1878,10 +1878,12 @@ def _issue_span(issue, blocks):
     return lead, lead + len(text)
 
 
-def quality_report(book, echoes=False, glossary=()):
+def quality_report(book, echoes=False, glossary=(), lang="es"):
     """Lo sospechoso del libro, para revisarlo: [Issue], por página. Cada aviso dice el problema, la
     solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa. Con echoes, también
-    las palabras repetidas cerca (muchos avisos de estilo); glossary, los nombres de la serie como deben ir."""
+    las palabras repetidas cerca (muchos avisos de estilo); glossary, los nombres de la serie como deben ir.
+    lang: idioma del libro; las erratas, calcos y ecos son del español, y «sin traducir» busca inglés."""
+    spanish, in_english = lang.lower().startswith("es"), lang.lower().startswith("en")
     blocks = book.blocks
     unpaired_signs = {}  # bloque -> signo de su aviso «Signo sin pareja»
     report = [Issue("skipped", None, page, "Grave", f"Texto no incluido ({letters} letras)",
@@ -1906,6 +1908,7 @@ def quality_report(book, echoes=False, glossary=()):
             continue
         text = _plain(b).strip()
         number, link, broken, english, capital, letter_end = _facts(text)
+        english = english and not in_english
         if text[:1].islower():
             # El párrafo anterior, saltando ilustraciones y separadores (la página se cortó con una imagen)
             j = next((j for j in range(k - 1, -1, -1) if blocks[j].kind in ("p", "heading")), None)
@@ -1983,14 +1986,14 @@ def quality_report(book, echoes=False, glossary=()):
                                 "falta un signo o sobra.",
                                 "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E).",
                                 _around(text, pos, pos + 1), text=text))
-        echo = _echo(text) if echoes else None
+        echo = _echo(text) if echoes and spanish else None
         if echo:
             report.append(Issue("echo", k, b.page, "Menor", "Palabra repetida cerca",
                                 f"«{text[echo[0]:echo[1]]}» sale dos veces en pocas palabras: suena repetido.",
                                 "Cambia una por un sinónimo o reescribe la frase con «Editar texto…» (tecla E).",
                                 _around(text, *echo), text=text))
         line = _line(b, k)
-        for t, fixed in _typos(line) if not link else ():
+        for t, fixed in _typos(line) if spanish and not link else ():
             kind, title, _, why, solution = TYPOS[t]
             before, after = TAGS.sub("", line), TAGS.sub("", fixed)
             n = len(os.path.commonprefix([before, after]))

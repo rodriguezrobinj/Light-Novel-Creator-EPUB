@@ -1496,6 +1496,8 @@ class App:
         for var in (self.title_var, self.author_var, self.publisher_var, self.lang_var, self.series_var,
                     self.volume_var):
             var.listeners.append(self.update_header)
+        self.lang_timer = None
+        self.lang_var.listeners.append(self.lang_changed)
 
         # Lista a la izquierda, vistas previas a la derecha, con divisor
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -1874,10 +1876,16 @@ class App:
                 parent=editor.win):
             editor.win.raise_()
             return False
+        if self.translations_running() and not messagebox.askyesno(
+                "Cerrar", "Hay una traducción en curso: si sales ahora se pierde el lote que se está traduciendo (hasta "
+                          "30 párrafos; lo anterior ya está guardado). ¿Salir igual?"):
+            return False
         if editor:
             editor.win.done(0)
         self.poller.stop()
         self.watcher.stop()
+        if self.lang_timer:  # el informe se recalcularía sobre la ventana ya cerrada
+            qtk.cancel(self.lang_timer)
         self.save_review()
         self.save_settings()
         if self.done and self.proc.is_alive():
@@ -2266,7 +2274,7 @@ class App:
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
         # Son del libro: llegan con la revisión (el glosario, también heredado de otro tomo)
         self.glossary, self.tr_glossary, self.comments, self.alts = [], [], [], {}
-        if report is not None and not self.echoes_var.get():  # el del proceso va sin opciones
+        if report is not None and not self.echoes_var.get() and self.spanish():  # el del proceso: sin opciones, en español
             self.reports[self.report_key()] = report
         if memos:
             convert.seed_report_memos(memos)
@@ -3045,6 +3053,10 @@ class App:
         """Revisa la ortografía en el proceso de trabajo: cargar el diccionario tarda unos segundos."""
         if not self.book:
             return
+        if not self.spanish():
+            messagebox.showinfo("Ortografía", f"La ortografía solo revisa libros en español, y este está en "
+                                              f"«{self.lang_var.get().strip()}» (Editar datos › Idioma).")
+            return
         texts = [convert._plain(b) for b in self.book.blocks if b.kind == "p"]
         if self.run(convert.unknown_words, (texts, self.words), self.spelling_dialog):
             self.status.setText("Revisando la ortografía…")
@@ -3789,6 +3801,17 @@ class App:
             self.fields()[name].set(value)
         self.update_preview()
 
+    def spanish(self):
+        """El libro está en español: las erratas, los calcos, los ecos y la ortografía solo saben de español."""
+        return (self.lang_var.get().strip() or "es").lower().startswith("es")
+
+    def lang_changed(self):
+        """Otro idioma cambia los avisos del informe; se espera a que se acabe de escribir en el campo."""
+        if self.book:
+            if self.lang_timer:
+                qtk.cancel(self.lang_timer)
+            self.lang_timer = qtk.after(600, lambda: self.book and self.update_quality())
+
     def quality_report(self):
         """convert.quality_report del libro, recordado por su contenido: tarda ~1 s en un libro largo, y
         deshacer, cambiar de tema o abrir el informe lo pedían otra vez con el mismo texto."""
@@ -3796,7 +3819,8 @@ class App:
         if key not in self.reports:
             if len(self.reports) >= 8:  # los últimos estados: basta para deshacer varias veces
                 del self.reports[next(iter(self.reports))]
-            self.reports[key] = convert.quality_report(self.book, self.echoes_var.get(), self.glossary)
+            self.reports[key] = convert.quality_report(self.book, self.echoes_var.get(), self.glossary,
+                                                       self.lang_var.get().strip() or "es")
         return list(self.reports[key]) + self.toc_issues() + self.comment_issues()
 
     def comment_issues(self):
@@ -3891,7 +3915,7 @@ class App:
         b = self.book
         return (b.title, b.cover, tuple(b.candidates), tuple(tuple(s) for s in b.skipped),
                 tuple((x.kind, x.page, x.html, x.image, x.keep, x.layout, x.align) for x in b.blocks),
-                self.echoes_var.get(), tuple(self.glossary))
+                self.echoes_var.get(), tuple(self.glossary), self.lang_var.get().strip())
 
     def update_quality(self):
         """Botón de la barra inferior con los avisos del informe de calidad: dice qué falta antes de generar,
@@ -4426,11 +4450,16 @@ class App:
         if not (self.book and self.pdf):
             return None
         old = getattr(self, "translate_window", None)
-        if old and shiboken6.isValid(old) and old.isVisible():  # cerrada, Qt la borra más tarde
+        # Oculta pero terminando su lote (se cerró a mitad): vuelve la misma, si es de este libro
+        if (old and shiboken6.isValid(old) and old.parts["book"] is self.book
+                and (old.isVisible() or old.parts["work"]["thread"])):
+            old.parts["work"]["closing"] = False
+            old.show()
             old.raise_()
             old.activateWindow()
             return old
-        saved = _read_translation(self.pdf)
+        pdf = self.pdf  # la ventana guarda siempre en su libro, aunque mientras tanto se abra otro
+        saved = _read_translation(pdf)
         done = saved["done"]
         prefs = self.settings.get("translate") if isinstance(self.settings.get("translate"), dict) else {}
         for name in ("models", "keys"):
@@ -4454,7 +4483,11 @@ class App:
             scope.addItem(title, n)
         scope.setMinimumContentsLength(30)
         scope.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        model, base, api_key = QLineEdit(), QLineEdit(), QLineEdit()
+        model, base, api_key = QComboBox(), QLineEdit(), QLineEdit()
+        model.setEditable(True)  # se escribe a mano o se elige de los que da «Buscar modelos»
+        model.setMinimumContentsLength(22)
+        model.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        models_btn = _button("Buscar modelos", lambda: find_models())
         api_key.setEchoMode(QLineEdit.EchoMode.Password)
         base.setPlaceholderText("http://localhost:11434/v1")
         base.setMinimumWidth(260)
@@ -4462,7 +4495,7 @@ class App:
         glossary_btn = _button("Glosario de traducción…", lambda: edit_glossary())
         column.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, QLabel("Motor:"), engine, 1, QLabel("Traducir:"),
                               scope))
-        column.addLayout(_row(model_label, model, base_label, base, key_label, api_key, 1, glossary_btn))
+        column.addLayout(_row(model_label, model, models_btn, base_label, base, key_label, api_key, 1, glossary_btn))
         hint = _label("", "muted")
         hint.setWordWrap(True)
         column.addWidget(hint)
@@ -4492,11 +4525,13 @@ class App:
         apply_btn = _button("Aplicar al libro", lambda: apply())
         column.addLayout(_row(run_btn, again_btn, 1, apply_btn, _button("Cerrar", lambda: close())))
         work = {"thread": None, "stop": None, "queue": None, "shown": None, "again": set(), "engine": "", "count": 0,
-                "total": 0}
+                "total": 0, "closing": False}
         rows = {}  # fila (índice del bloque) -> (clave, prefijo, texto original)
         index = {}  # clave -> sus filas: un lote no recorre la lista entera (miles de párrafos)
         hints = {"google": "Gratis y sin cuenta, frase a frase: los diálogos salen más literales. Si Google corta por "
                            "exceso de peticiones, la traducción espera y lo vuelve a intentar.",
+                 "gcloud": "La API oficial de Google: no corta por exceso de peticiones y trae 500.000 caracteres "
+                           "gratis al mes; pide una clave de Google Cloud con la facturación activada.",
                  "deepl": "Más natural que Google, frase a frase. La clave gratuita (acaba en «:fx») trae 500.000 "
                           "caracteres al mes. No usa el glosario.",
                  "openai": "La IA traduce por lotes de hasta 30 párrafos viendo los anteriores y el glosario: diálogos "
@@ -4508,7 +4543,7 @@ class App:
             """Guarda en las preferencias lo escrito para el motor elegido; la clave, cifrada."""
             name = work["engine"]
             if name:
-                prefs["models"][name] = model.text().strip()
+                prefs["models"][name] = model.currentText().strip()
                 try:
                     prefs["keys"][name] = translate.protect(api_key.text().strip())
                 except OSError:
@@ -4522,10 +4557,11 @@ class App:
         def show_engine():
             name = work["engine"] = engine.currentText()
             info = translate.ENGINES[name]
-            model.setText(prefs["models"].get(name) or info.get("model", ""))
+            model.clear()  # la lista buscada era de otro motor
+            model.setEditText(prefs["models"].get(name) or info.get("model", ""))
             api_key.setText(translate.unprotect(prefs["keys"].get(name, "")))
             base.setText(prefs.get("base") or info.get("base", ""))
-            for widget, shown in ((model_label, "model" in info), (model, "model" in info),
+            for widget, shown in ((model_label, "model" in info), (model, "model" in info), (models_btn, "model" in info),
                                   (base_label, info.get("custom")), (base, info.get("custom")),
                                   (key_label, info["kind"] != "google"), (api_key, info["kind"] != "google")):
                 widget.setVisible(bool(shown))
@@ -4578,8 +4614,7 @@ class App:
 
         def save():
             try:
-                _write_json(_translation_path(self.pdf), {"src": src.currentData(), "dst": dst.currentData(),
-                                                          "done": done})
+                _write_json(_translation_path(pdf), {"src": src.currentData(), "dst": dst.currentData(), "done": done})
             except OSError as e:
                 status.setText(f"No se pudo guardar la traducción: {e.strerror or e}")
 
@@ -4611,7 +4646,7 @@ class App:
         def busy(on):
             run_btn.setText("Pausar" if on else "Traducir")
             run_btn.setEnabled(True)
-            for widget in (again_btn, src, dst, engine, scope, model, base, api_key, glossary_btn):
+            for widget in (again_btn, src, dst, engine, scope, model, models_btn, base, api_key, glossary_btn):
                 widget.setEnabled(not on)
             count()
 
@@ -4641,7 +4676,7 @@ class App:
             order = table.get_children()
             before = [rows[i] for i in order[:order.index(ids[0])]]
             job = {"engine": name, "src": src.currentData(), "dst": dst.currentData(), "key": api_key.text().strip(),
-                   "model": model.text().strip(), "base": base.text().strip() if info.get("custom") else "",
+                   "model": model.currentText().strip(), "base": base.text().strip() if info.get("custom") else "",
                    "glossary": list(self.tr_glossary),
                    "items": list(dict.fromkeys((rows[i][0], rows[i][2]) for i in ids)),  # «—¿Eh?» repetido, una vez
                    "context": [(t, done[k]["text"]) for k, _, t in before if k in done][-translate.CONTEXT:]}
@@ -4667,23 +4702,79 @@ class App:
                 if event[0] == "done":
                     arrived.update(event[1])
             if arrived:  # todos los lotes llegados, de una vez: con Google llegan muchos y cada guardado escribe todo
-                for k, text in arrived.items():
-                    if not (done.get(k, {}).get("hand") and k not in work["again"]):  # lo corregido mientras tanto
-                        done[k] = {"text": text, "hand": False}
+                # Cerrada a mitad de lote y abierta otra vez sobre el mismo libro: lo que llega va a la nueva, que es
+                # la que guarda (si guardaran las dos, una pisaría lo de la otra)
+                twins = [w for w in self.root.findChildren(Dialog) if w is not win and shiboken6.isValid(w)
+                         and "merge" in getattr(w, "parts", {}) and w.parts["pdf"] == pdf and w.isVisible()]
+                merge(arrived, work["again"], store=not twins)
+                for twin in twins:
+                    twin.parts["merge"](arrived, work["again"])
                 work["count"] += len(arrived)
-                refresh(set(arrived))
-                save()
                 status.setText(f"Traduciendo… {work['count']} de {work['total']} párrafos")
             for event in events:
-                if event[0] == "error":
+                if event[0] == "error" and not work["closing"]:  # cerrada: nadie lo leería
                     messagebox.showerror("Traducir", event[1], parent=win)
                 elif event[0] == "log":
                     _log(event[1])
                 elif event[0] == "end":
                     work["thread"] = None
+                    if work["closing"]:  # su lote ya está guardado: ahora sí se cierra
+                        win.deleteLater()
+                        return
                     busy(False)
                     return
             qtk.after(200, poll)
+
+        def merge(arrived, again=(), store=True):
+            """Pone las traducciones llegadas, salvo las corregidas a mano mientras tanto (si no se pidieron otra vez)."""
+            for k, text in arrived.items():
+                if not (done.get(k, {}).get("hand") and k not in again):
+                    done[k] = {"text": text, "hand": False}
+            refresh(set(arrived))
+            if store:
+                save()
+            if work["thread"] is None:
+                count()
+
+        def find_models():
+            """Pide a la API los modelos de hoy con esta clave, en un hilo: sin conexión tardaría en fallar."""
+            name, info = engine.currentText(), translate.ENGINES[engine.currentText()]
+            if info.get("key") and not api_key.text().strip():
+                messagebox.showerror("Traducir", f"Falta la clave de {name}: sin ella la API no da la lista.", parent=win)
+                return
+            found, url = queue.Queue(), base.text().strip() if info.get("custom") else ""
+
+            def ask():
+                try:
+                    found.put(translate.models(name, api_key.text().strip(), url))
+                except Exception as e:  # TranslateError ya viene en español
+                    found.put(str(e) or type(e).__name__)
+
+            models_btn.setEnabled(False)
+            models_btn.setText("Buscando…")
+            threading.Thread(target=ask, daemon=True).start()
+
+            def wait():
+                if not shiboken6.isValid(win):
+                    return
+                try:
+                    result = found.get_nowait()
+                except queue.Empty:
+                    qtk.after(200, wait)
+                    return
+                models_btn.setText("Buscar modelos")
+                models_btn.setEnabled(work["thread"] is None)
+                if isinstance(result, str) or not result or engine.currentText() != name:
+                    if engine.currentText() == name:
+                        messagebox.showerror("Traducir", result or f"{name} no devolvió ningún modelo.", parent=win)
+                    return
+                current = model.currentText().strip()
+                model.clear()
+                model.addItems(result)
+                model.setEditText(current)
+                status.setText(f"{name} ofrece {convert.counted(len(result), 'modelo')}: elige uno en «Modelo».")
+
+            qtk.after(200, wait)
 
         def apply():
             keep()
@@ -4739,10 +4830,17 @@ class App:
 
         def close():
             keep()
-            if work["stop"]:
-                work["stop"].set()  # el hilo acaba su lote; lo que llegue después ya no se guarda
             remember()
+            if work["thread"]:  # a mitad de lote: se oculta, lo termina, lo guarda y luego se cierra (poll)
+                work["stop"].set()
+                work["closing"] = True
+                run_btn.setEnabled(False)
+                run_btn.setText("Pausando…")
+                win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)  # cerrar desde fuera solo la oculta
+                win.hide()
+                return
             win.on_reject = None
+            win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             win.close()
 
         win.on_reject = close
@@ -4753,9 +4851,15 @@ class App:
         fill()
         win.parts = {"table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
                      "scope": scope, "dst": dst, "src": src, "key": api_key, "status": status, "work": work, "done": done,
-                     "glossary": edit_glossary, "close": close}
+                     "glossary": edit_glossary, "close": close, "merge": merge, "pdf": pdf, "book": self.book,
+                     "model": model, "models": find_models}
         win.show()
         return win
+
+    def translations_running(self):
+        """Ventanas «Traducir» con un lote en camino, visibles u ocultas terminándolo."""
+        return [w for w in self.root.findChildren(Dialog) if shiboken6.isValid(w) and "merge" in getattr(w, "parts", {})
+                and w.parts["work"]["thread"]]
 
     def versions(self):
         """Versiones del libro, como los commits de git: guardar, comparar (con lo de ahora, o dos entre sí),
@@ -5047,7 +5151,7 @@ class TextEditor:
         sheet.command.connect(self.on_command)
         sheet.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         sheet.customContextMenuRequested.connect(self.context_menu)
-        self.spell = _start_spell_process()
+        self.spell = _start_spell_process() if app.spanish() else None  # el diccionario es de español
         if self.spell:  # todo el libro de una vez; luego, lo que se escriba
             blocks = [b for b in app.book.blocks if b.kind in ("p", "heading")]
             self.send_words(" ".join(convert._plain(b) for b in blocks))
