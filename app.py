@@ -278,6 +278,21 @@ def _image_info(data):
     return f"{image.width()}×{image.height()} px · {max(1, round(len(data) / 1024))} KB · {_image_ext(data).upper()}"
 
 
+THUMB_BOX = (72, 72)  # miniatura de la lista de ilustraciones: marco cuadrado, igual para verticales y apaisadas
+
+
+def _framed_thumb(data):
+    """La imagen reducida y centrada en un marco transparente de THUMB_BOX: todas las filas, iguales."""
+    image = QImage.fromData(data).scaled(*THUMB_BOX, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation)
+    framed = QPixmap(*THUMB_BOX)
+    framed.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(framed)
+    painter.drawImage((THUMB_BOX[0] - image.width()) // 2, (THUMB_BOX[1] - image.height()) // 2, image)
+    painter.end()
+    return framed
+
+
 def _store_image(path):
     """Copia la imagen elegida junto a las preferencias y devuelve esa ruta: la revisión la guarda, y la del usuario
     (una carpeta de exportación) puede borrarse; entonces, al reabrir, el cambio se perdía."""
@@ -3289,8 +3304,14 @@ class App:
         win, column = self.dialog("Ilustraciones")
         win.resize(980, 600)
         listing = QListWidget()
-        listing.setIconSize(QSize(48, 68))
+        listing.setIconSize(QSize(*THUMB_BOX))
         listing.setMinimumWidth(420)
+        # Filas iguales: el icono de una ilustración apaisada era más bajo y la fila se encogía; un título largo
+        # abría una barra horizontal. Se recorta con «…» y se lee entero al pasar el ratón.
+        listing.setUniformItemSizes(True)
+        listing.setTextElideMode(Qt.TextElideMode.ElideRight)
+        listing.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        listing.setSpacing(2)
         preview = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         preview.setMinimumSize(360, 440)
         info = _label("", "muted")
@@ -3306,11 +3327,10 @@ class App:
         def fill(row=0):
             listing.clear()
             for n, k in enumerate(order, 1):
-                pixmap = QPixmap()
-                pixmap.loadFromData(self.book.blocks[k].image)
-                item = QListWidgetItem(QIcon(pixmap.scaled(48, 68, Qt.AspectRatioMode.KeepAspectRatio,
-                                                           Qt.TransformationMode.SmoothTransformation)),
-                                       f"{self.image_title(n, k)}\n{_image_info(self.book.blocks[k].image)}")
+                text = f"{self.image_title(n, k)}\n{_image_info(self.book.blocks[k].image)}"
+                item = QListWidgetItem(QIcon(_framed_thumb(self.book.blocks[k].image)), text)
+                item.setToolTip(text)
+                item.setSizeHint(QSize(0, THUMB_BOX[1] + 8))
                 item.setData(Qt.ItemDataRole.UserRole, k)
                 listing.addItem(item)
             listing.setCurrentRow(min(row, listing.count() - 1))
