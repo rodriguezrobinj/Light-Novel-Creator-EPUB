@@ -4481,7 +4481,7 @@ class App:
         scope.addItem("Todo el libro", None)
         for n, (_, _, title) in enumerate(sections):
             scope.addItem(title, n)
-        scope.setMinimumContentsLength(30)
+        scope.setMinimumContentsLength(34)
         scope.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         model, base, api_key = QComboBox(), QLineEdit(), QLineEdit()
         model.setEditable(True)  # se escribe a mano o se elige de los que da «Buscar modelos»
@@ -4836,6 +4836,7 @@ class App:
                 work["closing"] = True
                 run_btn.setEnabled(False)
                 run_btn.setText("Pausando…")
+                status.setText("Terminando el lote en curso para guardarlo; luego se para.")
                 win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)  # cerrar desde fuera solo la oculta
                 win.hide()
                 return
