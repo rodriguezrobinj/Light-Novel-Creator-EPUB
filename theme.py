@@ -8,17 +8,24 @@ CHOICES = ("Sistema", "Claro", "Oscuro")
 LIGHT = {"bg": "#f3f3f3", "card": "#ffffff", "base": "#ffffff", "line": "#e1e1e1", "ink": "#1b1b1b",
          "muted": "#6b6b6b", "acc": "#2a62c8", "acc_hover": "#2353ab", "acc_ink": "#ffffff", "sel": "#dce8fc",
          "hover": "#ececec", "press": "#e2e2e2", "warn": "#c62828", "ok": "#2e7d32", "drop": "#f5f8fe",
-         "drop_line": "#b9c8e8", "sheet": "#ffffff", "sheet_line": "#d4d4d4", "hint": "#9a9a9a"}
+         "drop_line": "#b9c8e8", "sheet": "#ffffff", "sheet_line": "#d4d4d4", "hint": "#9a9a9a",
+         "zebra": "#f5f6f8"}
 DARK = {"bg": "#202020", "card": "#2b2b2b", "base": "#1f1f1f", "line": "#3d3d3d", "ink": "#ececec",
         "muted": "#a0a0a0", "acc": "#7099f5", "acc_hover": "#85a9f7", "acc_ink": "#111111", "sel": "#2f3d5c",
         "hover": "#353535", "press": "#3d3d3d", "warn": "#ff6b6b", "ok": "#7bc47f", "drop": "#262a33",
-        "drop_line": "#4a5a7a", "sheet": "#1a1a1a", "sheet_line": "#3d3d3d", "hint": "#7a7a7a"}
+        "drop_line": "#4a5a7a", "sheet": "#1a1a1a", "sheet_line": "#3d3d3d", "hint": "#7a7a7a",
+        "zebra": "#313131"}
 
 # Colores de los tipos de fila de la lista ("" = el del texto normal). Todo texto llega a 4,5:1 (WCAG AA)
 KINDS = {False: {"chapter": "", "subtitle": "#555555", "cut": "#737373", "image": "#2e7d32", "dropped": "#6a6a6a",
                  "separator": "#7a5c00"},
          True: {"chapter": "", "subtitle": "#b0b0b8", "cut": "#96969e", "image": "#7bc47f", "dropped": "#a2a2aa",
                 "separator": "#d9b54a"}}
+# Estado de cada párrafo en «Traducir»: el punto y el texto de su columna
+STATES = {False: {"Pendiente": "#6b6b6b", "Traducido": "#2e7d32", "Dudoso": "#b84300", "A mano": "#1f6fd1",
+                  "Aplicado": "#546e7a"},
+          True: {"Pendiente": "#a0a0a0", "Traducido": "#7bc47f", "Dudoso": "#ffa94d", "A mano": "#7aa7ff",
+                 "Aplicado": "#9aaab4"}}
 LEVELS = {False: {"Grave": "#c62828", "Revisar": "#b84300", "Menor": "#546e7a"},
           True: {"Grave": "#ff6b6b", "Revisar": "#ffa94d", "Menor": "#9aaab4"}}
 # Aspecto de las marcas en el editor de texto, en orden de prioridad (si dos fijan lo mismo, manda el último)
@@ -56,6 +63,8 @@ QPushButton#primary:hover {{ background: {acc_hover}; }}
 QPushButton#primary:disabled {{ background: {line}; border-color: {line}; color: {hint}; }}
 QPushButton#warn {{ color: {warn}; font-weight: 600; }}
 QPushButton#ok {{ color: {ok}; }}
+QPushButton#chip {{ border-radius: 12px; padding: 3px 12px; color: {muted}; }}
+QPushButton#chip:checked {{ background: {sel}; border-color: {acc}; color: {ink}; font-weight: 600; }}
 QPushButton#link {{ border: 0; background: transparent; color: {acc}; text-decoration: underline; padding: 0; }}
 QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QListWidget {{ border: 1px solid {line}; border-radius: 5px;
     background: {base}; selection-background-color: {acc}; selection-color: {acc_ink}; }}
@@ -72,6 +81,11 @@ QTreeWidget {{ background: {card}; border: 1px solid {line}; border-radius: 8px;
     selection-background-color: {sel}; selection-color: {ink}; outline: 0; }}
 QTreeWidget::item {{ padding: 2px 0; }}
 QTreeWidget::item:selected {{ background: {sel}; color: {ink}; }}
+QTableWidget {{ background: {card}; border: 1px solid {line}; border-radius: 8px; alternate-background-color: {zebra};
+    gridline-color: {card}; selection-background-color: {sel}; selection-color: {ink}; outline: 0; }}
+QTableWidget::item {{ padding: 4px 6px; }}
+QTableWidget::item:selected {{ background: {sel}; color: {ink}; }}
+QTabWidget::pane {{ border: 0; border-top: 1px solid {line}; }}
 QListWidget {{ show-decoration-selected: 1; outline: 0; }}
 QListWidget::item:selected {{ background: {sel}; color: {ink}; }}
 QHeaderView::section {{ background: {card}; border: 0; border-bottom: 1px solid {line}; padding: 4px 6px;
@@ -121,6 +135,10 @@ MARKS = {False: {"Grave": "#d32f2f", "Revisar": "#e07b00", "Menor": "#1f6fd1", "
 
 def mark_colors(dark):
     return MARKS[bool(dark)]
+
+
+def state_colors(dark):
+    return STATES[bool(dark)]
 
 
 def level_colors(dark):
