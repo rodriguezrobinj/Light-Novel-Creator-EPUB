@@ -2198,9 +2198,15 @@ def analyze(pdf_path, progress=None):
             if 1 <= p <= n and _key(title):
                 bookmarks[p - 1].add(_key(title))
         for i, rows in enumerate(pages):
+            normal = [r for r in rows if abs(r.size - body) < 0.5]
+            left, right = min((r.x0 for r in normal), default=0), max((r.x1 for r in normal), default=0)
             for r in rows:
                 key = _key(r.text)
-                r.heading = _is_heading(r, body) or any(
+                # The World's Strongest Witch: «Obtained Title: …» va en negrita algo más grande, pero con la sangría
+                # del párrafo y sin centrar: es texto destacado. Los subtítulos van al margen o centrados
+                emphasis = (normal and r.size < body * 1.3 and not KEYWORDS.match(r.text) and r.x0 > left + body * 0.8
+                            and abs((r.x0 + r.x1) / 2 - (left + right) / 2) > (right - left) * 0.05)
+                r.heading = _is_heading(r, body) and not emphasis or any(
                     key == mark or (r.bold and len(key) >= 4 and key in mark) for mark in bookmarks[i])
                 r.starts = len(key) >= 4 and any(mark.startswith(key) for mark in bookmarks[i])
 
