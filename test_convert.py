@@ -475,15 +475,19 @@ def test_ornament_image_between_paragraphs_is_a_scene_break():
 
 def test_inline_image_in_a_text_line_is_not_a_scene_break():
     """Una imagen pequeña y centrada dentro de una línea de texto («LEVEL UP! Lv. 2 → Lv. 3», con la flecha como
-    imagen: The World's Strongest Witch) no es un separador de escena: va en la línea, no entre párrafos."""
+    imagen: The World's Strongest Witch), ni la pegada al final de una línea corta (♡, ♪), es un separador de
+    escena: va en la línea, no entre párrafos."""
     doc = pymupdf.open()
     arrow = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 42, 33), False)
     arrow.clear_with(40)
     add_page(doc, 1, [(72, 110, "Capitulo 1: Inicio", 20, "helv"),
                       (92, 150, line("Primer parrafo de la escena", 57), 11, "cour"), (72, 164, "fin uno.", 11, "cour"),
                       (230, 200, "LEVEL UP! Lv. 2", 11, "helv"), (310, 200, "Lv. 3", 11, "helv"),
-                      (92, 240, line("Segundo parrafo tras la linea", 57), 11, "cour"), (72, 254, "fin dos.", 11, "cour")])
+                      (92, 240, line("Segundo parrafo tras la linea", 57), 11, "cour"), (72, 254, "fin dos.", 11, "cour"),
+                      (190, 290, "Hmph. No he perdido.", 11, "helv"),
+                      (92, 330, line("Tercer parrafo tras el corazon", 57), 11, "cour"), (72, 344, "fin tres.", 11, "cour")])
     doc[0].insert_image(pymupdf.Rect(296, 191.4, 307, 200), pixmap=arrow)  # en la línea, entre «Lv. 2» y «Lv. 3»
+    doc[0].insert_image(pymupdf.Rect(300, 280.4, 309, 290), pixmap=arrow)  # ♡ pegado al final de una línea corta
     # Kage 5, pág. 99: adorno de verdad con la línea siguiente pegada debajo (base a una letra de su borde)
     add_page(doc, 2, [(92, 150, line("Fin de la escena anterior", 57), 11, "cour"), (72, 164, "fin uno.", 11, "cour"),
                       (92, 240.5, line("Nueva escena justo debajo", 57), 11, "cour"), (72, 254.5, "fin dos.", 11, "cour")])
