@@ -5,6 +5,7 @@ import contextlib
 import ctypes
 import dataclasses
 import difflib
+import hashlib
 import html
 import http.server
 import io
@@ -262,6 +263,12 @@ REGEX_ERRORS = (("missing )", "falta cerrar un paréntesis"), ("unbalanced paren
                 ("unterminated character set", "falta cerrar un «[»"), ("nothing to repeat", "«*», «+» o «?» sin nada "
                  "delante"), ("multiple repeat", "dos repeticiones seguidas"), ("bad escape", "barra invertida no "
                  "válida"), ("bad character range", "rango de letras al revés"), ("unknown extension", "«(?» no válido"))
+
+
+def _thumb_path(path):
+    """Miniatura de la portada de un tomo para la pantalla de inicio, junto a las preferencias."""
+    return SETTINGS.parent / "miniaturas" / (hashlib.sha1(str(Path(path).resolve()).lower().encode()).hexdigest()[:16]
+                                             + ".jpg")
 
 
 def _comment_block(blocks, texts, comment):
@@ -1315,14 +1322,12 @@ class App:
         self.batch_btn = _button("Convertir carpeta…", self.convert_folder)
         self.recent_menu = QMenu(root)
         tools = QMenu(root)
-        tools.addAction("Buscar en el libro…  (Ctrl+F)", self.find)
-        tools.addAction("Informe de calidad…", self.quality)
-        tools.addAction("Ortografía…", self.spelling)
-        tools.addAction("Añadir página…", self.add_page)
-        tools.addAction("Página de personajes…", self.character_page)
-        tools.addAction("Cambiar ilustración…", self.change_image)
-        tools.addAction("Describir ilustración…", self.describe_image)
-        tools.addAction("Versiones…", self.versions)
+        # Las que trabajan sobre el libro abierto: en gris sin libro (update_chrome), no un aviso al pulsarlas
+        self.book_actions = [tools.addAction(text, action) for text, action in (
+            ("Buscar en el libro…  (Ctrl+F)", self.find), ("Informe de calidad…", self.quality),
+            ("Ortografía…", self.spelling), ("Añadir página…", self.add_page),
+            ("Página de personajes…", self.character_page), ("Cambiar ilustración…", self.change_image),
+            ("Describir ilustración…", self.describe_image), ("Versiones…", self.versions))]
         tools.addSeparator()
         tools.addAction("Panel de serie…", self.series_panel)
         tools.addAction("Volumen recopilatorio…", self.omnibus)
@@ -1342,9 +1347,9 @@ class App:
         tools.addAction("Instalar en este equipo", self.install)
         tools.addAction("Desinstalar", self.uninstall)
         self.file_label = _label("Ningún archivo", "muted")
-        top.setLayout(_row(self.open_btn, self.batch_btn, _menu_button("Recientes", self.recent_menu),
-                           _menu_button("Herramientas", tools), self.file_label, 1,
-                           _button("Buscar", self.find), margins=(10, 8, 10, 8)))
+        self.recent_btn, self.find_btn = _menu_button("Recientes", self.recent_menu), _button("Buscar", self.find)
+        top.setLayout(_row(self.open_btn, self.batch_btn, self.recent_btn, _menu_button("Herramientas", tools),
+                           self.file_label, 1, self.find_btn, margins=(10, 8, 10, 8)))
         outer.addWidget(top)
         QShortcut(QKeySequence("Ctrl+F"), root, self.find)
         # En toda la ventana: tras «Editar texto…» o «Todos» el foco se queda en el botón, no en la lista.
@@ -1462,7 +1467,10 @@ class App:
         self.quality_btn.setEnabled(False)
         self.gen_btn = _button("Generar EPUB…", self.generate, "primary")
         self.gen_btn.setEnabled(False)
-        rows.addLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15, changed=self.apply_profile),
+        self.options_row = QWidget()  # opciones del EPUB y «Generar»: solo con un libro abierto (update_chrome)
+        rows.addWidget(self.options_row)
+        self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
+                                                                 changed=self.apply_profile),
                             _label("Separador:"), _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12,
                                                          changed=self.update_preview),
                             _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
@@ -1479,6 +1487,7 @@ class App:
         status_row.setStretchFactor(self.status, 1)  # con un hueco elástico al lado, Ignored se quedaba en 0 px
         rows.addLayout(status_row)
         outer.addWidget(bottom)
+        self.bottom = bottom
 
         self.tree.pressed.connect(self.on_click)
         self.tree.double_clicked.connect(self.on_double_click)
@@ -1507,6 +1516,7 @@ class App:
         self.idle_text, self.views_size = "Abre un PDF para ver la vista previa", None
         self.pages.resized.connect(self.on_resize)
         self.load_settings()
+        self.update_chrome()
         self.apply_theme()
         theme.follow(qtk.app(), self.apply_theme)
         self.poller = QTimer()
@@ -1550,7 +1560,10 @@ class App:
         column = QVBoxLayout(recent)
         column.addWidget(_label("Recientes", "title"))
         self.recent_list = QListWidget()
-        self.recent_list.itemClicked.connect(lambda item: self.open_path(item.data(Qt.ItemDataRole.UserRole)))
+        self.recent_list.itemClicked.connect(lambda item: item.data(Qt.ItemDataRole.UserRole)
+                                             and self.open_path(item.data(Qt.ItemDataRole.UserRole)))
+        self.recent_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.recent_list.customContextMenuRequested.connect(self.recent_context)
         column.addWidget(self.recent_list, 1)
         page.setLayout(_row(drop, recent, margins=(16, 16, 16, 16), spacing=16))
         page.layout().setStretch(0, 3)
@@ -1639,6 +1652,8 @@ class App:
             self.tree.tag_configure(tag, font=self.fonts[tag], foreground=colors[tag])
         self.update_quality()
         self.redraw()
+        if self.book is None:  # las tarjetas de recientes llevan colores del tema
+            self.fill_recent()
 
     def show_panes(self):
         mode = self.tabs.currentIndex()  # 0 PDF, 1 EPUB, 2 los dos
@@ -1657,6 +1672,7 @@ class App:
         self.batch_btn.setEnabled(False)
         self.gen_btn.setEnabled(False)
         self.done, self.busy = done, busy
+        self.update_chrome()  # sin libro, la barra de abajo aparece para el progreso
         # Los datos van en un archivo: por la tubería del proceso nuevo, la ventana esperaba a que arrancara
         # para leerlos (unos 3 s con un libro con ilustraciones). Así start() vuelve enseguida.
         fd, path = tempfile.mkstemp(prefix="lnepub-trabajo-", suffix=".pickle")
@@ -1666,6 +1682,17 @@ class App:
         self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, path, report), daemon=True)
         self.proc.start()
         return True
+
+    def update_chrome(self):
+        """Sin libro abierto, solo lo que sirve para empezar: abrir, convertir una carpeta, herramientas y los
+        recientes de la pantalla de inicio. Las opciones del EPUB, Generar, Calidad, Buscar y el nombre del
+        archivo llegan con el libro; la barra de abajo también sale mientras se trabaja, por el progreso."""
+        has = self.book is not None
+        for widget in (self.options_row, self.quality_btn, self.recent_btn, self.file_label, self.find_btn):
+            widget.setVisible(has)
+        self.bottom.setVisible(has or self.done is not None)
+        for action in self.book_actions:
+            action.setEnabled(has)
 
     def report(self, done, total):
         # Solo se guarda el último valor: pintar cada evento de progreso cuesta llamadas a Tk.
@@ -1697,6 +1724,7 @@ class App:
     def finish(self, event):
         """Cierra el trabajo en curso: desbloquea la ventana y entrega el resultado o el error."""
         done, self.done, self.latest, self.partial = self.done, None, None, None
+        self.update_chrome()
         with contextlib.suppress(OSError):  # el proceso lo borra al leerlo; si murió antes, queda aquí
             os.remove(self.args_file)
         self.open_btn.setEnabled(True)
@@ -2124,6 +2152,8 @@ class App:
             self.pdf_doc.close()
         self.pdf_doc = pymupdf.open(self.pdf)
         self.stack.setCurrentIndex(1)
+        self.update_chrome()
+        self.save_thumb()
         self.title_var.set(book.title)
         self.author_var.set(book.author)
         self.series_var.set(book.series)
@@ -2531,22 +2561,94 @@ class App:
             pass  # sin preferencias guardadas la próxima vez; nada más
 
     def fill_recent(self):
-        """Menú «Recientes» y, en la pantalla vacía, la lista con el estado de cada tomo."""
+        """Menú «Recientes» y, en la pantalla vacía, una tarjeta por tomo: portada, nombre, PDF o EPUB, estado y
+        fecha de la última revisión."""
         self.recent_menu.clear()
         self.recent_list.clear()
         recent = [p for p in self.settings.get("recent", []) if isinstance(p, str)]
         for path in recent:
             self.recent_menu.addAction(Path(path).name, lambda p=path: self.open_path(p))
-            status = _volume_status(path) if Path(path).is_file() else "no se encuentra"
-            item = QListWidgetItem(f"{Path(path).stem}\n{status}")
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setToolTip(path)
+            card = self.recent_card(path)
+            item.setSizeHint(card.sizeHint())
             self.recent_list.addItem(item)
+            self.recent_list.setItemWidget(item, card)
         if not recent:
             self.recent_menu.addAction("(ninguno)").setEnabled(False)
             item = QListWidgetItem("Aún no has abierto ningún PDF")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.recent_list.addItem(item)
+
+    def recent_card(self, path):
+        """Tarjeta de un tomo reciente. La portada es la miniatura guardada al abrirlo (save_thumb): abrir cada PDF
+        al arrancar para sacarla sería lento."""
+        path, colors = Path(path), theme.colors(self.dark)
+        found = path.is_file()
+        status = _volume_status(path) if found else "No se encuentra"
+        color = {"EPUB generado": colors["ok"], "Sin revisar": colors["muted"], "No se encuentra": colors["warn"]}.get(
+            status, theme.level_colors(self.dark)["Revisar"])
+        card = QWidget()
+        thumb = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        thumb.setFixedSize(44, 62)
+        pixmap = QPixmap(str(_thumb_path(path))) if _thumb_path(path).is_file() else QPixmap()
+        if pixmap.isNull():
+            thumb.setText("📄")
+            thumb.setStyleSheet(f"font-size: 20pt; background: {colors['base']}; border: 1px solid {colors['line']};")
+        else:
+            thumb.setPixmap(pixmap.scaled(44, 62, Qt.AspectRatioMode.KeepAspectRatio,
+                                          Qt.TransformationMode.SmoothTransformation))
+        name = QLabel(path.stem)
+        name.setStyleSheet("font-weight: 600;")
+        kind = QLabel("EPUB" if path.suffix.lower() == ".epub" else "PDF")  # Maryoku 01: el PDF y su EPUB, no repetidos
+        kind.setStyleSheet(f"color: {colors['muted']}; border: 1px solid {colors['line']}; border-radius: 3px; "
+                           "padding: 0 4px; font-size: 8pt;")
+        when = ""
+        if found and _review_path(path).is_file():
+            when = f" · revisado el {datetime.fromtimestamp(_review_path(path).stat().st_mtime):%d/%m/%Y}"
+        state = QLabel(f'<span style="color:{color}">●</span> {html.escape(status)}{when}')
+        state.setObjectName("muted")
+        texts = QVBoxLayout()
+        texts.setSpacing(2)
+        texts.addLayout(_row(name, kind, 1))
+        texts.addWidget(state)
+        texts.addStretch(1)
+        layout = _row(thumb, texts, margins=(6, 6, 6, 6), spacing=10)
+        layout.setStretch(1, 1)
+        card.setLayout(layout)
+        return card
+
+    def recent_context(self, pos):
+        """Clic derecho en un reciente: abrir su carpeta o quitarlo de la lista (el archivo no se toca)."""
+        item = self.recent_list.itemAt(pos)
+        path = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not path:
+            return
+        menu = QMenu(self.recent_list)
+        menu.addAction("Abrir carpeta", lambda: self.open_external(path, folder=True)).setEnabled(Path(path).exists())
+        menu.addAction("Quitar de recientes", lambda: self.forget_recent(path))
+        menu.popup(self.recent_list.viewport().mapToGlobal(pos))
+        self.recent_popup = menu
+
+    def forget_recent(self, path):
+        self.settings["recent"] = [p for p in self.settings.get("recent", []) if p != path]
+        self.save_settings()
+        self.fill_recent()
+
+    def save_thumb(self):
+        """Miniatura de la portada del libro abierto para su tarjeta de recientes."""
+        if not (self.book and self.pdf and self.book.cover):
+            return
+        image = QImage.fromData(self.book.cover)
+        if image.isNull():
+            return
+        target = _thumb_path(self.pdf)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            image.scaledToHeight(124, Qt.TransformationMode.SmoothTransformation).save(str(target), "JPG", 85)
+        except OSError:
+            pass  # sin miniatura, la tarjeta muestra el icono
 
     def edit_replacements(self):
         win, column = self.dialog("Reemplazos")
@@ -3770,6 +3872,7 @@ class App:
             state["pdf"] = _fingerprint(self.pdf)
             _write_json(_review_path(self.pdf), state)
             _remember_series(state)
+            self.save_thumb()  # la portada elegida, para la tarjeta de recientes
         except OSError as e:  # PDF borrado, carpeta de solo lectura, OneDrive bloqueándolo: el trabajo en curso sigue
             self.status.setText(f"No se pudo guardar la revisión: {e.strerror or e}")
 
