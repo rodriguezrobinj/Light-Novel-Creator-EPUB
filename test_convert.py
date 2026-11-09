@@ -5525,7 +5525,8 @@ def test_install_paths_are_per_user():
 
 def test_edit_section_keeps_pages_of_unchanged_paragraphs():
     """Corregir una errata no cambia la página de los demás párrafos: la lista de páginas del EPUB y el
-    panel del PDF del editor dependen de ella. Lo cambiado o nuevo toma la del párrafo anterior."""
+    panel del PDF del editor dependen de ella. Lo corregido en su sitio conserva la suya; lo nuevo toma la del
+    párrafo anterior."""
     doc = pymupdf.open()
     texts = ("El primer parrafo de la pagina uno.", "El segundo parrafo de la pagina dos.",
              "El tercer parrafo de la pagina tres.")
@@ -5539,7 +5540,31 @@ def test_edit_section_keeps_pages_of_unchanged_paragraphs():
     text = convert.section_text(book, start, end).replace("pagina dos.", "pagina dos!") + "\n\nNuevo."
     convert.edit_section(book, start, end, text)
     pages = [b.page for b in book.blocks[start:]]
-    assert pages == [1, 1, 3, 3], pages
+    assert pages == [1, 2, 3, 3], pages
+
+
+def test_edit_section_translated_paragraphs_keep_page_and_box():
+    """Witch vol. 1 traducido con DeepSeek: tras «Aplicar al libro» el editor no recuadraba nada en el PDF, porque
+    cada párrafo traducido perdía su recuadro y su página, y el texto en español no se encuentra en el PDF inglés.
+    Cambiado uno por uno, cada párrafo sigue siendo el mismo; unir dos no se queda el recuadro de ninguno."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Chapter 1: Start", 20, "helv"), (92, 140, "The first paragraph is here.", 11, "cour")])
+    add_page(doc, 2, [(92, 140, "The second paragraph is here.", 11, "cour")])
+    add_page(doc, 3, [(92, 140, "The third paragraph on page three.", 11, "cour")])
+    path = TMP / "traducido.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    start, end = book.candidates[0], len(book.blocks)
+    before = [(b.page, b.rect) for b in book.blocks[start:end]]
+    assert all(rect for _, rect in before) and [p for p, _ in before] == [1, 1, 2, 3], before
+    spanish = ["# Capítulo 1: Inicio", "El primer párrafo está aquí.", "El segundo párrafo está aquí.",
+               "El tercer párrafo en la página tres."]
+    convert.edit_section(book, start, end, "\n\n".join(spanish))
+    assert [(b.page, b.rect) for b in book.blocks[start:end]] == before, book.blocks[start:end]
+    assert book.blocks[start].kind == "heading" and "primer" in book.blocks[start + 1].html
+    joined = "\n\n".join(spanish[:1] + [spanish[1] + " " + spanish[2]] + spanish[3:])
+    convert.edit_section(book, start, end, joined)
+    assert not book.blocks[start + 1].rect and book.blocks[start + 2].rect == before[3][1], book.blocks[start:]
 
 
 def test_paragraph_box_covers_all_its_lines_and_survives_edits():
@@ -5564,7 +5589,7 @@ def test_paragraph_box_covers_all_its_lines_and_survives_edits():
     assert found and found.y0 < 154 < 168 < found.y1, found
     text = convert.section_text(book, start, len(book.blocks)).replace("distinto", "nuevo")
     convert.edit_section(book, start, len(book.blocks), text)
-    assert book.blocks[start].rect == first.rect and not book.blocks[start + 1].rect, book.blocks[start + 1]
+    assert book.blocks[start].rect == first.rect and book.blocks[start + 1].rect == second.rect, book.blocks[start + 1]
 
 
 def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
