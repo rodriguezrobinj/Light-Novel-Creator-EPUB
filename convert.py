@@ -2315,7 +2315,9 @@ def analyze(pdf_path, progress=None):
                     if para is None or indented or short or centered:
                         new = True
                     elif prev is None:  # primera línea de la página: ¿sigue el párrafo anterior?
-                        new = not indent_style and last_text.endswith(END_PUNCT)
+                        # Witch 1: el Afterword (título solo en imagen) empieza sin sangría en una página que el
+                        # índice marca; unido, quedaba al final del capítulo anterior
+                        new = last_text.endswith(END_PUNCT) and (not indent_style or bool(bookmarks.get(num - 1)))
                     else:
                         new = r.y - prev.y > line_gap * 1.3
                     if new and para is not None and r.text[:1].islower() and not last_text.endswith(END_PUNCT):

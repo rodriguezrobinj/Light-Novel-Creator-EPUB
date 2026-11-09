@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import urllib.parse
 import urllib.request
@@ -2355,15 +2356,29 @@ class App:
         if self.load_review():
             text = "Revisión anterior recuperada"
         elif self.pdf:
+            # Del mismo PDF pero de otro análisis (otra versión del programa): los cambios de texto van por número
+            # de bloque y ya no encajan, pero los datos del libro (título, serie, glosarios, portada…) sí valen
+            stale = _read_review(self.pdf)
             backup = _set_aside(self.pdf)
             if backup:  # delante: si la línea no cabe, se corta el recuento y no esto
                 text = f"La revisión guardada no coincide con este análisis: copia en {backup.name} · {text}"
-            inherited = _inherited(self.pdf, book.series)
-            if book.author:
-                inherited.pop("author", None)  # el del PDF manda
-            if inherited:
-                self.apply_state(inherited)
-                text += " · datos de la serie tomados de otro tomo"
+            if stale:
+                self.apply_state(stale)
+                self.description = stale.get("description", "")
+                if stale.get("cover"):
+                    try:
+                        self.set_cover(stale["cover"])
+                    except Exception:
+                        pass  # la imagen de portada ya no existe: se queda la del PDF
+                text = (f"La revisión guardada no coincide con este análisis: se conservan los datos del libro; los "
+                        f"cambios de texto y de la lista quedan en {backup.name}")
+            else:
+                inherited = _inherited(self.pdf, book.series)
+                if book.author:
+                    inherited.pop("author", None)  # el del PDF manda
+                if inherited:
+                    self.apply_state(inherited)
+                    text += " · datos de la serie tomados de otro tomo"
         self.history = []  # lo recuperado no se deshace
         self.status.setText(text)
         self.update_header()
@@ -4902,23 +4917,33 @@ class App:
                     messagebox.showerror("Glosario y estilo", f"Falta la clave de {name}.", parent=box)
                     return
                 whole = "\n".join(t for _, _, t in translate.units(self.book, 0, len(self.book.blocks)))
-                # Cuatro trozos repartidos por el libro: el principio solo trae créditos y pocos personajes
+                # Cuatro trozos repartidos por el libro (el principio solo trae créditos y pocos personajes), pedidos a
+                # la vez: tarda lo que uno y la ventana puede decir cuántos van
                 step = max(1, (len(whole) - 7500) // 3)
-                sample = "\n[…]\n".join(whole[n * step:n * step + 7500] for n in range(4)) if len(whole) > 30000 \
-                    else whole
+                samples = [whole[n * step:n * step + 7500] for n in range(4)] if len(whole) > 30000 else [whole]
                 names = [f for f, _ in sorted(convert.proper_names(self.book).items(), key=lambda p: -p[1])[:60]]
-                args = (name, sample, src.currentData(), dst.currentData(), api_key.text().strip(),
-                        model.currentText().strip(), base.text().strip() if info.get("custom") else "", names, whole)
-                found = queue.Queue()
+                args = (src.currentData(), dst.currentData(), api_key.text().strip(), model.currentText().strip(),
+                        base.text().strip() if info.get("custom") else "", names, whole)
+                found, started = queue.Queue(), time.time()
 
                 def ask():
+                    terms, people = {}, {}
                     try:
-                        found.put(translate.propose(*args))
+                        with concurrent.futures.ThreadPoolExecutor(len(samples)) as pool:
+                            jobs = [pool.submit(translate.propose, name, sample, *args) for sample in samples]
+                            for n, job in enumerate(concurrent.futures.as_completed(jobs), 1):
+                                got = job.result()
+                                for a, b in got[0]:
+                                    terms.setdefault(a, b)
+                                for line in got[1]:  # el mismo personaje en dos trozos: vale la primera nota
+                                    people.setdefault(line.split(":")[0], line)
+                                found.put(("progress", n))
+                        found.put(([[a, b] for a, b in terms.items()], list(people.values())))
                     except Exception as e:  # TranslateError ya viene en español
                         found.put(str(e) or type(e).__name__)
 
                 suggest_btn.setEnabled(False)
-                suggest_btn.setText("Leyendo el libro…")
+                suggest_btn.setText(f"Leyendo el libro… 0 de {len(samples)}")
                 threading.Thread(target=ask, daemon=True).start()
 
                 def wait():
@@ -4926,7 +4951,12 @@ class App:
                         return
                     try:
                         result = found.get_nowait()
+                        while result[0] == "progress":
+                            suggest_btn.setText(f"Leyendo el libro… {result[1]} de {len(samples)}")
+                            result = found.get_nowait()
                     except queue.Empty:
+                        note.setText(f"La IA lee {convert.counted(len(samples), 'trozo', 'trozos')} del libro a la "
+                                     f"vez; suele tardar un minuto. Van {int(time.time() - started)} s.")
                         qtk.after(200, wait)
                         return
                     suggest_btn.setText("Proponer con la IA")

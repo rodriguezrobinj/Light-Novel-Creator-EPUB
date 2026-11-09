@@ -4118,6 +4118,29 @@ def test_bookmarked_chapter_name_joins_bare_label():
                      ("Capitulo 2: Llore y grite", True)], heads
 
 
+def test_bookmarked_page_starts_new_paragraph_without_indent():
+    """The World's Strongest Witch 1 (EPUB, pág. 204): el Afterword lleva el título solo en una imagen y su primera
+    línea va sin sangría; con párrafos marcados por sangría se unía al último párrafo del capítulo anterior, antes
+    del título. Una página que el índice marca empieza párrafo; una página sin marca sigue el párrafo abierto."""
+    doc = pymupdf.open()
+    body = [(92, 140 + 20 * n, line("Una linea de texto con sangria", 60), 11, "cour") for n in range(3)]
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv")] + body
+             + [(72, 220, line("y su continuacion sin sangria hasta el borde", 60), 11, "cour"),
+                (92, 240, line("Ultimo parrafo del capitulo que sigue", 60), 11, "cour")])
+    add_page(doc, 2, [(72, 140, "en la pagina siguiente y acaba.", 11, "cour")])
+    add_page(doc, 3, [(72, 300, "Hola, me llamo Autor.", 11, "cour"),
+                      (92, 320, line("Gracias por leer esta historia", 60), 11, "cour")])
+    doc.set_toc([[1, "Capitulo 1: Inicio", 1], [1, "Epilogo", 3]])
+    path = TMP / "marcador-sin-sangria.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    text = [(b.kind, convert._plain(b)) for b in book.blocks]
+    last = next(t for kind, t in text if "Ultimo parrafo" in t)
+    assert last.endswith("en la pagina siguiente y acaba."), text  # sin marca: sigue el párrafo
+    k = next(k for k, (kind, t) in enumerate(text) if t == "Epilogo")
+    assert text[k + 1] == ("p", "Hola, me llamo Autor.") and "Hola" not in last, text
+
+
 def test_numbered_chapter_titles():
     cases = {"Capítulo Uno: Las luchas": "Capítulo 1: Las luchas", "Capítulo IV: ¡Mi nombre!": "Capítulo 4: ¡Mi nombre!",
              "Capitulo 3": "Capítulo 3", "CAPITULO DOS: FIN": "CAPÍTULO 2: FIN", "Prologo: Un sueño": "Prólogo: Un sueño",
@@ -5593,7 +5616,8 @@ def test_paragraph_box_covers_all_its_lines_and_survives_edits():
 
 
 def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
-    """Si el análisis cambia (otra versión del programa), la revisión vieja no se pisa al cerrar: queda en .bak."""
+    """Si el análisis cambia (otra versión del programa), la revisión vieja no se pisa al cerrar: queda en .bak. Los
+    datos del libro sí se conservan (Witch 1: el arreglo del análisis apartaba también título, glosario y portada)."""
     import json
 
     import app
@@ -5602,6 +5626,9 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
     window.pdf = make_novel()
     window.show_book(convert.analyze(window.pdf))
     window.set_kind(first_title(window), app.OFF)
+    window.title_var.set("Mi título")
+    window.tr_glossary = [["Witch", "Bruja"]]
+    window.save_review()
     window.close()
     review = app._review_path(window.pdf)
     state = json.loads(review.read_text(encoding="utf-8"))
@@ -5612,10 +5639,12 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
     window.pdf = TMP / "novela.pdf"
     window.show_book(convert.analyze(window.pdf))
     status = window.status.text()
+    kept = window.title_var.get(), window.tr_glossary, window.tree.set(first_title(window), "inc")
     window.close()
     backup = review.with_name(review.name + ".bak")
     assert backup.is_file() and json.loads(backup.read_text(encoding="utf-8")) == state, "se perdió la revisión vieja"
     assert status.startswith("La revisión guardada no coincide") and backup.name in status, status  # delante: no se corta
+    assert kept[:2] == ("Mi título", [["Witch", "Bruja"]]) and kept[2] != app.OFF, kept
 
 
 def test_window_does_not_start_a_second_job():
@@ -6721,6 +6750,8 @@ def test_window_translate_chapters_style_and_doubts():
     la ficha de personajes con la serie y la variante en las preferencias, y «Proponer con la IA» rellena las dos
     cajas. Lo corregido a mano va de ejemplo, y una traducción que la IA deja mal queda «Dudoso» con su motivo."""
     import json
+    import threading
+    from PySide6.QtWidgets import QPushButton
     import time
     import app
     import translate
@@ -6743,8 +6774,24 @@ def test_window_translate_chapters_style_and_doubts():
         box["variant"].setCurrentIndex(box["variant"].findData("es-419"))
         box["honorifics"].setChecked(False)
         reply = {"glossary": {"Culto": "Cult"}, "characters": {"Subaru": "chico, informal"}}
-        translate._post = lambda url, headers, body: {"choices": [{"message": {"content": json.dumps(reply)}}]}
+        gate, asked = threading.Event(), []
+        translate._post = lambda url, headers, body: asked.append(body) or gate.wait(10) and {
+            "choices": [{"message": {"content": json.dumps(reply)}}]}
+        # Un libro largo se lee en cuatro trozos a la vez; mientras, el botón y la nota dicen cuánto va
+        window.book.blocks.append(convert.Block("p", 1, "Texto largo del libro. " * 2000))
         box["suggest"]()
+        end = time.time() + 5
+        while len(asked) < 4 and time.time() < end:
+            root.update()
+            time.sleep(0.02)
+        window.book.blocks.pop()
+        root.update()
+        time.sleep(0.25)
+        root.update()
+        buttons = [b.text() for b in box["box"].findChildren(QPushButton)]
+        assert len(asked) == 4 and "Leyendo el libro… 0 de 4" in buttons and "Van " in box["note"].text(), (
+            len(asked), buttons, box["note"].text())
+        gate.set()
         end = time.time() + 5
         while "Subaru" not in box["notes"].toPlainText() and time.time() < end:
             root.update()
