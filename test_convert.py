@@ -1826,6 +1826,34 @@ def test_window_illustrations_export_and_replace_with_comparison():
     assert real == "replace", real
     assert fresh.blocks[4].image == new2, "al reabrir, sin la carpeta de exportación, el cambio sigue"
 
+
+def test_window_illustrations_list_rows_are_even():
+    """Lista de «Ilustraciones…»: una apaisada (doble página) tiene la fila tan alta como una vertical, con la
+    miniatura en el mismo marco, y un título de capítulo largo no abre barra horizontal (Kage 7: filas
+    desiguales). El título entero, al pasar el ratón."""
+    from PySide6.QtCore import Qt
+
+    import app
+
+    B = convert.Block
+    title = "Capítulo II: ¡Esta Vez Seguro Que No Descubren Nuestro Escondite En El Bosque Del Norte!"
+    blocks = [B("heading", 1, title), B("image", 1, image=jpeg(300, 420)), B("image", 2, image=jpeg(900, 640)),
+              B("image", 3, image=jpeg(1200, 300))]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.images_dialog()
+    root.update()
+    listing = root.dialogs()[-1].parts["list"]
+    rows = [listing.visualItemRect(listing.item(n)).height() for n in range(listing.count())]
+    icons = [listing.item(n).icon().pixmap(app.QSize(*app.THUMB_BOX)).size().toTuple() for n in range(listing.count())]
+    scroll = listing.horizontalScrollBar().isVisible(), listing.horizontalScrollBarPolicy()
+    tip = listing.item(0).toolTip()
+    window.close()
+    assert len(set(rows)) == 1 and rows[0] >= app.THUMB_BOX[1], rows
+    assert set(icons) == {app.THUMB_BOX}, icons
+    assert scroll == (False, Qt.ScrollBarPolicy.ScrollBarAlwaysOff), scroll
+    assert title in tip, tip
+
 def test_window_describe_image_reaches_the_epub():
     """«Describir ilustración…» guarda la descripción por la imagen (no por la fila) en la revisión, y el EPUB la
     lleva como texto alternativo; sin una ilustración elegida, un aviso lo pide."""
