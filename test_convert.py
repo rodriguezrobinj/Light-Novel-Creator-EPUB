@@ -6487,6 +6487,10 @@ def test_translate_doubts_and_second_pass():
     found = doubts("The Witch Cult came.", "La Secta de la Bruja llegó.", "es", [["Witch Cult", "Culto de la Bruja"]])
     assert found == ["el glosario pide «Culto de la Bruja» para «Witch Cult»"], found
     assert doubts("The Witches came.", "Las brujas llegaron.", "es", [["Witch", "Hechicera"]]) == []  # otra palabra
+    # Witch vol. 1 con DeepSeek: el término concuerda en género y número, o lleva otro artículo, y está bien
+    assert doubts("Enchanted Wings!", "¡Alas Encantadas!", "es", [["Enchanted", "Encantado"]]) == []
+    assert doubts("Forget those Guugelheits.", "Olvida a esos Guugelheit.", "es", [["Guugelheits", "los Guugelheit"]]) == []
+    assert doubts("Enchanted Wings!", "¡Alas Mágicas!", "es", [["Enchanted", "Encantado"]]) != []
 
     calls = []
 
@@ -6603,14 +6607,15 @@ def test_translate_google_lines_retry_after_and_propose():
         translate._post = busy
         assert translate.translate("DeepSeek", ["Hi"], "en", "es", api_key="k") == ["ES:Hi"] and sleeps == [7], sleeps
 
-        reply = {"glossary": {"Witch Cult": "Culto de la Bruja", "": "x", "Roswaal": 3},
+        reply = {"glossary": {"Witch Cult": "Culto de la Bruja", "": "x", "Roswaal": 3, "Dress": "Vestido",
+                              "Elmina": "Elmina"},
                  "characters": {"Emilia": "chica, formal;\n trata de usted a todos"}}
         posts = []
         translate._post = lambda url, headers, body: posts.append(body) or {
             "choices": [{"message": {"content": "```json\n" + json.dumps(reply) + "\n```"}}]}
         terms, people = translate.propose("DeepSeek", "Emilia met the Witch Cult.", "en", "es", api_key="k",
-                                          names=["Emilia", "Roswaal"])
-        assert terms == [["Witch Cult", "Culto de la Bruja"]] and people == ["Emilia: chica, formal; trata de usted a todos"]
+                                          names=["Emilia", "Roswaal"], text="Her dress. Elmina came. Dress: G")
+        assert terms == [["Witch Cult", "Culto de la Bruja"], ["Elmina", "Elmina"]] and people == ["Emilia: chica, formal; trata de usted a todos"]
         assert "Emilia, Roswaal" in posts[0]["messages"][1]["content"] and "JSON" in posts[0]["messages"][0]["content"]
         try:
             translate.propose("DeepL", "x", "en", "es", api_key="k")
@@ -6770,14 +6775,16 @@ def test_window_translate_close_mid_batch():
     """Cerrar «Traducir» con un lote en camino no lo pierde: la ventana se oculta, lo termina, lo guarda y se
     cierra. Abrirla otra vez mientras tanto devuelve la misma. Salir de la app pregunta antes de perderlo."""
     import threading
+    import time
     import shiboken6
     import app
     import translate
 
     root, window = versioned_window()
     app._translation_path(window.pdf).unlink(missing_ok=True)
-    gate, fake, original = threading.Event(), FakeAI(), translate._post
-    translate._post = lambda url, headers, body: gate.wait(10) and fake(url, headers, body)
+    gate, fake, original, sent = threading.Event(), FakeAI(), translate._post, []
+    translate._post = lambda url, headers, body: sent.append(1) or gate.wait(10) and fake(url, headers, body)
+    groups = sum(bool(translate.units(window.book, a, b)) for a, b, _ in window.translation_sections())
     asked = []
     saved_ask = app.messagebox.askyesno
     app.messagebox.askyesno = lambda title, message, **kwargs: asked.append(message) or False
@@ -6791,6 +6798,10 @@ def test_window_translate_close_mid_batch():
         parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
         parts["run"]()
         total = len(parts["table"].get_children())
+        end = time.time() + 5  # los lotes ya en camino: pausar antes de pedir nada no tiene nada que guardar
+        while len(sent) < min(3, groups) and time.time() < end:
+            time.sleep(0.01)
+        assert groups <= 3 and len(sent) == groups, (groups, len(sent))
         assert window.close() is False and "traducción en curso" in asked[0], asked  # no sale: se perdería el lote
         parts["close"]()
         root.update()
