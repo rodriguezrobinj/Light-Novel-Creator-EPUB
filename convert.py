@@ -883,10 +883,17 @@ def edit_section(book, start, end, text):
         if old[k].kind in ("p", "heading"):
             same.setdefault(_line(old[k], k).strip(), old[k])
             same.setdefault(_line(old[k], k).strip().removeprefix(CENTER), old[k])  # edición de antes de <center>
+    lines = [line for line in (line.strip() for line in text.splitlines()) if line]
+    # Párrafo cambiado en su sitio, uno por uno (errata, traducción): sigue siendo el mismo del PDF y conserva
+    # su página y su recuadro. Unir o partir párrafos no cuadra uno a uno y toma la página del anterior.
+    origin = {}
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, [_line(old[k], k).strip() for k in range(start, end)],
+                                                      lines, autojunk=False).get_opcodes():
+        if op == "replace" and i2 - i1 == j2 - j1:
+            origin |= {j1 + n: old[start + i1 + n] for n in range(i2 - i1)
+                       if old[start + i1 + n].kind in ("p", "heading")}
     new, kept = [], {}
-    for line in (line.strip() for line in text.splitlines()):
-        if not line:
-            continue
+    for j, line in enumerate(lines):
         m = TOKEN.fullmatch(line)
         k = int(m.group(2)) if m else -1
         if m and start <= k < end and k not in kept and old[k].kind == ("image" if m.group(1) == "Ilustración" else "break"):
@@ -904,6 +911,9 @@ def edit_section(book, start, end, text):
             new.append(Block("p", page, _inline(line[len(CENTER):].strip()), align="center"))
         else:
             new.append(Block("p", page, _inline(line)))
+        if j in origin and new[-1].kind in ("p", "heading") and not (m or line in same):
+            page = new[-1].page = origin[j].page
+            new[-1].rect = origin[j].rect
     delta = len(new) - (end - start)
     book.blocks = old[:start] + new + old[end:]
     mapping = {k: k for k in range(start)} | kept | {k: k + delta for k in range(end, len(old))}
