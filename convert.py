@@ -2821,10 +2821,73 @@ PART_TITLE = re.compile(r"(parte|volumen|libro|part|book)\b", re.I)  # portadill
 PDF_SIZES = {"A5": (420, 595, 10.5), "e-reader 6″": (300, 400, 9), "A4": (595, 842, 12)}
 
 
+ILLUSTRATION_SHARE = 0.25  # una imagen que ocupa más de esto de la página es una ilustración, no un adorno
+
+
+def _image_page(pdf, xref, pno, rect):
+    """Página nueva en la posición pno de pdf con su imagen xref a página completa (ajustada, sin recortar)."""
+    page = pdf.new_page(pno, width=rect.width, height=rect.height)
+    info = pdf.extract_image(xref)
+    if info.get("smask"):  # con transparencia: la máscara va aparte en el PDF
+        page.insert_image(page.rect, pixmap=pymupdf.Pixmap(pymupdf.Pixmap(pdf, xref), pymupdf.Pixmap(pdf, info["smask"])))
+    else:
+        page.insert_image(page.rect, stream=info["image"])  # el JPEG tal cual: sin volver a comprimir
+
+
+def _full_page_images(pdf):
+    """Pone cada ilustración (y la portada) de pdf en una página entera. Una que compartía página con texto sale
+    de ella: antes del texto si estaba encima, después si estaba debajo; el texto se queda. Los adornos de
+    separador (pequeños) no se tocan. Cambia pdf en su sitio: copiar página a página duplicaba las letras
+    incrustadas (Re Zero 1: de 4 a 20 MB). Devuelve [página nueva de cada página vieja], para el índice."""
+    plans = []  # por página: (imágenes antes, se queda la página con su texto, imágenes después, cajas a quitar)
+    for page in pdf:
+        area = page.rect.width * page.rect.height
+        big = []
+        for image in page.get_images(full=True):
+            try:
+                box = page.get_image_bbox(image)
+            except ValueError:
+                continue
+            if box.width * box.height > ILLUSTRATION_SHARE * area:
+                big.append((image[0], box))
+        text = [pymupdf.Rect(b[:4]) for b in page.get_text("blocks") if b[6] == 0 and b[4].strip()]
+        if not big:
+            plans.append(([], True, [], []))
+        elif not text:
+            plans.append(([xref for xref, _ in big], False, [], []))
+        else:
+            top = min(r.y0 for r in text)
+            before = [xref for xref, box in big if box.y1 <= top + 1]
+            plans.append((before, True, [xref for xref, _ in big if xref not in before], [box for _, box in big]))
+    moved, count = [], 0
+    for before, keep, after, _ in plans:
+        moved.append(count)
+        count += len(before) + keep + len(after)
+    for n in range(len(plans) - 1, -1, -1):  # desde el final: las páginas de antes no se mueven
+        before, keep, after, boxes = plans[n]
+        if not before and keep and not after:
+            continue
+        rect = pdf[n].rect
+        for xref in reversed(after):
+            _image_page(pdf, xref, n + 1, rect)
+        if keep:
+            page = pdf[n]
+            for box in boxes:  # quitar la imagen solo de esta página: delete_image cambia el objeto compartido
+                page.add_redact_annot(box)
+            page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+                                  text=pymupdf.PDF_REDACT_TEXT_NONE)
+        for xref in reversed(before):
+            _image_page(pdf, xref, n, rect)
+        if not keep:
+            pdf.delete_page(n + len(before))
+    return moved
+
+
 def write_pdf(book, chapters, out_path, size="A5", **options):
     """PDF maquetado: el mismo libro que write_epub (con sus opciones), compuesto por MuPDF al tamaño de
     PDF_SIZES, con el índice como marcadores, título y autor en las propiedades y número de página al pie
-    (no en la portada ni en las ilustraciones a página completa). Se escribe en out_path + ".tmp" y se renombra."""
+    (no en la portada ni en las ilustraciones). Cada ilustración, y la portada, ocupa una página entera
+    (_full_page_images). Se escribe en out_path + ".tmp" y se renombra."""
     width, height, fontsize = PDF_SIZES[size]
     with tempfile.TemporaryDirectory(prefix="lnepub-pdf-") as tmp:
         epub = Path(tmp) / "libro.epub"
@@ -2832,8 +2895,10 @@ def write_pdf(book, chapters, out_path, size="A5", **options):
         with pymupdf.open(epub) as source:
             source.layout(width=width, height=height, fontsize=fontsize)
             toc = source.get_toc()
-            pdf = pymupdf.open("pdf", source.convert_to_pdf())
-    pdf.set_toc(toc)
+            laid = pymupdf.open("pdf", source.convert_to_pdf())
+    pdf = laid
+    moved = _full_page_images(pdf)
+    pdf.set_toc([[level, title, moved[page - 1] + 1, *rest] for level, title, page, *rest in toc])
     pdf.set_metadata({"title": book.title, "author": book.author, "subject": book.series,
                       "creator": "Light Novel Creator", "producer": "Light Novel Creator"})
     for n, page in enumerate(pdf):
