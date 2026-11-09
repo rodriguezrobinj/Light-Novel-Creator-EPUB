@@ -556,13 +556,17 @@ def _translation_path(pdf):
 
 
 def _read_translation(pdf):
-    """Traducciones guardadas de este libro: {"src", "dst", "done": {clave del original: {"text", "hand"}}}."""
+    """Traducciones guardadas de este libro: {"src", "dst", "done": {clave del original: {"text", "hand", "src",
+    "dst"}}}. Cada párrafo lleva sus idiomas: se puede haber traducido parte a otro por error. Los guardados antes
+    sin ellos toman los del archivo."""
     empty = {"src": "auto", "dst": "es", "done": {}}
     try:
         data = json.loads(_translation_path(pdf).read_text(encoding="utf-8"))
-        done = {str(k): {"text": str(v["text"]), "hand": bool(v.get("hand"))} for k, v in data["done"].items()
+        src, dst = str(data.get("src") or "auto"), str(data.get("dst") or "es")
+        done = {str(k): {"text": str(v["text"]), "hand": bool(v.get("hand")), "src": str(v.get("src") or src),
+                         "dst": str(v.get("dst") or dst)} for k, v in data["done"].items()
                 if isinstance(v, dict) and str(v.get("text") or "").strip()}  # el .json se puede editar a mano
-        return {"src": str(data.get("src") or "auto"), "dst": str(data.get("dst") or "es"), "done": done}
+        return {"src": src, "dst": dst, "done": done}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return empty
 
@@ -1339,6 +1343,12 @@ class StatusLabel(QLabel):
 
 
 MARKUP = re.compile(r"</?[ib]>")  # cursiva y negrita de section_text: en la lista no se leen las etiquetas
+LANG_ROLE = Qt.ItemDataRole.UserRole + 7  # («EN → ES», otro destino que el elegido) de una fila de «Traducir»
+
+
+def lang_code(code):
+    """«EN», «ES»…; «auto» queda como «Auto»: no se sabe qué idioma detectó el motor."""
+    return "Auto" if code == "auto" else code.upper()
 
 
 def _two_lines(text, font, width):
@@ -1408,11 +1418,20 @@ class _Cards(QStyledItemDelegate):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
-            middle = option.rect.center().y()
+            pair = index.data(LANG_ROLE)
+            middle = option.rect.center().y() - (step // 2 if pair else 0)
             painter.drawEllipse(QRectF(box.left(), middle - 4, 8, 8))
             painter.setPen(color)
-            painter.drawText(QRect(box.left() + 14, option.rect.top(), box.width() - 14, option.rect.height()),
+            painter.drawText(QRect(box.left() + 14, middle - step // 2, box.width() - 14, step),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, state)
+            if pair:  # «EN → JA» en color de aviso si no es el destino elegido: traducido a otro idioma por error
+                text, wrong = pair
+                font = QFont(opt.font)
+                font.setBold(wrong)
+                painter.setFont(font)
+                painter.setPen(QColor(tones["warn"] if wrong else tones["muted"]))
+                painter.drawText(QRect(box.left() + 14, middle + step // 2, box.width() - 14, step),
+                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
         painter.restore()
 
 
@@ -4635,7 +4654,13 @@ class App:
         search.setClearButtonEnabled(True)
         search.setMinimumWidth(280)
         search.textChanged.connect(lambda _: show_rows())
-        column.addLayout(_row(*chips.values(), 1, search))
+        lang_filter = QComboBox()
+        lang_filter.setMinimumContentsLength(26)
+        lang_filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        lang_filter.setToolTip("Solo los párrafos traducidos de un idioma a otro: para encontrar los que se tradujeron "
+                               "a un idioma por error y volver a traducirlos")
+        lang_filter.activated.connect(lambda _: show_rows())
+        column.addLayout(_row(*chips.values(), 1, lang_filter, search))
         panes = QSplitter(Qt.Orientation.Vertical)
         column.addWidget(panes, 1)
         table = qtk.RowList(("orig", "trans", "state"), {"orig": "Original", "trans": "Traducción", "state": "Estado"},
@@ -4680,7 +4705,7 @@ class App:
         apply_btn = _button("Aplicar al libro", lambda: apply())
         column.addLayout(_row(run_btn, again_btn, 1, apply_btn, _button("Cerrar", lambda: close())))
         work = {"thread": None, "stop": None, "queue": None, "shown": None, "again": set(), "engine": "", "count": 0,
-                "total": 0, "closing": False}
+                "total": 0, "closing": False, "langs": None}
         rows = {}  # fila (índice del bloque) -> (clave, prefijo, texto original)
         index = {}  # clave -> sus filas: un lote no recorre la lista entera (miles de párrafos)
         hints = {"google": "Gratis y sin cuenta, frase a frase: los diálogos salen más literales. Si Google corta por "
@@ -4731,7 +4756,7 @@ class App:
             if k in done:
                 if done[k]["hand"]:
                     return "A mano"
-                return "Dudoso" if translate.doubts(text, done[k]["text"], dst.currentData(),
+                return "Dudoso" if translate.doubts(text, done[k]["text"], done[k].get("dst", dst.currentData()),
                                                     self.tr_glossary) else "Traducido"
             return "Aplicado" if " ".join(text.split()) in texts else "Pendiente"
 
@@ -4750,8 +4775,21 @@ class App:
                     table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER) + text,
                                                                  done.get(code, {}).get("text", ""),
                                                                  state_of(code, text, texts)))
+                    mark_langs(str(k))
             pick()
             count()
+
+        def langs(k):
+            """(origen, destino) con que se tradujo el párrafo de clave k, o None si no tiene traducción."""
+            entry = done.get(k)
+            return (entry.get("src", "auto"), entry.get("dst", dst.currentData())) if entry else None
+
+        def mark_langs(iid):
+            """«EN → ES» bajo el estado; en color de aviso si el destino no es el elegido arriba."""
+            pair = langs(rows[iid][0])
+            item = table.rows[iid]
+            item.setData(2, LANG_ROLE, (f"{lang_code(pair[0])} → {lang_code(pair[1])}", pair[1] != dst.currentData())
+                         if pair else None)
 
         def count():
             todo = [rows[i][2] for i in table.get_children() if table.set(i, "state") == "Pendiente"]
@@ -4765,15 +4803,24 @@ class App:
                 many = (len(rows) if key == "all" else states["Traducido"] + states["Aplicado"] if key == "done"
                         else states[key])
                 chip.setText(f"{label} {many}")
+            pairs = collections.Counter(langs(rows[i][0]) for i in rows if rows[i][0] in done)
+            chosen = lang_filter.currentData()
+            lang_filter.clear()
+            lang_filter.addItem("Todos los idiomas", None)
+            for (a, b), many in sorted(pairs.items(), key=lambda p: -p[1]):
+                # «es>ja» y no la tupla: Qt la devuelve como lista y no se encontraría
+                lang_filter.addItem(f"{translate.LANGS.get(a, a)} → {translate.LANGS.get(b, b)} ({many})", f"{a}>{b}")
+            lang_filter.setCurrentIndex(max(0, lang_filter.findData(chosen)))
             show_rows()
 
         def show_rows():
             """Solo las filas del filtro elegido que tienen lo buscado, en el original o en la traducción."""
             want = next(key for key, chip in chips.items() if chip.isChecked())
-            query = search.text().strip().lower()
-            for item in table.rows.values():
+            query, pair = search.text().strip().lower(), lang_filter.currentData()
+            for iid, item in table.rows.items():
                 state = item.text(2)
                 shown = want == "all" or state == want or (want == "done" and state in ("Traducido", "Aplicado"))
+                shown = shown and (pair is None or ">".join(langs(rows[iid][0]) or ()) == pair)
                 item.setHidden(not shown or bool(query and query not in item.text(0).lower()
                                                   and query not in item.text(1).lower()))
 
@@ -4794,6 +4841,7 @@ class App:
                 for iid in index.get(k, ()):
                     table.set(iid, "trans", done.get(k, {}).get("text", ""))
                     table.set(iid, "state", state_of(k, rows[iid][2], texts))
+                    mark_langs(iid)
                     if iid == work["shown"]:
                         translation_box.setPlainText(done.get(k, {}).get("text", ""))
             count()
@@ -4814,7 +4862,9 @@ class App:
             if new == " ".join(done.get(k, {}).get("text", "").split()):
                 return
             if new:
-                done[k] = {"text": new, "hand": True}
+                old = done.get(k, {})
+                done[k] = {"text": new, "hand": True, "src": old.get("src", src.currentData()),
+                           "dst": old.get("dst", dst.currentData())}
             else:
                 done.pop(k, None)
             refresh({k})
@@ -4855,7 +4905,7 @@ class App:
             if src.currentData() == dst.currentData():
                 messagebox.showinfo("Traducir", "El idioma de origen y el de destino son el mismo.", parent=win)
                 return
-            picked = set(table.selection())
+            picked = {i for i in table.selection() if not table.rows[i].isHidden()}
             ids = [i for i in table.get_children() if (i in picked if again else table.set(i, "state") == "Pendiente")]
             if not ids:
                 messagebox.showinfo("Traducir", "Elige en la lista los párrafos que quieres volver a traducir." if again
@@ -4899,7 +4949,7 @@ class App:
                    "workers": 3 if cloud else 1}
             keys = {k for group in groups for k, _ in group["items"]}
             work.update(stop=threading.Event(), queue=queue.Queue(), count=0, total=len(keys),
-                        again=keys if again else set())
+                        again=keys if again else set(), langs=(job["src"], job["dst"]))
             work["thread"] = threading.Thread(target=_translate_thread, args=(job, work["queue"], work["stop"]),
                                               daemon=True)
             work["thread"].start()
@@ -4924,9 +4974,9 @@ class App:
                 # la que guarda (si guardaran las dos, una pisaría lo de la otra)
                 twins = [w for w in self.root.findChildren(Dialog) if w is not win and shiboken6.isValid(w)
                          and "merge" in getattr(w, "parts", {}) and w.parts["pdf"] == pdf and w.isVisible()]
-                merge(arrived, work["again"], store=not twins)
+                merge(arrived, work["again"], store=not twins, langs=work["langs"])
                 for twin in twins:
-                    twin.parts["merge"](arrived, work["again"])
+                    twin.parts["merge"](arrived, work["again"], langs=work["langs"])
                 work["count"] += len(arrived)
                 progress.setValue(work["count"])
                 status.setText(f"Traduciendo… {work['count']} de {work['total']} párrafos "
@@ -4945,11 +4995,12 @@ class App:
                     return
             qtk.after(200, poll)
 
-        def merge(arrived, again=(), store=True):
+        def merge(arrived, again=(), store=True, langs=None):
             """Pone las traducciones llegadas, salvo las corregidas a mano mientras tanto (si no se pidieron otra vez)."""
             for k, text in arrived.items():
                 if not (done.get(k, {}).get("hand") and k not in again):
-                    done[k] = {"text": text, "hand": False}
+                    src_code, dst_code = langs or (src.currentData(), dst.currentData())
+                    done[k] = {"text": text, "hand": False, "src": src_code, "dst": dst_code}
             refresh(set(arrived))
             if store:
                 save()
@@ -4998,6 +5049,17 @@ class App:
 
         def apply():
             keep()
+            book_keys = {translate.key(t) for _, _, t in translate.units(self.book, 0, len(self.book.blocks))}
+            other = collections.Counter(done[k]["dst"] for k in book_keys
+                                        if k in done and done[k].get("dst", dst.currentData()) != dst.currentData())
+            if other:
+                where = ", ".join(f"{translate.LANGS.get(c, c)}: {n}" for c, n in other.most_common())
+                if not messagebox.askyesno(
+                        "Traducir", f"{convert.counted(sum(other.values()), 'párrafo está traducido', 'párrafos están traducidos')} "
+                                    f"a otro idioma que el elegido ({dst.currentText()}): {where}.\n\nPara "
+                                    f"encontrarlos, elige su idioma en el filtro de la lista, selecciónalos con Ctrl+A "
+                                    f"y pulsa «Retraducir selección».\n\n¿Aplicar igual?", parent=win):
+                    return
             changed = self.apply_translation(done, dst.currentData())
             if changed is None:
                 messagebox.showerror("Traducir", "No se pudo guardar la versión «Antes de traducir»: el libro queda "
@@ -5303,13 +5365,14 @@ class App:
         table.selected.connect(pick)
         engine.activated.connect(lambda _: (remember(), show_engine()))
         scope.activated.connect(lambda _: fill())
+        dst.activated.connect(lambda _: (refresh(set(done)), count()))
         show_engine()
         fill()
         win.parts = {"table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
                      "scope": scope, "dst": dst, "src": src, "key": api_key, "status": status, "work": work, "done": done,
                      "glossary": edit_glossary, "close": close, "merge": merge, "pdf": pdf, "book": self.book,
                      "model": model, "models": find_models, "chips": chips, "search": search, "step": step,
-                     "doubt": doubt, "progress": progress}
+                     "doubt": doubt, "progress": progress, "langs": lang_filter}
         win.show()
         return win
 

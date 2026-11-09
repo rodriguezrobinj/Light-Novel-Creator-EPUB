@@ -6869,6 +6869,77 @@ def test_window_translate_chapters_style_and_doubts():
         window.close()
 
 
+def test_window_translate_languages_per_paragraph():
+    """Cada párrafo guarda de qué idioma a cuál se tradujo: la fila lo dice («ES → JA», en color de aviso si no es el
+    destino elegido), el filtro de idiomas encuentra los traducidos por error, «Retraducir selección» con Ctrl+A solo
+    toma los que se ven y «Aplicar al libro» avisa antes de meter otro idioma. Lo guardado sin idiomas toma los del
+    archivo."""
+    import json
+    import app
+    import translate
+
+    root, window = versioned_window()
+    path = app._translation_path(window.pdf)
+    path.unlink(missing_ok=True)
+    original, asked = translate._post, []
+    translate._post = fake = FakeAI()
+    saved_ask = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda title, message, **kwargs: asked.append(message) or False
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        parts["key"].setText("k")
+        parts["src"].setCurrentIndex(parts["src"].findData("es"))
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        table = parts["table"]
+        first = table.get_children()[:2]
+        for iid in first:  # dos párrafos, por error al japonés
+            table.selection_set(iid) if iid == first[0] else table.rows[iid].setSelected(True)
+        parts["dst"].setCurrentIndex(parts["dst"].findData("ja"))
+        parts["run"](again=True)
+        wait_translation(root, win)
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        parts["dst"].activated.emit(parts["dst"].currentIndex())
+        parts["run"]()
+        wait_translation(root, win)
+        done = parts["done"]
+        assert {(v["src"], v["dst"]) for v in done.values()} == {("es", "ja"), ("es", "en")}, done
+        assert table.rows[first[0]].data(2, app.LANG_ROLE) == ("ES → JA", True)
+        assert table.rows[table.get_children()[3]].data(2, app.LANG_ROLE) == ("ES → EN", False)
+        combo = parts["langs"]
+        labels = [combo.itemText(n) for n in range(combo.count())]
+        assert labels[0] == "Todos los idiomas" and "Español → Japonés (2)" in labels, labels
+        combo.setCurrentIndex(combo.findData("es>ja"))
+        combo.activated.emit(combo.currentIndex())
+        visible = [i for i in table.get_children() if not table.rows[i].isHidden()]
+        assert visible == list(first), visible
+        table.selectAll()  # Ctrl+A marca también lo que el filtro oculta: solo se retraduce lo que se ve
+        calls = len(fake.calls)
+        parts["run"](again=True)
+        wait_translation(root, win)
+        sent = json.loads(fake.calls[-1][2]["messages"][1]["content"].split("Paragraphs:")[1])
+        assert len(fake.calls) == calls + 1 and len(sent) == 2, sent
+        assert {(v["src"], v["dst"]) for v in done.values()} == {("es", "en")}
+        # Uno a mano en japonés: conserva su idioma, y aplicar avisa antes de meterlo en un libro en inglés
+        done[translate.key(table.set(first[0], "orig").removeprefix("# "))] = {"text": "日本語", "hand": True, "src": "es",
+                                                                              "dst": "ja"}
+        parts["apply"]()
+        assert asked and "1 párrafo está traducido a otro idioma" in asked[0] and "Japonés: 1" in asked[0], asked
+        assert window.lang_var.get() != "en", "aplicó pese a decir que no"
+        parts["close"]()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["done"] = {k: {"text": v["text"]} for k, v in data["done"].items()}  # como los guardados antes
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert {(v["src"], v["dst"]) for v in app._read_translation(window.pdf)["done"].values()} == {
+            (data["src"], data["dst"])}
+    finally:
+        translate._post = original
+        app.messagebox.askyesno = saved_ask
+        window.close()
+
+
 def test_window_translate_close_mid_batch():
     """Cerrar «Traducir» con un lote en camino no lo pierde: la ventana se oculta, lo termina, lo guarda y se
     cierra. Abrirla otra vez mientras tanto devuelve la misma. Salir de la app pregunta antes de perderlo."""
