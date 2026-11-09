@@ -6348,23 +6348,23 @@ def test_translate_ai_batches_split_and_marks():
 
 
 def test_translate_google_deepl_and_errors():
-    """Google: un párrafo por petición, sin clave. DeepL: clave «:fx» a la API gratuita, marcas como XML y contexto.
+    """Google: sin clave, por formulario. DeepL: clave «:fx» a la API gratuita, marcas como XML y contexto.
     401 da «la clave no es válida»; 429 se reintenta con espera y luego se rinde con un mensaje en español."""
     import io
     import urllib.error
     import urllib.parse
     import translate
 
-    saved = translate._get, translate._post, translate._sleep
+    saved = translate._form, translate._post, translate._sleep
     gets, posts, sleeps = [], [], []
-    translate._get = lambda url, headers=None: gets.append(url) or [[["Hola ", "Hello "], ["mundo", "world"]]]
+    translate._form = lambda url, fields: gets.append((url, fields)) or [[["Hola ", "Hello "], ["mundo", "world"]]]
     translate._post = lambda url, headers, body: posts.append((url, headers, body)) or {
         "translations": [{"text": t.replace("Tom", "Tomás")} for t in body["text"]]}
     translate._sleep = sleeps.append
     try:
         assert translate.translate("Google (gratis, sin clave)", ["Hello world"], "auto", "es") == ["Hola mundo"]
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(gets[0]).query)
-        assert query["sl"] == ["auto"] and query["tl"] == ["es"] and query["q"] == ["Hello world"], query
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(gets[0][0]).query)
+        assert query["sl"] == ["auto"] and query["tl"] == ["es"] and gets[0][1] == {"q": "Hello world"}, gets
         out = translate.translate("DeepL", ["Tom & <i>Jerry</i>"], "en", "pt", api_key="abc:fx",
                                   context=[("Prev", "Ant")])
         url, headers, body = posts[0]
@@ -6392,7 +6392,7 @@ def test_translate_google_deepl_and_errors():
         except translate.TranslateError as e:
             assert "Falta la clave de Claude" in str(e), e
     finally:
-        translate._get, translate._post, translate._sleep = saved
+        translate._form, translate._post, translate._sleep = saved
 
 
 def test_translate_gcloud_models_and_hints():
@@ -6402,7 +6402,7 @@ def test_translate_gcloud_models_and_hints():
     import urllib.error
     import translate
 
-    saved = translate._get, translate._post, translate._sleep
+    saved = translate._get, translate._post, translate._sleep, translate._form
     posts, gets = [], []
     translate._post = lambda url, headers, body: posts.append((url, body)) or {
         "data": {"translations": [{"translatedText": t.replace("Tom", "Tomás")} for t in body["q"]]}}
@@ -6422,7 +6422,7 @@ def test_translate_gcloud_models_and_hints():
             raise urllib.error.HTTPError(url, 429, "x", {}, io.BytesIO(b""))
 
         for fake in (captcha, down, lambda url, headers=None: {"raro": 1}):
-            translate._get = fake
+            translate._form = fake
             try:
                 translate.translate("Google (gratis, sin clave)", ["Hi"], "en", "es")
                 raise AssertionError("debía fallar")
@@ -6447,19 +6447,178 @@ def test_translate_gcloud_models_and_hints():
         translate.models("Compatible con OpenAI (Ollama, LM Studio…)", "", "http://127.0.0.1:1234/v1/")
         assert gets[2] == ("http://127.0.0.1:1234/v1/models", {}), gets
     finally:
-        translate._get, translate._post, translate._sleep = saved
+        translate._get, translate._post, translate._sleep, translate._form = saved
 
 
 def test_translate_batches_and_dpapi():
     """Lotes por número de párrafos y letras; la clave API cifrada no se lee en claro y vuelve igual."""
     import translate
 
-    assert translate.batches(["a"] * 3, "google") == [[0], [1], [2]]
-    assert translate.batches(["x" * 3000, "y" * 3000, "z"], "openai") == [[0], [1, 2]]
-    assert [len(b) for b in translate.batches(["w"] * 70, "openai")] == [30, 30, 10]
+    assert translate.batches(["a"] * 30, "google") == [list(range(25)), list(range(25, 30))]
+    assert translate.batches(["x" * 5000, "y" * 5000, "z"], "openai") == [[0], [1, 2]]
+    assert [len(b) for b in translate.batches(["w"] * 70, "openai")] == [40, 30]
+    # El japonés crece al traducirse: pesa el triple y el lote lleva menos, para que la respuesta no se corte
+    assert translate.batches(["あ" * 2000] * 3, "openai") == [[0], [1], [2]]
+    assert translate.batches(["あ" * 2000] * 3, "deepl") == [[0, 1, 2]]
     secret = translate.protect("sk-secreta-ñ")
     assert secret and "sk-secreta" not in secret and translate.unprotect(secret) == "sk-secreta-ñ"
     assert translate.unprotect("no es base64 válido!") == "" and translate.protect("") == ""
+
+
+def test_translate_doubts_and_second_pass():
+    """Una traducción dudosa (sin ¿, con comillas en vez de raya, sin traducir, cortada, sin el término del glosario,
+    sin las cursivas) se nota; la IA la repasa una vez con el motivo y solo se cambia si queda mejor."""
+    import json
+    import translate
+
+    doubts = translate.doubts
+    assert doubts("Where are you going?", "—¿Adónde vas?", "es") == []
+    assert "apertura" in doubts("Where are you going?", "—Adónde vas?", "es")[0]
+    assert "raya" in doubts('"Hello," she said.', '"Hola", dijo ella.', "es")[0]
+    assert doubts('"Hello," she said.', '"Hello," she said in English.', "en") == []
+    assert "sin traducir" in doubts("He walked to the door.", "He walked to the door.", "es")[0]
+    assert doubts("Subaru.", "Subaru.", "es") == []  # un nombre solo queda igual
+    assert "original" in doubts("彼は言った。", "Él dijo 彼。", "es")[0]
+    assert "corta" in doubts("x " * 60, "y", "es")[0] and "larga" in doubts("x " * 60, "y " * 200, "es")[0]
+    assert doubts("彼は静かにドアを開けて、ゆっくりと部屋の中に入っていった。", "Abrió la puerta en silencio y entró "
+                  "despacio en la habitación.", "es") == []
+    assert "cursivas" in doubts("He <i>ran</i>.", "Corrió.", "es")[0] and doubts("He <i>ran</i>.", "<i>Corrió</i>.", "es") == []
+    assert "Nota" in doubts("Hi.[Nota: a]", "Hola.", "es")[0]
+    found = doubts("The Witch Cult came.", "La Secta de la Bruja llegó.", "es", [["Witch Cult", "Culto de la Bruja"]])
+    assert found == ["el glosario pide «Culto de la Bruja» para «Witch Cult»"], found
+    assert doubts("The Witches came.", "Las brujas llegaron.", "es", [["Witch", "Hechicera"]]) == []  # otra palabra
+
+    calls = []
+
+    def fake(url, headers, body):
+        user = body["messages"][-1]["content"]
+        calls.append(user)
+        data = json.loads(user[user.index("Paragraphs:") + len("Paragraphs:"):])
+        fixed = "previous translation" in user
+        out = {n: ("—¿" if fixed else "—") + t for n, t in data.items()}
+        return {"choices": [{"message": {"content": json.dumps(out)}}]}
+
+    original = translate._post
+    translate._post = fake
+    try:
+        out = translate.translate("DeepSeek", ["Bien.", "Vienes?", "Claro."], "en", "es", api_key="k")
+        assert out == ["—Bien.", "—¿Vienes?", "—Claro."], out
+        assert len(calls) == 2 and "1: falta el signo de apertura" in calls[1] and '"1": "Vienes?"' in calls[1], calls
+        assert "Bien." not in calls[1].split("Paragraphs:")[1], "solo se repasa el dudoso"
+        # Si el repaso no mejora, queda la primera y no se pide más
+        translate._post = lambda url, headers, body: calls.append(1) or fake(url, headers, {"messages": [
+            {"content": body["messages"][-1]["content"].replace("previous translation", "")}]})
+        del calls[:]
+        assert translate.translate("DeepSeek", ["Vienes?"], "en", "es", api_key="k") == ["—Vienes?"]
+        assert calls.count(1) == 2, calls
+    finally:
+        translate._post = original
+
+
+def test_translate_style_chapter_and_rejected_params():
+    """La instrucción lleva la variante del español, los honoríficos, la ficha de personajes y las correcciones a
+    mano como ejemplo; el capítulo entero va al final de la instrucción (en Claude, marcado para la caché) salvo que
+    quepa en el lote. Una API que rechaza «temperature» o «response_format» se usa sin ellos y no se le repiten."""
+    import io
+    import urllib.error
+    import translate
+
+    style = {"variant": "es-419", "honorifics": False, "notes": "Emilia: chica, formal",
+             "examples": [("Good morning.", "—Buenos días.")]}
+    text = translate.instructions("en", "es", [["Witch", "Bruja"]], style)
+    assert "Latin American" in text and "Do not keep Japanese honorifics" in text and "vosotros" in text, text
+    assert "Emilia: chica, formal" in text and "Good morning.\n→ —Buenos días." in text and "Witch = Bruja" in text
+    plain = translate.instructions("en", "es")
+    assert "Keep Japanese honorifics" in plain and "Latin American" not in plain and "gender" in plain, plain
+    assert "European Spanish" in translate.instructions("en", "es", style={"variant": "es-ES"})
+    assert "European Spanish" not in translate.instructions("es", "en", style={"variant": "es-ES"})
+
+    fake, original = FakeAI(), translate._post
+    translate._post = fake
+    chapter = "\n".join(f"Chapter line {n}" for n in range(40))
+    try:
+        translate.translate("DeepSeek", ["Chapter line 3"], "en", "es", api_key="k", style=style | {"chapter": chapter})
+        body = fake.calls[0][2]
+        system = body["messages"][0]["content"]
+        assert system.endswith(chapter) and "only as context" in system and "Emilia" in system, system[-300:]
+        assert body["response_format"] == {"type": "json_object"} and body["temperature"] == 0.3, body
+        translate.translate("Claude", ["Chapter line 3"], "en", "es", api_key="k", style={"chapter": chapter})
+        body = fake.calls[1][2]
+        assert body["system"][1]["cache_control"] == {"type": "ephemeral"} and body["system"][1]["text"].endswith(chapter)
+        assert "response_format" not in body and "em dash" in body["system"][0]["text"], body
+        translate.translate("DeepSeek", ["Uno", "Dos"], "en", "es", api_key="k", style={"chapter": "Uno\nDos"})
+        assert "only as context" not in fake.calls[2][2]["messages"][0]["content"], "el capítulo ya iba en el lote"
+        long = translate.translate("DeepSeek", ["Uno"], "en", "es", api_key="k",
+                                   style={"chapter": "x" * (translate.CHAPTER + 1)})
+        assert long == ["ES:Uno"] and "only as context" not in fake.calls[3][2]["messages"][0]["content"]
+
+        seen = []
+
+        def picky(url, headers, body):
+            seen.append(sorted(k for k in ("temperature", "response_format") if k in body))
+            for name in ("temperature", "response_format"):
+                if name in body:
+                    raise urllib.error.HTTPError(url, 400, "x", {}, io.BytesIO(
+                        f'{{"error": "Unsupported parameter: {name}"}}'.encode()))
+            return fake(url, headers, body)
+
+        translate._post = picky
+        assert translate.translate("OpenAI (ChatGPT)", ["Hi"], "en", "es", api_key="k", model="o9") == ["ES:Hi"]
+        assert translate.translate("OpenAI (ChatGPT)", ["Hi"], "en", "es", api_key="k", model="o9") == ["ES:Hi"]
+        assert seen == [["response_format", "temperature"], ["response_format"], [], []], seen
+    finally:
+        translate._post = original
+
+
+def test_translate_google_lines_retry_after_and_propose():
+    """Google gratis: varios párrafos en una petición, uno por línea; si devuelve otras líneas, de uno en uno. Un 429
+    con «Retry-After» espera lo que dice el servidor. «Proponer con la IA» devuelve glosario y personajes limpios."""
+    import io
+    import json
+    import urllib.error
+    import translate
+
+    saved = translate._form, translate._post, translate._sleep
+    asked, sleeps = [], []
+    translate._sleep = sleeps.append
+    try:
+        translate._form = lambda url, fields: asked.append(fields["q"]) or [[[
+            "\n".join("ES:" + line for line in fields["q"].split("\n")), ""]]]
+        assert translate.translate("Google (gratis, sin clave)", ["One", "Two", "Three"], "en", "es") == [
+            "ES:One", "ES:Two", "ES:Three"]
+        assert asked == ["One\nTwo\nThree"], asked
+        del asked[:]
+        translate._form = lambda url, fields: asked.append(fields["q"]) or [[["ES:" + fields["q"].replace("\n", " "), ""]]]
+        assert translate.translate("Google (gratis, sin clave)", ["One", "Two"], "en", "es") == ["ES:One", "ES:Two"]
+        assert asked == ["One\nTwo", "One", "Two"], asked
+
+        fake, tries = FakeAI(), []
+
+        def busy(url, headers, body):
+            tries.append(1)
+            if len(tries) == 1:
+                raise urllib.error.HTTPError(url, 429, "x", {"Retry-After": "7"}, io.BytesIO(b""))
+            return fake(url, headers, body)
+
+        translate._post = busy
+        assert translate.translate("DeepSeek", ["Hi"], "en", "es", api_key="k") == ["ES:Hi"] and sleeps == [7], sleeps
+
+        reply = {"glossary": {"Witch Cult": "Culto de la Bruja", "": "x", "Roswaal": 3},
+                 "characters": {"Emilia": "chica, formal;\n trata de usted a todos"}}
+        posts = []
+        translate._post = lambda url, headers, body: posts.append(body) or {
+            "choices": [{"message": {"content": "```json\n" + json.dumps(reply) + "\n```"}}]}
+        terms, people = translate.propose("DeepSeek", "Emilia met the Witch Cult.", "en", "es", api_key="k",
+                                          names=["Emilia", "Roswaal"])
+        assert terms == [["Witch Cult", "Culto de la Bruja"]] and people == ["Emilia: chica, formal; trata de usted a todos"]
+        assert "Emilia, Roswaal" in posts[0]["messages"][1]["content"] and "JSON" in posts[0]["messages"][0]["content"]
+        try:
+            translate.propose("DeepL", "x", "en", "es", api_key="k")
+            raise AssertionError("debía fallar")
+        except translate.TranslateError as e:
+            assert "solo los puede proponer una IA" in str(e), e
+    finally:
+        translate._form, translate._post, translate._sleep = saved
 
 
 def wait_translation(root, win, seconds=10):
@@ -6483,7 +6642,7 @@ def test_window_translate_apply_and_undo():
     kinds = [window.tree.set(i, "inc") for i in window.tree.get_children()]
     original = translate._post
     translate._post = fake = FakeAI()
-    window.tr_glossary = [["Inicio", "Start"]]
+    window.tr_glossary = [["Inicio", "Inicio"]]
     try:
         win = window.translate_book()
         parts = win.parts
@@ -6494,8 +6653,8 @@ def test_window_translate_apply_and_undo():
         parts["src"].setCurrentIndex(parts["src"].findData("es"))
         parts["run"]()
         wait_translation(root, win)
-        assert "Inicio = Start" in fake.calls[0][2]["messages"][0]["content"], "el glosario no llegó a la IA"
-        assert window.review_state()["tr_glossary"] == [["Inicio", "Start"]]
+        assert "Inicio = Inicio" in fake.calls[0][2]["messages"][0]["content"], "el glosario no llegó a la IA"
+        assert window.review_state()["tr_glossary"] == [["Inicio", "Inicio"]]
         table = parts["table"]
         states = {table.set(i, "state") for i in table.get_children()}
         assert states == {"Traducido"}, states
@@ -6522,6 +6681,86 @@ def test_window_translate_apply_and_undo():
         found = [(rows.set(i, "state"), rows.set(i, "orig")) for i in rows.get_children()]
         assert {s for s, _ in found} == {"Traducido", "A mano"}, found
         again.parts["close"]()
+    finally:
+        translate._post = original
+        window.close()
+
+
+def test_window_translate_chapters_style_and_doubts():
+    """Cada capítulo se traduce por su cuenta, viendo su capítulo entero y no el de otro; «Glosario y estilo…» guarda
+    la ficha de personajes con la serie y la variante en las preferencias, y «Proponer con la IA» rellena las dos
+    cajas. Lo corregido a mano va de ejemplo, y una traducción que la IA deja mal queda «Dudoso» con su motivo."""
+    import json
+    import time
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    original = translate._post
+    translate._post = fake = FakeAI()
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        parts["key"].setText("k")
+        parts["src"].setCurrentIndex(parts["src"].findData("es"))
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        parts["glossary"]()
+        box = win.glossary_box
+        box["notes"].setPlainText("Emilia: chica, formal")
+        box["variant"].setCurrentIndex(box["variant"].findData("es-419"))
+        box["honorifics"].setChecked(False)
+        reply = {"glossary": {"Culto": "Cult"}, "characters": {"Subaru": "chico, informal"}}
+        translate._post = lambda url, headers, body: {"choices": [{"message": {"content": json.dumps(reply)}}]}
+        box["suggest"]()
+        end = time.time() + 5
+        while "Subaru" not in box["notes"].toPlainText() and time.time() < end:
+            root.update()
+            time.sleep(0.02)
+        assert box["notes"].toPlainText() == "Emilia: chica, formal\nSubaru: chico, informal", box["notes"].toPlainText()
+        assert "Culto = Cult" in box["text"].toPlainText() and "1 término nuevo y 1 personaje nuevo" in box["note"].text()
+        box["text"].setPlainText("")
+        box["accept"]()
+        translate._post = fake
+        assert window.review_state()["tr_notes"] == "Emilia: chica, formal\nSubaru: chico, informal"
+        assert "tr_notes" in app.INHERITED and window.settings["translate"]["variant"] == "es-419"
+        assert window.settings["translate"]["honorifics"] is False
+
+        table = parts["table"]
+        row = next(i for i in table.get_children() if "fin del primer parrafo" in table.set(i, "orig"))
+        table.selection_set(row)
+        root.update()
+        parts["translation"].setPlainText("Corrected by hand, as the editor wants it.")
+        parts["run"]()
+        wait_translation(root, win)
+        sections = [s for s in window.translation_sections()
+                    if translate.units(window.book, s[0], s[1])]
+        assert len(sections) >= 2 and len(fake.calls) >= len(sections) - 1, (len(sections), len(fake.calls))
+        systems = [body["messages"][0]["content"] for _, _, body in fake.calls]
+        assert all("Subaru: chico, informal" in s and "Do not keep Japanese honorifics" in s for s in systems)
+        assert all("Corrected by hand, as the editor wants it." in s for s in systems), "falta el ejemplo a mano"
+        with_chapter = [s.split("only as context")[1] for s in systems if "only as context" in s]
+        for _, _, body in fake.calls:  # el capítulo que acompaña a un lote es el suyo
+            system, user = body["messages"][0]["content"], body["messages"][1]["content"]
+            if "only as context" in system:
+                first = json.loads(user[user.index("Paragraphs:") + len("Paragraphs:"):])["1"]
+                assert first in system.split("only as context")[1], first
+        assert table.set(row, "state") == "A mano" and {table.set(i, "state") for i in table.get_children()} == {
+            "Traducido", "A mano"}, with_chapter
+
+        # Una traducción sin el término del glosario: «Dudoso», y al elegirla se dice por qué
+        other = next(i for i in table.get_children() if table.set(i, "state") == "Traducido")
+        word = next(w for w in table.set(other, "orig").split() if len(w) > 3 and w.isalpha())
+        window.tr_glossary = [[word, "Zzyzx"]]
+        parts["merge"]({win.parts["done"] and next(k for k, v in parts["done"].items() if not v["hand"]
+                                                    and v["text"] == table.set(other, "trans")): table.set(other, "trans")})
+        assert table.set(other, "state") == "Dudoso", table.set(other, "state")
+        table.selection_set(other)
+        root.update()
+        assert "Dudoso: el glosario pide «Zzyzx»" in parts["status"].text(), parts["status"].text()
+        parts["close"]()
     finally:
         translate._post = original
         window.close()

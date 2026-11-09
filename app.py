@@ -1,6 +1,7 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
 import base64
 import collections
+import concurrent.futures
 import contextlib
 import ctypes
 import dataclasses
@@ -70,7 +71,7 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
-             "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary")
+             "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
@@ -564,19 +565,32 @@ def _read_translation(pdf):
 
 
 def _translate_thread(job, out, stop):
-    """Traduce job["items"] [(clave, texto)] por lotes y pone en out ("done", {clave: traducción}) tras cada uno,
-    ("error", mensaje) si falla y ("end",) al acabar. Es un hilo, no un proceso: la red no retiene el GIL (PyMuPDF
-    sí) y así pausar es solo marcar stop."""
-    texts, context = [t for _, t in job["items"]], list(job["context"])
-    try:
-        for batch in translate.batches(texts, translate.ENGINES[job["engine"]]["kind"]):
+    """Traduce job["groups"] (uno por capítulo: {"items": [(clave, texto)], "context", "chapter"}) por lotes y pone
+    en out ("done", {clave: traducción}) tras cada uno, ("error", mensaje) si falla y ("end",) al acabar. Van
+    job["workers"] capítulos a la vez, cada uno con su contexto: el libro sale antes y el tono no se mezcla. Es un
+    hilo, no un proceso: la red no retiene el GIL (PyMuPDF sí) y así pausar es solo marcar stop."""
+    kind = translate.ENGINES[job["engine"]]["kind"]
+
+    def chapter(group):
+        texts, context = [t for _, t in group["items"]], list(group["context"])
+        style = job["style"] | {"chapter": group["chapter"]}
+        for batch in translate.batches(texts, kind):
             if stop.is_set():
-                break
+                return
             part = [texts[n] for n in batch]
             result = translate.translate(job["engine"], part, job["src"], job["dst"], job["key"], job["model"],
-                                         job["base"], job["glossary"], context)
+                                         job["base"], job["glossary"], context, style)
             context = (context + list(zip(part, result)))[-translate.CONTEXT:]
-            out.put(("done", {job["items"][n][0]: t for n, t in zip(batch, result)}))
+            out.put(("done", {group["items"][n][0]: t for n, t in zip(batch, result)}))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(job["workers"]) as pool:
+            try:
+                for future in [pool.submit(chapter, group) for group in job["groups"]]:
+                    future.result()
+            except BaseException:
+                stop.set()  # los demás capítulos acaban su lote, que se guarda, y paran
+                raise
     except translate.TranslateError as e:
         out.put(("error", str(e)))
     except Exception as e:
@@ -630,7 +644,8 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "credits": "Página de créditos", "reading": "Minutos de lectura", "epub2": "EPUB 2",
                 "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
-                "words": "Diccionario de la serie", "glossary": "Glosario", "tr_glossary": "Glosario de traducción", "ignored": "Avisos ignorados", "comments": "Comentarios",
+                "words": "Diccionario de la serie", "glossary": "Glosario", "tr_glossary": "Glosario de traducción",
+                "tr_notes": "Personajes y estilo de traducción", "ignored": "Avisos ignorados", "comments": "Comentarios",
                 "alts": "Descripciones de ilustraciones",
                 "echoes": "Buscar ecos"}
 
@@ -1378,6 +1393,7 @@ class App:
         self.words = []                        # diccionario de la serie: palabras que la ortografía da por buenas
         self.glossary = []                     # glosario de la serie: los nombres como deben ir
         self.tr_glossary = []                  # glosario de traducción de la serie: [[original, traducción]]
+        self.tr_notes = ""                     # personajes y estilo para la IA que traduce, de la serie
         self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
         self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
         self.thumbs, self.thumbs_tried = None, set()  # proceso de miniaturas de recientes y archivos ya probados
@@ -2274,6 +2290,7 @@ class App:
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
         # Son del libro: llegan con la revisión (el glosario, también heredado de otro tomo)
         self.glossary, self.tr_glossary, self.comments, self.alts = [], [], [], {}
+        self.tr_notes = ""
         if report is not None and not self.echoes_var.get() and self.spanish():  # el del proceso: sin opciones, en español
             self.reports[self.report_key()] = report
         if memos:
@@ -4259,7 +4276,7 @@ class App:
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
                      glossary=self.glossary, tr_glossary=self.tr_glossary, ignored=self.ignored, comments=self.comments,
-                     alts=self.alts)
+                     alts=self.alts, tr_notes=self.tr_notes)
         return state
 
     def save_review(self):
@@ -4303,6 +4320,8 @@ class App:
         if isinstance(state.get("tr_glossary"), list):
             self.tr_glossary = [[str(a), str(b)] for a, b in (p for p in state["tr_glossary"]
                                                                if isinstance(p, list) and len(p) == 2)]
+        if isinstance(state.get("tr_notes"), str):
+            self.tr_notes = state["tr_notes"]
 
     def load_review(self, state=None):
         """Recupera la revisión guardada de este PDF, o la de una versión (state). False si no hay o si el PDF
@@ -4492,7 +4511,7 @@ class App:
         base.setPlaceholderText("http://localhost:11434/v1")
         base.setMinimumWidth(260)
         model_label, base_label, key_label = QLabel("Modelo:"), QLabel("URL:"), QLabel("Clave:")
-        glossary_btn = _button("Glosario de traducción…", lambda: edit_glossary())
+        glossary_btn = _button("Glosario y estilo…", lambda: edit_glossary())
         column.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, QLabel("Motor:"), engine, 1, QLabel("Traducir:"),
                               scope))
         column.addLayout(_row(model_label, model, models_btn, base_label, base, key_label, api_key, 1, glossary_btn))
@@ -4534,8 +4553,8 @@ class App:
                            "gratis al mes; pide una clave de Google Cloud con la facturación activada.",
                  "deepl": "Más natural que Google, frase a frase. La clave gratuita (acaba en «:fx») trae 500.000 "
                           "caracteres al mes. No usa el glosario.",
-                 "openai": "La IA traduce por lotes de hasta 30 párrafos viendo los anteriores y el glosario: diálogos "
-                           "naturales. Se paga por uso con tu clave.",
+                 "openai": "La IA traduce varios capítulos a la vez viendo el capítulo entero, el glosario y la ficha de "
+                           "personajes de «Glosario y estilo…», y repasa sola lo dudoso. Se paga por uso con tu clave.",
                  "custom": "Modelo en tu equipo (Ollama, LM Studio): gratis y privado, lento sin una buena tarjeta "
                            "gráfica. Escribe la URL de su API y el nombre del modelo."}
 
@@ -4574,7 +4593,10 @@ class App:
 
         def state_of(k, text, texts):
             if k in done:
-                return "A mano" if done[k]["hand"] else "Traducido"
+                if done[k]["hand"]:
+                    return "A mano"
+                return "Dudoso" if translate.doubts(text, done[k]["text"], dst.currentData(),
+                                                    self.tr_glossary) else "Traducido"
             return "Aplicado" if " ".join(text.split()) in texts else "Pendiente"
 
         def fill():
@@ -4642,6 +4664,9 @@ class App:
             original_box.setPlainText(rows[iid][2] if iid else "")
             translation_box.setPlainText(done.get(rows[iid][0], {}).get("text", "") if iid else "")
             translation_box.setEnabled(iid is not None)
+            if iid and table.set(iid, "state") == "Dudoso":  # por qué: la IA ya lo repasó una vez y sigue así
+                status.setText("Dudoso: " + "; ".join(translate.doubts(
+                    rows[iid][2], done[rows[iid][0]]["text"], dst.currentData(), self.tr_glossary)) + ".")
 
         def busy(on):
             run_btn.setText("Pausar" if on else "Traducir")
@@ -4673,20 +4698,43 @@ class App:
                 api_key.setFocus()
                 return
             remember()
-            order = table.get_children()
-            before = [rows[i] for i in order[:order.index(ids[0])]]
+            order, wanted = table.get_children(), set(ids)
+            place = {iid: n for n, iid in enumerate(order)}
+            originals = {k: t for k, _, t in rows.values()}
+            ai, cloud = info["kind"] in translate.AI, info["kind"] != "google" and not info.get("custom")
+            style = {"variant": prefs.get("variant", ""), "honorifics": prefs.get("honorifics", True),
+                     "notes": self.tr_notes,
+                     # Lo corregido a mano enseña a la IA el estilo que se quiere
+                     "examples": [(originals[k], v["text"]) for k, v in done.items()
+                                  if v["hand"] and k in originals and 20 <= len(originals[k]) <= 400][-5:]}
+            groups, seen = [], set()
+            for start, end, _ in sections if scope.currentData() is None else [sections[scope.currentData()]]:
+                members = [i for i in order if start <= int(i) < end]
+                mine = [i for i in members if i in wanted]
+                # «—¿Eh?» repetido, una vez en todo el libro
+                items = list(dict.fromkeys((rows[i][0], rows[i][2]) for i in mine if rows[i][0] not in seen))
+                if not items:
+                    continue
+                seen.update(k for k, _ in items)
+                before = [rows[i] for i in order[max(0, place[mine[0]] - 60):place[mine[0]]]]
+                groups.append({"items": items,
+                               "context": [(t, done[k]["text"]) for k, _, t in before if k in done][-translate.CONTEXT:],
+                               # Un modelo local suele tener poca memoria de contexto: el capítulo no le cabe
+                               "chapter": "\n".join(rows[i][2] for i in members)
+                               if ai and cloud and prefs.get("chapter", True) else ""})
             job = {"engine": name, "src": src.currentData(), "dst": dst.currentData(), "key": api_key.text().strip(),
                    "model": model.currentText().strip(), "base": base.text().strip() if info.get("custom") else "",
-                   "glossary": list(self.tr_glossary),
-                   "items": list(dict.fromkeys((rows[i][0], rows[i][2]) for i in ids)),  # «—¿Eh?» repetido, una vez
-                   "context": [(t, done[k]["text"]) for k, _, t in before if k in done][-translate.CONTEXT:]}
-            work.update(stop=threading.Event(), queue=queue.Queue(), count=0, total=len(job["items"]),
-                        again={k for k, _ in job["items"]} if again else set())
+                   "glossary": list(self.tr_glossary), "groups": groups, "style": style,
+                   # Google gratis corta con peticiones seguidas y un modelo local va de una en una
+                   "workers": 3 if cloud else 1}
+            keys = {k for group in groups for k, _ in group["items"]}
+            work.update(stop=threading.Event(), queue=queue.Queue(), count=0, total=len(keys),
+                        again=keys if again else set())
             work["thread"] = threading.Thread(target=_translate_thread, args=(job, work["queue"], work["stop"]),
                                               daemon=True)
             work["thread"].start()
             busy(True)
-            status.setText(f"Traduciendo con {name}… 0 de {len(job['items'])} párrafos")
+            status.setText(f"Traduciendo con {name}… 0 de {len(keys)} párrafos")
             qtk.after(200, poll)
 
         def poll():
@@ -4789,14 +4837,35 @@ class App:
                            if changed else "Nada que cambiar: lo traducido ya está en el libro.")
 
         def edit_glossary():
-            box, inner = self.dialog("Glosario de traducción", modal=True)
-            inner.addWidget(QLabel("Un término por línea: original = traducción («Witch Cult = Culto de la Bruja»). "
-                                   "La IA lo usa siempre;\nGoogle y DeepL no. Lo que va tras # no cuenta. Pasa a los "
-                                   "demás tomos de la serie."))
+            """Lo que guía a la IA: glosario y ficha de personajes (de la serie), variante del español, honoríficos
+            y si ve el capítulo entero (preferencias)."""
+            box, inner = self.dialog("Glosario y estilo de traducción", modal=True)
+            inner.addWidget(QLabel("Glosario. Un término por línea: original = traducción («Witch Cult = Culto de la "
+                                   "Bruja»). La IA lo usa siempre;\nGoogle y DeepL no. Lo que va tras # no cuenta. "
+                                   "Pasa a los demás tomos de la serie."))
             text = QPlainTextEdit("\n".join(f"{a} = {b}" for a, b in self.tr_glossary))
             text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-            text.setMinimumSize(560, 260)
-            inner.addWidget(text, 1)
+            text.setMinimumSize(600, 200)
+            inner.addWidget(text, 2)
+            inner.addWidget(QLabel("Personajes y estilo. Una línea por personaje: género, cómo habla y a quién trata "
+                                   "de tú o de usted\n(«Emilia: chica, amable y formal; trata de usted a Roswaal»). La "
+                                   "IA no equivoca así el género ni el trato. También pasa a la serie."))
+            notes = QPlainTextEdit(self.tr_notes)
+            notes.setMinimumHeight(130)
+            inner.addWidget(notes, 1)
+            variant, honorifics = QComboBox(), QCheckBox("Mantener honoríficos (-san, -kun…)")
+            chapter = QCheckBox("La IA ve el capítulo entero")
+            for code, label in translate.VARIANTS.items():
+                variant.addItem(label, code)
+            variant.setCurrentIndex(max(0, variant.findData(prefs.get("variant", ""))))
+            honorifics.setChecked(bool(prefs.get("honorifics", True)))
+            chapter.setChecked(bool(prefs.get("chapter", True)))
+            chapter.setToolTip("Con el capítulo original delante, la IA sabe quién habla y qué viene después.\nGasta "
+                               "más texto de entrada, que las API cobran rebajado al repetirse. Los modelos en tu "
+                               "equipo no lo reciben: no les suele caber.")
+            inner.addLayout(_row(QLabel("Español de:"), variant, honorifics, chapter, 1))
+            note = _label("", "muted")
+            inner.addWidget(note)
 
             def pairs():
                 out = {}
@@ -4805,6 +4874,11 @@ class App:
                     if sep and a.strip() and b.strip():
                         out[a.strip()] = b.strip()
                 return [[a, b] for a, b in out.items()]
+
+            def append(edit, lines):
+                if lines:
+                    lead = "\n" if edit.toPlainText().strip() else ""
+                    edit.setPlainText(edit.toPlainText().rstrip("\n") + lead + "\n".join(lines))
 
             def add_names():
                 """Los nombres propios de este tomo que salen 5 veces o más, iguales en los dos lados para corregir."""
@@ -4815,18 +4889,74 @@ class App:
                     messagebox.showinfo("Glosario de traducción", "No hay nombres nuevos que salgan 5 veces o más en "
                                                                   "este tomo.", parent=box)
                     return
-                lead = "\n" if text.toPlainText().strip() else ""
-                text.setPlainText(text.toPlainText() + lead + "\n".join(f"{f} = {f}  # {convert.counted(n, 'vez', 'veces')}"
-                                                                        for n, f in names))
+                append(text, [f"{f} = {f}  # {convert.counted(n, 'vez', 'veces')}" for n, f in names])
+
+            def suggest():
+                """La IA lee el principio del libro y propone términos y personajes; nada se guarda sin «Aceptar»."""
+                name, info = engine.currentText(), translate.ENGINES[engine.currentText()]
+                if info["kind"] not in translate.AI:
+                    messagebox.showinfo("Glosario y estilo", "Esto lo propone una IA: elige una en «Motor» (OpenAI, "
+                                                             "DeepSeek, Claude, Gemini…).", parent=box)
+                    return
+                if info.get("key") and not api_key.text().strip():
+                    messagebox.showerror("Glosario y estilo", f"Falta la clave de {name}.", parent=box)
+                    return
+                sample = "\n".join(t for _, _, t in translate.units(self.book, 0, len(self.book.blocks)))[:30000]
+                names = [f for f, _ in sorted(convert.proper_names(self.book).items(), key=lambda p: -p[1])[:60]]
+                args = (name, sample, src.currentData(), dst.currentData(), api_key.text().strip(),
+                        model.currentText().strip(), base.text().strip() if info.get("custom") else "", names)
+                found = queue.Queue()
+
+                def ask():
+                    try:
+                        found.put(translate.propose(*args))
+                    except Exception as e:  # TranslateError ya viene en español
+                        found.put(str(e) or type(e).__name__)
+
+                suggest_btn.setEnabled(False)
+                suggest_btn.setText("Leyendo el libro…")
+                threading.Thread(target=ask, daemon=True).start()
+
+                def wait():
+                    if not shiboken6.isValid(box):
+                        return
+                    try:
+                        result = found.get_nowait()
+                    except queue.Empty:
+                        qtk.after(200, wait)
+                        return
+                    suggest_btn.setText("Proponer con la IA")
+                    suggest_btn.setEnabled(True)
+                    if isinstance(result, str):
+                        messagebox.showerror("Glosario y estilo", result, parent=box)
+                        return
+                    have, known = {a for a, _ in pairs()}, notes.toPlainText()
+                    terms = [f"{a} = {b}" for a, b in result[0] if a not in have]
+                    people = [line for line in result[1] if line.split(":")[0] not in known]
+                    append(text, terms)
+                    append(notes, people)
+                    note.setText(f"La IA propone {convert.counted(len(terms), 'término nuevo', 'términos nuevos')} y "
+                                 f"{convert.counted(len(people), 'personaje nuevo', 'personajes nuevos')}: revísalos "
+                                 f"antes de aceptar.")
+
+                qtk.after(200, wait)
 
             def accept():
-                self.tr_glossary = pairs()
+                self.tr_glossary, self.tr_notes = pairs(), notes.toPlainText().strip()
+                prefs.update(variant=variant.currentData(), honorifics=honorifics.isChecked(),
+                             chapter=chapter.isChecked())
+                self.settings["translate"] = prefs
+                self.save_settings()
+                self.save_review()  # glosario y personajes van con la serie: que no dependan de otro guardado
+                refresh(set(done))  # un término nuevo del glosario puede dejar traducciones en «Dudoso»
                 box.close()
 
-            inner.addLayout(_row(_button("Añadir nombres de este tomo", add_names), 1,
+            suggest_btn = _button("Proponer con la IA", suggest)
+            inner.addLayout(_row(_button("Añadir nombres de este tomo", add_names), suggest_btn, 1,
                                  _button("Aceptar", accept, "primary")))
             box.show()
-            win.glossary_box = box, text, accept
+            win.glossary_box = {"box": box, "text": text, "notes": notes, "variant": variant, "honorifics": honorifics,
+                                "chapter": chapter, "suggest": suggest, "accept": accept, "note": note}
 
         def close():
             keep()
