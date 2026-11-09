@@ -352,6 +352,31 @@ class Speaker(QObject):
             proc.deleteLater()
 
 
+def _render_thumbs(jobs):
+    """Proceso aparte: miniatura de la primera página de cada tomo [(archivo, destino)], que en las novelas es su
+    portada. En la ventana, PyMuPDF congelaba el arranque."""
+    for src, dest in jobs:
+        try:
+            with pymupdf.open(src) as doc:
+                page = doc[0]
+                zoom = 124 / max(page.rect.height, 1)
+                data = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("jpg", jpg_quality=85)
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            Path(dest).write_bytes(data)
+        except Exception:  # PDF roto, protegido o vacío: la tarjeta se queda con el icono
+            continue
+
+
+def _start_thumbs(jobs):
+    """Arranca _render_thumbs; None si no se pudo (la tarjeta se queda con el icono)."""
+    try:
+        proc = multiprocessing.Process(target=_render_thumbs, args=(jobs,), daemon=True)
+        proc.start()
+        return proc
+    except Exception:
+        return None
+
+
 def _start_spell_process():
     """(peticiones, respuestas, proceso) de _spell_server, o None si no arranca: el editor sigue sin él."""
     try:
@@ -1270,6 +1295,7 @@ class App:
         self.glossary = []                     # glosario de la serie: los nombres como deben ir
         self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
         self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
+        self.thumbs, self.thumbs_tried = None, set()  # proceso de miniaturas de recientes y archivos ya probados
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
         self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
@@ -1328,7 +1354,7 @@ class App:
             ("Ortografía…", self.spelling), ("Añadir página…", self.add_page),
             ("Página de personajes…", self.character_page), ("Cambiar ilustración…", self.change_image),
             ("Describir ilustración…", self.describe_image), ("Versiones…", self.versions))]
-        tools.addSeparator()
+        self.book_actions.append(tools.addSeparator())
         tools.addAction("Panel de serie…", self.series_panel)
         tools.addAction("Volumen recopilatorio…", self.omnibus)
         tools.addAction("Vigilar una carpeta…", self.watch_folder)
@@ -1684,15 +1710,15 @@ class App:
         return True
 
     def update_chrome(self):
-        """Sin libro abierto, solo lo que sirve para empezar: abrir, convertir una carpeta, herramientas y los
-        recientes de la pantalla de inicio. Las opciones del EPUB, Generar, Calidad, Buscar y el nombre del
+        """Sin libro abierto, solo lo que sirve para empezar: abrir, convertir una carpeta, las herramientas que no
+        piden libro y los recientes de la pantalla de inicio. Las opciones del EPUB, Generar, Calidad, Buscar y el nombre del
         archivo llegan con el libro; la barra de abajo también sale mientras se trabaja, por el progreso."""
         has = self.book is not None
         for widget in (self.options_row, self.quality_btn, self.recent_btn, self.file_label, self.find_btn):
             widget.setVisible(has)
         self.bottom.setVisible(has or self.done is not None)
-        for action in self.book_actions:
-            action.setEnabled(has)
+        for action in self.book_actions:  # ocultas: en gris, en el tema oscuro parecían activas
+            action.setVisible(has)
 
     def report(self, done, total):
         # Solo se guarda el último valor: pintar cada evento de progreso cuesta llamadas a Tk.
@@ -2575,6 +2601,13 @@ class App:
             item.setSizeHint(card.sizeHint())
             self.recent_list.addItem(item)
             self.recent_list.setItemWidget(item, card)
+        missing = [(p, str(_thumb_path(p))) for p in recent if p not in self.thumbs_tried and Path(p).is_file()
+                   and not _thumb_path(p).is_file()]
+        if missing and self.thumbs is None:
+            self.thumbs_tried.update(p for p, _ in missing)  # un archivo que no da miniatura no se reintenta
+            self.thumbs = _start_thumbs(missing)
+            if self.thumbs:
+                qtk.after(300, self.wait_thumbs)
         if not recent:
             self.recent_menu.addAction("(ninguno)").setEnabled(False)
             item = QListWidgetItem("Aún no has abierto ningún PDF")
@@ -2618,6 +2651,17 @@ class App:
         layout.setStretch(1, 1)
         card.setLayout(layout)
         return card
+
+    def wait_thumbs(self):
+        """Al acabar las miniaturas, las tarjetas las muestran (si sigue la pantalla de inicio)."""
+        if self.closed or self.thumbs is None:
+            return
+        if self.thumbs.is_alive():
+            qtk.after(300, self.wait_thumbs)
+            return
+        self.thumbs = None
+        if self.book is None:
+            self.fill_recent()
 
     def recent_context(self, pos):
         """Clic derecho en un reciente: abrir su carpeta o quitarlo de la lista (el archivo no se toca)."""

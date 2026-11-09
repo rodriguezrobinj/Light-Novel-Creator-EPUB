@@ -918,6 +918,7 @@ def visible_window():
 
     app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"  # cada ventana sin preferencias de otra prueba
     app._start_spell_process = lambda: None  # sin el proceso de ortografía del editor (su prueba pone uno falso)
+    app._start_thumbs = lambda jobs: None  # ni el de las miniaturas de recientes (su prueba llama a _render_thumbs)
     window = app.App(app.Window())
     window.theme_var.set("Claro")
     window.apply_theme()
@@ -5599,7 +5600,7 @@ def test_window_start_screen_shows_only_what_needs_no_book():
     root, window = visible_window()
     hidden = [w.isVisible() for w in (window.bottom, window.options_row, window.gen_btn, window.quality_btn,
                                       window.find_btn, window.recent_btn, window.file_label)]
-    tools_off = [a.isEnabled() for a in window.book_actions]
+    tools_off = [a.isVisible() for a in window.book_actions]  # ocultas: en gris parecían activas (tema oscuro)
     pdf = TMP / "inicio.pdf"  # copia propia: otras pruebas dejan revisión y EPUB junto a novela.pdf
     pdf.write_bytes(make_novel().read_bytes())
     gone = TMP / "perdido.epub"
@@ -5611,12 +5612,19 @@ def test_window_start_screen_shows_only_what_needs_no_book():
                                                                  convert.Block("p", 1, "Texto.")], [0]))
     shown = [w.isVisible() for w in (window.bottom, window.options_row, window.gen_btn, window.quality_btn,
                                      window.find_btn, window.recent_btn, window.file_label)]
-    tools_on = [a.isEnabled() for a in window.book_actions]
+    tools_on = [a.isVisible() for a in window.book_actions]
     thumb = app._thumb_path(pdf).is_file()
     card = window.recent_card(str(pdf))
     with_cover = any(not label.pixmap().isNull() for label in card.findChildren(app.QLabel))
     window.forget_recent(str(gone))
     left = window.settings["recent"], window.recent_list.count()
+    # Un tomo nunca abierto: su miniatura es la primera página (la portada en las novelas); un archivo roto, nada
+    never = TMP / "nunca-abierto.pdf"
+    never.write_bytes(make_novel().read_bytes())
+    broken = TMP / "roto.pdf"
+    broken.write_bytes(b"no es un pdf")
+    app._render_thumbs([(str(never), str(app._thumb_path(never))), (str(broken), str(app._thumb_path(broken)))])
+    first_page = app.QPixmap(str(app._thumb_path(never)))
     window.close()
     assert hidden == [False] * 7 and not any(tools_off), (hidden, tools_off)
     assert shown == [True] * 7 and all(tools_on), (shown, tools_on)
@@ -5624,6 +5632,7 @@ def test_window_start_screen_shows_only_what_needs_no_book():
     assert "perdido" in cards[1] and "EPUB" in cards[1] and "No se encuentra" in cards[1], cards[1]
     assert thumb and with_cover, (thumb, with_cover)
     assert left == ([str(pdf)], 1), left
+    assert first_page.height() == 124 and not app._thumb_path(broken).exists(), first_page.size()
 
 def test_window_empty_screen_and_dropped_pdf():
     """Sin PDF: la pantalla vacía con los recientes. Soltar archivos sobre la ventana abre el primer .pdf y
