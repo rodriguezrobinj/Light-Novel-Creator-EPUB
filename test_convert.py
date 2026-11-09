@@ -6102,6 +6102,152 @@ def test_version_of_another_analysis_is_not_restored():
     assert "No se compara el texto" in shown and "Grupo X" in shown, shown
 
 
+def small_book():
+    """Libro en memoria: título, párrafo con cursiva y nota, separador, párrafo centrado e ilustración."""
+    blocks = [convert.Block("heading", 1, "Chapter 1: Start"),
+              convert.Block("p", 1, 'He said <i>hello</i> to me.<span class="nota">A greeting</span>'),
+              convert.Block("break", 1, "* * *"),
+              convert.Block("p", 2, "Dear friend &amp; ally", align="center"),
+              convert.Block("image", 2, image=b"jpeg"),
+              convert.Block("p", 2, "1234")]
+    return convert.Book("Libro", "Autor", b"", blocks, [0])
+
+
+class FakeAI:
+    """Hace de API de IA: traduce cada párrafo a "ES:" + texto; con short, la primera respuesta trae uno de menos."""
+
+    def __init__(self, short=False):
+        self.calls, self.short = [], short
+
+    def __call__(self, url, headers, body):
+        import json
+        self.calls.append((url, headers, body))
+        user = body["messages"][-1]["content"]
+        data = json.loads(user[user.index("Paragraphs:") + len("Paragraphs:"):])
+        out = {n: "ES:" + t for n, t in data.items()}
+        if self.short:
+            self.short = False
+            out.pop(next(iter(out)))
+        reply = "Aquí tienes:\n```json\n" + json.dumps(out, ensure_ascii=False) + "\n```"
+        if "anthropic" in url:
+            return {"content": [{"type": "text", "text": reply}]}
+        return {"choices": [{"message": {"content": reply}}]}
+
+
+def test_translate_units_and_section():
+    """Se traducen títulos y párrafos con letras, con su prefijo aparte; ilustraciones y separadores quedan igual."""
+    import translate
+
+    book = small_book()
+    units = translate.units(book, 0, len(book.blocks))
+    assert [(k, p, t) for k, p, t in units] == [
+        (0, "# ", "Chapter 1: Start"), (1, "", "He said <i>hello</i> to me.[Nota: A greeting]"),
+        (3, convert.CENTER, "Dear friend & ally")], units
+    done = {translate.key(units[0][2]): "Capítulo 1: Inicio", translate.key(units[2][2]): "Querido amigo\ny aliado"}
+    text = translate.translated_section(book, 0, len(book.blocks), done)
+    lines = text.split("\n\n")
+    assert lines[0] == "# Capítulo 1: Inicio" and lines[1].startswith("He said") and lines[2] == "[Separador 2]", lines
+    assert lines[3] == convert.CENTER + "Querido amigo y aliado" and lines[4] == "[Ilustración 4]", lines
+    convert.edit_section(book, 0, len(book.blocks), text)
+    assert [b.kind for b in book.blocks] == ["heading", "p", "break", "p", "image", "p"], book.blocks
+    assert book.blocks[3].align == "center" and book.blocks[1].html.endswith('<span class="nota">A greeting</span>')
+
+
+def test_translate_ai_batches_split_and_marks():
+    """La IA recibe lotes numerados con contexto y glosario; si devuelve un párrafo de menos, el lote se parte en dos
+    y no se pierde ni se corre ninguno. Las marcas estropeadas («< i>», «[Note: ») se arreglan."""
+    import translate
+
+    fake = FakeAI(short=True)
+    original = translate._post
+    translate._post = fake
+    try:
+        texts = [f"Line {n}" for n in range(4)] + ["She <i>smiled</i>.[Nota: x]"]
+        out = translate.translate("DeepSeek", texts, "en", "es", api_key="k", glossary=[["Subaru", "Subaru"]],
+                                  context=[("Before", "Antes")])
+        url, headers, body = fake.calls[0]
+        assert out == ["ES:" + t for t in texts], out
+        assert len(fake.calls) == 3 and url == "https://api.deepseek.com/chat/completions", fake.calls
+        assert headers["Authorization"] == "Bearer k" and body["model"] == "deepseek-chat", (headers, body)
+        system = body["messages"][0]["content"]
+        assert "Subaru = Subaru" in system and "em dash" in system and "Before\n→ Antes" in body["messages"][1]["content"]
+        assert "Line 1\n→ ES:Line 1" in fake.calls[2][2]["messages"][1]["content"], "la segunda mitad ve la primera"
+        claude = FakeAI()
+        translate._post = claude
+        assert translate.translate("Claude", ["Hi"], "auto", "en", api_key="c") == ["ES:Hi"]
+        assert claude.calls[0][1]["x-api-key"] == "c" and claude.calls[0][0].endswith("/v1/messages")
+        assert "em dash" not in claude.calls[0][2]["system"]  # la raya es cosa del español
+        assert translate._fix("[Nota: x]", "< I>Hola</ i>[Note: y]") == "<i>Hola</i>[Nota: y]"
+        translate._post = lambda url, headers, body: {"choices": [{"message": {"content": "{}"}}]}
+        try:
+            translate.translate("OpenAI (ChatGPT)", ["Hi"], "en", "es", api_key="k")
+            raise AssertionError("debía fallar")
+        except translate.TranslateError as e:
+            assert "no devolvió" in str(e), e
+    finally:
+        translate._post = original
+
+
+def test_translate_google_deepl_and_errors():
+    """Google: un párrafo por petición, sin clave. DeepL: clave «:fx» a la API gratuita, marcas como XML y contexto.
+    401 da «la clave no es válida»; 429 se reintenta con espera y luego se rinde con un mensaje en español."""
+    import io
+    import urllib.error
+    import urllib.parse
+    import translate
+
+    saved = translate._get, translate._post, translate._sleep
+    gets, posts, sleeps = [], [], []
+    translate._get = lambda url: gets.append(url) or [[["Hola ", "Hello "], ["mundo", "world"]]]
+    translate._post = lambda url, headers, body: posts.append((url, headers, body)) or {
+        "translations": [{"text": t.replace("Tom", "Tomás")} for t in body["text"]]}
+    translate._sleep = sleeps.append
+    try:
+        assert translate.translate("Google (gratis, sin clave)", ["Hello world"], "auto", "es") == ["Hola mundo"]
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(gets[0]).query)
+        assert query["sl"] == ["auto"] and query["tl"] == ["es"] and query["q"] == ["Hello world"], query
+        out = translate.translate("DeepL", ["Tom & <i>Jerry</i>"], "en", "pt", api_key="abc:fx",
+                                  context=[("Prev", "Ant")])
+        url, headers, body = posts[0]
+        assert out == ["Tomás & <i>Jerry</i>"], out
+        assert url == "https://api-free.deepl.com/v2/translate" and headers["Authorization"] == "DeepL-Auth-Key abc:fx"
+        assert body["text"] == ["Tom &amp; <i>Jerry</i>"] and body["target_lang"] == "PT-BR", body
+        assert body["source_lang"] == "EN" and body["context"] == "Prev" and body["tag_handling"] == "xml", body
+
+        def fail(code):
+            def call(url, headers, body):
+                raise urllib.error.HTTPError(url, code, "x", {}, io.BytesIO(b"detalle"))
+            return call
+
+        for code, expected in ((401, "la clave no es válida"), (429, "Revisa la conexión"), (400, "error 400")):
+            translate._post = fail(code)
+            try:
+                translate.translate("DeepL", ["Hi"], "en", "es", api_key="k")
+                raise AssertionError("debía fallar")
+            except translate.TranslateError as e:
+                assert expected in str(e), (code, e)
+        assert sleeps == [2, 4, 8], sleeps  # solo el 429 espera y reintenta
+        try:
+            translate.translate("Claude", ["Hi"], "en", "es")
+            raise AssertionError("debía fallar")
+        except translate.TranslateError as e:
+            assert "Falta la clave de Claude" in str(e), e
+    finally:
+        translate._get, translate._post, translate._sleep = saved
+
+
+def test_translate_batches_and_dpapi():
+    """Lotes por número de párrafos y letras; la clave API cifrada no se lee en claro y vuelve igual."""
+    import translate
+
+    assert translate.batches(["a"] * 3, "google") == [[0], [1], [2]]
+    assert translate.batches(["x" * 3000, "y" * 3000, "z"], "openai") == [[0], [1, 2]]
+    assert [len(b) for b in translate.batches(["w"] * 70, "openai")] == [30, 30, 10]
+    secret = translate.protect("sk-secreta-ñ")
+    assert secret and "sk-secreta" not in secret and translate.unprotect(secret) == "sk-secreta-ñ"
+    assert translate.unprotect("no es base64 válido!") == "" and translate.protect("") == ""
+
+
 def no_modal_dialogs():
     """Sin pantalla, un aviso modal bloquearía la prueba: los que ninguna prueba espera se apuntan y responden «No»."""
     import qtk
