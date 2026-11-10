@@ -2791,7 +2791,8 @@ STATUS = re.compile(r"\s*[【\[].*[】\]]\s*")  # "【Habilidad adquirida】", "
 
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
-               breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None):
+               breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
+               progress=None):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -2810,7 +2811,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     hyphenate: guiones blandos en los párrafos (_hyphenate), solo en libros en español.
     alts: {image_key: descripción} de las ilustraciones que describió el usuario; las demás, «Ilustración de
     «capítulo»». Con los metadatos de accesibilidad (EPUB 3), el lector de pantalla las anuncia.
-    Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número."""
+    Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número.
+    progress(hechos, total): avanza por sección e ilustración escritas (reducir las imágenes es lo lento)."""
     rules = _rules(replacements)
     hyphenate = hyphenate and lang.split("-")[0].lower() == "es"
     typo = (lambda s, dashes=False: _typography(s, dashes)) if typography else (lambda s, dashes=False: s)
@@ -3071,12 +3073,21 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             z.writestr("OEBPS/style.css", css)
             z.writestr("OEBPS/cover.xhtml", cover)
             z.writestr("OEBPS/cover.jpg", _shrink(book.cover, limit) if limit and book.cover else book.cover)
+            total, done = len(files) + len(images) + 1, 1
+            if progress:
+                progress(done, total)
             for name, text in files.items():
                 z.writestr(f"OEBPS/{name}", _kepub(text) if kepub else text)
+                done += 1
+                if progress:
+                    progress(done, total)
             for src, data in images.items():
                 data = _trim(data) if trim else data
                 data = _gray(data) if gray else data
                 z.writestr(f"OEBPS/{src}", _shrink(data, limit) if limit else data)
+                done += 1
+                if progress:
+                    progress(done, total)
             for src, path in fonts.items():
                 z.write(path, f"OEBPS/{src}")
         os.replace(tmp, out_path)
@@ -3155,25 +3166,31 @@ def _full_page_images(pdf):
     return moved
 
 
-def write_pdf(book, chapters, out_path, size="A5", **options):
+def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     """PDF maquetado: el mismo libro que write_epub (con sus opciones), compuesto por MuPDF al tamaño de
     PDF_SIZES, con el índice como marcadores, título y autor en las propiedades y número de página al pie
     (no en la portada ni en las ilustraciones). Cada ilustración, y la portada, ocupa una página entera
-    (_full_page_images). Se escribe en out_path + ".tmp" y se renombra."""
+    (_full_page_images). Se escribe en out_path + ".tmp" y se renombra.
+    progress(hechos, 100): por etapas; maquetar con MuPDF es una sola llamada y salta de 40 a 70."""
+    step = progress or (lambda done, total: None)
     width, height, fontsize = PDF_SIZES[size]
     with tempfile.TemporaryDirectory(prefix="lnepub-pdf-") as tmp:
         epub = Path(tmp) / "libro.epub"
-        write_epub(book, chapters, epub, **{**options, "kepub": False, "epub2": False})
+        write_epub(book, chapters, epub, **{**options, "kepub": False, "epub2": False},
+                   progress=lambda done, total: step(done * 40 // total, 100))
         with pymupdf.open(epub) as source:
             source.layout(width=width, height=height, fontsize=fontsize)
             toc = source.get_toc()
             laid = pymupdf.open("pdf", source.convert_to_pdf())
+    step(70, 100)
     pdf = laid
     moved = _full_page_images(pdf)
+    step(80, 100)
     pdf.set_toc([[level, title, moved[page - 1] + 1, *rest] for level, title, page, *rest in toc])
     pdf.set_metadata({"title": book.title, "author": book.author, "subject": book.series,
                       "creator": "Light Novel Creator", "producer": "Light Novel Creator"})
     for n, page in enumerate(pdf):
+        step(80 + n * 15 // len(pdf), 100)
         if n == 0 or (not page.get_text().strip() and page.get_images()):  # portada, ilustración a página completa
             continue
         page.insert_textbox(pymupdf.Rect(0, height - 26, width, height - 10), str(n + 1), fontsize=fontsize * 0.75,
@@ -3182,6 +3199,7 @@ def write_pdf(book, chapters, out_path, size="A5", **options):
     pdf.save(partial, garbage=3, deflate=True)
     pdf.close()
     os.replace(partial, out_path)
+    step(100, 100)
 
 
 def check_epub(path):

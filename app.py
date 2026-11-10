@@ -473,15 +473,15 @@ def _write_options(state, breaks=()):
             "alts": {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}}
 
 
-def _write_pdf(book, chapters, out, removed, options, size):
+def _write_pdf(book, chapters, out, removed, options, size, progress=None):
     """convert.write_pdf en el proceso de trabajo (maquetar un libro largo tarda unos segundos)."""
-    convert.write_pdf(book, chapters, out, size, removed=removed, **options)
+    convert.write_pdf(book, chapters, out, size, progress, removed=removed, **options)
     return []
 
 
-def _write_checked(book, chapters, out, removed, options):
+def _write_checked(book, chapters, out, removed, options, progress=None):
     """write_epub y, en el mismo proceso de trabajo, check_epub: devuelve los problemas del EPUB."""
-    convert.write_epub(book, chapters, out, removed=removed, **options)
+    convert.write_epub(book, chapters, out, removed=removed, progress=progress, **options)
     return convert.check_epub(out)
 
 
@@ -2602,7 +2602,7 @@ class App:
         chapters, removed, breaks = self.prepare_output()
         self.status.setText("Generando EPUB…")
         if self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
-                    lambda problems: self.saved(out, problems)):
+                    lambda problems: self.saved(out, problems), report=True, busy="Generando EPUB…"):
             self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
 
     def generate_pdf(self, size):
@@ -2620,7 +2620,7 @@ class App:
         chapters, removed, breaks = self.prepare_output()
         self.status.setText(f"Generando PDF {size}…")
         if self.run(_write_pdf, (self.book, chapters, out, removed, self.write_options(breaks), size),
-                    lambda problems: self.saved(out, problems), busy="Maquetando el PDF…"):
+                    lambda problems: self.saved(out, problems), report=True, busy="Maquetando el PDF…"):
             self.partial = f"{out}.tmp"
 
     def prepare_output(self):
@@ -2642,6 +2642,7 @@ class App:
         return _write_options(state, breaks)
 
     def saved(self, out, problems=()):
+        self.progress.setValue(0)  # la barra llena se quedaba tras el aviso de guardado
         self.status.setText(f"Guardado: {Path(out).name}" + (" (con avisos)" if problems else ""))
         self.last_problems = list(problems)
         self.save_review()  # el panel de serie muestra los avisos del último EPUB
