@@ -2034,6 +2034,21 @@ def test_write_pdf_bookmarks_numbers_and_metadata():
     assert not list(TMP.glob("libro.pdf.tmp")), "queda el .tmp"
 
 
+def test_write_epub_and_pdf_report_progress():
+    """Generar EPUB o PDF avanza la barra de abajo con su porcentaje, como al abrir: el progreso sube sin
+    retroceder y acaba lleno."""
+    B = convert.Block
+    blocks = ([B("heading", 1, "Capítulo 1: Inicio"), B("p", 1, "Texto.")] + [B("image", 2, image=jpeg(600, 900))]
+              + [B("heading", 3, "Capítulo 2: Final"), B("p", 3, "Más texto.")])
+    book = convert.Book("Mi novela", "Autora X", jpeg(400, 600), blocks, [0, 3])
+    chapters = [(0, "Capítulo 1: Inicio"), (3, "Capítulo 2: Final")]
+    for write, out in ((convert.write_epub, TMP / "progreso.epub"), (convert.write_pdf, TMP / "progreso.pdf")):
+        seen = []
+        write(book, chapters, out, progress=lambda done, total: seen.append((done, total)))
+        values = [done / total for done, total in seen]
+        assert len(seen) > 2 and values == sorted(values) and seen[-1][0] == seen[-1][1], (write.__name__, seen)
+
+
 def test_pdf_illustrations_fill_their_own_page():
     """En el PDF cada ilustración ocupa una página entera: la que estaba sola con márgenes se amplía, la que
     compartía página con unas líneas de texto (Re Zero 1, págs. 108, 140, 256) sale a su propia página tras el
