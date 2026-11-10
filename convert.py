@@ -3108,9 +3108,11 @@ ILLUSTRATION_SHARE = 0.25  # una imagen que ocupa más de esto de la página es 
 
 
 def _image_page(pdf, xref, pno, rect):
-    """Página nueva en la posición pno de pdf con su imagen xref a página completa (ajustada, sin recortar)."""
-    page = pdf.new_page(pno, width=rect.width, height=rect.height)
+    """Página nueva en la posición pno de pdf con su imagen xref llenándola entera: el ancho es el del libro
+    (todas las páginas iguales de ancho) y el alto sigue a la imagen; con el alto del libro, una ilustración
+    doble quedaba pequeña entre márgenes blancos (Witch 1)."""
     info = pdf.extract_image(xref)
+    page = pdf.new_page(pno, width=rect.width, height=rect.width * info["height"] / info["width"])
     if info.get("smask"):  # con transparencia: la máscara va aparte en el PDF
         page.insert_image(page.rect, pixmap=pymupdf.Pixmap(pymupdf.Pixmap(pdf, xref), pymupdf.Pixmap(pdf, info["smask"])))
     else:
