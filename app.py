@@ -5629,7 +5629,10 @@ class TextEditor:
         side_column = QVBoxLayout(side)
         side_column.setContentsMargins(8, 8, 8, 0)
         side_column.addWidget(self.scroll, 1)
-        side_column.addLayout(_row(_button("◀", lambda: self.turn(-1)), self.page_label, _button("▶", lambda: self.turn(1)),
+        prev_btn, next_btn = _button("◀", lambda: self.step_section(-1)), _button("▶", lambda: self.step_section(1))
+        prev_btn.setToolTip("Capítulo anterior")  # hojear página a página era lento para cruzar el libro
+        next_btn.setToolTip("Capítulo siguiente")
+        side_column.addLayout(_row(prev_btn, self.page_label, next_btn,
                                    1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
                                    _button("+", lambda: self.zoom(25))))
         self.split = QSplitter()
@@ -6894,7 +6897,7 @@ class TextEditor:
             scale = min(self.panel_width() * self.pdf_zoom / pix.width, 1.5)
             if scale != 1:
                 pix = pymupdf.Pixmap(pix, max(1, round(pix.width * scale)), max(1, round(pix.height * scale)), None)
-            self.shown, self.box, self.page = ("image", k), None, block.page - 1  # ◀ ▶ siguen desde aquí
+            self.shown, self.box, self.page = ("image", k), None, block.page - 1
             self.put(pix)
             self.page_label.setText(f"Ilustración · pág. {block.page}")
         elif self.app.pdf_doc is None:
@@ -6935,30 +6938,6 @@ class TextEditor:
         image = qtk.qimage(pix)
         self.canvas.setFixedSize(image.width(), image.height())
         self.canvas.show_image((image.width(), image.height()), image, marks)
-
-    def turn(self, delta):
-        """◀ ▶: hojea el PDF sin mover el cursor; el siguiente movimiento vuelve a la página de su párrafo."""
-        if self.app.pdf_doc is None:
-            return
-        self.box, self.drawn = None, None  # el próximo movimiento del cursor vuelve a su página
-        self.show_page(min(max(self.page + delta, 0), self.app.pdf_doc.page_count - 1))
-        self.follow_page(self.page + 1)
-
-    def follow_page(self, number):
-        """La hoja va al primer párrafo de la página number del PDF, cambiando de capítulo si es de otro
-        (como el panel de navegación de Word con la vista previa). Una página sin texto no mueve la hoja."""
-        blocks = self.app.book.blocks
-        k = next((j for j, b in enumerate(blocks) if b.page == number), None)
-        if k is None:
-            return
-        bounds = self.app.section_bounds(k)
-        bounds = next((s[1:3] for s in self.sections if s[1] <= k < s[2]), bounds)
-        if bounds != self.current:
-            self.open_section(*bounds, focus=k)
-        else:
-            self.sheet.goto_source(k)
-        self.drawn = self.source_key()  # la página ya está dibujada
-        self.sheet.ensureCursorVisible()
 
     @staticmethod
     def find_box(page, block):

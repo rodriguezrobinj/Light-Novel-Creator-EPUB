@@ -2016,7 +2016,8 @@ def test_write_pdf_bookmarks_numbers_and_metadata():
     convert.write_pdf(book, [(0, "Capítulo 1: Inicio"), (12, "Capítulo 2: Final")], out, size="A5",
                       typography=True)
     pdf = pymupdf.open(out)
-    width, height = pdf[0].rect.width, pdf[0].rect.height
+    width, height = pdf[-1].rect.width, pdf[-1].rect.height  # una de texto: la portada mide lo que su imagen
+    widths = {round(page.rect.width) for page in pdf}
     toc = [title for _, title, _ in pdf.get_toc()]
     meta = pdf.metadata["title"], pdf.metadata["author"]
     foot = lambda page: page.get_text(clip=pymupdf.Rect(0, height - 30, width, height)).strip()
@@ -2025,7 +2026,7 @@ def test_write_pdf_bookmarks_numbers_and_metadata():
                    and page.get_images()]
     pages = len(pdf)
     pdf.close()
-    assert (round(width), round(height)) == (420, 595), (width, height)
+    assert (round(width), round(height)) == (420, 595) and widths == {420}, (width, height, widths)
     assert "Capítulo 1: Inicio" in toc and "Capítulo 2: Final" in toc, toc
     assert meta == ("Mi novela", "Autora X"), meta
     assert feet[0] == "" and all(feet[n] == "" for n in image_pages) and image_pages, (feet, image_pages)
@@ -2075,6 +2076,19 @@ def test_pdf_illustrations_fill_their_own_page():
     full = [p[1][0] for p in pages if p[1]]
     assert len(full) == 2 and all(w >= 410 or h >= 585 for w, h in full), full  # a toda la página, sin recortar
     assert not pages[1][1] and pages[3][2] == 1, pages  # el texto sin la imagen; el adorno sigue
+
+
+def test_pdf_illustration_page_height_follows_the_image():
+    """Una ilustración doble (Witch 1, págs. 2-3) llena su página: mismo ancho que el libro y el alto de la
+    imagen, sin márgenes blancos; una vertical más larga que la hoja alarga su página, no se encoge."""
+    pdf = pymupdf.open()
+    for size in ((1200, 860), (600, 1200)):
+        page = pdf.new_page(width=420, height=595)
+        page.insert_image(pymupdf.Rect(20, 20, 400, 580), stream=jpeg(*size))
+    convert._full_page_images(pdf)
+    sizes = [(round(page.rect.width), round(page.rect.height)) for page in pdf]
+    fills = [page.get_image_bbox(page.get_images(full=True)[0]) == page.rect for page in pdf]
+    assert sizes == [(420, 301), (420, 840)] and all(fills), (sizes, fills)
 
 def jpeg(width, height):
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
@@ -2909,9 +2923,10 @@ def test_text_editor_navigates_chapters_and_saves_only_changes():
     sheet.textCursor().insertText("Nuevo. ")
     editor.open_section(*window.section_bounds(int(first)))
     kept = lines()[0] == "# Capítulo 1: El comienzo"  # lo editado sigue al volver
-    editor.page = window.book.blocks[int(second)].page - 2
-    editor.turn(1)  # hojeando el PDF hasta la página del segundo capítulo, la hoja va a él
-    synced = editor.current == window.section_bounds(int(second))
+    # ▶ bajo la página del panel: salta al capítulo siguiente, no a la página siguiente
+    next(b for b in editor.win.findChildren(app.QPushButton) if b.toolTip() == "Capítulo siguiente").click()
+    synced = (editor.current == window.section_bounds(int(second))
+              and editor.shown == ("page", window.book.blocks[int(second)].page))
     editor.save()
     rows = {i: (window.tree.set(i, "inc"), window.tree.set(i, "ok")) for i in window.tree.get_children()}
     title = window.tree.set(first, "title")
@@ -3688,7 +3703,7 @@ def test_text_editor_find_box_skips_repeated_lines():
 def test_text_editor_shows_source_page_and_illustration():
     """El panel sigue al cursor: la página del PDF del párrafo (recuadrado), también en un párrafo nuevo
     escrito debajo; sobre una ilustración, la ilustración. Es grande (al menos el 40 % del ancho), el zoom la
-    agranda y ◀ ▶ hojean. Sección vacía y libro sin PDF: sin errores."""
+    agranda. Sección vacía y libro sin PDF: sin errores."""
     import app
     import editor as sheet_module
 
@@ -3717,9 +3732,6 @@ def test_text_editor_shows_source_page_and_illustration():
         return editor.shown
 
     seen = [at("Fin."), editor.box is not None, at("[Ilustración 0]")]
-    editor.turn(1)  # ▶ desde una ilustración: la página siguiente a la suya
-    seen.append(editor.shown)
-    editor.open_section(0, len(window.book.blocks))  # hojear llevó la hoja al capítulo de esa página
     seen.append(at("Ella penso"))
     wide = editor.canvas.width() / editor.win.width()
     narrow = editor.canvas.width()
@@ -3744,7 +3756,7 @@ def test_text_editor_shows_source_page_and_illustration():
     editor.win.done(0)
     empty.win.done(0)
     window.close()
-    assert seen == [("page", 4), True, ("image", 0), ("page", 3), ("page", 3), ("page", 4), ("page", 4), None], seen
+    assert seen == [("page", 4), True, ("image", 0), ("page", 3), ("page", 4), ("page", 4), None], seen
     assert status.startswith("Página 4 del PDF · párrafo "), status
     assert wide >= 0.4 and bigger, (wide, bigger)
 
