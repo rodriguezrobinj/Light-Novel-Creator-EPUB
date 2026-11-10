@@ -2405,6 +2405,7 @@ def analyze(pdf_path, progress=None):
         toc = False  # la página anterior era el índice
         contents = []  # títulos del índice impreso
         repeated = ""  # título que la página anterior ya emitió junto a su ilustración
+        follow = ""  # título de la portadilla anterior: la página siguiente lo repite antes del texto
         frames = [_frames(page) for page in doc]
         repeats = collections.Counter(tuple(round(v) for v in b) for page_frames in frames for b in page_frames)
         frames = [[b for b in page_frames if repeats[tuple(round(v) for v in b)] <= max(3, n // 5)]
@@ -2415,6 +2416,25 @@ def analyze(pdf_path, progress=None):
             if progress:
                 progress(n + num, 2 * n)
             pending, repeated = repeated, ""
+            # Eminence 7: tras la portadilla, la página repite etiqueta (pequeña) y nombre encima del texto
+            if follow and rows and _key(rows[0].text) and _key(rows[0].text) in follow:
+                lead = next((j for j, r in enumerate(rows) if abs(r.size - body) < 0.5), len(rows))
+                lost = sum(_letters(r.text) for r in rows[:lead] if _key(r.text) not in follow)  # lo ya dicho no avisa
+                if lost:
+                    skipped.append((num, lost, "título repetido tras su portadilla, omitido"))
+                rows = rows[lead:]
+            follow = ""
+            # Eminence 7: portadilla con el nombre arriba, «Chapter 1» enorme abajo y la marca del libro en letra
+            # diminuta. La marca se quita y la etiqueta se une al nombre: eran tres capítulos con la repetición
+            if any(r.heading for r in rows) and all(r.heading or r.size < body * 0.6 for r in rows):
+                rows = [r for r in rows if r.heading]
+                label = _label(rows[-1])
+                if len(rows) >= 2 and label and CHAPTER_LABEL.fullmatch(label) and not _label(rows[0]):
+                    group = _first_group(rows[:-1]) + rows[-1:]
+                    text = f"{label}: {' '.join(r.text for r in group[:-1])}"
+                    rows = [replace(rows[-1], text=text, html=html.escape(text), box=_rect(group),
+                                    x0=min(r.x0 for r in group), x1=max(r.x1 for r in group))]
+                    follow = _key(text)
             headings = [r for r in rows if r.heading]
             infos = _image_info(page, digests)
             before, last_boxes = last_boxes, [info["bbox"] for info in infos]  # las de la anterior: cabeceras

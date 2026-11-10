@@ -4129,6 +4129,34 @@ def test_named_part_stays_a_chapter():
         "Parte 1: La sombra", "Capitulo 1: Inicio", "Capitulo 2: Final"]
 
 
+def test_title_page_with_label_below_name_and_repeat_on_next_page():
+    """Eminence 7: portadilla con el nombre arriba, «Chapter 1» enorme abajo y la marca del libro en letra diminuta;
+    la página siguiente repite la etiqueta (pequeña, en negrita) y el nombre antes del texto. Era tres capítulos:
+    es uno, «Chapter 1: Nombre», sin la marca ni la repetición."""
+    doc = pymupdf.open()
+    body = [(92, 230 + 14 * n, line(f"Linea {n} del texto de la novela", 60), 11, "cour") for n in range(30)]
+    for number, label, name, typo in ((1, "Prologue", ["Spring is the Season", "for New Journeys!"], "Journeys!"),
+                                      (3, "Chapter 1", ["This Time, There's No", "Way You'll See Through"], "Thruogh")):
+        add_page(doc, number, [(200, 200, name[0], 18, "helv"), (220, 225, name[1], 18, "helv"),
+                               (330, 260, "Mi Novela Ligera", 6, "hebo"), (380, 268, "Volume 7", 6, "hebo"),
+                               (40, 700, label, 58, "helv")])
+        add_page(doc, number + 1, [(260, 70, label, 7.5, "hebo"), (200, 95, name[0], 14, "helv"),
+                                   (200, 113, name[1].replace("Through", typo), 14, "helv")] + body)
+    doc.set_toc([[1, "Prologue: Spring is the Season for New Journeys!", 1],
+                 [1, "Chapter 1: This Time, There's No Way You'll See Through", 3]])
+    path = TMP / "portadilla-etiqueta-abajo.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = [(html.unescape(b.html), k in book.candidates) for k, b in enumerate(book.blocks) if b.kind == "heading"]
+    after = [plain(book.blocks[k + 1].html)[:8] for k in book.candidates]
+    stray = [b.html for b in book.blocks if b.kind == "p" and ("Volume" in b.html or "Way You" in b.html)]
+    assert heads == [("Prologue: Spring is the Season for New Journeys!", True),
+                     ("Chapter 1: This Time, There's No Way You'll See Through", True)], heads
+    assert after == ["Linea 0 ", "Linea 0 "] and not stray, (after, stray)
+    # Lo omitido ya estaba en el título: no es «Texto no incluido»; solo la línea con la errata cuenta
+    assert [(page, letters) for page, letters, _ in book.skipped] == [(4, 18)], book.skipped
+
+
 def test_bookmarked_chapter_name_joins_bare_label():
     """Re Zero 3: marcador de nivel 1 "Capitulo 1" y de nivel 2 su nombre, en líneas separadas."""
     doc = pymupdf.open()
