@@ -278,6 +278,7 @@ def _rows(page):
     for s in spans:
         if "symbol" in s["font"].lower():
             s["text"] = s["text"].translate(SYMBOL_FONT)
+    _inline_glyphs(page, spans)
     rows, group = [], []
     for s in sorted(spans, key=lambda s: s["origin"][1]):
         if group and abs(s["origin"][1] - group[0]["origin"][1]) > 2:
@@ -533,22 +534,137 @@ def _frames(page):
     return [b for b in boxes if b.height >= 20 and b.width * b.height < 0.85 * area]
 
 
-def _bullets(page, rows, infos):
-    """Viñeta en imagen diminuta delante de una línea (Witch 1: ■ y ◆ en las ventanas de estado), como su letra:
-    sin ella la línea perdía la viñeta. La forma sale de cuánto tapa su recuadro: lleno ■, redondo ●, rombo ◆."""
-    for info in infos:
+# Símbolos que algunas novelas meten como imagen diminuta en el texto, y su dibujo en la fuente de símbolos de Windows
+GLYPHS = "■□◆◇●○♥♡★☆♪♫➔→▶▲△▼▽✓✗※"
+SYMBOLS_TTF = Path(os.environ.get("WINDIR") or r"C:\Windows") / "Fonts" / "seguisym.ttf"
+
+
+def _shape(pix):
+    """(silueta rellena en cuadrícula de 24x24, tinta/silueta, ancho/alto) del dibujo de pix recortado a su tinta;
+    None sin tinta. La silueta rellena compara la forma aunque el trazo sea fino; la proporción de tinta distingue
+    ♡ de ♥ y ◇ de ◆."""
+    w, h, data, stride = pix.width, pix.height, pix.samples, pix.stride
+    ink = [[data[y * stride + x] < 128 for x in range(w)] for y in range(h)]
+    ys = [y for y in range(h) if any(ink[y])]
+    if not ys:
+        return None
+    xs = [x for x in range(w) if any(ink[y][x] for y in ys)]
+    y0, y1, x0, x1 = ys[0], ys[-1] + 1, xs[0], xs[-1] + 1
+    w, h = x1 - x0, y1 - y0
+    # Una celda tiene tinta si la tiene cualquier punto suyo: tomar uno solo abría huecos en un trazo fino (♡)
+    grid = [[any(ink[y][x] for y in range(y0 + h * j // 24, max(y0 + h * (j + 1) // 24, y0 + h * j // 24 + 1))
+                 for x in range(x0 + w * i // 24, max(x0 + w * (i + 1) // 24, x0 + w * i // 24 + 1)))
+             for i in range(24)] for j in range(24)]
+    outside, todo = set(), [(i, j) for i in range(24) for j in (0, 23)] + [(i, j) for j in range(24) for i in (0, 23)]
+    while todo:  # lo que se alcanza desde el borde sin cruzar tinta es fuera; el resto, la silueta
+        i, j = todo.pop()
+        if 0 <= i < 24 and 0 <= j < 24 and (i, j) not in outside and not grid[j][i]:
+            outside.add((i, j))
+            todo += [(i + 1, j), (i - 1, j), (i, j + 1), (i, j - 1)]
+    filled = tuple((i, j) not in outside for j in range(24) for i in range(24))
+    return filled, sum(map(sum, grid)) / max(1, sum(filled)), w / h
+
+
+@functools.cache
+def _glyph_shapes():
+    """{símbolo: _shape} de GLYPHS; vacío sin la fuente de símbolos (entonces la imagen se pierde, como antes)."""
+    if not SYMBOLS_TTF.is_file():
+        return {}
+    doc, out = pymupdf.open(), {}
+    for ch in GLYPHS:
+        page = doc.new_page(width=100, height=100)
+        page.insert_font(fontname="sym", fontfile=str(SYMBOLS_TTF))
+        page.insert_text((14, 76), ch, fontsize=64, fontname="sym")
+        shape = _shape(page.get_pixmap(colorspace=pymupdf.csGRAY))
+        if shape:
+            out[ch] = shape
+    return out
+
+
+def _glyph(page, box):
+    """El símbolo que dibuja una imagen diminuta del texto (Witch 1: ♡, ♥, ♪, ◇, ➔, viñetas ■ ◆), o "" si no se
+    parece a ninguno."""
+    zoom = 48 / max(1, box.height)
+    pix = page.get_pixmap(clip=box, matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csGRAY)
+    return _classify(pix.width, pix.height, pix.stride, pix.samples)
+
+
+@functools.lru_cache(maxsize=256)  # el mismo ♡ sale decenas de veces en un tomo: se mira una vez
+def _classify(width, height, stride, samples):
+    """_glyph de un dibujo ya pasado a gris."""
+    shapes = _glyph_shapes()
+    found = _shape(type("Pix", (), {"width": width, "height": height, "stride": stride, "samples": samples}))
+    if not shapes or not found:
+        return ""
+    filled, density, ratio = found
+
+    def score(shape):
+        other, other_density, other_ratio = shape
+        overlap = sum(a and b for a, b in zip(filled, other)) / max(1, sum(a or b for a, b in zip(filled, other)))
+        return (overlap - abs(density - other_density)
+                - (0.3 if abs(ratio - other_ratio) > 0.4 * max(ratio, other_ratio) else 0))
+
+    best = max(shapes, key=lambda ch: score(shapes[ch]))
+    return best if score(shapes[best]) >= 0.55 else ""
+
+
+def _split_span(page, span, x):
+    """span partido en x, donde un símbolo en imagen va dentro de su texto («find! ♪”»); None si no se puede. Las
+    letras salen de rawdict con las mismas opciones que _rows (con recorte, MuPDF añadía una letra de más)."""
+    flags = pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_IMAGES
+    chars = next((t["chars"] for block in page.get_text("rawdict", flags=flags)["blocks"]
+                  for line in block.get("lines", []) for t in line["spans"]
+                  if abs(t["origin"][1] - span["origin"][1]) <= 1 and abs(t["bbox"][0] - span["bbox"][0]) <= 1), [])
+    chars = [c for c in chars if (c["bbox"][0] + c["bbox"][2]) / 2 <= span["bbox"][2] + 1]  # ya partido: solo lo suyo
+    k = sum((c["bbox"][0] + c["bbox"][2]) / 2 < x for c in chars)
+    end = k
+    while end and not chars[end - 1]["c"].strip():  # la mitad izquierda acaba en su última letra
+        end -= 1
+    while k < len(chars) and not chars[k]["c"].strip():  # el hueco de las imágenes: la otra mitad empieza tras él
+        k += 1
+    if not (end and k < len(chars)):
+        return None
+    text = "".join(c["c"] for c in chars)
+    return ({**span, "text": text[:end], "bbox": (*span["bbox"][:2], chars[end - 1]["bbox"][2], span["bbox"][3])},
+            {**span, "text": text[k:], "origin": (chars[k]["origin"][0], span["origin"][1]),
+             "bbox": (chars[k]["bbox"][0], *span["bbox"][1:])})
+
+
+def _inline_glyphs(page, spans):
+    """Añade a spans los símbolos en imagen de una línea de texto: sin ellos «Margrave! ♡» perdía el ♡. Una imagen
+    el doble de ancha que alta lleva dos (Witch 1: «♥♥»); dentro del texto de un span, lo parte."""
+    for info in page.get_image_info():
         box = pymupdf.Rect(info["bbox"])
-        if not (3 <= box.width <= 14 and 3 <= box.height <= 14):
+        if not (3 <= box.width <= 40 and 3 <= box.height <= 20):
             continue
         middle = (box.y0 + box.y1) / 2
-        row = next((r for r in rows if abs(r.y - r.size * 0.35 - middle) < r.size * 0.6
-                    and -2 <= r.x0 - box.x1 <= r.size * 1.5), None)
-        if row is None or row.text[:1] in BULLETS:
+
+        def away(t):
+            return 0 if t["bbox"][0] <= box.x0 <= t["bbox"][2] else min(abs(box.x0 - t["bbox"][2]),
+                                                                         abs(t["bbox"][0] - box.x1))
+
+        near = [t for t in spans if t["bbox"][1] - 2 <= middle <= t["bbox"][3] + 2 and away(t) < 3 * t["size"]]
+        if not near:
             continue
-        pix = page.get_pixmap(clip=box, matrix=pymupdf.Matrix(4, 4), colorspace=pymupdf.csGRAY)
-        ink = sum(b < 128 for b in pix.samples) / max(1, len(pix.samples))
-        mark = "■" if ink > 0.85 else "●" if ink > 0.68 else "◆"
-        row.text, row.html, row.x0 = f"{mark} {row.text}", f"{mark} {row.html}", box.x0
+        line = min(near, key=away)
+        words = " ".join(t["text"] for t in spans if abs(t["origin"][1] - line["origin"][1]) <= 2)
+        if re.fullmatch(r"[\d\s.|·–—-]*", words):  # Kage 5: el adorno del número de página no es texto
+            continue
+        text = _glyph(page, box)
+        if not text and box.width >= 1.6 * box.height:  # no es un símbolo ancho (➔): varios seguidos («♥♥»)
+            n = round(box.width / box.height)
+            text = "".join(_glyph(page, pymupdf.Rect(box.x0 + box.width * j / n, box.y0,
+                                                     box.x0 + box.width * (j + 1) / n, box.y1)) for j in range(n))
+        if not text:
+            continue
+        if line["bbox"][0] + 1 < box.x0 and box.x1 < line["bbox"][2] - 1:
+            halves = _split_span(page, line, box.x0)
+            if halves:
+                spans.remove(line)
+                spans += halves
+        # Sin negrita ni cursiva: el símbolo no parte la etiqueta de su línea («■ <b>Lorna</b>»)
+        spans.append({**line, "text": text, "bbox": tuple(box), "origin": (box.x0, line["origin"][1]), "flags": 0,
+                      "font": "glyph"})
 
 
 def _image_info(page, digests):
@@ -2318,6 +2434,13 @@ def analyze(pdf_path, progress=None):
                 para, repeated = None, _title(rows)
                 continue
             if not rows:
+                art = pymupdf.Rect()
+                for info in infos:
+                    if info["xref"] == 0 or uses[info["xref"]] <= 2:  # las que se repiten son fondo o adorno
+                        art |= pymupdf.Rect(info["bbox"]) & page.rect
+                if abs(art) >= 0.15 * abs(page.rect):  # Witch 1: la portadilla con el logo ocupa el 45 %
+                    blocks.append(Block("image", num, image=_jpeg(page.get_pixmap(dpi=150, clip=art), 85)))
+                    para = None
                 continue
             toc = _is_toc(rows) or (toc and _links_only(page, rows))
             if toc:  # se apunta: si no era el índice, se habría perdido una página de texto
@@ -2343,8 +2466,6 @@ def analyze(pdf_path, progress=None):
             start = len(blocks)
             inside = {id(r): f for r in rows for f in frames[i]
                       if pymupdf.Point((r.x0 + r.x1) / 2, r.y - r.size * 0.35) in f}
-            # Solo dentro de un recuadro: en la prosa, un ♡ en imagen al principio de línea no es viñeta (Witch 1)
-            _bullets(page, [r for r in rows if id(r) in inside], infos)
             # Márgenes de cada recuadro: dentro, la sangría y la línea corta se miden respecto a él
             edges = {}
             for r in rows:
@@ -2391,7 +2512,8 @@ def analyze(pdf_path, progress=None):
                                                and abs((r.x0 + r.x1) / 2 - (lo + hi) / 2) < width * 0.05)
                     # Entrar o salir de un recuadro siempre abre párrafo: el de dentro no se une al de fuera
                     switch = para is not None and (para.align == "frame") != framed
-                    if para is None or indented or short or centered or switch or r.text[:1] in BULLETS:
+                    # Una viñeta abre línea solo en un recuadro: en la prosa, un ♡ al principio de línea sigue la frase
+                    if para is None or indented or short or centered or switch or (framed and r.text[:1] in BULLETS):
                         new = True
                     elif prev is None:  # primera línea de la página: ¿sigue el párrafo anterior?
                         # Witch 1: el Afterword (título solo en imagen) empieza sin sangría en una página que el
@@ -2439,13 +2561,22 @@ def analyze(pdf_path, progress=None):
 
         outline = [(title, p) for level, title, p in doc.get_toc() if level == 1]
         if outline:
-            chosen = set()
+            chosen, inserted = set(), []
             for title, p in outline:
                 k = next((k for k, b in enumerate(blocks) if b.kind == "heading" and b.page == p), None)
                 if k is None:
                     k = next((k for k, b in enumerate(blocks) if b.page >= p), len(blocks))
                     blocks.insert(k, Block("heading", p, html.escape(title)))
+                    inserted.append(blocks[k])
                 chosen.add(id(blocks[k]))
+            # Witch 1: «Cover» (la portada va aparte) y «Table of Contents» (el índice no se copia) no tienen nada:
+            # como capítulos, salían vacíos en el EPUB
+            for title in inserted:
+                k = next(k for k, b in enumerate(blocks) if b is title)
+                after = blocks[k + 1] if k + 1 < len(blocks) else None
+                if after is None or (after.kind == "heading" and id(after) in chosen):
+                    del blocks[k]
+                    chosen.discard(id(title))
             # Marcadores incompletos: un título de capítulo en una página sin ningún marcador también cuenta.
             marked = {p for _, _, p in doc.get_toc()}
             chosen |= {id(b) for b in blocks if b.kind == "heading" and b.page not in marked
