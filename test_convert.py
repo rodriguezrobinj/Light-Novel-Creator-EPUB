@@ -4155,6 +4155,59 @@ def framed_pdf():
     return path
 
 
+def glyph_png(ch):
+    """PNG del símbolo ch dibujado con la fuente de símbolos de Windows, como las imágenes de Witch 1."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=60 * len(ch), height=60)
+    page.insert_font(fontname="sym", fontfile=str(convert.SYMBOLS_TTF))
+    page.insert_text((8, 48), ch, fontsize=44, fontname="sym")
+    import io
+    from PIL import Image, ImageOps
+    image = Image.open(io.BytesIO(page.get_pixmap().tobytes("png"))).convert("L")
+    image = image.crop(ImageOps.invert(image).getbbox())  # justo la tinta, como las imágenes del EPUB
+    out = io.BytesIO()
+    image.save(out, "PNG")
+    return out.getvalue()
+
+
+def test_inline_symbol_images_become_letters_and_image_pages_stay():
+    """The World's Strongest Witch 1: ♡, ♪, ➔ y «♥♥» van como imágenes diminutas en el texto y se perdían; ahora son
+    su letra, en su sitio aunque caigan dentro del texto de un span («find! ♪”»). Una página solo con una ilustración
+    de menos de media página (portadilla, ilustraciones a color) se perdía entera; y una sección del índice del EPUB
+    que queda sin nada («Cover», cuya imagen es la portada) ya no sale como capítulo vacío."""
+    doc = pymupdf.open()
+    cover = doc.new_page(width=595, height=842)
+    cover.insert_image(cover.rect, stream=glyph_png("■"))
+    page = add_page(doc, 2, [(72, 100, "Capitulo 1: Inicio", 20, "helv"),
+                             (92, 140, "Muy bien, Margrave!", 11, "cour"),
+                             (92, 160, 'Bien hecho!     " dijo ella.', 11, "cour"),
+                             (92, 180, "Sube de nivel 1    2 y celebra.", 11, "cour"),
+                             (92, 200, "Registro completo", 11, "cour"),
+                             (72, 220, line("Una linea de texto hasta el margen", 60), 11, "cour")])
+    width = pymupdf.get_text_length("Muy bien, Margrave! ", "cour", 11)
+    page.insert_image(pymupdf.Rect(92 + width, 131, 92 + width + 9, 141), stream=glyph_png("♡"))
+    width = pymupdf.get_text_length("Bien hecho!     ", "cour", 11)  # pegado a la comilla, como en Witch
+    page.insert_image(pymupdf.Rect(92 + width - 7, 151, 92 + width, 161), stream=glyph_png("♪"))
+    width = pymupdf.get_text_length("Sube de nivel 1 ", "cour", 11)
+    page.insert_image(pymupdf.Rect(92 + width + 2, 172, 92 + width + 13, 180), stream=glyph_png("➔"))
+    width = pymupdf.get_text_length("Registro completo", "cour", 11)
+    page.insert_image(pymupdf.Rect(92 + width + 2, 192, 92 + width + 19, 200), stream=glyph_png("♥♥"))
+    art = add_page(doc, 3, [])
+    art.insert_image(pymupdf.Rect(72, 100, 523, 400), stream=glyph_png("★"))  # un 30 % de la página
+    add_page(doc, 4, [(72, 100, "Capitulo 2: Final", 20, "helv"), (92, 140, "Fin del libro.", 11, "cour")])
+    doc.set_toc([[1, "Cover", 1], [1, "Capitulo 1: Inicio", 2], [1, "Capitulo 2: Final", 4]])
+    path = TMP / "simbolos.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    text = [convert._plain(b) for b in book.blocks if b.kind == "p" and "Grupo" not in b.html and "Novela" not in b.html]
+    assert text[:3] == ["Muy bien, Margrave! ♡", 'Bien hecho! ♪" dijo ella.', "Sube de nivel 1 ➔ 2 y celebra."], text
+    assert text[3].startswith("Registro completo ♥♥"), text
+    heads = [convert._plain(book.blocks[k]) for k in book.candidates]
+    assert heads == ["Capitulo 1: Inicio", "Capitulo 2: Final"], heads  # «Cover» vacío ya no es capítulo
+    kinds = [(b.kind, b.page) for b in book.blocks]
+    assert ("image", 3) in kinds, kinds  # la ilustración de menos de media página sigue ahí
+
+
 def test_status_box_keeps_frame_bullets_and_survives_edits():
     """The World's Strongest Witch 1: las ventanas de estado van en un recuadro de doble línea con viñetas en imagen
     (■, ◆), y salían como párrafos sueltos sin borde ni viñeta. Ahora cada línea va en recuadro («<marco>» en el
