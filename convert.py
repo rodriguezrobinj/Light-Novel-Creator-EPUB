@@ -727,15 +727,40 @@ def _ornaments(page, rows, infos, before=()):
         top = (first and not first.heading and not any(r.y < y0 for r in rows) and x1 - x0 <= 1.5 * (y1 - y0)
                and not any(other is not info and y1 - 1 <= other["bbox"][1] < first.y for other in infos)
                and not any(all(abs(a - b) < 1 for a, b in zip(info["bbox"], box)) for box in before))
+        above = max((r for r in rows if r.y < y0), key=lambda r: r.y, default=None)
+        # Eminence 7: el adorno puede cerrar la página (la escena sigue en la siguiente, pág. 58); la raya justo
+        # bajo un título («Afterword», pág. 246) es su subrayado
         if (x1 - x0 < 0.3 * width and y1 - y0 < 0.1 * height and abs((x0 + x1) / 2 - width / 2) < 0.15 * width
-                and (top or BAND * height < (y0 + y1) / 2 < (1 - BAND) * height and any(r.y < y0 for r in rows))
-                and below
+                and (top or BAND * height < (y0 + y1) / 2 < (1 - BAND) * height and above and not above.heading)
                 # The World's Strongest Witch: la flecha de «Lv. 2 → Lv. 3» y el ♡ o ♪ al final de una línea corta son
                 # imágenes en la línea (una línea base cruza su altura); la línea que empieza justo debajo de un adorno
                 # (Kage 5, pág. 99) no cuenta
                 and not any(y0 < r.y < y1 + 0.3 * r.size for r in rows)):
-            found.append(((y0 + y1) / 2, info["xref"]))
-    return sorted(found)  # [(posición vertical, xref)], de arriba abajo
+            found.append(((y0 + y1) / 2, info))
+    return sorted(found, key=lambda f: f[0])  # [(posición vertical, info)], de arriba abajo
+
+
+def _drawn(page):
+    """Dibujos de trazos de la página agrupados en cajas, como las imágenes de _image_info ({"bbox", "xref": 0}):
+    Eminence 7 dibuja su separador de escena (dos barras y una raya) sin imagen ni texto. El fondo de página
+    no cuenta."""
+    boxes = []
+    for d in page.get_drawings():
+        r = pymupdf.Rect(d["rect"]) + (-1, -1, 1, 1)  # una línea recta no tiene alto: sin margen no se toca con nada
+        if abs(r) > 0.05 * abs(page.rect):
+            continue
+        while hit := next((b for b in boxes if b.intersects(r)), None):
+            boxes.remove(hit)
+            r |= hit
+        boxes.append(r)
+    return [{"bbox": tuple(b), "xref": 0, "drawn": True} for b in boxes]
+
+
+def _ornament_image(doc, page, info):
+    """La imagen de un adorno-separador, por si se quiere el original: la incrustada o, si va dibujado, su dibujo."""
+    if info["xref"]:
+        return _extract(doc, info["xref"])
+    return page.get_pixmap(dpi=200, clip=info["bbox"], alpha=True).tobytes("png") if info.get("drawn") else b""
 
 
 def _jpeg(pix, quality):
@@ -2437,7 +2462,8 @@ def analyze(pdf_path, progress=None):
                     follow = _key(text)
             headings = [r for r in rows if r.heading]
             infos = _image_info(page, digests)
-            before, last_boxes = last_boxes, [info["bbox"] for info in infos]  # las de la anterior: cabeceras
+            drawn = _drawn(page)
+            before, last_boxes = last_boxes, [info["bbox"] for info in infos + drawn]  # las de la anterior: cabeceras
             images = _images(page, infos)
             # ponytail: solo ilustraciones a página completa; las pequeñas dentro del texto se descartan
             covered = sum(len(r.text) for r in rows) < 200 and _image_coverage(page, infos) > 0.5
@@ -2501,12 +2527,12 @@ def analyze(pdf_path, progress=None):
             left = min((r.x0 for r in normal), default=0)
             right = max((r.x1 for r in normal), default=0)
             prev = None
-            ornaments = _ornaments(page, rows, infos, before)  # adornos-separador, de arriba abajo
+            ornaments = _ornaments(page, rows, infos + drawn, before)  # adornos-separador, de arriba abajo
             for r in rows:
                 while ornaments and ornaments[0][0] < r.y:  # el adorno queda por encima de esta línea
-                    xref = ornaments.pop(0)[1]
+                    info = ornaments.pop(0)[1]
                     if blocks and blocks[-1].kind != "break":  # guarda el adorno, por si se quiere el original
-                        blocks.append(Block("break", num, image=_extract(doc, xref) if xref else b""))
+                        blocks.append(Block("break", num, image=_ornament_image(doc, page, info)))
                     para = None
                 if SCENE_BREAK.fullmatch(r.text):  # solo símbolos: separador aunque vaya en letra de título (Mitsuha 6)
                     blocks.append(Block("break", num, r.html))  # guarda el texto original ("☆", "* * *")
@@ -2555,6 +2581,9 @@ def analyze(pdf_path, progress=None):
                     short = r.x1 < hi - (hi - lo) * 0.2
                     last_text = r.text
                 prev = r
+            if ornaments and blocks and blocks[-1].kind != "break":  # adorno al pie: la escena sigue en la siguiente
+                blocks.append(Block("break", num, image=_ornament_image(doc, page, ornaments[0][1])))
+                para = None
             # Desde el párrafo que venía abierto de la página anterior: también puede llevar llamadas de esta
             _attach_notes(blocks[max(start - 1, 0):], notes)
             if art:
