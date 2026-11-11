@@ -2175,6 +2175,24 @@ def test_indexed_jpeg2000_illustration_is_not_noise():
     assert all(abs(v - 200) <= 8 for v in middle), middle
 
 
+def test_preview_illustration_fits_its_page():
+    """Vista previa del EPUB (MuPDF): no entiende max-height, y una ilustración más alta que la página pasaba
+    entera a la siguiente, dejando la primera en blanco con un borde de la imagen abajo (Eminence 7, pág. 23).
+    Con fit, la ilustración cabe en la primera página del dispositivo; sin fit, el EPUB no cambia."""
+    book = convert.Book("Libro", "", jpeg(40, 60), [convert.Block("image", 1, image=jpeg(831, 1239))], [])
+    for size in ((420, 560), (300, 560), (560, 750)):
+        out = TMP / f"vista-{size[0]}.epub"
+        convert.write_epub(book, [], out, contents=False, fit=size)
+        with pymupdf.open(out) as epub:
+            epub.layout(width=size[0], height=size[1], fontsize=11)
+            pages = epub.chapter_page_count(1)
+            box = pymupdf.Rect(epub.load_page((1, 0)).get_image_info()[0]["bbox"])
+        assert pages == 1 and box in pymupdf.Rect(0, 0, *size), (size, pages, box)
+    convert.write_epub(book, [], TMP / "sin-fit.epub", contents=False)
+    with zipfile.ZipFile(TMP / "sin-fit.epub") as z:
+        assert "style=" not in z.read("OEBPS/sec001.xhtml").decode()
+
+
 def test_shrink_makes_big_images_lighter():
     big = jpeg(2000, 3000)
     book = convert.Book("Libro", "", big, [convert.Block("heading", 1, "Cap 1"),
