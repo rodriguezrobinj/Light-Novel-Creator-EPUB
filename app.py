@@ -559,17 +559,96 @@ def _translation_path(pdf):
 def _read_translation(pdf):
     """Traducciones guardadas de este libro: {"src", "dst", "done": {clave del original: {"text", "hand", "src",
     "dst"}}}. Cada párrafo lleva sus idiomas: se puede haber traducido parte a otro por error. Los guardados antes
-    sin ellos toman los del archivo."""
+    sin ellos toman los del archivo. Además, si los tiene: "source" (el original, para la memoria de la serie) y
+    "memory" (la traducción viene de otro tomo)."""
+    return _read_translation_file(_translation_path(pdf))
+
+
+def _read_translation_file(path):
     empty = {"src": "auto", "dst": "es", "done": {}}
     try:
-        data = json.loads(_translation_path(pdf).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
         src, dst = str(data.get("src") or "auto"), str(data.get("dst") or "es")
-        done = {str(k): {"text": str(v["text"]), "hand": bool(v.get("hand")), "src": str(v.get("src") or src),
-                         "dst": str(v.get("dst") or dst)} for k, v in data["done"].items()
-                if isinstance(v, dict) and str(v.get("text") or "").strip()}  # el .json se puede editar a mano
+        done = {}
+        for k, v in data["done"].items():
+            if isinstance(v, dict) and str(v.get("text") or "").strip():  # el .json se puede editar a mano
+                entry = done[str(k)] = {"text": str(v["text"]), "hand": bool(v.get("hand")),
+                                        "src": str(v.get("src") or src), "dst": str(v.get("dst") or dst)}
+                if v.get("source"):
+                    entry["source"] = str(v["source"])
+                if v.get("memory"):
+                    entry["memory"] = True
         return {"src": src, "dst": dst, "done": done}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return empty
+
+
+def _memory_path():
+    return SETTINGS.with_suffix(".memoria.json")  # junto a las preferencias: vale para cualquier carpeta
+
+
+def _memory_index():
+    """{serie en minúsculas: [archivos de traducción de sus tomos]}."""
+    try:
+        store = json.loads(_memory_path().read_text(encoding="utf-8"))
+        return store if isinstance(store, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_translation(pdf, series):
+    """Apunta dónde está la traducción de este tomo con el nombre de su serie: los demás tomos reutilizan lo ya
+    traducido aunque estén en otra carpeta. No copia nada: cada tomo sigue con su archivo."""
+    series, path = series.strip().lower(), str(_translation_path(pdf).resolve())
+    store = _memory_index()
+    paths = store.get(series) if isinstance(store.get(series), list) else []
+    if not series or path in paths:
+        return
+    store[series] = paths + [path]
+    try:
+        _memory_path().parent.mkdir(parents=True, exist_ok=True)
+        _write_json(_memory_path(), store)
+    except OSError:
+        pass  # sin esto solo se reutiliza lo de la misma carpeta
+
+
+def _series_memory(pdf, series):
+    """Lo ya traducido en los otros tomos de la serie: {clave del original: {"text", "hand", "src", "dst", "volume"
+    y, si se guardó, "source"}}. Tomos apuntados por _remember_translation y los de la carpeta de este (uno movido
+    pierde su ruta); cada uno, solo si su revisión dice que es de la serie. Entre dos tomos gana lo corregido a
+    mano y luego el más reciente."""
+    series = series.strip().lower()
+    if not series:
+        return {}
+    store, own = _memory_index(), _translation_path(pdf).resolve()
+    listed = [Path(p) for p in store.get(series, []) if isinstance(p, str)] if isinstance(store.get(series), list) else []
+    alive = [p for p in listed if p.is_file()]
+    if len(alive) != len(listed):  # tomos borrados o movidos: fuera del índice
+        store[series] = [str(p) for p in alive]
+        try:
+            _write_json(_memory_path(), store)
+        except OSError:
+            pass
+    found, seen = [], {own}
+    for path in alive + sorted(own.parent.glob("*.lnepub.traduccion.json")):
+        path = path.resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            review = path.with_name(path.name.removesuffix(".traduccion.json") + ".json")
+            state = json.loads(review.read_text(encoding="utf-8"))
+            if str(state.get("series", "")).strip().lower() == series:
+                found.append((path.stat().st_mtime, str(state.get("volume", "")).strip(),
+                              _read_translation_file(path)["done"]))
+        except (OSError, ValueError, AttributeError):
+            continue
+    memory = {}
+    for _, volume, done in sorted(found, key=lambda f: f[0]):
+        for k, entry in done.items():
+            if k not in memory or entry["hand"] or not memory[k]["hand"]:
+                memory[k] = entry | {"volume": volume}
+    return memory
 
 
 def _translate_thread(job, out, stop):
@@ -4608,6 +4687,9 @@ class App:
         pdf = self.pdf  # la ventana guarda siempre en su libro, aunque mientras tanto se abra otro
         saved = _read_translation(pdf)
         done = saved["done"]
+        series = self.series_var.get()
+        memory = _series_memory(pdf, series)  # lo ya traducido en los otros tomos de la serie
+        sources = {v["source"]: k for k, v in memory.items() if v.get("source")}  # original -> su clave
         prefs = self.settings.get("translate") if isinstance(self.settings.get("translate"), dict) else {}
         for name in ("models", "keys"):
             if not isinstance(prefs.get(name), dict):
@@ -4655,7 +4737,8 @@ class App:
         # Filtros por estado con su cuenta y buscador: entre miles de párrafos se va directo a lo que falta
         chips, chip_group = {}, QButtonGroup(win)
         for key, label in (("all", "Todos"), ("Pendiente", "Pendientes"), ("Dudoso", "Dudosos"),
-                           ("warn", "Con avisos"), ("A mano", "A mano"), ("done", "Traducidos")):
+                           ("warn", "Con avisos"), ("De la serie", "De la serie"), ("A mano", "A mano"),
+                           ("done", "Traducidos")):
             chip = QPushButton(label)
             chip.setObjectName("chip")
             chip.setCheckable(True)
@@ -4715,6 +4798,14 @@ class App:
         lower.addWidget(translation_box, 1, 1)
         lower.addLayout(_row(prev_btn, next_btn, 1), 2, 0)
         lower.addWidget(doubt, 2, 1)
+        # Un párrafo pendiente que se parece a uno ya traducido en otro tomo de la serie
+        similar_label, similar_btn = _label("", "muted"), _button("Usar esta", lambda: use_similar())
+        similar_label.setWordWrap(True)
+        similar_row = QWidget()
+        similar_row.setLayout(_row(similar_label, similar_btn))
+        similar_row.layout().setStretch(0, 1)
+        similar_row.hide()
+        lower.addWidget(similar_row, 3, 0, 1, 2)
         panes.addWidget(bottom)
         panes.setSizes([470, 200])
         panes.setStretchFactor(0, 3)  # al encoger la ventana (zoom de Windows), la lista conserva más alto
@@ -4786,8 +4877,9 @@ class App:
             if k in done:
                 if done[k]["hand"]:
                     return "A mano"
-                return "Dudoso" if translate.doubts(text, done[k]["text"], done[k].get("dst", dst.currentData()),
-                                                    self.tr_glossary) else "Traducido"
+                if translate.doubts(text, done[k]["text"], done[k].get("dst", dst.currentData()), self.tr_glossary):
+                    return "Dudoso"
+                return "De la serie" if done[k].get("memory") else "Traducido"
             return "Aplicado" if " ".join(text.split()) in texts else "Pendiente"
 
         def fill():
@@ -4796,10 +4888,17 @@ class App:
             table.delete(*table.get_children())
             rows.clear()
             index.clear()
-            texts = applied()
+            texts, taken = applied(), 0
             for start, end, _ in sections if scope.currentData() is None else [sections[scope.currentData()]]:
                 for k, prefix, text in translate.units(self.book, start, end):
                     code = translate.key(text)
+                    known = memory.get(code)
+                    # Ya traducido en otro tomo de la serie, a este idioma: no se paga otra vez
+                    if (known and code not in done and known["dst"] == dst.currentData()
+                            and " ".join(text.split()) not in texts):
+                        done[code] = {"text": known["text"], "hand": False, "src": known["src"], "dst": known["dst"],
+                                      "memory": True, "source": text}
+                        taken += 1
                     rows[str(k)] = code, prefix, text
                     index.setdefault(code, []).append(str(k))
                     table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER)
@@ -4807,9 +4906,14 @@ class App:
                                                                  done.get(code, {}).get("text", ""),
                                                                  state_of(code, text, texts)))
                     mark_langs(str(k))
+            if taken:
+                save()
             pick()
             count()
             check()
+            if taken:
+                status.setText(f"{convert.counted(taken, 'párrafo')} ya traducidos en otros tomos de la serie: están "
+                               f"en el filtro «De la serie».")
 
         def langs(k):
             """(origen, destino) con que se tradujo el párrafo de clave k, o None si no tiene traducción."""
@@ -4883,6 +4987,7 @@ class App:
         def save():
             try:
                 _write_json(_translation_path(pdf), {"src": src.currentData(), "dst": dst.currentData(), "done": done})
+                _remember_translation(pdf, series)
             except OSError as e:
                 status.setText(f"No se pudo guardar la traducción: {e.strerror or e}")
 
@@ -4898,7 +5003,7 @@ class App:
             if new:
                 old = done.get(k, {})
                 done[k] = {"text": new, "hand": True, "src": old.get("src", src.currentData()),
-                           "dst": old.get("dst", dst.currentData())}
+                           "dst": old.get("dst", dst.currentData()), "source": rows[iid][2]}
             else:
                 done.pop(k, None)
             refresh({k})
@@ -5073,6 +5178,24 @@ class App:
             found = notes()
             if found and found[0].startswith("Dudoso"):
                 status.setText(found[0])
+            near = (translate.similar(rows[iid][2], sources)
+                    if iid and sources and table.set(iid, "state") == "Pendiente" else None)
+            work["similar"] = memory[sources[near[0]]]["text"] if near else None
+            similar_row.setVisible(bool(near))
+            if near:
+                entry = memory[sources[near[0]]]
+                where = f"el tomo {entry['volume']}" if entry["volume"] else "otro tomo"
+                similar_label.setText(f"Parecido ({round(100 * near[1])} %) en {where} de la serie: "
+                                      f"«{convert._cut(MARKUP.sub('', near[0]))}» → "
+                                      f"«{convert._cut(MARKUP.sub('', entry['text']))}»")
+
+        def use_similar():
+            """La traducción del párrafo parecido de otro tomo, para corregir lo que cambia: queda «A mano»."""
+            if work.get("similar") and work["shown"] in rows:
+                translation_box.setPlainText(work["similar"])
+                keep()
+                similar_row.hide()
+                translation_box.setFocus()
 
         def busy(on):
             run_btn.setText("Pausar" if on else "Traducir")
@@ -5193,6 +5316,8 @@ class App:
                 if not (done.get(k, {}).get("hand") and k not in again):
                     src_code, dst_code = langs or (src.currentData(), dst.currentData())
                     done[k] = {"text": text, "hand": False, "src": src_code, "dst": dst_code}
+                    if k in index:  # el original, para la memoria de la serie
+                        done[k]["source"] = rows[index[k][0]][2]
             refresh(set(arrived))
             if store:
                 save()
@@ -5626,7 +5751,7 @@ class App:
         table.selected.connect(pick)
         engine.activated.connect(lambda _: (remember(), show_engine()))
         scope.activated.connect(lambda _: fill())
-        dst.activated.connect(lambda _: (refresh(set(done)), count(), check()))
+        dst.activated.connect(lambda _: fill())  # con lo de la serie que esté traducido a ese idioma
         show_engine()
         fill()
         win.parts = {"table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
@@ -5634,7 +5759,8 @@ class App:
                      "glossary": edit_glossary, "close": close, "merge": merge, "pdf": pdf, "book": self.book,
                      "model": model, "models": find_models, "chips": chips, "search": search, "step": step,
                      "doubt": doubt, "progress": progress, "langs": lang_filter, "coherence": coherence,
-                     "warnings": warnings, "check": check, "look": look, "spell": spell, "add_word": add_word}
+                     "warnings": warnings, "check": check, "look": look, "spell": spell, "add_word": add_word,
+                     "similar": similar_label, "similar_row": similar_row, "use_similar": use_similar}
         win.show()
         return win
 

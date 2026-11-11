@@ -7586,6 +7586,117 @@ def test_window_translate_spanish_warnings():
         window.close()
 
 
+def write_volume(folder, name, series, volume, done):
+    """Un tomo ya traducido, como lo deja la app: su revisión (serie y volumen) y su archivo de traducción."""
+    import json
+    folder.mkdir(parents=True, exist_ok=True)
+    pdf = folder / f"{name}.pdf"
+    (folder / f"{name}.lnepub.json").write_text(json.dumps({"series": series, "volume": volume}), encoding="utf-8")
+    (folder / f"{name}.lnepub.traduccion.json").write_text(
+        json.dumps({"src": "en", "dst": "es", "done": done}, ensure_ascii=False), encoding="utf-8")
+    return pdf
+
+
+def test_translation_memory_of_series():
+    """Lo traducido en otros tomos de la serie se encuentra en la misma carpeta y, apuntado al guardar, en cualquier
+    otra; lo corregido a mano gana; un tomo de otra serie, uno borrado o un archivo roto no estorban, y sin serie no
+    se lee ni se apunta nada. Un párrafo casi igual a uno de la memoria se reconoce; uno corto o distinto, no."""
+    import os
+    from time import time_ns
+    import app
+    import translate
+
+    saved_settings = app.SETTINGS
+    app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"
+    try:
+        here, there = TMP / f"memoria-{time_ns()}", TMP / f"memoria-otra-{time_ns()}"
+        entry = lambda text, hand=False: {"text": text, "hand": hand, "source": "Original of " + text}
+        own = write_volume(here, "Serie 03", "Mi Serie", "3", {"k1": entry("propia")})
+        write_volume(here, "Serie 01", "mi serie", "1", {"k1": entry("uno"), "k2": entry("dos a mano", True)})
+        write_volume(here, "Otra 01", "Otra Serie", "1", {"k1": entry("ajena"), "k9": entry("ajena")})
+        (here / "Rota.lnepub.json").write_text('{"series": "Mi Serie"}', encoding="utf-8")
+        (here / "Rota.lnepub.traduccion.json").write_text("{esto no es JSON", encoding="utf-8")
+        far = write_volume(there, "Serie 02", "Mi Serie", "2", {"k2": entry("dos nueva"), "k3": entry("tres")})
+        os.utime(far.with_name("Serie 02.lnepub.traduccion.json"), (2_000_000_000, 2_000_000_000))  # el más reciente
+
+        memory = app._series_memory(own, "Mi Serie")
+        assert {k: (v["text"], v["volume"]) for k, v in memory.items()} == {"k1": ("uno", "1"), "k2": ("dos a mano", "1")}
+        assert memory["k1"]["source"] == "Original of uno" and memory["k1"]["dst"] == "es"
+        app._remember_translation(far, "Mi Serie")
+        app._remember_translation(far, "Mi Serie")  # dos veces, una sola ruta
+        assert len(app._memory_index()["mi serie"]) == 1
+        memory = app._series_memory(own, " mi serie ")
+        assert {k: (v["text"], v["volume"]) for k, v in memory.items()} == {
+            "k1": ("uno", "1"), "k2": ("dos a mano", "1"), "k3": ("tres", "2")}, memory
+        far.with_name("Serie 02.lnepub.traduccion.json").unlink()
+        assert set(app._series_memory(own, "Mi Serie")) == {"k1", "k2"} and app._memory_index()["mi serie"] == []
+        assert app._series_memory(own, "") == {} and app._series_memory(own, "Nadie") == {}
+        app._remember_translation(own, "  ")
+        assert "" not in app._memory_index()
+    finally:
+        app.SETTINGS = saved_settings
+
+    old = "The knight drew his sword and looked at the dragon without any fear."
+    sources = [old, "Something completely different that shares almost nothing with it.", "Short."]
+    found = translate.similar("The knight drew her sword and looked at the dragon without fear.", sources)
+    assert found and found[0] == old and 0.9 < found[1] < 1, found
+    assert translate.similar("The weather was nice on that quiet morning in the village.", sources) is None
+    assert translate.similar("Short!", sources) is None and translate.similar(old, [old]) is None
+
+
+def test_window_translate_series_memory():
+    """Al abrir «Traducir» en un tomo de una serie, un párrafo ya traducido en otro tomo sale «De la serie» con su
+    traducción (y se guarda con este tomo); corregido pasa a «A mano». Un párrafo pendiente parecido a uno de otro
+    tomo lo dice, y «Usar esta» pone esa traducción para corregirla."""
+    from time import time_ns
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    window.book.blocks += [convert.Block("p", 1, "The knight drew his sword and looked at the dragon without any fear."),
+                           convert.Block("p", 1, "The princess opened the old gate and walked slowly into the garden.")]
+    same, near = (b.html for b in window.book.blocks[-2:])
+    older = near.replace("slowly", "quickly")
+    write_volume(TMP / f"memoria-ventana-{time_ns()}", "Tomo 5", "Serie de prueba", "5", {
+        translate.key(same): {"text": "El caballero desenvainó la espada y miró al dragón sin miedo.", "hand": False,
+                              "source": same},
+        translate.key(older): {"text": "La princesa abrió el viejo portón y entró deprisa en el jardín.", "hand": True,
+                               "source": older}})
+    app._remember_translation(next((TMP).glob("memoria-ventana-*/")) / "Tomo 5.pdf", "Serie de prueba")
+    window.series_var.set("Serie de prueba")
+    saved_spell = app._start_spell_process
+    app._start_spell_process = lambda: None
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        table, chips = parts["table"], parts["chips"]
+        row, other = (next(i for i in table.get_children() if table.set(i, "orig") == text) for text in (same, near))
+        assert table.set(row, "state") == "De la serie" and "desenvainó" in table.set(row, "trans")
+        assert chips["De la serie"].text() == "De la serie 1" and "ya traducido" in parts["status"].text()
+        saved = app._read_translation(window.pdf)["done"][translate.key(same)]
+        assert saved["memory"] and saved["source"] == same and not saved["hand"], saved
+        assert str(app._translation_path(window.pdf).resolve()) in app._memory_index()["serie de prueba"]
+        table.selection_set(other)
+        root.update()
+        assert table.set(other, "state") == "Pendiente" and not parts["similar_row"].isHidden()
+        assert "en el tomo 5" in parts["similar"].text() and "deprisa" in parts["similar"].text(), parts["similar"].text()
+        parts["use_similar"]()
+        assert table.set(other, "state") == "A mano" and "deprisa" in table.set(other, "trans")
+        table.selection_set(row)
+        root.update()
+        assert parts["similar_row"].isHidden(), "solo un párrafo pendiente busca parecidos"
+        parts["translation"].setPlainText("El caballero desenvainó su espada y miró al dragón sin temor.")
+        table.selection_set(other)
+        root.update()
+        assert table.set(row, "state") == "A mano" and chips["De la serie"].text() == "De la serie 0"
+        assert "memory" not in app._read_translation(window.pdf)["done"][translate.key(same)]
+        parts["close"]()
+    finally:
+        app._start_spell_process = saved_spell
+        window.close()
+
+
 def test_window_translate_languages_per_paragraph():
     """Cada párrafo guarda de qué idioma a cuál se tradujo: la fila lo dice («ES → JA», en color de aviso si no es el
     destino elegido), el filtro de idiomas encuentra los traducidos por error, «Retraducir selección» con Ctrl+A solo

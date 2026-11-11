@@ -1,6 +1,7 @@
 """Traducción automática del libro, párrafo a párrafo, sin interfaz: Google (gratis), DeepL o una IA."""
 import base64
 import collections
+import difflib
 import ctypes
 import hashlib
 import html
@@ -268,6 +269,25 @@ def inconsistent(pairs, glossary=()):
         if len(forms) >= 2:
             out.append((term, sorted(forms, key=lambda f: -len(f[1]))))
     return sorted(out, key=lambda t: (-sum(len(keys) for _, keys in t[1][1:]), t[0]))
+
+
+def similar(text, sources, least=0.75):
+    """(original, parecido de 0 a 1) del texto de sources que más se parece a text, o None si ninguno llega a
+    least. Para reutilizar la traducción de un párrafo casi igual de otro tomo; uno corto se parece a cualquiera."""
+    if len(text) < 30:
+        return None
+    matcher, best = difflib.SequenceMatcher(None, autojunk=False), None
+    matcher.set_seq2(text)
+    for source in sources:
+        if source == text or not 0.6 * len(text) <= len(source) <= 1.6 * len(text):
+            continue
+        matcher.set_seq1(source)
+        # Las dos cotas baratas primero: la comparación entera, con miles de párrafos, tardaría
+        if matcher.real_quick_ratio() >= least and matcher.quick_ratio() >= least:
+            ratio = matcher.ratio()
+            if ratio >= least and (best is None or ratio > best[1]):
+                best = source, ratio
+    return best
 
 
 # Avisos del informe de calidad que son de la maquetación del PDF, no del texto de una traducción

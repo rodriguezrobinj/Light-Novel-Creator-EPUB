@@ -23,9 +23,9 @@ KINDS = {False: {"chapter": "", "subtitle": "#555555", "cut": "#737373", "image"
                 "separator": "#d9b54a"}}
 # Estado de cada párrafo en «Traducir»: el punto y el texto de su columna
 STATES = {False: {"Pendiente": "#6b6b6b", "Traducido": "#2e7d32", "Dudoso": "#b84300", "A mano": "#1f6fd1",
-                  "Aplicado": "#546e7a"},
+                  "Aplicado": "#546e7a", "De la serie": "#6a4fb3", "Con fallos": "#c62828", "Revisado": "#00796b"},
           True: {"Pendiente": "#a0a0a0", "Traducido": "#7bc47f", "Dudoso": "#ffa94d", "A mano": "#7aa7ff",
-                 "Aplicado": "#9aaab4"}}
+                 "Aplicado": "#9aaab4", "De la serie": "#b39ddb", "Con fallos": "#ff6b6b", "Revisado": "#4db6ac"}}
 LEVELS = {False: {"Grave": "#c62828", "Revisar": "#b84300", "Menor": "#546e7a"},
           True: {"Grave": "#ff6b6b", "Revisar": "#ffa94d", "Menor": "#9aaab4"}}
 # Aspecto de las marcas en el editor de texto, en orden de prioridad (si dos fijan lo mismo, manda el último)
