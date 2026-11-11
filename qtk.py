@@ -4,7 +4,8 @@ import re
 from contextlib import contextmanager
 
 import pymupdf
-from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import (QEasingCurve, QEvent, QItemSelectionModel, QPoint, QPointF, QRectF, Qt, QTimer,
+                            QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QPen, QPixmap, QPolygonF,
                            QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
@@ -188,6 +189,12 @@ class RowList(QTreeWidget):
         self.stretch = stretch
         self.keys = {}  # (tecla, modificadores) -> función, antes que la búsqueda por teclado de Qt
         self.itemSelectionChanged.connect(self.selected)
+        # Arrastre de una fila (la ventana pone drag_iid al pulsar en su título): sin guía no se veía hacia
+        # dónde iba. Una línea marca dónde caerá, delante de drop_iid, y se desliza de una fila a otra
+        self.drag_iid = self.drop_iid = None
+        self.press_at = None
+        self.slide = QVariantAnimation(self, duration=120, easingCurve=QEasingCurve.Type.OutCubic)
+        self.slide.valueChanged.connect(lambda _: self.viewport().update())
 
     def bind_key(self, key, fn, modifiers=Qt.KeyboardModifier.NoModifier):
         self.keys[(key, modifiers)] = fn
@@ -223,17 +230,88 @@ class RowList(QTreeWidget):
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
-            self.pressed.emit(self.Event(event.position().toPoint()))
+            self.press_at = event.position().toPoint()
+            self.pressed.emit(self.Event(self.press_at))
 
     def mouseDoubleClickEvent(self, event):
         super().mouseDoubleClickEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self.double_clicked.emit(self.Event(event.position().toPoint()))
 
+    def mouseMoveEvent(self, event):
+        pos = event.position().toPoint()
+        if not (self.drag_iid in self.rows and event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        if self.drop_iid is None and (pos - (self.press_at or pos)).manhattanLength() < QApplication.startDragDistance():
+            return  # un clic que tiembla no es un arrastre
+        self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+        bar, row = self.verticalScrollBar(), self.visualItemRect(self.rows[self.drag_iid]).height() or 20
+        if pos.y() < row:  # cerca del borde: la lista se desplaza para llegar a las filas que no se ven
+            bar.setValue(bar.value() - 1)
+        elif pos.y() > self.viewport().height() - row:
+            bar.setValue(bar.value() + 1)
+        target = self.identify_row(pos.y())
+        self.drop_to(target if target != self.drag_iid else None)
+        # sin super(): la selección no sigue al ratón mientras se arrastra
+
+    def drop_to(self, iid):
+        """La guía pasa a la fila iid (None: en su sitio, sin guía), deslizándose desde donde estaba."""
+        if iid == self.drop_iid:
+            return
+        y = float(self.visualItemRect(self.rows[iid]).top()) if iid else None
+        if iid and self.drop_iid is not None:
+            self.slide.stop()
+            self.slide.setStartValue(self.slide.currentValue() if self.slide.currentValue() is not None else y)
+            self.slide.setEndValue(y)
+            self.slide.start()
+        else:
+            self.slide.stop()
+            self.slide.setStartValue(y)
+            self.slide.setEndValue(y)
+        self.drop_iid = iid
+        self.viewport().update()
+
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self.released.emit(self.Event(event.position().toPoint()))
+            self.drag_iid = self.drop_iid = self.press_at = None
+            self.slide.stop()
+            self.viewport().unsetCursor()
+            self.viewport().update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not (self.drop_iid in self.rows and self.drag_iid in self.rows):
+            return
+        # el acento del tema (Link): el Highlight de la lista es el azul apagado de la selección y no se distinguía
+        accent = QApplication.palette().color(QPalette.ColorRole.Link)
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        source = QRectF(self.visualItemRect(self.rows[self.drag_iid])).adjusted(1, 1, -1, -1)
+        tint = QColor(accent)
+        tint.setAlpha(45)
+        painter.fillRect(source, tint)  # la fila que se mueve
+        painter.setPen(QPen(accent, 1, Qt.PenStyle.DashLine))
+        painter.drawRect(source)
+        running = self.slide.state() == QVariantAnimation.State.Running
+        y = self.slide.currentValue() if running else self.visualItemRect(self.rows[self.drop_iid]).top()
+        width = self.viewport().width()
+        painter.setPen(QPen(accent, 3))
+        painter.drawLine(QPointF(6, y), QPointF(width - 6, y))
+        painter.setBrush(accent)
+        painter.drawEllipse(QPointF(6, y), 4, 4)
+        # el título que se mueve, en una etiqueta sobre la línea
+        title = self.rows[self.drag_iid].text(self.columns.index(self.stretch))
+        metrics = QFontMetrics(self.font())
+        title = metrics.elidedText(title, Qt.TextElideMode.ElideRight, max(80, width // 2))
+        box = QRectF(18, y - metrics.height() / 2 - 3, metrics.horizontalAdvance(title) + 16, metrics.height() + 6)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(box, box.height() / 2, box.height() / 2)
+        painter.setPen(QApplication.palette().color(QPalette.ColorRole.HighlightedText))
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, title)
+        painter.end()
 
     def insert(self, parent, index, iid, values=(), tags=()):
         item = QTreeWidgetItem([str(v) for v in values])

@@ -372,6 +372,7 @@ def _is_heading(r, body):
 
 
 LABEL_DECOR = "»«-–—|·*~ "  # adornos alrededor de una etiqueta de capítulo: "» Capítulo 1 «", "«Prólogo»"
+HEADING_DECOR = "◆◇♦■□●○◈❖✦✧★☆ "  # símbolos que adornan un título por delante o detrás: «◆Prólogo»
 CHAPTER_LABEL = re.compile(
     r"(?:cap[ií]tulo|chapter|pr[oó]logo|prologue|ep[ií]logo|epilogue|interludio|interlude|anexo|parte|part"
     r"|volumen|historia\b[^:]*)(?: [\w.]+)?", re.I)
@@ -2275,12 +2276,15 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                                 f"Cambiarlo por «{named[m[0]]}». Si las dos formas valen, añade esta al glosario.",
                                 _around(before, n, n), _around(after, n, n + len(after) - len(before)),
                                 (k, k + 1, fixed), text))
+        # La nota al pie va dentro del párrafo: su punto final no corta la frase (Psychology of Harem 2)
+        flow = _unhtml(NOTE.sub(" ", b.html)).strip() if capital and NOTE.search(b.html) else text
+        capital = _facts(flow)[4] if flow is not text else capital
         if capital and not link:
             report.append(Issue("capital", k, b.page, "Menor", "Minúscula tras un punto",
                                 "Tras un punto la frase nueva empieza en mayúscula. Si la frase sigue, el punto "
                                 "sobra: suele quedar de un salto de línea del PDF.",
                                 "Compáralo con el PDF y corrígelo con «Editar texto…» (tecla E): quita el punto o "
-                                "pon la mayúscula.", _around(text, *capital), text=text))
+                                "pon la mayúscula.", _around(flow, *capital), text=text))
         if (len(text) >= 40 and letter_end and nxt[:1].isupper() and not link
                 and not LABEL.match(text.strip()) and not LABEL.match(nxt)):
             report.append(Issue("end", k, b.page, "Menor", "Falta el punto final",
@@ -2620,7 +2624,9 @@ def analyze(pdf_path, progress=None):
                         blocks[-1].html += " " + html.escape(r.text)
                         blocks[-1].rect = _rect([blocks[-1], r])  # el rectángulo abarca todas sus líneas
                     else:
-                        blocks.append(Block("heading", num, html.escape(r.text), rect=_rect([r])))
+                        # Psychology of Harem 2: «◆Capítulo 1: El Discurso»; el rombo es adorno, no título
+                        blocks.append(Block("heading", num, html.escape(r.text.strip(HEADING_DECOR) or r.text),
+                                            rect=_rect([r])))
                     para = None
                 else:
                     framed = id(r) in inside
@@ -2642,8 +2648,9 @@ def analyze(pdf_path, progress=None):
                         new = last_text.endswith(END_PUNCT) and (not indent_style or bool(bookmarks.get(num - 1)))
                     else:
                         new = r.y - prev.y > line_gap * 1.3
+                    # Una minúscula sigue la frase; también tras «¡Gran escritor!"» (Psychology of Harem 2, pág. 300)
                     if (new and para is not None and not switch and r.text[:1].islower()
-                            and not last_text.endswith(END_PUNCT)):
+                            and (not last_text.endswith(END_PUNCT) or re.search(r"[!?][\"”»’)]*\s*$", last_text))):
                         new = False  # algunos PDF ponen con sangría el final de una frase sin acabar
                     if new:
                         para = Block("p", num, r.html, align="frame" if framed else "center" if centered else "",

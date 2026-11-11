@@ -4400,6 +4400,27 @@ def test_blank_gap_between_paragraphs_is_a_scene_break():
     assert "break" not in styled, styled
 
 
+def test_heading_decoration_and_lowercase_continuation_across_pages():
+    """Psychology of Harem 2 (Next Novels): los títulos llevan un rombo delante («◆Capítulo 1: El Discurso»),
+    que se quedaba en el capítulo. Y sin sangría (párrafos separados por espacio), un párrafo que sigue en la
+    página siguiente tras «¡Gran escritor!"» con minúscula («y pasabas…») salía partido en dos."""
+    doc = pymupdf.open()
+    text = lambda y, t: [(72, y, line(t, 60), 11, "cour"), (72, y + 14, line("y sigue el parrafo", 60), 11, "cour"),
+                         (72, y + 28, "fin del parrafo.", 11, "cour")]
+    add_page(doc, 1, [(72, 100, "◆Capitulo 1: El Discurso", 16, "china-s")] + text(150, "Primer parrafo")
+             + text(210, "Segundo parrafo") + [(72, 270, line("Tercer parrafo que sigue", 60), 11, "cour"),
+                                                (72, 284, 'te llamaban "¡Gran escritor!"', 11, "cour")])
+    add_page(doc, 2, [(72, 100, line("y pasabas a la historia, que envidia", 60), 11, "cour"), (72, 114, "la era.", 11, "cour")]
+             + text(160, "Otro parrafo"))
+    path = TMP / "rombo-y-pagina.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = [convert._plain(b) for b in book.blocks if b.kind == "heading"]
+    joined = [convert._plain(b) for b in book.blocks if "Gran escritor" in b.html]
+    assert heads == ["Capitulo 1: El Discurso"], heads
+    assert len(joined) == 1 and "y pasabas" in joined[0], joined
+
+
 def test_bold_bare_number_marks_a_part():
     """Re Zero 4 y 5: los apartados de cada capítulo van marcados con un número solo, en negrita y del tamaño del
     texto («2»), y la numeración vuelve a empezar en cada capítulo. Salía como un párrafo «2» dentro del texto:
@@ -4788,6 +4809,19 @@ def test_quality_report_by_book_language():
     assert {"english", "aver", "doubled", "echo", "number"} <= spanish, spanish
     assert "number" in english and not {"english", "aver", "doubled", "echo"} & english, english
     assert "english" in french and not {"aver", "doubled", "echo"} & french, french
+
+
+def test_quality_report_capital_ignores_footnotes():
+    """Psychology of Harem 2: la nota al pie va dentro del párrafo («…más firme[nota: … el ánimo mejora.] y se
+    la veía…»). Su punto final seguido de «y se la veía» daba «Minúscula tras un punto»; es otra cosa. Una
+    minúscula tras un punto fuera de la nota sigue avisando."""
+    note = '<span class="nota"><b>Postura </b> Solo con eso, el ánimo mejora.</span>'
+    texts = [f"Su postura era más firme{note} y se la veía segura.",
+             f"Era firme{note} y segura. luego se fue."]
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, t) for t in texts]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    found = [i.block for i in convert.quality_report(book) if i.kind == "capital"]
+    assert found == [2], found
 
 
 def test_quality_report_fixes_fansub_typos():
@@ -5814,6 +5848,53 @@ def test_window_move_section_persists_and_undoes():
     assert before == ["Capitulo 1: Inicio", "Agradecimientos", "Capitulo 2: Final"], before
     assert moved == ["Capitulo 1: Inicio", "Capitulo 2: Final", "Agradecimientos"], moved
     assert reopened == moved and still == moved and undone == moved, (reopened, still, undone)
+
+
+def test_window_drag_row_shows_where_it_goes():
+    """Arrastrar una fila por su título: no se veía hacia dónde iba. Ahora una línea del color de acento marca
+    dónde caerá (delante de la fila bajo el ratón) y se desliza al cambiar de fila; la selección no salta con el
+    ratón. Al soltar, la sección se mueve allí y la guía desaparece."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    root, window = visible_window()
+    window.pdf = make_group_pdf()
+    window.show_book(convert.analyze(window.pdf))
+    root.update()
+    tree = window.tree
+    titles = lambda: [tree.set(i, "title") for i in tree.get_children()]
+    first, last = tree.get_children()[1], tree.get_children()[-1]  # se suelta delante de la segunda fila
+    tree.selection_set(last)
+
+    def mouse(kind, iid, dy=0):
+        x, y, w, h = tree.bbox(iid, "title")
+        pos = QPointF(x + 12, y + h / 2 + dy)
+        button = Qt.MouseButton.NoButton if kind == QEvent.Type.MouseMove else Qt.MouseButton.LeftButton
+        held = Qt.MouseButton.NoButton if kind == QEvent.Type.MouseButtonRelease else Qt.MouseButton.LeftButton
+        QApplication.sendEvent(tree.viewport(), QMouseEvent(kind, pos, tree.viewport().mapToGlobal(pos), button, held,
+                                                            Qt.KeyboardModifier.NoModifier))
+        root.update()
+
+    mouse(QEvent.Type.MouseButtonPress, last)
+    mouse(QEvent.Type.MouseMove, last, -8)
+    mouse(QEvent.Type.MouseMove, first)
+    QApplication.processEvents()
+    import time
+    time.sleep(0.3)  # la línea termina de deslizarse
+    QApplication.processEvents()
+    target, selected = tree.drop_iid, tree.selection()
+    top = tree.visualItemRect(tree.rows[first]).top()
+    accent = QApplication.palette().color(QApplication.palette().ColorRole.Link)
+    shot = tree.viewport().grab().toImage()
+    line = min((shot.pixelColor(shot.width() * 3 // 4, y) for y in range(top - 2, top + 3)),
+               key=lambda c: abs(c.red() - accent.red()) + abs(c.green() - accent.green()) + abs(c.blue() - accent.blue()))
+    mouse(QEvent.Type.MouseButtonRelease, first)
+    after, gone = titles(), tree.drop_iid is None and tree.drag_iid is None
+    window.close()
+    assert target == first and selected == (last,), (target, selected)
+    assert abs(line.red() - accent.red()) < 40 and abs(line.blue() - accent.blue()) < 40, (line.name(), accent.name())
+    assert after[1] == "Capitulo 2: Final" and gone, (after, gone)
 
 
 def test_window_cover_from_illustration_quality_and_series_panel():
