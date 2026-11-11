@@ -382,9 +382,19 @@ class Var:
 
 
 def qimage(pix):
-    """Pixmap de PyMuPDF -> QImage (copia: la memoria del pixmap se libera con él)."""
+    """Pixmap de PyMuPDF -> QImage (copia: la memoria del pixmap se libera con él). Lo transparente va sobre
+    blanco, como en una página: quitando sin más el canal alfa salía negro (el separador dibujado de Eminence 7
+    era un cuadro negro en el editor)."""
     if pix.alpha:
-        pix = pymupdf.Pixmap(pix, 0)
+        if pix.n != 4:  # gris o CMYK con alfa: a RGB con alfa
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+        image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGBA8888_Premultiplied)
+        out = QImage(pix.width, pix.height, QImage.Format.Format_RGB888)
+        out.fill(QColor("white"))
+        painter = QPainter(out)
+        painter.drawImage(0, 0, image)
+        painter.end()
+        return out
     if pix.n not in (1, 3):
         pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
     form = QImage.Format.Format_Grayscale8 if pix.n == 1 else QImage.Format.Format_RGB888

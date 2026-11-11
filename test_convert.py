@@ -3600,6 +3600,23 @@ def test_text_editor_live_spelling():
     assert after == [] and words == ["palabrq"] and stopped, (after, words, stopped)
 
 
+def test_qimage_puts_transparency_on_white():
+    """El separador dibujado de Eminence 7 es un PNG con fondo transparente: en el editor salía un cuadro negro,
+    porque lo transparente se quedaba en negro. Sobre blanco, como en una página; en gris, igual."""
+    import qtk
+
+    qtk.app()
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 20, 20), True)
+    pix.set_rect(pix.irect, (0, 0, 0, 0))  # todo transparente
+    pix.set_rect(pymupdf.IRect(8, 0, 12, 20), (0, 0, 0, 255))  # una barra negra opaca
+    gray = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.IRect(0, 0, 4, 4), True)
+    gray.set_rect(gray.irect, (0, 0))
+    shown = [(image.pixelColor(1, 1).name(), image.pixelColor(10, 10).name())
+             for image in (qtk.qimage(pix), qtk.qimage(pymupdf.Pixmap(pix.tobytes("png"))))]
+    assert shown == [("#ffffff", "#000000")] * 2, shown
+    assert qtk.qimage(gray).pixelColor(1, 1).name() == "#ffffff"
+
+
 def test_text_editor_many_unknown_words_do_not_freeze():
     """Eminence 7 sin traducir: con la ortografía en español, miles de palabras desconocidas. Al llegar la
     respuesta del proceso, la ventana se congelaba 10 s (una expresión regular por palabra para pedir sugerencias
