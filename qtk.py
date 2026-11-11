@@ -386,6 +386,10 @@ def qimage(pix, ink=None):
     blanco, como en una página: quitando sin más el canal alfa salía negro (el separador dibujado de Eminence 7
     era un cuadro negro en el editor). Con ink, la forma se pinta de ese color sobre fondo transparente: un
     adorno se ve como un símbolo del texto, no como una foto con fondo blanco."""
+    if ink and not pix.alpha:  # adorno opaco, oscuro sobre blanco (las calaveras de Megami): lo oscuro es la forma
+        shape = pymupdf.Pixmap(pymupdf.csGRAY, pix) if pix.n != 1 else pymupdf.Pixmap(pix, 0)
+        shape.invert_irect()
+        pix = pymupdf.Pixmap(pymupdf.Pixmap(pymupdf.csRGB, pix) if pix.n != 3 else pix, shape)
     if pix.alpha:
         if pix.n != 4:  # gris o CMYK con alfa: a RGB con alfa
             pix = pymupdf.Pixmap(pymupdf.csRGB, pix)

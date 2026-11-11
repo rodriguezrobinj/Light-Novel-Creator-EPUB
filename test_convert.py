@@ -493,12 +493,17 @@ def test_drawn_ornament_between_paragraphs_is_a_scene_break():
     page = add_page(doc, 3, [(250, 110, "Epilogo", 20, "helv"),
                              (92, 150, line("Cuarto parrafo de otra escena", 57), 11, "cour"), (72, 164, "fin cuatro.", 11, "cour")])
     page.draw_line((250, 120), (345, 120))
+    # 4: enlace centrado y subrayado entre dos párrafos (créditos de Re Zero 6): la raya es del enlace
+    page = add_page(doc, 4, [(92, 150, line("Quinto parrafo de otra escena", 57), 11, "cour"), (72, 164, "fin.", 11, "cour"),
+                             (230, 300, "http://grupo.net/", 11, "helv"),
+                             (92, 400, line("Sexto parrafo de otra escena", 57), 11, "cour"), (72, 414, "fin.", 11, "cour")])
+    page.draw_line((230, 303), (325, 303))
     path = TMP / "adorno-dibujado.pdf"
     doc.save(path)
     blocks = convert.analyze(path).blocks
-    kinds = [[b.kind for b in blocks if b.page == n] for n in (1, 2, 3)]
+    kinds = [[b.kind for b in blocks if b.page == n] for n in (1, 2, 3, 4)]
     image = next((b.image for b in blocks if b.kind == "break"), b"")
-    assert kinds == [["heading", "p", "break", "p"], ["p", "break"], ["heading", "p"]], kinds
+    assert kinds == [["heading", "p", "break", "p"], ["p", "break"], ["heading", "p"], ["p", "p", "p"]], kinds
     assert image[:4] == b"\x89PNG", image[:8]
 
 
@@ -3705,6 +3710,13 @@ def test_qimage_puts_transparency_on_white():
     inked = qtk.qimage(pix, "#ececec")
     assert inked.pixelColor(1, 1).alpha() == 0 and inked.pixelColor(10, 10).name() == "#ececec", (
         inked.pixelColor(1, 1).getRgb(), inked.pixelColor(10, 10).name())
+    # Adorno opaco, negro sobre blanco (las calaveras JPEG de Megami): lo oscuro es la forma, el blanco se va
+    opaque = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 20, 20), False)
+    opaque.set_rect(opaque.irect, (255, 255, 255))
+    opaque.set_rect(pymupdf.IRect(8, 0, 12, 20), (0, 0, 0))
+    inked = qtk.qimage(pymupdf.Pixmap(opaque.tobytes("jpg")), "#ececec")
+    assert inked.pixelColor(1, 1).alpha() < 10 and inked.pixelColor(10, 10).alpha() > 240, (
+        inked.pixelColor(1, 1).getRgb(), inked.pixelColor(10, 10).getRgb())
 
 
 def test_text_editor_many_unknown_words_do_not_freeze():
