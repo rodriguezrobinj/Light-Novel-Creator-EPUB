@@ -473,6 +473,35 @@ def test_ornament_image_between_paragraphs_is_a_scene_break():
     assert "break" not in page2, page2
 
 
+def test_drawn_ornament_between_paragraphs_is_a_scene_break():
+    """Eminence 7: el separador de escena va dibujado con trazos (dos barras y una raya cruzada), sin imagen ni
+    texto. Es un separador y guarda su dibujo; el subrayado ancho bajo el título y el fondo de página, no."""
+    doc = pymupdf.open()
+    page = add_page(doc, 1, [(72, 110, "Capitulo 1: Inicio", 20, "helv"),
+                             (92, 150, line("Primer parrafo de la escena", 57), 11, "cour"), (72, 164, "fin uno.", 11, "cour"),
+                             (92, 250, line("Segundo parrafo de la escena", 57), 11, "cour"), (72, 264, "fin dos.", 11, "cour")])
+    page.draw_rect(pymupdf.Rect(0, 0, 595, 842), color=None, fill=(1, 1, 1), overlay=False)  # fondo de página
+    page.draw_line((72, 116), (400, 116))  # subrayado del título
+    page.draw_rect(pymupdf.Rect(292, 185, 298, 220), color=None, fill=(0, 0, 0))  # las dos barras
+    page.draw_rect(pymupdf.Rect(297, 200, 303, 235), color=None, fill=(0, 0, 0))
+    page.draw_line((285, 225), (310, 195))  # la raya cruzada
+    # 2: el adorno cierra la página, sin texto debajo (pág. 58): la escena sigue en la 3
+    page = add_page(doc, 2, [(92, 150, line("Tercer parrafo de la escena", 57), 11, "cour"), (72, 164, "fin tres.", 11, "cour")])
+    page.draw_rect(pymupdf.Rect(292, 600, 298, 635), color=None, fill=(0, 0, 0))
+    page.draw_rect(pymupdf.Rect(297, 615, 303, 650), color=None, fill=(0, 0, 0))
+    # 3: raya corta justo bajo un título («Afterword», pág. 246): subrayado, no separador
+    page = add_page(doc, 3, [(250, 110, "Epilogo", 20, "helv"),
+                             (92, 150, line("Cuarto parrafo de otra escena", 57), 11, "cour"), (72, 164, "fin cuatro.", 11, "cour")])
+    page.draw_line((250, 120), (345, 120))
+    path = TMP / "adorno-dibujado.pdf"
+    doc.save(path)
+    blocks = convert.analyze(path).blocks
+    kinds = [[b.kind for b in blocks if b.page == n] for n in (1, 2, 3)]
+    image = next((b.image for b in blocks if b.kind == "break"), b"")
+    assert kinds == [["heading", "p", "break", "p"], ["p", "break"], ["heading", "p"]], kinds
+    assert image[:4] == b"\x89PNG", image[:8]
+
+
 def test_inline_image_in_a_text_line_is_not_a_scene_break():
     """Una imagen pequeña y centrada dentro de una línea de texto («LEVEL UP! Lv. 2 → Lv. 3», con la flecha como
     imagen: The World's Strongest Witch), ni la pegada al final de una línea corta (♡, ♪), es un separador de
