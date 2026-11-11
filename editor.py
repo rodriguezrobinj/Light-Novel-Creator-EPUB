@@ -4,7 +4,7 @@ separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda
 import html
 import re
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, QRectF, QRegularExpression, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat)
 from PySide6.QtWidgets import QApplication, QTextEdit
@@ -312,13 +312,23 @@ def _is_text(block):
             and not convert.SCENE_BREAK.fullmatch(bare))
 
 
+def _matches(text, words):
+    """Las palabras de text que están en words (en minúscula), sin distinguir mayúsculas: «Fin» si está «fin»."""
+    return (m for m in WORD.finditer(text) if m[0].lower() in words) if words else iter(())
+
+
+WORD = re.compile(r"\w+")  # como (?<!\w)palabra(?!\w): «abc1» no es «abc»
+REPAINT_BATCH = 40  # párrafos subrayados por tanda (Look._repaint)
+
+
 class Look(QSyntaxHighlighter):
     """Aspecto que no se guarda: títulos grandes, notas en gris, separadores escritos y palabras desconocidas
     subrayadas. Solo pinta: no cambia el texto ni entra en deshacer."""
 
     def __init__(self, document):
         super().__init__(document)
-        self.unknown = None
+        self.unknown = set()
+        self.job = 0  # tanda de repintado en curso (_repaint)
         self.tags = {}
 
     def set_tags(self, tags):
@@ -328,18 +338,35 @@ class Look(QSyntaxHighlighter):
 
     def set_unknown(self, words, changed=None):
         """Palabras que se subrayan. changed: solo se repintan los párrafos con esas (las nuevas o las que dejan
-        de estarlo); repintar la hoja entera tardaba 1 s en un capítulo largo."""
-        self.unknown = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, sorted(words, key=len, reverse=True)))
-                                  + r")(?!\w)", re.I) if words else None
+        de estarlo); repintar la hoja entera tardaba 1 s en un capítulo largo. Un conjunto, no una expresión con
+        todas: con un libro sin traducir son miles y la ventana se congelaba (Eminence 7)."""
+        self.unknown = {w.lower() for w in words}
         if changed is None:
             self.rehighlight()
             return
-        probe = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, changed)) + r")(?!\w)", re.I) if changed else None
+        changed, blocks = {w.lower() for w in changed}, []
         block = self.document().firstBlock()
-        while probe and block.isValid():
-            if probe.search(block.text()):
-                self.rehighlightBlock(block)
+        while changed and block.isValid():
+            if any(True for _ in _matches(block.text(), changed)):
+                blocks.append(block)
             block = block.next()
+        self.job += 1
+        self._repaint(self.job, blocks)
+
+    def _repaint(self, job, blocks):
+        """Repinta de REPAINT_BATCH en REPAINT_BATCH párrafos y deja respirar a la ventana entre tandas: los ~600
+        de un capítulo sin traducir, de golpe, la congelaban 1 s. Una llamada nueva a set_unknown cancela esta."""
+        if job != self.job:
+            return
+        for block in blocks[:REPAINT_BATCH]:
+            if block.isValid():  # borrado mientras tanto: ya no hay nada que pintar
+                self.rehighlightBlock(block)
+        if blocks[REPAINT_BATCH:]:
+            QTimer.singleShot(0, self, lambda: self._repaint(job, blocks[REPAINT_BATCH:]))  # sin hoja, no corre
+
+    def matches(self, text):
+        """Las palabras subrayadas de text, como re.Match."""
+        return _matches(text, self.unknown)
 
     def color(self, tag):
         return QColor(self.tags.get(tag, {}).get("foreground", "#888888"))
@@ -362,7 +389,7 @@ class Look(QSyntaxHighlighter):
             f = QTextCharFormat()
             f.setForeground(self.color("mark"))
             self.setFormat(m.start(), m.end() - m.start(), f)
-        for m in self.unknown.finditer(text) if self.unknown else ():
+        for m in self.matches(text):
             for c in range(m.start(), m.end()):  # encima de lo que ya tenga (título, nota)
                 f = QTextCharFormat(self.format(c))
                 f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
@@ -589,7 +616,7 @@ class Sheet(QTextEdit):
     def misspelled(self):
         found, block = [], self.document().firstBlock()
         while block.isValid() and self.look.unknown:
-            found += [m.group(0) for m in self.look.unknown.finditer(block.text())]
+            found += [m.group(0) for m in self.look.matches(block.text())]
             block = block.next()
         return found
 
