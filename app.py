@@ -402,7 +402,7 @@ def _render_thumbs(jobs):
     portada. En la ventana, PyMuPDF congelaba el arranque."""
     for src, dest in jobs:
         try:
-            with pymupdf.open(src) as doc:
+            with convert.open_pdf(src) as doc:
                 page = doc[0]
                 zoom = 124 / max(page.rect.height, 1)
                 data = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("jpg", jpg_quality=85)
@@ -985,7 +985,7 @@ def _prepare(pdf, options):
             setattr(book, name, str(state[name]).strip())
     if state.get("cover"):
         try:
-            with pymupdf.open(pdf) as doc:
+            with convert.open_pdf(pdf) as doc:
                 book.cover = _cover_image(doc, state["cover"], book)
         except Exception:
             pass  # la imagen de portada ya no existe: se queda la del PDF
@@ -2398,7 +2398,7 @@ class App:
             convert.seed_report_memos(memos)
         if self.pdf_doc:
             self.pdf_doc.close()
-        self.pdf_doc = pymupdf.open(self.pdf)
+        self.pdf_doc = convert.open_pdf(self.pdf)  # vista previa, miniaturas y panel del editor
         self.stack.setCurrentIndex(1)
         self.update_chrome()
         self.save_thumb()
@@ -6779,7 +6779,9 @@ class TextEditor:
             block = self.app.book.blocks[k]
             if block.kind in ("image", "break") and block.image:
                 try:
-                    found[k] = qtk.qimage(pymupdf.Pixmap(block.image))
+                    # el adorno transparente, del color del texto: un símbolo más, no una foto con fondo blanco
+                    found[k] = qtk.qimage(pymupdf.Pixmap(block.image),
+                                          self.colors["ink"] if block.kind == "break" else None)
                 except Exception:
                     pass  # imagen que MuPDF no lee: queda su marca
             elif block.kind == "break":
