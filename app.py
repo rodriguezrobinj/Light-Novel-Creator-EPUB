@@ -2536,6 +2536,7 @@ class App:
             self.update_reviewed()
             self.update_preview()
         self.drag_source = item if item and column == "#2" else None  # on_drop decide si se movió
+        self.tree.drag_iid = self.drag_source if self.drag_source and not self.is_break(item) else None  # su guía
 
     def on_double_click(self, event):
         item = self.tree.identify_row(event.y)
