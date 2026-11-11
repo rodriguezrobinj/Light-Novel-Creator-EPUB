@@ -2126,6 +2126,55 @@ def jpeg(width, height):
     return pix.tobytes("jpg", jpg_quality=95)
 
 
+def indexed_jpx(palette, rows):
+    """JPEG 2000 de índices con su propia paleta RGB (cajas pclr y cmap), como las ilustraciones de Eminence 7,
+    y la tabla de la paleta para el /Indexed del PDF."""
+    import io
+    import struct
+
+    from PIL import Image
+
+    def box(kind, body):
+        return struct.pack(">I4s", 8 + len(body), kind) + body
+
+    im = Image.new("L", (len(rows[0]), len(rows)))
+    im.putdata([v for row in rows for v in row])
+    out = io.BytesIO()
+    im.save(out, "JPEG2000")  # sin pérdida: los índices quedan exactos
+    data = out.getvalue()
+    start = data.index(b"jp2h") - 4
+    end = start + struct.unpack(">I", data[start:start + 4])[0]
+    ihdr = data[data.index(b"ihdr", start) - 4:][:22]
+    table = b"".join(bytes([v] * 3) for v in palette) + bytes(3 * (256 - len(palette)))
+    head = box(b"jp2h", ihdr + box(b"colr", bytes([1, 0, 0]) + struct.pack(">I", 16))  # sRGB
+               + box(b"pclr", struct.pack(">HB", 256, 3) + bytes([7, 7, 7]) + table)
+               + box(b"cmap", bytes([0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 2])))
+    return data[:start] + head + data[end:], table
+
+
+def test_indexed_jpeg2000_illustration_is_not_noise():
+    """Eminence 7: ilustraciones JPEG 2000 con paleta propia y /Indexed en el PDF. Dibujadas más pequeñas que
+    su tamaño (vista previa, miniaturas, panel del editor, ilustraciones a página entera), MuPDF promediaba los
+    índices y salía ruido. Un damero de los índices 0 y 2 (los dos gris claro) se veía negro: la media es el 1."""
+    data, table = indexed_jpx([200, 0, 200], [[0 if (x + y) % 2 else 2 for x in range(256)] for y in range(256)])
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"),
+                      (92, 150, line("Un parrafo cualquiera de la escena", 57), 11, "cour"), (72, 164, "fin.", 11, "cour")])
+    page = doc.new_page(width=100, height=100)
+    page.insert_image(page.rect, stream=data)
+    xref = page.get_images(full=True)[0][0]
+    doc.xref_set_key(xref, "ColorSpace", f"[/Indexed /DeviceRGB 255 <{table.hex()}>]")
+    path = TMP / "jpx-paleta.pdf"
+    doc.save(path)
+    with convert.open_pdf(path) as shown:
+        preview = shown[1].get_pixmap().pixel(50, 50)
+    picture = next(b.image for b in convert.analyze(path).blocks if b.kind == "image")
+    pix = pymupdf.Pixmap(picture)
+    middle = pix.pixel(pix.width // 2, pix.height // 2)[:3]
+    assert preview == (200, 200, 200), preview
+    assert all(abs(v - 200) <= 8 for v in middle), middle
+
+
 def test_shrink_makes_big_images_lighter():
     big = jpeg(2000, 3000)
     book = convert.Book("Libro", "", big, [convert.Block("heading", 1, "Cap 1"),
@@ -3615,6 +3664,10 @@ def test_qimage_puts_transparency_on_white():
              for image in (qtk.qimage(pix), qtk.qimage(pymupdf.Pixmap(pix.tobytes("png"))))]
     assert shown == [("#ffffff", "#000000")] * 2, shown
     assert qtk.qimage(gray).pixelColor(1, 1).name() == "#ffffff"
+    # En el editor, el adorno va del color del texto sobre la hoja: un símbolo más, no una foto con fondo blanco
+    inked = qtk.qimage(pix, "#ececec")
+    assert inked.pixelColor(1, 1).alpha() == 0 and inked.pixelColor(10, 10).name() == "#ececec", (
+        inked.pixelColor(1, 1).getRgb(), inked.pixelColor(10, 10).name())
 
 
 def test_text_editor_many_unknown_words_do_not_freeze():

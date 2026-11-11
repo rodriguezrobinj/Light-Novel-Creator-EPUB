@@ -2364,12 +2364,30 @@ FONTS = {"Literata": "literata", "Bitter": "bitter"}  # tipografías libres (OFL
 FONT_DIR = Path(__file__).parent / "fonts"  # en el .exe, junto a los módulos (--add-data fonts;fonts)
 
 
+def open_pdf(path):
+    """Abre el PDF (o EPUB) para leerlo o dibujarlo. Una imagen JPEG 2000 que trae su propia paleta y el PDF
+    marca /Indexed salía como ruido al dibujarla más pequeña que su tamaño (Eminence 7, las ilustraciones):
+    MuPDF la reduce promediando los índices de la paleta como si fueran colores. Sin el /ColorSpace del PDF
+    usa los colores del propio JPEG 2000. Solo en memoria: el archivo no cambia."""
+    doc = pymupdf.open(path)
+    if doc.is_pdf and not doc.needs_pass:
+        for xref in range(1, doc.xref_length()):
+            if doc.xref_get_key(xref, "Filter")[1] != "/JPXDecode":
+                continue
+            kind, value = doc.xref_get_key(xref, "ColorSpace")
+            if kind == "xref":
+                value = doc.xref_object(int(value.split()[0]), compressed=True)
+            if "/Indexed" in value and b"pclr" in doc.xref_stream_raw(xref)[:4096]:  # la paleta va en la cabecera
+                doc.xref_set_key(xref, "ColorSpace", "null")
+    return doc
+
+
 def analyze(pdf_path, progress=None):
     """Lee el PDF (o un EPUB, que PyMuPDF compone en páginas) y lo devuelve como bloques, con los títulos de
     capítulo candidatos."""
     kind = "EPUB" if str(pdf_path).lower().endswith(".epub") else "PDF"
     try:
-        doc = pymupdf.open(pdf_path)
+        doc = open_pdf(pdf_path)
     except Exception as e:
         raise ValueError(f"No se pudo abrir el {kind}: {e}") from e
     with doc:
