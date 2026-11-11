@@ -3903,7 +3903,7 @@ class App:
         changed = []
         for item in self.tree.get_children():
             if (self.is_title(item) and self.tree.set(item, "inc") != SEP
-                    and convert.SUBPART.fullmatch(self.tree.set(item, "title").strip())):
+                    and convert.is_subpart(self.tree.set(item, "title"))):
                 changed.append(self.row_state(item))
                 self.tree.set(item, "inc", SEP)
                 self.tree.item(item, tags=(KIND_TAG[SEP],))
