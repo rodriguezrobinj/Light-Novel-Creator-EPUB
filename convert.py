@@ -2856,10 +2856,19 @@ def _file_as(author):
 STATUS = re.compile(r"\s*[【\[].*[】\]]\s*")  # "【Habilidad adquirida】", "[Nivel 5]": ventana de estado
 
 
+def _fit_style(data, page):
+    """Tamaño de una ilustración para la vista previa, que cabe en la página (ancho, alto en pt). MuPDF no entiende
+    max-height: una más alta que la página pasaba entera a la siguiente y dejaba la primera en blanco con un borde
+    de la imagen abajo (Eminence 7, pág. 23). Solo encoge: una pequeña se ve a su tamaño, como en un lector."""
+    width, height = Image.open(io.BytesIO(data)).size
+    scale = min(1, page[0] * 0.78 / width, page[1] * 0.85 / height)  # dentro de los márgenes de MuPDF (~8 %)
+    return f' style="width: {width * scale:.0f}px; height: {height * scale:.0f}px"'
+
+
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
                breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
-               progress=None):
+               progress=None, fit=None):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -2879,7 +2888,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     alts: {image_key: descripción} de las ilustraciones que describió el usuario; las demás, «Ilustración de
     «capítulo»». Con los metadatos de accesibilidad (EPUB 3), el lector de pantalla las anuncia.
     Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número.
-    progress(hechos, total): avanza por sección e ilustración escritas (reducir las imágenes es lo lento)."""
+    progress(hechos, total): avanza por sección e ilustración escritas (reducir las imágenes es lo lento).
+    fit: (ancho, alto) de la página de la vista previa: cada ilustración lleva un tamaño que cabe en ella
+    (_fit_style). Solo para MuPDF; el EPUB de verdad no lo lleva."""
     rules = _rules(replacements)
     hyphenate = hyphenate and lang.split("-")[0].lower() == "es"
     typo = (lambda s, dashes=False: _typography(s, dashes)) if typography else (lambda s, dashes=False: s)
@@ -2950,7 +2961,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     ext = "png" if data[:4] == b"\x89PNG" else "jpg"  # PNG si trae transparencia
                     src = f"img/b{k:05d}{'_' + str(i) if b.layout else ''}.{ext}"  # por bloque: una página puede tener varias
                     images[src] = data
-                    parts.append(f'<div class="img"><img src="{src}" alt="{html.escape(alt)}"/></div>')
+                    sized = _fit_style(data, fit) if fit else ""
+                    parts.append(f'<div class="img"><img src="{src}" alt="{html.escape(alt)}"{sized}/></div>')
             elif b.kind == "break" or k in breaks:
                 parts.append(_separator(b if b.kind == "break" else Block("break", b.page), k, style, separator, images))
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")

@@ -1660,7 +1660,8 @@ class App:
             self.tabs.addTab(name)
         self.tabs.setCurrentIndex(2)
         self.tabs.currentChanged.connect(lambda _: self.show_panes())
-        device = _combo(self.device_var, list(DEVICES), 10, changed=self.draw_epub)
+        # otro tamaño de página: el EPUB de la vista previa se rehace con sus ilustraciones a la medida
+        device = _combo(self.device_var, list(DEVICES), 10, changed=self.update_preview)
         dark = qtk.Var.check(self.dark_var, QCheckBox("Modo oscuro"))
         dark.toggled.connect(lambda _: self.book and (self.draw_pdf(), self.draw_epub()))  # las dos vistas
         views.addLayout(_row(self.tabs, 1, device, dark, _button("Editar texto…", self.edit_text)))
@@ -2122,6 +2123,7 @@ class App:
                 options["removed"] = [k for k, v in inner.items() if v == CUT]
                 options.update(shrink=False, trim=False, epub2=False, credits=False)  # rápido: solo lo que se ve
                 chapters = [(0, self.tree.set(item, "title"))] if kind == ON else []
+                options["fit"] = DEVICES[self.device_var.get()]  # ilustraciones que caben en la página de MuPDF
                 key = (self.book.title, self.book.cover, chapters, sorted(options.items()),
                        [(b.kind, b.page, b.html, b.image, b.layout, b.align, b.keep) for b in part_blocks])
                 if key != self.preview_key:  # lo mismo que ya está escrito y maquetado: no se rehace
