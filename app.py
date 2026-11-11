@@ -100,6 +100,7 @@ PREVIEW_CHROME = 40       # alto de la fila ◀ leyenda ▶ de cada vista previa
 DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
 THUMB_HEIGHT = 64         # alto de las miniaturas del PDF, en píxeles
 THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe congelaría la ventana
+SUGGEST_AHEAD = 40        # sugerencias de ortografía pedidas por adelantado en cada capítulo
 MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
 # Aspecto de las marcas en el editor de texto (theme.editor_tags); "broken" es lo que edit_section quitaría
@@ -6523,15 +6524,18 @@ class TextEditor:
         cientos, ~1 s cada una); first, la del clic derecho, antes que ninguna."""
         if not self.spell or not shiboken6.isValid(self.sheet):
             return
-        here = self.sheet.document().toPlainText()
+        pending = self.unknown - self.ignored_words - set(self.suggestions)
+        # En orden de lectura y pocas: con un libro sin traducir son miles, y una expresión regular por palabra
+        # congelaba la ventana 10 s (Eminence 7). Las demás se piden con el clic derecho («first»)
+        here = convert.spell_words(self.sheet.document().toPlainText())
+        ahead = list(dict.fromkeys(w for w in here if w in pending))[:SUGGEST_AHEAD]
         try:
             if first:
                 self.suggestions.setdefault(first, None)
                 self.spell[0].put(("first", first))
-            for word in sorted(self.unknown - self.ignored_words - set(self.suggestions)):
-                if re.search(rf"(?<!\w){re.escape(word)}(?!\w)", here):
-                    self.suggestions[word] = None  # None: pedida, aún sin respuesta
-                    self.spell[0].put(("suggest", word))
+            for word in ahead:
+                self.suggestions[word] = None  # None: pedida, aún sin respuesta
+                self.spell[0].put(("suggest", word))
         except (OSError, ValueError):
             self.spell = None
 

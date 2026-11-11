@@ -3600,6 +3600,47 @@ def test_text_editor_live_spelling():
     assert after == [] and words == ["palabrq"] and stopped, (after, words, stopped)
 
 
+def test_text_editor_many_unknown_words_do_not_freeze():
+    """Eminence 7 sin traducir: con la ortografía en español, miles de palabras desconocidas. Al llegar la
+    respuesta del proceso, la ventana se congelaba 10 s (una expresión regular por palabra para pedir sugerencias
+    y otra gigante para subrayar). Ahora es rápido, subraya igual y pide pocas sugerencias por adelantado."""
+    import queue
+    from time import perf_counter
+
+    import app
+    requests, replies, proc = queue.Queue(), queue.Queue(), FakeSpellProcess()
+    B = convert.Block
+    words = [f"pal{chr(97 + n % 26)}{chr(97 + n // 26 % 26)}{chr(97 + n // 676)}x" for n in range(4000)]
+    paragraphs = [B("p", 1, " ".join(words[n:n + 8]) + ". Fin del Párrafo.") for n in range(0, 4000, 8)]
+    original = app._start_spell_process
+    root, window = visible_window()
+    app._start_spell_process = lambda: (requests, replies, proc)
+    try:
+        doc = pymupdf.open()
+        add_page(doc, 1, [(72, 100, "Pagina", 11, "helv")])
+        window.pdf = TMP / f"muchas-{time_ns()}.pdf"
+        doc.save(window.pdf)
+        window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1")] + paragraphs, [0]))
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    finally:
+        app._start_spell_process = original
+    while not requests.empty():
+        requests.get_nowait()
+    replies.put(("unknown", words + ["fin", "otra"]))  # «Fin» con mayúscula también se subraya; «otra» no está
+    start = perf_counter()
+    editor.poll_spelling()
+    took = perf_counter() - start
+    asked = []
+    while not requests.empty():
+        asked.append(requests.get_nowait())
+    underlined = editor.sheet.misspelled()
+    editor.win.done(0)
+    window.close()
+    assert took < 2, took  # antes, ~10 s
+    assert 0 < len(asked) <= app.SUGGEST_AHEAD and all(a[1] in words + ["fin"] for a in asked), asked[:5]
+    assert len(underlined) == 4000 + 500 and underlined.count("Fin") == 500, len(underlined)
+
+
 def test_spell_server_answers_checks_before_suggestions():
     """El proceso de ortografía (aquí en un hilo con colas) dice qué palabras no están y sus sugerencias."""
     import queue
