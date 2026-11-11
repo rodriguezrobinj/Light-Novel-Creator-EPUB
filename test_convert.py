@@ -7462,6 +7462,55 @@ def test_window_translate_chapters_style_and_doubts():
         window.close()
 
 
+def test_window_translate_coherence():
+    """«Coherencia…»: un término traducido de dos formas sale con ellas; al elegir una entra en el glosario de la
+    serie y la lista deja a la vista, elegidos, los párrafos con la otra. Sin nada incoherente, lo dice."""
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    texts = {f"Then the Witch Cult attacked village {n}.": f"Entonces el Culto de la Bruja atacó la aldea {n}."
+             for n in range(5)}
+    texts |= {f"Nobody saw the Witch Cult near gate {n}.": f"Nadie vio a la Secta de la Bruja junto al portón {n}."
+              for n in range(2)}
+    window.book.blocks += [convert.Block("p", 1, t) for t in texts]
+    infos, saved_info = [], app.messagebox.showinfo
+    app.messagebox.showinfo = lambda title, message, **_: infos.append(message)
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        table, chips = parts["table"], parts["chips"]
+        parts["coherence"]()
+        assert infos and "nada traducido" in infos[-1], infos
+        parts["merge"]({translate.key(a): b for a, b in texts.items()})
+        parts["coherence"]()
+        box = win.coherence_box
+        assert [box["table"].set(i, "term") for i in box["table"].get_children()] == ["Witch Cult"]
+        assert "«Culto de la Bruja» 5 · «Secta de la Bruja» 2" in box["table"].set("0", "forms")
+        assert [box["forms"].itemText(n) for n in range(box["forms"].count())] == ["Culto de la Bruja",
+                                                                                   "Secta de la Bruja"]
+        box["use"]()
+        assert window.tr_glossary == [["Witch Cult", "Culto de la Bruja"]], window.tr_glossary
+        assert window.review_state()["tr_glossary"] == [["Witch Cult", "Culto de la Bruja"]]
+        visible = [i for i in table.get_children() if not table.rows[i].isHidden()]
+        assert [table.set(i, "orig") for i in visible] == [t for t in texts if "gate" in t], visible
+        assert set(table.selection()) == set(visible) and "2 párrafos" in parts["status"].text(), parts["status"].text()
+        # El glosario ya pide la forma elegida: los otros quedan «Dudoso», listos para «Retraducir selección»
+        assert {table.set(i, "state") for i in visible} == {"Dudoso"}
+        chips["all"].click()
+        assert not any(item.isHidden() for item in table.rows.values())
+        del infos[:]
+        parts["done"].clear()
+        parts["merge"]({translate.key(a): b.replace("Secta", "Culto") for a, b in texts.items()})
+        parts["coherence"]()
+        assert infos and "varias formas" in infos[-1], infos
+        parts["close"]()
+    finally:
+        app.messagebox.showinfo = saved_info
+        window.close()
+
+
 def test_window_translate_languages_per_paragraph():
     """Cada párrafo guarda de qué idioma a cuál se tradujo: la fila lo dice («ES → JA», en color de aviso si no es el
     destino elegido), el filtro de idiomas encuentra los traducidos por error, «Retraducir selección» con Ctrl+A solo

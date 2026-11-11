@@ -4650,7 +4650,7 @@ class App:
             chip = QPushButton(label)
             chip.setObjectName("chip")
             chip.setCheckable(True)
-            chip.clicked.connect(lambda _=False: show_rows())
+            chip.clicked.connect(lambda _=False: (work.update(only=None), show_rows()))
             chip_group.addButton(chip)
             chips[key] = chip
         chips["all"].setChecked(True)
@@ -4708,9 +4708,12 @@ class App:
         run_btn = _button("Traducir", lambda: run(), "primary")
         again_btn = _button("Retraducir selección", lambda: run(again=True))
         apply_btn = _button("Aplicar al libro", lambda: apply())
-        column.addLayout(_row(run_btn, again_btn, 1, apply_btn, _button("Cerrar", lambda: close())))
+        coherence_btn = _button("Coherencia…", lambda: coherence())
+        coherence_btn.setToolTip("Nombres y términos del original que la traducción escribe de varias formas")
+        column.addLayout(_row(run_btn, again_btn, coherence_btn, 1, apply_btn, _button("Cerrar", lambda: close())))
+        # only: claves que se dejan a la vista (las de «Coherencia…»), hasta que se pulsa un filtro
         work = {"thread": None, "stop": None, "queue": None, "shown": None, "again": set(), "engine": "", "count": 0,
-                "total": 0, "closing": False, "langs": None}
+                "total": 0, "closing": False, "langs": None, "only": None}
         rows = {}  # fila (índice del bloque) -> (clave, prefijo, texto original)
         index = {}  # clave -> sus filas: un lote no recorre la lista entera (miles de párrafos)
         hints = {"google": "Gratis y sin cuenta, frase a frase: los diálogos salen más literales. Si Google corta por "
@@ -4822,10 +4825,11 @@ class App:
         def show_rows():
             """Solo las filas del filtro elegido que tienen lo buscado, en el original o en la traducción."""
             want = next(key for key, chip in chips.items() if chip.isChecked())
-            query, pair = search.text().strip().lower(), lang_filter.currentData()
+            query, pair, only = search.text().strip().lower(), lang_filter.currentData(), work["only"]
             for iid, item in table.rows.items():
                 state = item.text(2)
                 shown = want == "all" or state == want or (want == "done" and state in ("Traducido", "Aplicado"))
+                shown = shown and (only is None or rows[iid][0] in only)
                 shown = shown and (pair is None or ">".join(langs(rows[iid][0]) or ()) == pair)
                 item.setHidden(not shown or bool(query and query not in item.text(0).lower()
                                                   and query not in item.text(1).lower()))
@@ -4897,7 +4901,8 @@ class App:
             progress.setVisible(on)
             progress.setRange(0, max(1, work["total"]))
             progress.setValue(work["count"])
-            for widget in (again_btn, src, dst, engine, scope, model, models_btn, base, api_key, glossary_btn):
+            for widget in (again_btn, src, dst, engine, scope, model, models_btn, base, api_key, glossary_btn,
+                           coherence_btn):
                 widget.setEnabled(not on)
             count()
 
@@ -5075,6 +5080,74 @@ class App:
             status.setText(f"{convert.counted(changed, 'párrafo cambiado', 'párrafos cambiados')} en el libro; el idioma "
                            f"pasa a {dst.currentText()}. Ctrl+Z en la lista lo deshace."
                            if changed else "Nada que cambiar: lo traducido ya está en el libro.")
+
+        def coherence():
+            """Términos del original que la traducción escribe de varias formas: se elige una, entra en el glosario de
+            la serie y la lista deja a la vista los párrafos con las otras, para retraducirlos o corregirlos. No se
+            cambia el texto solo: el género y el número romperían la frase."""
+            keep()
+            pairs = list({code: (code, text, done[code]["text"])
+                          for _, _, text in translate.units(self.book, 0, len(self.book.blocks))
+                          if (code := translate.key(text)) in done}.values())
+            found = translate.inconsistent(pairs, self.tr_glossary)
+            if not found:
+                messagebox.showinfo("Coherencia", "No se ve ningún término traducido de varias formas."
+                                    if pairs else "Aún no hay nada traducido que comparar.", parent=win)
+                return
+            box, inner = self.dialog("Coherencia de términos", modal=True)
+            box.resize(780, 520)
+            note = _label("Estos nombres y términos del original están traducidos de más de una forma. Elige uno, "
+                          "la forma que debe quedar y «Usar esta forma»: entra en el glosario y la lista te deja "
+                          "los párrafos con las otras formas para retraducirlos o corregirlos.", "muted")
+            note.setWordWrap(True)
+            inner.addWidget(note)
+            terms = qtk.RowList(("term", "forms"), {"term": "Término del original", "forms": "Cómo está traducido"},
+                                {"term": 220}, stretch="forms")
+            for n, (term, forms) in enumerate(found):
+                terms.insert("", "end", iid=str(n), values=(term, " · ".join(f"«{f}» {len(keys)}" for f, keys in forms)))
+            inner.addWidget(terms, 1)
+            choice = QComboBox()
+            choice.setMinimumContentsLength(30)
+
+            def show_forms():
+                choice.clear()
+                for iid in terms.selection()[:1]:
+                    choice.addItems([form for form, _ in found[int(iid)][1]])
+
+            def use():
+                if not terms.selection() or choice.currentIndex() < 0:
+                    return
+                term, forms = found[int(terms.selection()[0])]
+                self.tr_glossary = [pair for pair in self.tr_glossary if pair[0] != term] + [[term, choice.currentText()]]
+                self.save_review()  # el glosario va con la serie: que no dependa de otro guardado
+                others = {k for n, (_, keys) in enumerate(forms) if n != choice.currentIndex() for k in keys}
+                box.close()
+                if scope.currentData() is not None:  # los párrafos pueden estar en cualquier capítulo
+                    scope.setCurrentIndex(0)
+                    fill()
+                else:
+                    refresh(set(done))  # el término nuevo deja en «Dudoso» los que no lo siguen
+                work["only"] = others
+                chips["all"].setChecked(True)
+                search.clear()
+                lang_filter.setCurrentIndex(0)
+                show_rows()
+                table.clearSelection()
+                shown = [iid for iid, item in table.rows.items() if not item.isHidden()]
+                for iid in shown:
+                    table.rows[iid].setSelected(True)
+                if shown:
+                    table.see(shown[0])
+                status.setText(f"{convert.counted(len(shown), 'párrafo', 'párrafos')} con otra forma de «{term}»: pulsa "
+                               f"«Retraducir selección» o corrígelos a mano. Un filtro vuelve a mostrar todos.")
+
+            terms.selected.connect(show_forms)
+            terms.selection_set("0")
+            show_forms()
+            inner.addLayout(_row(QLabel("Forma que debe quedar:"), choice, 1,
+                                 _button("Usar esta forma", use, "primary"), _button("Cerrar", box.close)))
+            box.show()
+            win.coherence_box = {"box": box, "table": terms, "forms": choice, "use": use}
 
         def edit_glossary():
             """Lo que guía a la IA, en pestañas: glosario (tabla con las veces que sale cada término), personajes (una
@@ -5378,7 +5451,7 @@ class App:
                      "scope": scope, "dst": dst, "src": src, "key": api_key, "status": status, "work": work, "done": done,
                      "glossary": edit_glossary, "close": close, "merge": merge, "pdf": pdf, "book": self.book,
                      "model": model, "models": find_models, "chips": chips, "search": search, "step": step,
-                     "doubt": doubt, "progress": progress, "langs": lang_filter}
+                     "doubt": doubt, "progress": progress, "langs": lang_filter, "coherence": coherence}
         win.show()
         return win
 
