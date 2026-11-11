@@ -7800,10 +7800,12 @@ def test_window_translate_review():
         table.selection_set(first)
         root.update()
         assert "Revisión de la IA: Omite la segunda frase." in parts["doubt"].text()
-        assert "Propone: ARREGLADO ES:" in parts["doubt"].text() and not parts["accept_btn"].isHidden()
+        assert parts["fix"].toPlainText().startswith("ARREGLADO ES:") and not parts["fix"].isHidden()
+        assert not parts["accept_btn"].isHidden()
         parts["accept"]()
         assert table.set(first, "trans").startswith("ARREGLADO ES:") and table.set(first, "state") == "Revisado"
-        assert parts["accept_btn"].isHidden() and parts["translation"].toPlainText().startswith("ARREGLADO")
+        assert parts["accept_btn"].isHidden() and parts["fix"].isHidden()
+        assert parts["translation"].toPlainText().startswith("ARREGLADO")
         del asked[:]
         parts["review"]()  # ya está todo revisado: no se gasta otra vez
         assert not asked and "sin revisar" in infos[-1], infos

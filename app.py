@@ -4770,7 +4770,7 @@ class App:
         search = QLineEdit()
         search.setPlaceholderText("Buscar en el original o en la traducción")
         search.setClearButtonEnabled(True)
-        search.setMinimumWidth(200)
+        search.setMinimumWidth(224)
         search.textChanged.connect(lambda _: show_rows())
         lang_filter = QComboBox()
         lang_filter.setMinimumContentsLength(20)
@@ -4778,7 +4778,7 @@ class App:
         lang_filter.setToolTip("Solo los párrafos traducidos de un idioma a otro: para encontrar los que se tradujeron "
                                "a un idioma por error y volver a traducirlos")
         lang_filter.activated.connect(lambda _: show_rows())
-        column.addLayout(_row(*chips.values(), 1, lang_filter, search))
+        column.addLayout(_row(*chips.values(), 1, search))  # el filtro de idiomas va abajo: con ocho filtros no cabe
         panes = QSplitter(Qt.Orientation.Vertical)
         column.addWidget(panes, 1)
         table = qtk.RowList(("orig", "trans", "state"), {"orig": "Original", "trans": "Traducción", "state": "Estado"},
@@ -4792,6 +4792,9 @@ class App:
         lower = QGridLayout(bottom)
         lower.setContentsMargins(0, 8, 0, 0)
         lower.setHorizontalSpacing(10)
+        for side in (0, 1):  # mitad y mitad: una corrección larga con sus botones no estrecha el original
+            lower.setColumnStretch(side, 1)
+            lower.setColumnMinimumWidth(side, 300)
         original_box, translation_box = QPlainTextEdit(), QPlainTextEdit()
         for pane in (original_box, translation_box):
             font = pane.font()
@@ -4816,14 +4819,25 @@ class App:
         lower.addWidget(_label("ORIGINAL", "muted"), 0, 0)
         lower.addWidget(_label("TRADUCCIÓN · SE CORRIGE AQUÍ", "muted"), 0, 1)
         lower.addWidget(original_box, 1, 0)
-        lower.addWidget(translation_box, 1, 1)
+        # La corrección que propone la IA revisora, bajo la traducción: en su caja, una larga se lee entera
+        fix_box = QPlainTextEdit()
+        fix_box.setReadOnly(True)
+        fix_box.setFont(translation_box.font())
+        fix_box.setMaximumHeight(84)
+        fix_box.setToolTip("Corrección que propone la IA: «Aceptar corrección» la pone como traducción")
+        fix_box.hide()
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        right.addWidget(translation_box, 1)
+        right.addWidget(fix_box)
+        lower.addLayout(right, 1, 1)
         # Lo que propone la IA revisora para el párrafo elegido: se acepta o se da por bueno lo que hay
         accept_btn = _button("Aceptar corrección", lambda: settle(True), "primary")
         discard_btn = _button("Descartar", lambda: settle(False))
         discard_btn.setToolTip("La traducción se queda como está y cuenta como revisada")
         accept_btn.hide()
         discard_btn.hide()
-        lower.addLayout(_row(prev_btn, next_btn, 1), 2, 0)
+        lower.addLayout(_row(prev_btn, next_btn, 1, lang_filter), 2, 0)
         fixes = _row(doubt, accept_btn, discard_btn)
         fixes.setStretch(0, 1)
         lower.addLayout(fixes, 2, 1)
@@ -5203,17 +5217,18 @@ class App:
             """Bajo la traducción elegida, por qué merece otro vistazo: lo dudoso y sus avisos de español."""
             iid = work["shown"]
             lines, state = [], table.set(iid, "state") if iid in rows else ""
-            for button in (accept_btn, discard_btn):
-                button.setVisible(state == "Con fallos")
+            for widget in (accept_btn, discard_btn, fix_box):
+                widget.setVisible(state == "Con fallos")
             if state == "Con fallos":
                 found = reviewed(rows[iid][0])
-                lines += ["Revisión de la IA: " + found["problem"], "Propone: " + found["fix"]]
+                lines.append("Revisión de la IA: " + found["problem"] + " Su corrección está bajo la traducción.")
+                fix_box.setPlainText(found["fix"])
             if state == "Dudoso":  # la IA ya lo repasó una vez y sigue así
                 lines.append("Dudoso: " + "; ".join(translate.doubts(
                     rows[iid][2], done[rows[iid][0]]["text"], dst.currentData(), self.tr_glossary)) + ".")
             if iid in rows:
                 lines += warnings.get(rows[iid][0], ())
-            doubt.setText("\n".join(("" if line.startswith("Propone: ") else "⚠ ") + line for line in lines))
+            doubt.setText("\n".join("⚠ " + line for line in lines))
             return lines
 
         def settle(accept):
@@ -5900,7 +5915,7 @@ class App:
                      "warnings": warnings, "check": check, "look": look, "spell": spell, "add_word": add_word,
                      "similar": similar_label, "similar_row": similar_row, "use_similar": use_similar,
                      "review": review, "accept": lambda: settle(True), "discard": lambda: settle(False),
-                     "accept_btn": accept_btn}
+                     "accept_btn": accept_btn, "fix": fix_box}
         win.show()
         return win
 
