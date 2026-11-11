@@ -2175,6 +2175,25 @@ def test_indexed_jpeg2000_illustration_is_not_noise():
     assert all(abs(v - 200) <= 8 for v in middle), middle
 
 
+def test_open_pdf_with_a_dangling_object_entry():
+    """Re Zero 3 y Megami 3: la última entrada de la tabla de objetos apunta a la palabra «xref», no a un objeto.
+    Mirar todos los objetos en busca de JPEG 2000 (open_pdf) daba «cannot find object» y el libro no abría."""
+    objects = [b"<</Type/Catalog/Pages 2 0 R>>", b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+               b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]>>"]
+    data, offsets = b"%PDF-1.5\r\n", []
+    for n, body in enumerate(objects, 1):
+        offsets.append(len(data))
+        data += b"%d 0 obj\r\n%s\r\nendobj\r\n" % (n, body)
+    xref = len(data)
+    data += (b"xref\r\n0 5\r\n0000000000 65535 f\r\n" + b"".join(b"%010d 00000 n\r\n" % o for o in offsets)
+             + b"%010d 00000 n\r\n" % xref  # el objeto 4 «está» donde empieza la tabla
+             + b"trailer\r\n<</Size 5/Root 1 0 R>>\r\nstartxref\r\n%d\r\n%%%%EOF\r\n" % xref)
+    path = TMP / "objeto-perdido.pdf"
+    path.write_bytes(data)
+    with convert.open_pdf(path) as doc:
+        assert doc.page_count == 1
+
+
 def test_preview_illustration_fits_its_page():
     """Vista previa del EPUB (MuPDF): no entiende max-height, y una ilustración más alta que la página pasaba
     entera a la siguiente, dejando la primera en blanco con un borde de la imagen abajo (Eminence 7, pág. 23).

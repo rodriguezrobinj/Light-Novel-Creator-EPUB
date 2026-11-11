@@ -2372,13 +2372,16 @@ def open_pdf(path):
     doc = pymupdf.open(path)
     if doc.is_pdf and not doc.needs_pass:
         for xref in range(1, doc.xref_length()):
-            if doc.xref_get_key(xref, "Filter")[1] != "/JPXDecode":
+            try:
+                if doc.xref_get_key(xref, "Filter")[1] != "/JPXDecode":
+                    continue
+                kind, value = doc.xref_get_key(xref, "ColorSpace")
+                if kind == "xref":
+                    value = doc.xref_object(int(value.split()[0]), compressed=True)
+                if "/Indexed" in value and b"pclr" in doc.xref_stream_raw(xref)[:4096]:  # la paleta va en la cabecera
+                    doc.xref_set_key(xref, "ColorSpace", "null")
+            except Exception:  # Re Zero 3: una entrada de la tabla sin objeto detrás; el libro abre igual
                 continue
-            kind, value = doc.xref_get_key(xref, "ColorSpace")
-            if kind == "xref":
-                value = doc.xref_object(int(value.split()[0]), compressed=True)
-            if "/Indexed" in value and b"pclr" in doc.xref_stream_raw(xref)[:4096]:  # la paleta va en la cabecera
-                doc.xref_set_key(xref, "ColorSpace", "null")
     return doc
 
 
