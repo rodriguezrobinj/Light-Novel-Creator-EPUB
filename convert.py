@@ -729,9 +729,11 @@ def _ornaments(page, rows, infos, before=()):
                and not any(all(abs(a - b) < 1 for a, b in zip(info["bbox"], box)) for box in before))
         above = max((r for r in rows if r.y < y0), key=lambda r: r.y, default=None)
         # Eminence 7: el adorno puede cerrar la página (la escena sigue en la siguiente, pág. 58); la raya justo
-        # bajo un título («Afterword», pág. 246) es su subrayado
+        # bajo un título («Afterword», pág. 246) o pegada bajo su línea (el enlace de los créditos de Re Zero 6)
+        # es su subrayado
+        underline = above and (above.heading or y0 - above.y < 0.5 * above.size)
         if (x1 - x0 < 0.3 * width and y1 - y0 < 0.1 * height and abs((x0 + x1) / 2 - width / 2) < 0.15 * width
-                and (top or BAND * height < (y0 + y1) / 2 < (1 - BAND) * height and above and not above.heading)
+                and (top or BAND * height < (y0 + y1) / 2 < (1 - BAND) * height and above and not underline)
                 # The World's Strongest Witch: la flecha de «Lv. 2 → Lv. 3» y el ♡ o ♪ al final de una línea corta son
                 # imágenes en la línea (una línea base cruza su altura); la línea que empieza justo debajo de un adorno
                 # (Kage 5, pág. 99) no cuenta
