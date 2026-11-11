@@ -7139,6 +7139,96 @@ def test_translate_doubts_and_second_pass():
         translate._post = original
 
 
+def test_translate_inconsistent_terms():
+    """Un término del original traducido de dos formas sale con cada forma y sus párrafos; un nombre que no se
+    traduce, un plural o una mayúscula distinta y un término dentro de otro más largo no son incoherencias."""
+    import translate
+
+    pairs = [(f"a{n}", f"Then the Witch Cult attacked village {n}.", f"Entonces el Culto de la Bruja atacó la aldea {n}.")
+             for n in range(8)]
+    pairs += [(f"b{n}", f"Nobody saw the Witch Cult near gate {n}.", f"Nadie vio a la Secta de la Bruja junto al portón {n}.")
+              for n in range(3)]
+    pairs += [(f"c{n}", f"Later Subaru ran to house {n}.", f"Después Subaru corrió a la casa {n}.") for n in range(6)]
+    pairs += [(f"d{n}", f"He feared the Witch on day {n}.", f"Temía a la Bruja el día {n}.") for n in range(4)]
+    pairs += [(f"e{n}", f"All the Knights left on night {n}.", f"Todos los {'caballeros' if n % 2 else 'Caballero'} "
+               f"se fueron la noche {n}.") for n in range(4)]
+    found = dict(translate.inconsistent(pairs))
+    assert list(found) == ["Witch Cult"], found
+    forms = found["Witch Cult"]
+    assert [(f, len(keys)) for f, keys in forms] == [("Culto de la Bruja", 8), ("Secta de la Bruja", 3)], forms
+    assert forms[1][1] == ["b0", "b1", "b2"]
+    assert translate.inconsistent(pairs[:8]) == []  # una sola forma
+    # El glosario también da términos, aunque empiecen frase o vayan en minúscula
+    ends = ["fluye por el río", "llena la sala", "arde en su mano", "se agota pronto", "vuelve despacio", "brilla hoy"]
+    low = [(f"g{n}", f"mana does thing number {n}.", f"El {'maná' if n < 3 else 'poder mágico'} {end}.")
+           for n, end in enumerate(ends)]  # frases distintas, como en un libro: solo el término se repite
+    assert translate.inconsistent(low) == []
+    assert [t for t, _ in translate.inconsistent(low, [["mana", "maná"]])] == ["mana"]
+
+
+def test_translate_quality_of_translations():
+    """Los avisos de texto del informe de calidad, sobre las traducciones: un signo sin pareja o inglés sin traducir
+    salen con la clave de su párrafo; los de estructura (número suelto, línea repetida, párrafo partido) no."""
+    import translate
+
+    pairs = [("a", "—¿Adónde vas?"), ("b", "Abrió la puerta (y no la cerró."), ("c", "1234"),
+             ("d", "empieza en minúscula."), ("e", "He walked to the door and then he was gone with the wind."),
+             ("f", "Cartel"), ("g", "Cartel"), ("h", "Cartel"), ("i", "Dijo <i>hola</i> sin más.[Nota: un saludo]")]
+    found = translate.quality(pairs)
+    assert set(found) == {"b", "e"}, found
+    assert found["b"][0][0] == "Signo sin pareja" and found["e"][0][0] == "Texto sin traducir", found
+    assert "e" not in translate.quality(pairs, lang="en")
+    assert translate.quality([]) == {}
+
+
+def test_translate_review():
+    """La IA revisora recibe cada original con su traducción, el glosario y la ficha, y solo cuenta lo que marca con
+    una corrección distinta de lo que hay; la corrección conserva las marcas. Una respuesta rota parte el lote, y
+    con un solo párrafo se da por no revisado. Un motor que no es IA no revisa."""
+    import json
+    import translate
+
+    calls, replies = [], []
+
+    def fake(url, headers, body):
+        calls.append(body["messages"])
+        reply = replies.pop(0) if replies else {}
+        return {"choices": [{"message": {"content": reply if isinstance(reply, str) else json.dumps(reply)}}]}
+
+    pairs = [("He ran.", "Corrió."), ("She fell. Then she cried.", "Ella se cayó."), ("He <i>ran</i> away.", "Huyó.")]
+    original = translate._post
+    translate._post = fake
+    try:
+        replies.append({"2": {"problem": "Omite  la segunda frase.", "fix": "Ella se cayó. Luego lloró."}})
+        out = translate.review("DeepSeek", pairs, "en", "es", api_key="k", glossary=[["Witch", "Bruja"]],
+                               style={"notes": "Emilia: chica, formal"})
+        assert out == [None, {"problem": "Omite la segunda frase.", "fix": "Ella se cayó. Luego lloró."}, None], out
+        system, user = calls[0][0]["content"], calls[0][1]["content"]
+        assert "Witch = Bruja" in system and "Emilia: chica, formal" in system and "editor" in system
+        sent = json.loads(user[user.index("Paragraphs:") + len("Paragraphs:"):])
+        assert sent["2"] == {"source": "She fell. Then she cried.", "translation": "Ella se cayó."}, sent
+        # Lo que no sirve se ignora: número que no existe, sin corrección, corrección igual a lo que hay
+        replies.append({"9": {"problem": "x", "fix": "y"}, "1": {"problem": "sin arreglo"},
+                        "2": {"problem": "igual", "fix": " Ella se  cayó. "}, "3": "mal"})
+        assert translate.review("DeepSeek", pairs, "en", "es", api_key="k") == [None, None, None]
+        # Las marcas de la corrección, arregladas como las de una traducción
+        replies.append({"3": {"fix": "< i>Huyó</ I> lejos."}})
+        out = translate.review("DeepSeek", pairs, "en", "es", api_key="k")
+        assert out[2] == {"problem": "La IA propone otra traducción.", "fix": "<i>Huyó</i> lejos."}, out
+        # Respuesta rota: el lote se parte; lo que sigue sin entenderse queda sin revisar
+        del calls[:]
+        replies[:] = ["no es JSON", "tampoco", {"1": {"problem": "Falta el sujeto.", "fix": "Él huyó."}}]
+        out = translate.review("DeepSeek", pairs[:1] + pairs[2:], "en", "es", api_key="k")
+        assert out == [False, {"problem": "Falta el sujeto.", "fix": "Él huyó."}] and len(calls) == 3, (out, len(calls))
+        try:
+            translate.review("Google (gratis, sin clave)", pairs, "en", "es")
+            assert False, "Google no revisa"
+        except translate.TranslateError as e:
+            assert "Solo una IA" in str(e)
+    finally:
+        translate._post = original
+
+
 def test_translate_style_chapter_and_rejected_params():
     """La instrucción lleva la variante del español, los honoríficos, la ficha de personajes y las correcciones a
     mano como ejemplo; el capítulo entero va al final de la instrucción (en Claude, marcado para la caché) salvo que
@@ -7432,6 +7522,335 @@ def test_window_translate_chapters_style_and_doubts():
         parts["close"]()
     finally:
         translate._post = original
+        window.close()
+
+
+def test_window_translate_coherence():
+    """«Coherencia…»: un término traducido de dos formas sale con ellas; al elegir una entra en el glosario de la
+    serie y la lista deja a la vista, elegidos, los párrafos con la otra. Sin nada incoherente, lo dice."""
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    texts = {f"Then the Witch Cult attacked village {n}.": f"Entonces el Culto de la Bruja atacó la aldea {n}."
+             for n in range(5)}
+    texts |= {f"Nobody saw the Witch Cult near gate {n}.": f"Nadie vio a la Secta de la Bruja junto al portón {n}."
+              for n in range(2)}
+    window.book.blocks += [convert.Block("p", 1, t) for t in texts]
+    infos, saved_info = [], app.messagebox.showinfo
+    app.messagebox.showinfo = lambda title, message, **_: infos.append(message)
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        table, chips = parts["table"], parts["chips"]
+        parts["coherence"]()
+        assert infos and "nada traducido" in infos[-1], infos
+        parts["merge"]({translate.key(a): b for a, b in texts.items()})
+        parts["coherence"]()
+        box = win.coherence_box
+        assert [box["table"].set(i, "term") for i in box["table"].get_children()] == ["Witch Cult"]
+        assert "«Culto de la Bruja» 5 · «Secta de la Bruja» 2" in box["table"].set("0", "forms")
+        assert [box["forms"].itemText(n) for n in range(box["forms"].count())] == ["Culto de la Bruja",
+                                                                                   "Secta de la Bruja"]
+        box["use"]()
+        assert window.tr_glossary == [["Witch Cult", "Culto de la Bruja"]], window.tr_glossary
+        assert window.review_state()["tr_glossary"] == [["Witch Cult", "Culto de la Bruja"]]
+        visible = [i for i in table.get_children() if not table.rows[i].isHidden()]
+        assert [table.set(i, "orig") for i in visible] == [t for t in texts if "gate" in t], visible
+        assert set(table.selection()) == set(visible) and "2 párrafos" in parts["status"].text(), parts["status"].text()
+        # El glosario ya pide la forma elegida: los otros quedan «Dudoso», listos para «Retraducir selección»
+        assert {table.set(i, "state") for i in visible} == {"Dudoso"}
+        chips["all"].click()
+        assert not any(item.isHidden() for item in table.rows.values())
+        del infos[:]
+        parts["done"].clear()
+        parts["merge"]({translate.key(a): b.replace("Secta", "Culto") for a, b in texts.items()})
+        parts["coherence"]()
+        assert infos and "varias formas" in infos[-1], infos
+        parts["close"]()
+    finally:
+        app.messagebox.showinfo = saved_info
+        window.close()
+
+
+def test_window_translate_spanish_warnings():
+    """Con destino español, cada traducción lleva sus avisos del informe de calidad y las palabras que no están en
+    el diccionario: la tarjeta dice cuántos, el filtro «Con avisos» las junta y al elegirla se leen. Una palabra
+    añadida al diccionario de la serie deja de avisar. Con otro destino no hay avisos."""
+    import time
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    window.book.blocks += [convert.Block("p", 1, "He opened the door and did not close it."),
+                           convert.Block("p", 1, "She wrote a single wrong word in the letter.")]
+    started, saved_spell = [], app._start_spell_process
+    app._start_spell_process = lambda: started.append(1)  # sin el proceso real: lo que diría se pone a mano
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        table, chips = parts["table"], parts["chips"]
+        assert parts["dst"].currentData() == "es"
+        bad, typo = (next(i for i in table.get_children() if word in table.set(i, "orig")) for word in ("door", "letter"))
+        parts["merge"]({translate.key(table.set(bad, "orig")): "Abrió la puerta (y no la cerró.",
+                        translate.key(table.set(typo, "orig")): "Escribió una sola palbra mal en la carta."})
+        parts["check"](later=False)
+        assert started, "con traducciones al español, la ortografía arranca"
+        assert table.rows[bad].data(2, app.WARN_ROLE) == 1 and table.rows[typo].data(2, app.WARN_ROLE) is None
+        assert chips["warn"].text() == "Con avisos 1", chips["warn"].text()
+        chips["warn"].click()
+        assert [i for i in table.get_children() if not table.rows[i].isHidden()] == [bad]
+        chips["all"].click()
+        table.selection_set(bad)
+        root.update()
+        assert "⚠ Signo sin pareja" in parts["doubt"].text(), parts["doubt"].text()
+        # Lo que dice el proceso de ortografía: la palabra se subraya y la fila avisa
+        parts["spell"]["unknown"].add("palbra")
+        parts["check"](later=False)
+        assert parts["look"].unknown == {"palbra"} and table.rows[typo].data(2, app.WARN_ROLE) == 1
+        assert parts["warnings"][translate.key(table.set(typo, "orig"))] == ["No está en el diccionario: «palbra»"]
+        assert chips["warn"].text() == "Con avisos 2"
+        parts["add_word"]("palbra")
+        assert "palbra" in window.words and table.rows[typo].data(2, app.WARN_ROLE) is None
+        assert parts["look"].unknown == set() and chips["warn"].text() == "Con avisos 1"
+        # Corregida a mano, el aviso se va (el informe nuevo llega del hilo)
+        parts["translation"].setPlainText("Abrió la puerta y no la cerró.")
+        table.selection_set(typo)
+        end = time.time() + 5
+        while table.rows[bad].data(2, app.WARN_ROLE) and time.time() < end:
+            root.update()
+            time.sleep(0.02)
+        assert table.rows[bad].data(2, app.WARN_ROLE) is None and chips["warn"].text() == "Con avisos 0"
+        # A otro idioma, el español no opina
+        parts["translation"].setPlainText("Escribió (una sola palabra mal en la carta.")
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        parts["dst"].activated.emit(parts["dst"].currentIndex())
+        assert not parts["warnings"] and chips["warn"].text() == "Con avisos 0"
+        parts["close"]()
+    finally:
+        app._start_spell_process = saved_spell
+        window.close()
+
+
+def write_volume(folder, name, series, volume, done):
+    """Un tomo ya traducido, como lo deja la app: su revisión (serie y volumen) y su archivo de traducción."""
+    import json
+    folder.mkdir(parents=True, exist_ok=True)
+    pdf = folder / f"{name}.pdf"
+    (folder / f"{name}.lnepub.json").write_text(json.dumps({"series": series, "volume": volume}), encoding="utf-8")
+    (folder / f"{name}.lnepub.traduccion.json").write_text(
+        json.dumps({"src": "en", "dst": "es", "done": done}, ensure_ascii=False), encoding="utf-8")
+    return pdf
+
+
+def test_translation_memory_of_series():
+    """Lo traducido en otros tomos de la serie se encuentra en la misma carpeta y, apuntado al guardar, en cualquier
+    otra; lo corregido a mano gana; un tomo de otra serie, uno borrado o un archivo roto no estorban, y sin serie no
+    se lee ni se apunta nada. Un párrafo casi igual a uno de la memoria se reconoce; uno corto o distinto, no."""
+    import os
+    from time import time_ns
+    import app
+    import translate
+
+    saved_settings = app.SETTINGS
+    app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"
+    try:
+        here, there = TMP / f"memoria-{time_ns()}", TMP / f"memoria-otra-{time_ns()}"
+        entry = lambda text, hand=False: {"text": text, "hand": hand, "source": "Original of " + text}
+        own = write_volume(here, "Serie 03", "Mi Serie", "3", {"k1": entry("propia")})
+        write_volume(here, "Serie 01", "mi serie", "1", {"k1": entry("uno"), "k2": entry("dos a mano", True)})
+        write_volume(here, "Otra 01", "Otra Serie", "1", {"k1": entry("ajena"), "k9": entry("ajena")})
+        (here / "Rota.lnepub.json").write_text('{"series": "Mi Serie"}', encoding="utf-8")
+        (here / "Rota.lnepub.traduccion.json").write_text("{esto no es JSON", encoding="utf-8")
+        far = write_volume(there, "Serie 02", "Mi Serie", "2", {"k2": entry("dos nueva"), "k3": entry("tres")})
+        os.utime(far.with_name("Serie 02.lnepub.traduccion.json"), (2_000_000_000, 2_000_000_000))  # el más reciente
+
+        memory = app._series_memory(own, "Mi Serie")
+        assert {k: (v["text"], v["volume"]) for k, v in memory.items()} == {"k1": ("uno", "1"), "k2": ("dos a mano", "1")}
+        assert memory["k1"]["source"] == "Original of uno" and memory["k1"]["dst"] == "es"
+        app._remember_translation(far, "Mi Serie")
+        app._remember_translation(far, "Mi Serie")  # dos veces, una sola ruta
+        assert len(app._memory_index()["mi serie"]) == 1
+        memory = app._series_memory(own, " mi serie ")
+        assert {k: (v["text"], v["volume"]) for k, v in memory.items()} == {
+            "k1": ("uno", "1"), "k2": ("dos a mano", "1"), "k3": ("tres", "2")}, memory
+        far.with_name("Serie 02.lnepub.traduccion.json").unlink()
+        assert set(app._series_memory(own, "Mi Serie")) == {"k1", "k2"} and app._memory_index()["mi serie"] == []
+        assert app._series_memory(own, "") == {} and app._series_memory(own, "Nadie") == {}
+        app._remember_translation(own, "  ")
+        assert "" not in app._memory_index()
+    finally:
+        app.SETTINGS = saved_settings
+
+    old = "The knight drew his sword and looked at the dragon without any fear."
+    sources = [old, "Something completely different that shares almost nothing with it.", "Short."]
+    found = translate.similar("The knight drew her sword and looked at the dragon without fear.", sources)
+    assert found and found[0] == old and 0.9 < found[1] < 1, found
+    assert translate.similar("The weather was nice on that quiet morning in the village.", sources) is None
+    assert translate.similar("Short!", sources) is None and translate.similar(old, [old]) is None
+
+
+def test_window_translate_series_memory():
+    """Al abrir «Traducir» en un tomo de una serie, un párrafo ya traducido en otro tomo sale «De la serie» con su
+    traducción (y se guarda con este tomo); corregido pasa a «A mano». Un párrafo pendiente parecido a uno de otro
+    tomo lo dice, y «Usar esta» pone esa traducción para corregirla."""
+    from time import time_ns
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    window.book.blocks += [convert.Block("p", 1, "The knight drew his sword and looked at the dragon without any fear."),
+                           convert.Block("p", 1, "The princess opened the old gate and walked slowly into the garden.")]
+    same, near = (b.html for b in window.book.blocks[-2:])
+    older = near.replace("slowly", "quickly")
+    write_volume(TMP / f"memoria-ventana-{time_ns()}", "Tomo 5", "Serie de prueba", "5", {
+        translate.key(same): {"text": "El caballero desenvainó la espada y miró al dragón sin miedo.", "hand": False,
+                              "source": same},
+        translate.key(older): {"text": "La princesa abrió el viejo portón y entró deprisa en el jardín.", "hand": True,
+                               "source": older}})
+    app._remember_translation(next((TMP).glob("memoria-ventana-*/")) / "Tomo 5.pdf", "Serie de prueba")
+    window.series_var.set("Serie de prueba")
+    saved_spell = app._start_spell_process
+    app._start_spell_process = lambda: None
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        table, chips = parts["table"], parts["chips"]
+        row, other = (next(i for i in table.get_children() if table.set(i, "orig") == text) for text in (same, near))
+        assert table.set(row, "state") == "De la serie" and "desenvainó" in table.set(row, "trans")
+        assert chips["De la serie"].text() == "De la serie 1" and "ya traducido" in parts["status"].text()
+        saved = app._read_translation(window.pdf)["done"][translate.key(same)]
+        assert saved["memory"] and saved["source"] == same and not saved["hand"], saved
+        assert str(app._translation_path(window.pdf).resolve()) in app._memory_index()["serie de prueba"]
+        table.selection_set(other)
+        root.update()
+        assert table.set(other, "state") == "Pendiente" and not parts["similar_row"].isHidden()
+        assert "en el tomo 5" in parts["similar"].text() and "deprisa" in parts["similar"].text(), parts["similar"].text()
+        parts["use_similar"]()
+        assert table.set(other, "state") == "A mano" and "deprisa" in table.set(other, "trans")
+        table.selection_set(row)
+        root.update()
+        assert parts["similar_row"].isHidden(), "solo un párrafo pendiente busca parecidos"
+        parts["translation"].setPlainText("El caballero desenvainó su espada y miró al dragón sin temor.")
+        table.selection_set(other)
+        root.update()
+        assert table.set(row, "state") == "A mano" and chips["De la serie"].text() == "De la serie 0"
+        assert "memory" not in app._read_translation(window.pdf)["done"][translate.key(same)]
+        parts["close"]()
+    finally:
+        app._start_spell_process = saved_spell
+        window.close()
+
+
+def test_window_translate_review():
+    """«Revisar con IA»: lo traducido que la IA marca queda «Con fallos» con su problema y su corrección, y lo demás
+    «Revisado». «Aceptar corrección» la pone; «Descartar» deja lo que había; las dos lo dan por revisado. Una
+    traducción corregida a mano mientras llega su revisión se queda sin ella. Al volver a abrir, todo sigue."""
+    import json
+    import threading
+    import time
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    original = translate._post
+    translate._post = FakeAI()
+    flagged, gate, asked = [], threading.Event(), []
+    gate.set()
+
+    def reviewer(url, headers, body):
+        user = body["messages"][-1]["content"]
+        data = json.loads(user[user.index("Paragraphs:") + len("Paragraphs:"):])
+        asked.append(data)
+        gate.wait(10)
+        out = {n: {"problem": "Omite la segunda frase.", "fix": "ARREGLADO " + v["translation"]}
+               for n, v in data.items() if v["source"] in flagged}
+        return {"choices": [{"message": {"content": json.dumps(out)}}]}
+
+    infos, saved_info = [], app.messagebox.showinfo
+    app.messagebox.showinfo = lambda title, message, **_: infos.append(message)
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        table, chips = parts["table"], parts["chips"]
+        parts["src"].setCurrentIndex(parts["src"].findData("es"))
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        parts["review"]()  # Google, el motor por defecto, no revisa
+        assert infos and "Solo una IA" in infos[-1], infos
+        parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        parts["key"].setText("k")
+        parts["run"]()
+        wait_translation(root, win)
+        total = len(table.get_children())
+        first, second, third, fourth = [i for i in table.get_children() if len(table.set(i, "orig")) > 20][:4]
+        flagged.append(table.set(first, "orig"))
+        translate._post = reviewer
+        parts["review"]()
+        wait_translation(root, win)
+        assert all("source" in v and "translation" in v for data in asked for v in data.values())
+        states = {i: table.set(i, "state") for i in table.get_children()}
+        assert states[first] == "Con fallos" and set(states.values()) == {"Con fallos", "Revisado"}, states
+        assert chips["Con fallos"].text() == "Con fallos 1" and chips["done"].text() == f"Traducidos {total - 1}"
+        assert "1 párrafo con fallos" in parts["status"].text(), parts["status"].text()
+        table.selection_set(first)
+        root.update()
+        assert "Revisión de la IA: Omite la segunda frase." in parts["doubt"].text()
+        assert parts["fix"].toPlainText().startswith("ARREGLADO ES:") and not parts["fix"].isHidden()
+        assert not parts["accept_btn"].isHidden()
+        parts["accept"]()
+        assert table.set(first, "trans").startswith("ARREGLADO ES:") and table.set(first, "state") == "Revisado"
+        assert parts["accept_btn"].isHidden() and parts["fix"].isHidden()
+        assert parts["translation"].toPlainText().startswith("ARREGLADO")
+        del asked[:]
+        parts["review"]()  # ya está todo revisado: no se gasta otra vez
+        assert not asked and "sin revisar" in infos[-1], infos
+
+        def choose(*iids):
+            table.clearSelection()
+            for iid in iids:
+                table.rows[iid].setSelected(True)
+            root.update()
+
+        # Elegidos dos o más, se revisan otra vez; «Descartar» deja la traducción como estaba
+        flagged[:] = [table.set(second, "orig")]
+        choose(second, third)
+        parts["review"]()
+        wait_translation(root, win)
+        assert sum(len(data) for data in asked) == 2 and table.set(second, "state") == "Con fallos"
+        before = table.set(second, "trans")
+        table.selection_set(second)
+        root.update()
+        parts["discard"]()
+        assert table.set(second, "trans") == before and table.set(second, "state") == "Revisado"
+
+        # Corregida a mano mientras la IA la mira: su revisión ya no vale
+        flagged[:] = [table.set(third, "orig"), table.set(fourth, "orig")]
+        gate.clear()
+        choose(third, fourth)
+        parts["review"]()
+        table.selection_set(third)
+        root.update()
+        parts["translation"].setPlainText("Corrected by hand in the meantime.")
+        table.selection_set(first)
+        root.update()
+        gate.set()
+        wait_translation(root, win)
+        assert table.set(third, "state") == "A mano" and table.set(fourth, "state") == "Con fallos"
+        assert "review" not in parts["done"][translate.key(table.set(third, "orig"))]
+        parts["close"]()
+        again = window.translate_book()  # la revisión se guarda con la traducción
+        rows = again.parts["table"]
+        assert [rows.set(i, "state") for i in (first, second, third, fourth)] == [
+            "Revisado", "Revisado", "A mano", "Con fallos"]
+        again.parts["close"]()
+    finally:
+        translate._post = original
+        app.messagebox.showinfo = saved_info
         window.close()
 
 
