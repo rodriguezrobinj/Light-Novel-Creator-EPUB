@@ -1,5 +1,6 @@
 """Traducción automática del libro, párrafo a párrafo, sin interfaz: Google (gratis), DeepL o una IA."""
 import base64
+import collections
 import ctypes
 import hashlib
 import html
@@ -173,6 +174,100 @@ def _stem(word):
     """Raíz sin género ni número: «Encantado» vale como «Encantadas», «Guugelheit» como «los Guugelheit»."""
     word = word.removesuffix("s")
     return word[:-1] if len(word) > 4 and word[-1] in "aoe" else word
+
+
+WORD = re.compile(r"[^\W\d_][\w'’-]*")
+KATAKANA = re.compile(r"[ァ-ヺー]{2,}")
+SENTENCE_START = set('.!?…"“”«»—–:;([¿¡')  # tras esto, la mayúscula es de empezar frase, no de nombre
+# Palabras que no empiezan ni acaban la forma de un término: «la Secta de la Bruja» es «Secta de la Bruja»
+BORDER = ARTICLES | {"de", "del", "al", "y", "e", "en", "of", "and", "to", "in"}
+LINKS = {"of", "the", "de", "no"}  # palabras en minúscula dentro de un nombre: «Cult of Diablos»
+POSSESSIVE = re.compile(r"['’]s$")
+DICE = 0.5  # coincidencia mínima entre un término y una forma para darla por su traducción
+
+
+def _terms(source):
+    """Términos de un párrafo original que merece la pena seguir: rachas de hasta 3 palabras con mayúscula que no
+    empiezan frase (nombres, lugares, técnicas) y palabras en katakana."""
+    plain = TAG.sub("", source)
+    found, run, links, last = set(KATAKANA.findall(plain)), [], [], 0
+
+    def close():
+        if run and (len(run) > 1 or len(run[0]) >= 3):
+            found.add(" ".join(run))
+        run.clear()
+        links.clear()
+
+    for m in WORD.finditer(plain):
+        word, before = POSSESSIVE.sub("", m.group(0)), plain[:m.start()].rstrip()
+        if run and plain[last:m.start()] != " ":
+            close()
+        capital = word[:1].isupper() and word.replace("’", "'").split("'")[0] != "I"  # «I’m» no es un nombre
+        if capital and (run or (before and before[-1] not in SENTENCE_START)) and len(run) + len(links) < 5:
+            run += links + [word]  # «Cult of Diablos»: el enlace entra si lo sigue otra mayúscula
+            del links[:]
+        elif run and not links and word in LINKS:
+            links.append(word)
+        else:
+            close()
+        if m.group(0) != word:  # tras un posesivo empieza otra cosa: «Lalanoa’s Sword»
+            close()
+        last = m.end()
+    close()
+    return found
+
+
+def _grams(text):
+    """{n-grama de raíces: cómo está escrito} de una traducción, de 1 a 4 palabras, sin artículos en los bordes."""
+    words, out = WORD.findall(TAG.sub("", text)), {}
+    low = [w.lower() for w in words]
+    for i in range(len(words)):
+        if low[i] in BORDER:
+            continue
+        for j in range(i + 1, min(i + 4, len(words)) + 1):
+            if low[j - 1] not in BORDER:
+                out.setdefault(tuple(_stem(w) for w in low[i:j]), " ".join(words[i:j]))
+    return out
+
+
+def inconsistent(pairs, glossary=()):
+    """Términos del original traducidos de varias formas: [(término, [(forma, [claves de sus párrafos])])], cada uno
+    con sus formas de más a menos usada. pairs: [(clave, original, traducción)]. Sin IA: la forma de un término es
+    el grupo de palabras que más coincide con él (Dice) en las traducciones de los párrafos donde sale."""
+    pairs = [p for p in pairs if p[2].strip()]
+    seen = collections.Counter(t for _, source, _ in pairs for t in _terms(source))
+    terms = {t for t, n in seen.items() if n >= 3} | {a.strip() for a, b in glossary if a.strip() and b.strip()}
+    grams = [_grams(text) for _, _, text in pairs]
+    total = collections.Counter(g for found in grams for g in found)
+    out = []
+    for term in terms:
+        longer = [t for t in set(seen) | terms if t != term and term in t]  # «Witch» no cuenta donde dice «Witch Cult»
+        cut = re.compile("|".join(sorted(map(re.escape, longer), key=len, reverse=True))) if longer else None
+        word = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)")
+        left = {n for n, (_, source, _) in enumerate(pairs)
+                if term in source and word.search(cut.sub(" ", source) if cut else source)}
+        if len(left) < 3:
+            continue
+        forms, proper = [], term[:1].isupper()
+        while len(left) >= 2:
+            here = collections.Counter(g for n in left for g in grams[n])
+            scored = {g: 2 * n / (len(left) + total[g]) for g, n in here.items() if n >= 2}
+            best = max(scored.values(), default=0)
+            if best < DICE:
+                break
+            written = {g: next(grams[n][g] for n in left if g in grams[n]) for g, score in scored.items()
+                       if score >= max(DICE, 0.8 * best)}
+            # De las que casi empatan, la que más mayúsculas conserva (un nombre las lleva también traducido) y la más
+            # larga: «Culto de la Bruja» antes que «Bruja», que comparten las dos formas
+            gram = max(written, key=lambda g: (sum(w[:1].isupper() for w in written[g].split()) if proper else 0,
+                                               len(g), scored[g]))
+            mine = sorted(n for n in left if gram in grams[n])
+            written = collections.Counter(grams[n][gram] for n in mine).most_common(1)[0][0]
+            forms.append((written, [pairs[n][0] for n in mine]))
+            left -= set(mine)
+        if len(forms) >= 2:
+            out.append((term, sorted(forms, key=lambda f: -len(f[1]))))
+    return sorted(out, key=lambda t: (-sum(len(keys) for _, keys in t[1][1:]), t[0]))
 
 
 def _fix(source, out):

@@ -7139,6 +7139,33 @@ def test_translate_doubts_and_second_pass():
         translate._post = original
 
 
+def test_translate_inconsistent_terms():
+    """Un término del original traducido de dos formas sale con cada forma y sus párrafos; un nombre que no se
+    traduce, un plural o una mayúscula distinta y un término dentro de otro más largo no son incoherencias."""
+    import translate
+
+    pairs = [(f"a{n}", f"Then the Witch Cult attacked village {n}.", f"Entonces el Culto de la Bruja atacó la aldea {n}.")
+             for n in range(8)]
+    pairs += [(f"b{n}", f"Nobody saw the Witch Cult near gate {n}.", f"Nadie vio a la Secta de la Bruja junto al portón {n}.")
+              for n in range(3)]
+    pairs += [(f"c{n}", f"Later Subaru ran to house {n}.", f"Después Subaru corrió a la casa {n}.") for n in range(6)]
+    pairs += [(f"d{n}", f"He feared the Witch on day {n}.", f"Temía a la Bruja el día {n}.") for n in range(4)]
+    pairs += [(f"e{n}", f"All the Knights left on night {n}.", f"Todos los {'caballeros' if n % 2 else 'Caballero'} "
+               f"se fueron la noche {n}.") for n in range(4)]
+    found = dict(translate.inconsistent(pairs))
+    assert list(found) == ["Witch Cult"], found
+    forms = found["Witch Cult"]
+    assert [(f, len(keys)) for f, keys in forms] == [("Culto de la Bruja", 8), ("Secta de la Bruja", 3)], forms
+    assert forms[1][1] == ["b0", "b1", "b2"]
+    assert translate.inconsistent(pairs[:8]) == []  # una sola forma
+    # El glosario también da términos, aunque empiecen frase o vayan en minúscula
+    ends = ["fluye por el río", "llena la sala", "arde en su mano", "se agota pronto", "vuelve despacio", "brilla hoy"]
+    low = [(f"g{n}", f"mana does thing number {n}.", f"El {'maná' if n < 3 else 'poder mágico'} {end}.")
+           for n, end in enumerate(ends)]  # frases distintas, como en un libro: solo el término se repite
+    assert translate.inconsistent(low) == []
+    assert [t for t, _ in translate.inconsistent(low, [["mana", "maná"]])] == ["mana"]
+
+
 def test_translate_style_chapter_and_rejected_params():
     """La instrucción lleva la variante del español, los honoríficos, la ficha de personajes y las correcciones a
     mano como ejemplo; el capítulo entero va al final de la instrucción (en Claude, marcado para la caché) salvo que
