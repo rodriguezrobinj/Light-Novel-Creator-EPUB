@@ -1345,6 +1345,7 @@ class StatusLabel(QLabel):
 
 MARKUP = re.compile(r"</?[ib]>")  # cursiva y negrita de section_text: en la lista no se leen las etiquetas
 LANG_ROLE = Qt.ItemDataRole.UserRole + 7  # («EN → ES», otro destino que el elegido) de una fila de «Traducir»
+WARN_ROLE = Qt.ItemDataRole.UserRole + 8  # avisos de español de la traducción de una fila de «Traducir»
 
 
 def lang_code(code):
@@ -1419,20 +1420,28 @@ class _Cards(QStyledItemDelegate):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
-            pair = index.data(LANG_ROLE)
-            middle = option.rect.center().y() - (step // 2 if pair else 0)
+            pair, warned = index.data(LANG_ROLE), index.data(WARN_ROLE)
+            middle = option.rect.center().y() - (bool(pair) + bool(warned)) * step // 2  # con sus líneas debajo
             painter.drawEllipse(QRectF(box.left(), middle - 4, 8, 8))
             painter.setPen(color)
             painter.drawText(QRect(box.left() + 14, middle - step // 2, box.width() - 14, step),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, state)
+            below = middle + step // 2
             if pair:  # «EN → JA» en color de aviso si no es el destino elegido: traducido a otro idioma por error
                 text, wrong = pair
                 font = QFont(opt.font)
                 font.setBold(wrong)
                 painter.setFont(font)
                 painter.setPen(QColor(tones["warn"] if wrong else tones["muted"]))
-                painter.drawText(QRect(box.left() + 14, middle + step // 2, box.width() - 14, step),
+                painter.drawText(QRect(box.left() + 14, below, box.width() - 14, step),
                                  Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+                below += step
+            if warned:  # erratas y avisos de calidad de la traducción
+                painter.setFont(opt.font)
+                painter.setPen(QColor(tones["warn"]))
+                painter.drawText(QRect(box.left() + 14, below, box.width() - 14, step),
+                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                 "⚠ " + convert.counted(warned, "aviso"))
         painter.restore()
 
 
@@ -4645,8 +4654,8 @@ class App:
         column.addWidget(settings)
         # Filtros por estado con su cuenta y buscador: entre miles de párrafos se va directo a lo que falta
         chips, chip_group = {}, QButtonGroup(win)
-        for key, label in (("all", "Todos"), ("Pendiente", "Pendientes"), ("Dudoso", "Dudosos"), ("A mano", "A mano"),
-                           ("done", "Traducidos")):
+        for key, label in (("all", "Todos"), ("Pendiente", "Pendientes"), ("Dudoso", "Dudosos"),
+                           ("warn", "Con avisos"), ("A mano", "A mano"), ("done", "Traducidos")):
             chip = QPushButton(label)
             chip.setObjectName("chip")
             chip.setCheckable(True)
@@ -4657,10 +4666,10 @@ class App:
         search = QLineEdit()
         search.setPlaceholderText("Buscar en el original o en la traducción")
         search.setClearButtonEnabled(True)
-        search.setMinimumWidth(280)
+        search.setMinimumWidth(200)
         search.textChanged.connect(lambda _: show_rows())
         lang_filter = QComboBox()
-        lang_filter.setMinimumContentsLength(26)
+        lang_filter.setMinimumContentsLength(20)
         lang_filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         lang_filter.setToolTip("Solo los párrafos traducidos de un idioma a otro: para encontrar los que se tradujeron "
                                "a un idioma por error y volver a traducirlos")
@@ -4687,6 +4696,16 @@ class App:
         original_box.setReadOnly(True)
         original_box.setPlaceholderText("Elige un párrafo de la lista")
         translation_box.setPlaceholderText("Su traducción: se corrige aquí, a mano")
+        # Faltas subrayadas como en «Editar texto…», con destino español
+        look = editor.Look(translation_box.document())
+        look.set_tags(theme.editor_tags(self.dark))
+        translation_box.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        translation_box.customContextMenuRequested.connect(lambda pos: spell_menu(pos))
+        typing = QTimer(win)  # lo que se escribe se revisa al parar un momento
+        typing.setSingleShot(True)
+        typing.setInterval(800)
+        typing.timeout.connect(lambda: send_words([translation_box.toPlainText()]))
+        translation_box.textChanged.connect(typing.start)
         doubt = _label("", "warn")
         doubt.setWordWrap(True)
         prev_btn, next_btn = _button("◀ Anterior", lambda: step(-1)), _button("Siguiente ▶", lambda: step(1))
@@ -4713,7 +4732,10 @@ class App:
         column.addLayout(_row(run_btn, again_btn, coherence_btn, 1, apply_btn, _button("Cerrar", lambda: close())))
         # only: claves que se dejan a la vista (las de «Coherencia…»), hasta que se pulsa un filtro
         work = {"thread": None, "stop": None, "queue": None, "shown": None, "again": set(), "engine": "", "count": 0,
-                "total": 0, "closing": False, "langs": None, "only": None}
+                "total": 0, "closing": False, "langs": None, "only": None, "check": 0, "quality": {}}
+        warnings = {}  # clave -> avisos de español de su traducción (informe de calidad y ortografía)
+        # Proceso de ortografía (arranca con la primera traducción al español), lo que ya dijo y lo que se le pidió
+        spell = {"proc": None, "unknown": set(), "checked": set(), "suggestions": {}}
         rows = {}  # fila (índice del bloque) -> (clave, prefijo, texto original)
         index = {}  # clave -> sus filas: un lote no recorre la lista entera (miles de párrafos)
         hints = {"google": "Gratis y sin cuenta, frase a frase: los diálogos salen más literales. Si Google corta por "
@@ -4787,6 +4809,7 @@ class App:
                     mark_langs(str(k))
             pick()
             count()
+            check()
 
         def langs(k):
             """(origen, destino) con que se tradujo el párrafo de clave k, o None si no tiene traducción."""
@@ -4810,7 +4833,7 @@ class App:
             for key, chip in chips.items():
                 label = chip.text().rsplit(" ", 1)[0] if chip.text()[-1:].isdigit() else chip.text()
                 many = (len(rows) if key == "all" else states["Traducido"] + states["Aplicado"] if key == "done"
-                        else states[key])
+                        else sum(1 for i in rows if rows[i][0] in warnings) if key == "warn" else states[key])
                 chip.setText(f"{label} {many}")
             pairs = collections.Counter(langs(rows[i][0]) for i in rows if rows[i][0] in done)
             chosen = lang_filter.currentData()
@@ -4828,7 +4851,8 @@ class App:
             query, pair, only = search.text().strip().lower(), lang_filter.currentData(), work["only"]
             for iid, item in table.rows.items():
                 state = item.text(2)
-                shown = want == "all" or state == want or (want == "done" and state in ("Traducido", "Aplicado"))
+                shown = (want == "all" or state == want or (want == "done" and state in ("Traducido", "Aplicado"))
+                         or (want == "warn" and rows[iid][0] in warnings))
                 shown = shown and (only is None or rows[iid][0] in only)
                 shown = shown and (pair is None or ">".join(langs(rows[iid][0]) or ()) == pair)
                 item.setHidden(not shown or bool(query and query not in item.text(0).lower()
@@ -4880,6 +4904,163 @@ class App:
             refresh({k})
             save()
             count()
+            check()
+
+        def spanish():
+            return dst.currentData() == "es"  # la ortografía y los avisos de calidad solo saben de español
+
+        def send_words(texts):
+            """Manda al proceso de ortografía las palabras de texts que aún no revisó; lo arranca si hace falta."""
+            if not spanish():
+                return
+            skip = convert.spell_skip(self.words)
+            new = {w for text in texts for w in convert.spell_words(MARKUP.sub(" ", text))
+                   if convert.spell_candidate(w, skip)} - spell["checked"]
+            if not new:
+                return
+            if not spell["proc"]:
+                spell["proc"] = _start_spell_process()
+                if not spell["proc"]:
+                    return  # sin ortografía, lo demás sigue
+                qtk.after(300, poll_spell)
+            try:
+                spell["proc"][0].put(("check", sorted(new)))
+                spell["checked"] |= new
+            except (OSError, ValueError):
+                spell["proc"] = None
+
+        def poll_spell():
+            if not spell["proc"] or not shiboken6.isValid(win):
+                return
+            new = set()
+            while True:
+                try:
+                    reply = spell["proc"][1].get_nowait()
+                except queue.Empty:
+                    break
+                except (OSError, ValueError, EOFError):
+                    spell["proc"] = None
+                    return
+                if reply[0] == "unknown":
+                    new |= set(reply[1]) - spell["unknown"]
+                elif reply[0] == "suggestions":
+                    spell["suggestions"][reply[1]] = reply[2]
+            if new:
+                spell["unknown"] |= new
+                warn()
+            if spell["proc"][2].is_alive():
+                qtk.after(300, poll_spell)
+            else:
+                spell["proc"] = None
+
+        def stop_spell():
+            if spell["proc"]:
+                spell["proc"][2].terminate()  # nada que guardar: lo aprendido ya está en self.words
+                spell["proc"] = None
+
+        def misspelled():
+            """Palabras que el diccionario no conoce y la serie no da por buenas."""
+            return spell["unknown"] - convert.spell_skip(self.words) if spanish() else set()
+
+        def add_word(word):
+            """Al diccionario de la serie (el de «Ortografía…»): no se vuelve a marcar en ningún tomo."""
+            if word not in self.words:
+                self.words.append(word)
+                self.save_review()
+            warn()
+
+        def spell_menu(pos):
+            """Clic derecho en la traducción, en español: sugerencias de la falta de ahí y lo de siempre."""
+            cursor = translation_box.cursorForPosition(pos)
+            cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+            word, menu = cursor.selectedText(), QMenu(translation_box)
+            if word and word.lower() in look.unknown:
+                suggestions = spell["suggestions"].get(word)
+                if suggestions is None and spell["proc"]:
+                    try:
+                        spell["proc"][0].put(("first", word))
+                    except (OSError, ValueError):
+                        spell["proc"] = None
+                for suggestion in suggestions or ():
+                    action = menu.addAction(suggestion, lambda s=suggestion: cursor.insertText(s))
+                    font = action.font()
+                    font.setBold(True)
+                    action.setFont(font)
+                if not suggestions:  # llegan en un momento: al volver a pulsar ya están
+                    menu.addAction("Buscando sugerencias: vuelve a pulsar" if suggestions is None
+                                   else "Sin sugerencias").setEnabled(False)
+                menu.addAction("Añadir al diccionario de la serie", lambda: add_word(word))
+                menu.addSeparator()
+            menu.addAction("Deshacer", translation_box.undo)
+            menu.addSeparator()
+            menu.addAction("Cortar", translation_box.cut)
+            menu.addAction("Copiar", translation_box.copy)
+            menu.addAction("Pegar", translation_box.paste)
+            menu.addAction("Seleccionar todo", translation_box.selectAll)
+            menu.exec(translation_box.mapToGlobal(pos))
+
+        def warn(found=None):
+            """Pone en cada fila sus avisos de español: los del informe de calidad (found, si llega uno nuevo) y las
+            palabras que no están en el diccionario. La tarjeta dice cuántos; el detalle, al elegir la fila."""
+            if found is not None:
+                work["quality"] = found
+            unknown = misspelled()
+            look.set_unknown(unknown)
+            warnings.clear()
+            for k in {code for code, _, _ in rows.values() if code in done} if spanish() else ():
+                lines = [f"{title}: {problem}" for title, problem in work["quality"].get(k, ())]
+                lines += [f"No está en el diccionario: «{w}»" for w in dict.fromkeys(
+                    convert.spell_words(MARKUP.sub(" ", done[k]["text"]))) if w in unknown]
+                if lines:
+                    warnings[k] = lines
+            for iid, item in table.rows.items():
+                item.setData(2, WARN_ROLE, len(warnings.get(rows[iid][0], ())) or None)
+            count()
+            notes()
+
+        def check(later=True):
+            """Revisa el español de las traducciones de la lista: ortografía (en su proceso) e informe de calidad (en
+            un hilo: con un libro entero tarda un segundo y la ventana se quedaría parada). later=False, ya."""
+            work["check"] += 1  # un informe pedido antes ya no vale
+            if not spanish():
+                warn({})
+                return
+            pairs = list({code: (code, done[code]["text"]) for code, _, _ in rows.values() if code in done}.values())
+            send_words(text for _, text in pairs)
+            if not later:
+                warn(translate.quality(pairs, self.glossary))
+                return
+            job, found, glossary = work["check"], queue.Queue(), list(self.glossary)
+
+            def report():
+                try:
+                    found.put(translate.quality(pairs, glossary))
+                except Exception:
+                    found.put({})
+                    _log(traceback.format_exc())
+
+            def wait():
+                if not shiboken6.isValid(win) or job != work["check"]:
+                    return
+                try:
+                    warn(found.get_nowait())
+                except queue.Empty:
+                    qtk.after(200, wait)
+
+            threading.Thread(target=report, daemon=True).start()
+            qtk.after(200, wait)
+
+        def notes():
+            """Bajo la traducción elegida, por qué merece otro vistazo: lo dudoso y sus avisos de español."""
+            iid = work["shown"]
+            lines = []
+            if iid in rows and table.set(iid, "state") == "Dudoso":  # la IA ya lo repasó una vez y sigue así
+                lines.append("Dudoso: " + "; ".join(translate.doubts(
+                    rows[iid][2], done[rows[iid][0]]["text"], dst.currentData(), self.tr_glossary)) + ".")
+            if iid in rows:
+                lines += warnings.get(rows[iid][0], ())
+            doubt.setText("\n".join("⚠ " + line for line in lines))
+            return lines
 
         def pick():
             keep()
@@ -4888,12 +5069,10 @@ class App:
             original_box.setPlainText(rows[iid][2] if iid else "")
             translation_box.setPlainText(done.get(rows[iid][0], {}).get("text", "") if iid else "")
             translation_box.setEnabled(iid is not None)
-            doubt.setText("")
-            if iid and table.set(iid, "state") == "Dudoso":  # por qué: la IA ya lo repasó una vez y sigue así
-                why = "Dudoso: " + "; ".join(translate.doubts(
-                    rows[iid][2], done[rows[iid][0]]["text"], dst.currentData(), self.tr_glossary)) + "."
-                status.setText(why)
-                doubt.setText("⚠ " + why)
+            typing.stop()  # el texto puesto ya está revisado: no es algo que se haya escrito
+            found = notes()
+            if found and found[0].startswith("Dudoso"):
+                status.setText(found[0])
 
         def busy(on):
             run_btn.setText("Pausar" if on else "Traducir")
@@ -4905,6 +5084,8 @@ class App:
                            coherence_btn):
                 widget.setEnabled(not on)
             count()
+            if not on:
+                check()  # la tanda acabó: sus avisos
 
         def run(again=False):
             if work["thread"]:  # «Pausar»: el lote en curso termina y se guarda
@@ -5427,6 +5608,7 @@ class App:
         def close():
             keep()
             remember()
+            stop_spell()
             if work["thread"]:  # a mitad de lote: se oculta, lo termina, lo guarda y luego se cierra (poll)
                 work["stop"].set()
                 work["closing"] = True
@@ -5444,14 +5626,15 @@ class App:
         table.selected.connect(pick)
         engine.activated.connect(lambda _: (remember(), show_engine()))
         scope.activated.connect(lambda _: fill())
-        dst.activated.connect(lambda _: (refresh(set(done)), count()))
+        dst.activated.connect(lambda _: (refresh(set(done)), count(), check()))
         show_engine()
         fill()
         win.parts = {"table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
                      "scope": scope, "dst": dst, "src": src, "key": api_key, "status": status, "work": work, "done": done,
                      "glossary": edit_glossary, "close": close, "merge": merge, "pdf": pdf, "book": self.book,
                      "model": model, "models": find_models, "chips": chips, "search": search, "step": step,
-                     "doubt": doubt, "progress": progress, "langs": lang_filter, "coherence": coherence}
+                     "doubt": doubt, "progress": progress, "langs": lang_filter, "coherence": coherence,
+                     "warnings": warnings, "check": check, "look": look, "spell": spell, "add_word": add_word}
         win.show()
         return win
 

@@ -7166,6 +7166,21 @@ def test_translate_inconsistent_terms():
     assert [t for t, _ in translate.inconsistent(low, [["mana", "maná"]])] == ["mana"]
 
 
+def test_translate_quality_of_translations():
+    """Los avisos de texto del informe de calidad, sobre las traducciones: un signo sin pareja o inglés sin traducir
+    salen con la clave de su párrafo; los de estructura (número suelto, línea repetida, párrafo partido) no."""
+    import translate
+
+    pairs = [("a", "—¿Adónde vas?"), ("b", "Abrió la puerta (y no la cerró."), ("c", "1234"),
+             ("d", "empieza en minúscula."), ("e", "He walked to the door and then he was gone with the wind."),
+             ("f", "Cartel"), ("g", "Cartel"), ("h", "Cartel"), ("i", "Dijo <i>hola</i> sin más.[Nota: un saludo]")]
+    found = translate.quality(pairs)
+    assert set(found) == {"b", "e"}, found
+    assert found["b"][0][0] == "Signo sin pareja" and found["e"][0][0] == "Texto sin traducir", found
+    assert "e" not in translate.quality(pairs, lang="en")
+    assert translate.quality([]) == {}
+
+
 def test_translate_style_chapter_and_rejected_params():
     """La instrucción lleva la variante del español, los honoríficos, la ficha de personajes y las correcciones a
     mano como ejemplo; el capítulo entero va al final de la instrucción (en Claude, marcado para la caché) salvo que
@@ -7508,6 +7523,66 @@ def test_window_translate_coherence():
         parts["close"]()
     finally:
         app.messagebox.showinfo = saved_info
+        window.close()
+
+
+def test_window_translate_spanish_warnings():
+    """Con destino español, cada traducción lleva sus avisos del informe de calidad y las palabras que no están en
+    el diccionario: la tarjeta dice cuántos, el filtro «Con avisos» las junta y al elegirla se leen. Una palabra
+    añadida al diccionario de la serie deja de avisar. Con otro destino no hay avisos."""
+    import time
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    window.book.blocks += [convert.Block("p", 1, "He opened the door and did not close it."),
+                           convert.Block("p", 1, "She wrote a single wrong word in the letter.")]
+    started, saved_spell = [], app._start_spell_process
+    app._start_spell_process = lambda: started.append(1)  # sin el proceso real: lo que diría se pone a mano
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        table, chips = parts["table"], parts["chips"]
+        assert parts["dst"].currentData() == "es"
+        bad, typo = (next(i for i in table.get_children() if word in table.set(i, "orig")) for word in ("door", "letter"))
+        parts["merge"]({translate.key(table.set(bad, "orig")): "Abrió la puerta (y no la cerró.",
+                        translate.key(table.set(typo, "orig")): "Escribió una sola palbra mal en la carta."})
+        parts["check"](later=False)
+        assert started, "con traducciones al español, la ortografía arranca"
+        assert table.rows[bad].data(2, app.WARN_ROLE) == 1 and table.rows[typo].data(2, app.WARN_ROLE) is None
+        assert chips["warn"].text() == "Con avisos 1", chips["warn"].text()
+        chips["warn"].click()
+        assert [i for i in table.get_children() if not table.rows[i].isHidden()] == [bad]
+        chips["all"].click()
+        table.selection_set(bad)
+        root.update()
+        assert "⚠ Signo sin pareja" in parts["doubt"].text(), parts["doubt"].text()
+        # Lo que dice el proceso de ortografía: la palabra se subraya y la fila avisa
+        parts["spell"]["unknown"].add("palbra")
+        parts["check"](later=False)
+        assert parts["look"].unknown == {"palbra"} and table.rows[typo].data(2, app.WARN_ROLE) == 1
+        assert parts["warnings"][translate.key(table.set(typo, "orig"))] == ["No está en el diccionario: «palbra»"]
+        assert chips["warn"].text() == "Con avisos 2"
+        parts["add_word"]("palbra")
+        assert "palbra" in window.words and table.rows[typo].data(2, app.WARN_ROLE) is None
+        assert parts["look"].unknown == set() and chips["warn"].text() == "Con avisos 1"
+        # Corregida a mano, el aviso se va (el informe nuevo llega del hilo)
+        parts["translation"].setPlainText("Abrió la puerta y no la cerró.")
+        table.selection_set(typo)
+        end = time.time() + 5
+        while table.rows[bad].data(2, app.WARN_ROLE) and time.time() < end:
+            root.update()
+            time.sleep(0.02)
+        assert table.rows[bad].data(2, app.WARN_ROLE) is None and chips["warn"].text() == "Con avisos 0"
+        # A otro idioma, el español no opina
+        parts["translation"].setPlainText("Escribió (una sola palabra mal en la carta.")
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        parts["dst"].activated.emit(parts["dst"].currentIndex())
+        assert not parts["warnings"] and chips["warn"].text() == "Con avisos 0"
+        parts["close"]()
+    finally:
+        app._start_spell_process = saved_spell
         window.close()
 
 

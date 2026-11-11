@@ -270,6 +270,24 @@ def inconsistent(pairs, glossary=()):
     return sorted(out, key=lambda t: (-sum(len(keys) for _, keys in t[1][1:]), t[0]))
 
 
+# Avisos del informe de calidad que son de la maquetación del PDF, no del texto de una traducción
+STRUCTURE = {"skipped", "lower", "long", "number", "repeated", "duplicate", "link", "end", "short", "gap"}
+
+
+def quality(pairs, glossary=(), lang="es"):
+    """Avisos del informe de calidad sobre las traducciones, antes de aplicarlas al libro: {clave: [(título,
+    problema)]}. pairs: [(clave, traducción)]. Solo los de texto (signos sin pareja, sin traducir, erratas, calcos,
+    honoríficos, nombres del glosario): los de estructura hablan del PDF. glossary: los nombres de la serie."""
+    blocks = [convert.Block("p", n + 1, convert._inline(text)) for n, (_, text) in enumerate(pairs)]
+    out = {}
+    for issue in convert.quality_report(convert.Book("", "", b"", blocks, []), glossary=glossary, lang=lang):
+        if issue.block is not None and issue.kind not in STRUCTURE:
+            found = out.setdefault(pairs[issue.block][0], [])
+            if (issue.title, issue.problem) not in found:
+                found.append((issue.title, issue.problem))
+    return out
+
+
 def _fix(source, out):
     """Arregla lo que el motor pudo estropear de las marcas: etiquetas con espacios y la palabra «Nota»."""
     out = TAG.sub(lambda m: f"<{m[1]}{m[2].lower()}>", out.strip())
