@@ -507,6 +507,27 @@ def test_drawn_ornament_between_paragraphs_is_a_scene_break():
     assert image[:4] == b"\x89PNG", image[:8]
 
 
+def test_wide_colored_title_image_is_not_a_scene_break():
+    """Mitsuha 4, pág. 190: «Ilustrador», un título dorado hecho imagen (ancho, 4:1) entre dos párrafos de los
+    créditos, salía como separador. Ancho y de color es un título; una floritura ancha en negro sí es un adorno."""
+    def picture(color):
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 160, 40), False)
+        pix.set_rect(pix.irect, (255, 255, 255))
+        pix.set_rect(pymupdf.IRect(10, 10, 150, 30), color)
+        return pix.tobytes("png")
+
+    doc = pymupdf.open()
+    for n, color in ((1, (230, 170, 20)), (2, (20, 20, 20))):
+        page = add_page(doc, n, [(92, 150, line("Un parrafo antes de la imagen", 57), 11, "cour"), (72, 164, "fin.", 11, "cour"),
+                                 (92, 250, line("Un parrafo despues de la imagen", 57), 11, "cour"), (72, 264, "fin.", 11, "cour")])
+        page.insert_image(pymupdf.Rect(237, 190, 357, 220), stream=picture(color))
+    path = TMP / "titulo-imagen.pdf"
+    doc.save(path)
+    blocks = convert.analyze(path).blocks
+    kinds = [[b.kind for b in blocks if b.page == n and b.keep] for n in (1, 2)]
+    assert kinds == [["p", "p"], ["p", "break", "p"]], kinds
+
+
 def test_inline_image_in_a_text_line_is_not_a_scene_break():
     """Una imagen pequeña y centrada dentro de una línea de texto («LEVEL UP! Lv. 2 → Lv. 3», con la flecha como
     imagen: The World's Strongest Witch), ni la pegada al final de una línea corta (♡, ♪), es un separador de
@@ -4344,6 +4365,57 @@ def test_title_page_with_label_below_name_and_repeat_on_next_page():
     assert after == ["Linea 0 ", "Linea 0 "] and not stray, (after, stray)
     # Lo omitido ya estaba en el título: no es «Texto no incluido»; solo la línea con la errata cuenta
     assert [(page, letters) for page, letters, _ in book.skipped] == [(4, 18)], book.skipped
+
+
+def test_blank_gap_between_paragraphs_is_a_scene_break():
+    """Mitsuha (GambaTrans): la escena cambia con un hueco de unas tres líneas en blanco, sin símbolo ni adorno.
+    Es un separador de escena (sin imagen ni texto: sale el del estilo). Un hueco con una ilustración o un
+    título dentro, no; el espacio normal entre párrafos, tampoco."""
+    doc = pymupdf.open()
+    para = lambda y, t: [(92, y, line(t, 57), 11, "cour"), (72, y + 14, line("sigue el parrafo", 60), 11, "cour"),
+                         (72, y + 28, "fin.", 11, "cour")]
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv")] + para(150, "Primera escena del capitulo")
+             + para(194, "Sigue la primera escena") + para(290, "Cayo la noche y empezo otra")  # hueco de ~4 líneas
+             + para(334, "Mas de la segunda escena"))
+    page = add_page(doc, 2, para(150, "Texto antes de la ilustracion") + para(330, "Texto despues de la ilustracion")
+                    + [(72, 470, "Un subtitulo", 16, "hebo")] + para(520, "Texto tras el subtitulo"))
+    page.insert_image(pymupdf.Rect(200, 200, 300, 300), stream=jpeg(100, 100))
+    # 3: ficha de estado tras un hueco (Maryoku) y la firma del autor al final del epílogo (Eminence 7): no
+    add_page(doc, 3, para(150, "Mire mi pantalla de estado") + [(72, 250, "NOMBRE: Chise (Reencarnador)", 11, "cour")]
+             + para(350, "Ultimo parrafo del epilogo") + [(300, 450, "Autor Ejemplo", 11, "cour")])
+    path = TMP / "hueco-escena.pdf"
+    doc.save(path)
+    blocks = convert.analyze(path).blocks
+    kinds = [[b.kind for b in blocks if b.page == n and b.kind != "image"] for n in (1, 2, 3)]
+    gap = next((b for b in blocks if b.kind == "break"), None)
+    assert kinds == [["heading", "p", "p", "break", "p", "p"], ["p", "p", "heading", "p"], ["p", "p", "p", "p"]], kinds
+    assert gap is not None and not gap.image and not gap.html, gap
+    # Megami 4: una línea en blanco entre muchos párrafos, en todas las páginas: es el estilo del libro
+    doc = pymupdf.open()
+    for n in range(1, 4):
+        add_page(doc, n, [(72, 100, f"Capitulo {n}: Otro", 20, "helv")]
+                 + [row for y in range(150, 700, 90) for row in para(y, "Parrafo con hueco despues")])
+    doc.save(TMP / "huecos-estilo.pdf")
+    styled = [b.kind for b in convert.analyze(TMP / "huecos-estilo.pdf").blocks]
+    assert "break" not in styled, styled
+
+
+def test_bold_bare_number_marks_a_part():
+    """Re Zero 4 y 5: los apartados de cada capítulo van marcados con un número solo, en negrita y del tamaño del
+    texto («2»), y la numeración vuelve a empezar en cada capítulo. Salía como un párrafo «2» dentro del texto:
+    es un apartado, como «Parte 2» (subtítulo, no capítulo). Un número sin negrita (página que sobra) no."""
+    doc = pymupdf.open()
+    text = lambda y, t: [(92, y, line(t, 57), 11, "cour"), (72, y + 14, "fin.", 11, "cour")]
+    for n, chapter in ((1, "Capitulo 1: Inicio"), (2, "Capitulo 2: Final")):
+        add_page(doc, n, [(72, 100, chapter, 20, "helv")] + text(150, "Primer apartado del capitulo")
+                 + [(72, 200, "2", 11, "cobo")] + text(240, "Segundo apartado del capitulo")
+                 + [(72, 290, "61", 11, "cour")] + text(330, "Sigue el segundo apartado"))
+    path = TMP / "apartados-numero.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = [(html.unescape(b.html).strip(), k in book.candidates) for k, b in enumerate(book.blocks) if b.kind == "heading"]
+    assert heads == [("Capitulo 1: Inicio", True), ("2", False), ("Capitulo 2: Final", True), ("2", False)], heads
+    assert convert.is_subpart("2") and convert.is_subpart("Parte 3") and not convert.is_subpart("Capitulo 2")
 
 
 def test_bookmarked_chapter_name_joins_bare_label():

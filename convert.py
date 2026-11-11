@@ -46,6 +46,7 @@ def _memo(fn):
 
 
 BAND = 0.12     # franja superior/inferior (fracción de la altura) donde viven encabezados y pies
+SCENE_GAP = 2.5  # hueco mínimo entre dos líneas del texto (en interlíneas) que separa escenas (Mitsuha GambaTrans: 3,3)
 REPEAT = 0.30   # fracción de páginas en que una línea debe repetirse para ser encabezado o pie
 KEYWORDS = re.compile(
     r"(cap[ií]tulo|pr[oó]logo|ep[ií]logo|interludio|historia paralela|palabras de cierre"
@@ -732,7 +733,10 @@ def _ornaments(page, rows, infos, before=()):
         # bajo un título («Afterword», pág. 246) o pegada bajo su línea (el enlace de los créditos de Re Zero 6)
         # es su subrayado
         underline = above and (above.heading or y0 - above.y < 0.5 * above.size)
+        # Mitsuha 4, pág. 190: «Ilustrador», título dorado hecho imagen, ancho. Los adornos son grises o negros
+        title = x1 - x0 >= 2.5 * (y1 - y0) and info["xref"] and _colorful(page.parent, info["xref"])
         if (x1 - x0 < 0.3 * width and y1 - y0 < 0.1 * height and abs((x0 + x1) / 2 - width / 2) < 0.15 * width
+                and not title
                 and (top or BAND * height < (y0 + y1) / 2 < (1 - BAND) * height and above and not underline)
                 # The World's Strongest Witch: la flecha de «Lv. 2 → Lv. 3» y el ♡ o ♪ al final de una línea corta son
                 # imágenes en la línea (una línea base cruza su altura); la línea que empieza justo debajo de un adorno
@@ -756,6 +760,21 @@ def _drawn(page):
             r |= hit
         boxes.append(r)
     return [{"bbox": tuple(b), "xref": 0, "drawn": True} for b in boxes]
+
+
+def _colorful(doc, xref):
+    """¿Imagen de color? Media de saturación de la tinta (lo que no es fondo claro): los adornos-separador
+    medidos van de 0 a 9 (negros o grises); el título dorado «Ilustrador» de Mitsuha 4, 183."""
+    try:
+        pix = _rgb(pymupdf.Pixmap(doc, xref), alpha=False)
+    except Exception:
+        return False
+    if pix.n != 3:  # en gris: sin color
+        return False
+    pix = pymupdf.Pixmap(pix, 40, 40, None)  # muestra pequeña: basta para el color
+    data = pix.samples
+    ink = [data[i:i + 3] for i in range(0, len(data), 3) if min(data[i:i + 3]) < 230]
+    return bool(ink) and sum(max(p) - min(p) for p in ink) / len(ink) > 60
 
 
 def _ornament_image(doc, page, info):
@@ -1403,6 +1422,13 @@ def _join(a, b):
 
 
 SUBPART = re.compile(r"(parte|part|secci[oó]n|section)\s+[\w.]+", re.I)
+BARE_PART = re.compile(r"\d{1,2}")  # Re Zero 4 y 5: «2» solo, en negrita, marca el apartado como «Parte 2»
+
+
+def is_subpart(title):
+    """¿Apartado sin nombre de un capítulo? «Parte 2», «Sección 3» o el número solo de Re Zero 4."""
+    title = title.strip()
+    return bool(SUBPART.fullmatch(title) or BARE_PART.fullmatch(title))
 CREDIT = re.compile(r"(autor|author|escrito por|historia|traducci[oó]n|traductor(?:es)?|translation|ilustraci[oó]n(?:es)?"
                     r"|ilustrador(?:a|es)?|illustrations?|correcci[oó]n|corrector(?:a|es)?|edici[oó]n|editor(?:a|es)?)"
                     r"([^:]{0,40}):\s*(.+)", re.I)
@@ -2424,6 +2450,16 @@ def analyze(pdf_path, progress=None):
                 indents += sum(r.x0 > left + body * 0.8 for r in normal)
         line_gap = gaps.most_common(1)[0][0] if gaps else body * 1.2
         indent_style = indents > total * 0.05  # los párrafos se marcan con sangría
+        # Hueco que separa escenas (Mitsuha GambaTrans: 3,3 líneas): bastante más que el espacio entre párrafos, y
+        # raro. Si sale en casi cada página es el estilo del libro (Megami 4: una línea en blanco entre párrafos)
+        spaced = collections.Counter()
+        for rows in pages:
+            normal = [r for r in rows if r.size == body]
+            spaced.update(round(b.y - a.y) for a, b in zip(normal, normal[1:]) if b.y - a.y > line_gap * 1.15)
+        paragraph_gap = max((g for g in spaced if g < 3 * line_gap), key=spaced.get, default=line_gap)
+        scene_gap = max(SCENE_GAP * line_gap, 1.8 * paragraph_gap)
+        if sum(count for gap, count in spaced.items() if gap > scene_gap) > 2 * n:  # Megami 4: 4 por página
+            scene_gap = None
 
         # Título por tamaño o negrita, o porque el PDF lo marca: hay subtítulos del tamaño del texto
         # ("El lado de la bruja") que solo se distinguen por su marcador de nivel 2.
@@ -2440,8 +2476,9 @@ def analyze(pdf_path, progress=None):
                 # del párrafo y sin centrar: es texto destacado. Los subtítulos van al margen o centrados
                 emphasis = (normal and r.size < body * 1.3 and not KEYWORDS.match(r.text) and r.x0 > left + body * 0.8
                             and abs((r.x0 + r.x1) / 2 - (left + right) / 2) > (right - left) * 0.05)
-                r.heading = _is_heading(r, body) and not emphasis or any(
+                r.heading = (_is_heading(r, body) and not emphasis or any(
                     key == mark or (r.bold and len(key) >= 4 and key in mark) for mark in bookmarks[i])
+                    or (r.bold and bool(BARE_PART.fullmatch(r.text.strip()))))  # apartado «2» (is_subpart)
                 r.starts = len(key) >= 4 and any(mark.startswith(key) for mark in bookmarks[i])
 
         uses = collections.Counter(img[0] for page in doc for img in page.get_images())  # xref -> páginas
@@ -2551,11 +2588,26 @@ def analyze(pdf_path, progress=None):
             right = max((r.x1 for r in normal), default=0)
             prev = None
             ornaments = _ornaments(page, rows, infos + drawn, before)  # adornos-separador, de arriba abajo
+            boxes = [info["bbox"] for info in infos + drawn]  # imágenes, recuadros y adornos: no son un hueco
             for r in rows:
                 while ornaments and ornaments[0][0] < r.y:  # el adorno queda por encima de esta línea
                     info = ornaments.pop(0)[1]
                     if blocks and blocks[-1].kind != "break":  # guarda el adorno, por si se quiere el original
                         blocks.append(Block("break", num, image=_ornament_image(doc, page, info)))
+                    para = None
+                # Mitsuha (GambaTrans): la escena cambia con un hueco de unas tres líneas en blanco, sin símbolo ni
+                # adorno. Solo entre dos líneas del texto, sin nada en medio (ilustración, recuadro, título); no
+                # antes de una firma centrada o a la derecha (el autor al final del epílogo, Eminence 7) ni alrededor
+                # de una ficha de estado («NOMBRE: Chise», Maryoku)
+                if (prev is not None and scene_gap and r.y - prev.y > scene_gap and not prev.heading and not r.heading
+                        and abs(prev.size - body) < 0.5 and abs(r.size - body) < 0.5
+                        and id(prev) not in inside and id(r) not in inside
+                        and not any(prev.y < (box[1] + box[3]) / 2 < r.y for box in boxes)
+                        and blocks and blocks[-1].kind == "p"
+                        and max(prev.x0, r.x0) < left + (right - left) / 4  # la sangría de Re Zero 7 es de 35 pt
+                        and not LABEL.match(r.text.strip()) and not LABEL.match(_plain(blocks[-1]))
+                        and not r.text.rstrip().endswith(":")):  # «Protector de la Tierra:» presenta una ficha
+                    blocks.append(Block("break", num))  # sin imagen ni texto: en el EPUB, el del estilo
                     para = None
                 if SCENE_BREAK.fullmatch(r.text):  # solo símbolos: separador aunque vaya en letra de título (Mitsuha 6)
                     blocks.append(Block("break", num, r.html))  # guarda el texto original ("☆", "* * *")
@@ -2674,7 +2726,7 @@ def analyze(pdf_path, progress=None):
             _toc_match(_key(html.unescape(b.html)), key) for key in keys)})
         # "Parte 1", "Parte 2"… sin nombre y con la numeración que vuelve a empezar en cada capítulo
         # (Re Zero) son apartados del capítulo: subtítulos. "Parte uno: Stifled Shadow" sí es una parte.
-        bare = [k for k in candidates if SUBPART.fullmatch(html.unescape(blocks[k].html).strip())]
+        bare = [k for k in candidates if is_subpart(html.unescape(blocks[k].html))]
         if len({_key(blocks[k].html) for k in bare}) < len(bare):
             candidates = [k for k in candidates if k not in bare]
 
