@@ -7181,6 +7181,54 @@ def test_translate_quality_of_translations():
     assert translate.quality([]) == {}
 
 
+def test_translate_review():
+    """La IA revisora recibe cada original con su traducción, el glosario y la ficha, y solo cuenta lo que marca con
+    una corrección distinta de lo que hay; la corrección conserva las marcas. Una respuesta rota parte el lote, y
+    con un solo párrafo se da por no revisado. Un motor que no es IA no revisa."""
+    import json
+    import translate
+
+    calls, replies = [], []
+
+    def fake(url, headers, body):
+        calls.append(body["messages"])
+        reply = replies.pop(0) if replies else {}
+        return {"choices": [{"message": {"content": reply if isinstance(reply, str) else json.dumps(reply)}}]}
+
+    pairs = [("He ran.", "Corrió."), ("She fell. Then she cried.", "Ella se cayó."), ("He <i>ran</i> away.", "Huyó.")]
+    original = translate._post
+    translate._post = fake
+    try:
+        replies.append({"2": {"problem": "Omite  la segunda frase.", "fix": "Ella se cayó. Luego lloró."}})
+        out = translate.review("DeepSeek", pairs, "en", "es", api_key="k", glossary=[["Witch", "Bruja"]],
+                               style={"notes": "Emilia: chica, formal"})
+        assert out == [None, {"problem": "Omite la segunda frase.", "fix": "Ella se cayó. Luego lloró."}, None], out
+        system, user = calls[0][0]["content"], calls[0][1]["content"]
+        assert "Witch = Bruja" in system and "Emilia: chica, formal" in system and "editor" in system
+        sent = json.loads(user[user.index("Paragraphs:") + len("Paragraphs:"):])
+        assert sent["2"] == {"source": "She fell. Then she cried.", "translation": "Ella se cayó."}, sent
+        # Lo que no sirve se ignora: número que no existe, sin corrección, corrección igual a lo que hay
+        replies.append({"9": {"problem": "x", "fix": "y"}, "1": {"problem": "sin arreglo"},
+                        "2": {"problem": "igual", "fix": " Ella se  cayó. "}, "3": "mal"})
+        assert translate.review("DeepSeek", pairs, "en", "es", api_key="k") == [None, None, None]
+        # Las marcas de la corrección, arregladas como las de una traducción
+        replies.append({"3": {"fix": "< i>Huyó</ I> lejos."}})
+        out = translate.review("DeepSeek", pairs, "en", "es", api_key="k")
+        assert out[2] == {"problem": "La IA propone otra traducción.", "fix": "<i>Huyó</i> lejos."}, out
+        # Respuesta rota: el lote se parte; lo que sigue sin entenderse queda sin revisar
+        del calls[:]
+        replies[:] = ["no es JSON", "tampoco", {"1": {"problem": "Falta el sujeto.", "fix": "Él huyó."}}]
+        out = translate.review("DeepSeek", pairs[:1] + pairs[2:], "en", "es", api_key="k")
+        assert out == [False, {"problem": "Falta el sujeto.", "fix": "Él huyó."}] and len(calls) == 3, (out, len(calls))
+        try:
+            translate.review("Google (gratis, sin clave)", pairs, "en", "es")
+            assert False, "Google no revisa"
+        except translate.TranslateError as e:
+            assert "Solo una IA" in str(e)
+    finally:
+        translate._post = original
+
+
 def test_translate_style_chapter_and_rejected_params():
     """La instrucción lleva la variante del español, los honoríficos, la ficha de personajes y las correcciones a
     mano como ejemplo; el capítulo entero va al final de la instrucción (en Claude, marcado para la caché) salvo que
@@ -7694,6 +7742,113 @@ def test_window_translate_series_memory():
         parts["close"]()
     finally:
         app._start_spell_process = saved_spell
+        window.close()
+
+
+def test_window_translate_review():
+    """«Revisar con IA»: lo traducido que la IA marca queda «Con fallos» con su problema y su corrección, y lo demás
+    «Revisado». «Aceptar corrección» la pone; «Descartar» deja lo que había; las dos lo dan por revisado. Una
+    traducción corregida a mano mientras llega su revisión se queda sin ella. Al volver a abrir, todo sigue."""
+    import json
+    import threading
+    import time
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    original = translate._post
+    translate._post = FakeAI()
+    flagged, gate, asked = [], threading.Event(), []
+    gate.set()
+
+    def reviewer(url, headers, body):
+        user = body["messages"][-1]["content"]
+        data = json.loads(user[user.index("Paragraphs:") + len("Paragraphs:"):])
+        asked.append(data)
+        gate.wait(10)
+        out = {n: {"problem": "Omite la segunda frase.", "fix": "ARREGLADO " + v["translation"]}
+               for n, v in data.items() if v["source"] in flagged}
+        return {"choices": [{"message": {"content": json.dumps(out)}}]}
+
+    infos, saved_info = [], app.messagebox.showinfo
+    app.messagebox.showinfo = lambda title, message, **_: infos.append(message)
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        table, chips = parts["table"], parts["chips"]
+        parts["src"].setCurrentIndex(parts["src"].findData("es"))
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        parts["review"]()  # Google, el motor por defecto, no revisa
+        assert infos and "Solo una IA" in infos[-1], infos
+        parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        parts["key"].setText("k")
+        parts["run"]()
+        wait_translation(root, win)
+        total = len(table.get_children())
+        first, second, third, fourth = [i for i in table.get_children() if len(table.set(i, "orig")) > 20][:4]
+        flagged.append(table.set(first, "orig"))
+        translate._post = reviewer
+        parts["review"]()
+        wait_translation(root, win)
+        assert all("source" in v and "translation" in v for data in asked for v in data.values())
+        states = {i: table.set(i, "state") for i in table.get_children()}
+        assert states[first] == "Con fallos" and set(states.values()) == {"Con fallos", "Revisado"}, states
+        assert chips["Con fallos"].text() == "Con fallos 1" and chips["done"].text() == f"Traducidos {total - 1}"
+        assert "1 párrafo con fallos" in parts["status"].text(), parts["status"].text()
+        table.selection_set(first)
+        root.update()
+        assert "Revisión de la IA: Omite la segunda frase." in parts["doubt"].text()
+        assert "Propone: ARREGLADO ES:" in parts["doubt"].text() and not parts["accept_btn"].isHidden()
+        parts["accept"]()
+        assert table.set(first, "trans").startswith("ARREGLADO ES:") and table.set(first, "state") == "Revisado"
+        assert parts["accept_btn"].isHidden() and parts["translation"].toPlainText().startswith("ARREGLADO")
+        del asked[:]
+        parts["review"]()  # ya está todo revisado: no se gasta otra vez
+        assert not asked and "sin revisar" in infos[-1], infos
+
+        def choose(*iids):
+            table.clearSelection()
+            for iid in iids:
+                table.rows[iid].setSelected(True)
+            root.update()
+
+        # Elegidos dos o más, se revisan otra vez; «Descartar» deja la traducción como estaba
+        flagged[:] = [table.set(second, "orig")]
+        choose(second, third)
+        parts["review"]()
+        wait_translation(root, win)
+        assert sum(len(data) for data in asked) == 2 and table.set(second, "state") == "Con fallos"
+        before = table.set(second, "trans")
+        table.selection_set(second)
+        root.update()
+        parts["discard"]()
+        assert table.set(second, "trans") == before and table.set(second, "state") == "Revisado"
+
+        # Corregida a mano mientras la IA la mira: su revisión ya no vale
+        flagged[:] = [table.set(third, "orig"), table.set(fourth, "orig")]
+        gate.clear()
+        choose(third, fourth)
+        parts["review"]()
+        table.selection_set(third)
+        root.update()
+        parts["translation"].setPlainText("Corrected by hand in the meantime.")
+        table.selection_set(first)
+        root.update()
+        gate.set()
+        wait_translation(root, win)
+        assert table.set(third, "state") == "A mano" and table.set(fourth, "state") == "Con fallos"
+        assert "review" not in parts["done"][translate.key(table.set(third, "orig"))]
+        parts["close"]()
+        again = window.translate_book()  # la revisión se guarda con la traducción
+        rows = again.parts["table"]
+        assert [rows.set(i, "state") for i in (first, second, third, fourth)] == [
+            "Revisado", "Revisado", "A mano", "Con fallos"]
+        again.parts["close"]()
+    finally:
+        translate._post = original
+        app.messagebox.showinfo = saved_info
         window.close()
 
 

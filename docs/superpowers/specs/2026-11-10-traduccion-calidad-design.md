@@ -50,9 +50,11 @@ Local, sin IA, con cualquier motor. `translate.inconsistent(pairs, glossary=())`
 `[(clave, original, traducción)]`; devuelve `[(término, [(forma, [claves])])]` con dos formas o más, de la más
 usada a la menos.
 
-- Términos candidatos del original: secuencias de 1 a 3 palabras con mayúscula inicial que no empiezan frase,
-  secuencias de katakana de 2 letras o más y los originales del glosario. Solo los que salen en 3 párrafos o
-  más.
+- Términos candidatos del original: rachas de palabras con mayúscula inicial que no empiezan frase (con
+  enlaces en minúscula dentro: «Cult of Diablos»; sin el posesivo), secuencias de katakana de 2 letras o más y
+  los originales del glosario. Solo los que salen en 3 párrafos o más. Un término no cuenta donde forma parte
+  de otro más largo. Entre formas que casi empatan gana la que conserva más mayúsculas y la más larga.
+  Probado con la traducción real de Eminence 7 (3.073 párrafos, 0,5 s): ninguna incoherencia falsa.
 - Formas: para cada término, entre los n-gramas (1 a 4 palabras, sin artículos en los bordes) de las
   traducciones de sus párrafos, el de mayor coeficiente de Dice con el término (párrafos donde salen juntos
   contra párrafos donde sale cada uno). Los párrafos sin esa forma se vuelven a mirar para hallar la segunda,
@@ -90,8 +92,8 @@ Solo cuando el destino es español.
   `_spell_server` y las mismas palabras de la serie (`words`) que el editor; clic derecho da sugerencias y
   «Añadir al diccionario de la serie». El proceso arranca al abrir la ventana y termina al cerrarla.
 - Avisos: `translate.quality(pairs, glossary, lang)`, con `pairs = [(clave, traducción)]`, monta un `Book`
-  ligero (un bloque `p` por traducción) y pasa `convert.quality_report`; devuelve `{clave: [título del
-  aviso]}` solo de los tipos de texto (erratas, calcos, mayúsculas de más, signos sin pareja o repetidos,
+  ligero (un bloque `p` por traducción) y pasa `convert.quality_report`; devuelve `{clave: [(título,
+  problema)]}` solo de los tipos de texto (erratas, calcos, mayúsculas de más, signos sin pareja o repetidos,
   inglés sin traducir, honoríficos). Los de estructura (párrafo partido, número suelto, línea repetida, muy
   largo) no aplican.
 - Se calculan en un hilo al abrir y al acabar cada tanda o corrección a mano del párrafo. La tarjeta muestra

@@ -581,6 +581,67 @@ def translate(name, texts, src, dst, api_key="", model="", base="", glossary=(),
     return [_fix(source, t) for source, t in zip(texts, out)]
 
 
+REVIEW_CHAPTER = "The whole chapter in the original language, only as context (who speaks, each character's gender):\n"
+
+
+def review(name, pairs, src, dst, api_key="", model="", base="", glossary=(), style=None):
+    """La IA hace de editora: compara cada traducción con su original y dice solo lo que está mal. pairs: [(original,
+    traducción)] (un lote). Devuelve, por par: None si está bien, {"problem" (en español), "fix" (el párrafo
+    corregido)} si no, y False si no se pudo revisar (la respuesta no se entendía). style: "notes" y "chapter",
+    como en translate. Ve lo que las reglas de doubts no: sentido cambiado, frases omitidas, quién habla."""
+    engine = ENGINES[name]
+    if engine["kind"] not in AI:
+        raise TranslateError("Solo una IA puede revisar la traducción: elige una en «Motor».")
+    style, target = style or {}, LANG_NAMES.get(dst, dst)
+    rules = [
+        f"You are the editor of a light novel translated from {LANG_NAMES.get(src, src)} into {target}. Each numbered "
+        f"paragraph comes with its source and its translation. Compare them and report only real errors:",
+        "- the meaning changed, or a sentence or a detail was left out or added;",
+        "- wrong speaker, gender or number, or a form of address (formal or informal) that does not fit the "
+        "characters;",
+        "- a glossary term that was not used;",
+        f"- a literal calque or a phrase that does not sound natural in {target}.",
+        "Do not report style preferences, and do not rewrite a correct translation just to word it differently.",
+        "Reply only with a JSON object with the paragraphs that have errors: map each one's number to an object with "
+        f"\"problem\" (one short sentence in Spanish saying what is wrong) and \"fix\" (the whole corrected paragraph "
+        f"in {target}, keeping its <i> and <b> tags and its \"[Nota: ...]\" marks). If every paragraph is fine, reply "
+        "{}.",
+    ]
+    terms = [(a, b) for a, b in glossary if a and b]
+    if terms:
+        rules.append("Glossary (these translations are mandatory):\n" + "\n".join(f"{a} = {b}" for a, b in terms))
+    if str(style.get("notes") or "").strip():
+        rules.append("Characters and style notes from the editor:\n" + style["notes"].strip())
+    system, chapter = "\n".join(rules), str(style.get("chapter") or "")
+    model, base = model or engine.get("model", ""), base or engine["base"]
+    cached = REVIEW_CHAPTER + chapter if sum(len(a) for a, _ in pairs) + 200 < len(chapter) <= CHAPTER else ""
+
+    def ask(part):
+        user = "Paragraphs:\n" + json.dumps({str(n + 1): {"source": a, "translation": b}
+                                             for n, (a, b) in enumerate(part)}, ensure_ascii=False, indent=0)
+        data, out = _json(_chat(name, engine, system, user, api_key, model, base, cached)), [None] * len(part)
+        for n, (source, text) in enumerate(part):
+            found = data.get(str(n + 1))
+            # Sin corrección no hay nada que ofrecer, y una igual a lo que hay no es un fallo
+            if isinstance(found, dict) and isinstance(found.get("fix"), str) and found["fix"].strip():
+                fix = " ".join(_fix(source, found["fix"]).split())
+                if fix != " ".join(text.split()):
+                    out[n] = {"problem": " ".join(str(found.get("problem") or "").split())
+                              or "La IA propone otra traducción.", "fix": fix}
+        return out
+
+    def run(part):
+        try:
+            return ask(part)
+        except _Mismatch:
+            if len(part) == 1:
+                return [False]
+            half = len(part) // 2  # con menos de golpe suele responder bien
+            return run(part[:half]) + run(part[half:])
+
+    return run(list(pairs))
+
+
 def propose(name, sample, src, dst, api_key="", model="", base="", names=(), text=""):
     """Glosario y ficha de personajes que la IA saca de una muestra del libro, para que el usuario los revise:
     ([[original, traducción]], ["Nombre: género, cómo habla…"]). names: nombres propios frecuentes del tomo. text: el
