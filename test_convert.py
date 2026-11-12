@@ -4280,6 +4280,32 @@ def test_window_options_app_pages():
     assert reopened == ("Tablet", True, True), reopened
 
 
+def test_window_options_translation_page():
+    """Traducción en Opciones: clave oculta con 👁; al Aceptar, Traducir abierto usa el motor y la clave nuevos, y
+    al cerrarse no los pisa con los de antes."""
+    import translate
+    from PySide6.QtWidgets import QLineEdit
+    root, window = versioned_window()
+    tr = window.translate_book().parts
+    dialog = window.open_options("Traducción")
+    parts = dialog.parts
+    parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+    parts["engine"].activated.emit(parts["engine"].currentIndex())
+    hidden = parts["key"].echoMode() == QLineEdit.EchoMode.Password
+    parts["key"].setText("sk-nueva")
+    parts["eye"].click()
+    shown = parts["key"].echoMode() == QLineEdit.EchoMode.Normal
+    parts["accept"]()
+    root.update()
+    summary, used = tr["summary"].text(), (tr["engine"].currentText(), tr["key"].text())
+    tr["close"]()
+    root.update()
+    stored = translate.unprotect(window.settings["translate"]["keys"]["DeepSeek"])
+    window.close()
+    assert hidden and shown, (hidden, shown)
+    assert "DeepSeek" in summary and used == ("DeepSeek", "sk-nueva") and stored == "sk-nueva", (summary, used, stored)
+
+
 def test_window_kindle_profile_hyphenates():
     root, window = visible_window()
     window.profile_var.set("Kindle")
@@ -8222,8 +8248,9 @@ def test_window_translate_close_mid_batch():
 
 
 def test_window_translate_models_and_book_language():
-    """«Buscar modelos» llena la lista con los de la API; Google Cloud pide clave. Un libro en inglés: el informe
-    no da erratas del español, «Ortografía…» lo dice y el editor no revisa la ortografía."""
+    """Opciones → Traducción: «Buscar modelos» llena la lista con los de la API; Google Cloud pide clave y no
+    modelo; Traducir, abierto, muestra el motor elegido. Un libro en inglés: el informe no da erratas del español,
+    «Ortografía…» lo dice y el editor no revisa la ortografía."""
     import time
     import app
     import translate
@@ -8232,8 +8259,8 @@ def test_window_translate_models_and_book_language():
     original = translate._get
     translate._get = lambda url, headers=None: {"data": [{"id": "deepseek-reasoner"}, {"id": "deepseek-chat"}]}
     try:
-        win = window.translate_book()
-        parts = win.parts
+        tr = window.translate_book().parts
+        parts = window.open_options("Traducción").parts
         parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
         parts["engine"].activated.emit(parts["engine"].currentIndex())
         parts["key"].setText("k")
@@ -8248,7 +8275,10 @@ def test_window_translate_models_and_book_language():
         parts["engine"].setCurrentIndex(parts["engine"].findText("Google Cloud (clave)"))
         parts["engine"].activated.emit(parts["engine"].currentIndex())
         assert parts["key"].isVisible() and not parts["model"].isVisible()
-        parts["close"]()
+        parts["accept"]()
+        root.update()
+        assert "Google Cloud" in tr["summary"].text() and not tr["key"].isVisible(), tr["summary"].text()
+        tr["close"]()
     finally:
         translate._get = original
     item = first_title(window)

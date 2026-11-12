@@ -1,6 +1,8 @@
 """Ventana «Opciones»: todos los ajustes en un sitio, como las Preferencias de Acrobat.
 La tabla OPTIONS declara cada opción una vez; páginas, buscador y ayudas salen de ella."""
 import copy
+import queue
+import threading
 import unicodedata
 from collections import namedtuple
 from pathlib import Path
@@ -10,8 +12,11 @@ from PySide6.QtGui import QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QPushButton, QRadioButton, QScrollArea, QSpinBox,
                                QSplitter, QVBoxLayout, QWidget)
+import shiboken6
 
+import qtk
 import theme
+import translate
 
 BOOK, APP = "El libro", "La aplicación"
 CATEGORIES = {BOOK: ("Perfil y formato", "Aspecto", "Texto", "Ilustraciones", "PDF"),
@@ -244,6 +249,9 @@ class OptionsDialog:
     def add_option(self, layout, option):
         """Control de una opción y, debajo, su ayuda en gris."""
         key, value = option.key, self.get(option.key)
+        if option.kind == "translate":
+            self.translation_page(layout, option)
+            return
         if option.kind == "folder":
             widget = QLabel(value or "Ninguna")
             widget.setWordWrap(True)
@@ -315,6 +323,143 @@ class OptionsDialog:
                 layout.addWidget(error)
                 self.parts["watch_error"] = error
         self.parts["widgets"][key], self.parts["notes"][key] = widget, note
+
+    def translation_page(self, layout, option):
+        """Motor, modelo, URL y clave del motor elegido, e idiomas con los que empieza Traducir. La clave se guarda
+        cifrada (translate.protect); todo espera a Aceptar."""
+        data = self.values["translate"]
+        for name in ("models", "keys"):
+            if not isinstance(data.get(name), dict):
+                data[name] = {}
+        engine, model, base, key = QComboBox(), QComboBox(), QLineEdit(), QLineEdit()
+        src, dst, status = QComboBox(), QComboBox(), QLabel("")
+        engine.addItems(list(translate.ENGINES))
+        engine.setCurrentIndex(max(0, engine.findText(str(data.get("engine", "")))))
+        model.setEditable(True)  # se escribe a mano o se elige de los que da «Buscar modelos»
+        model.setMinimumContentsLength(22)
+        base.setPlaceholderText("http://localhost:11434/v1")
+        base.setMinimumWidth(260)
+        key.setEchoMode(QLineEdit.EchoMode.Password)
+        key.setMinimumWidth(260)
+        eye = QPushButton("👁")
+        eye.setToolTip("Mostrar u ocultar la clave")
+        eye.clicked.connect(lambda: key.setEchoMode(QLineEdit.EchoMode.Normal if key.echoMode()
+                                                    == QLineEdit.EchoMode.Password else QLineEdit.EchoMode.Password))
+        models_btn = QPushButton("Buscar modelos")
+        for code, name in translate.LANGS.items():
+            src.addItem(name, code)
+            if code != "auto":
+                dst.addItem(name, code)
+        src.setCurrentIndex(max(0, src.findData(data.get("src", "auto"))))
+        dst.setCurrentIndex(max(0, dst.findData(data.get("dst", "es"))))
+        status.setObjectName("muted")
+        status.setWordWrap(True)
+        rows, shown = {}, {"name": engine.currentText()}  # el motor cuyos campos se ven ahora
+
+        def labelled(text, *widgets):
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.addWidget(QLabel(text))
+            for widget in widgets:
+                line.addWidget(widget)
+            line.addStretch(1)
+            layout.addWidget(row)
+            return row
+
+        labelled("Motor:", engine)
+        rows["model"] = labelled("Modelo:", model, models_btn)
+        rows["base"] = labelled("URL:", base)
+        rows["key"] = labelled("Clave:", key, eye)
+        labelled("Traducir de:", src, QLabel("a:"), dst)
+        layout.addWidget(status)
+        note = QLabel(option.help)
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        def keep():
+            """Lo escrito, al motor cuyos campos se ven; la clave, cifrada (sin cifrar no se guarda)."""
+            name = shown["name"]
+            data.update(engine=engine.currentText(), src=src.currentData(), dst=dst.currentData())
+            data["models"][name] = model.currentText().strip()
+            try:
+                data["keys"][name] = translate.protect(key.text().strip())
+            except OSError:
+                data["keys"].pop(name, None)
+            if translate.ENGINES[name].get("custom"):
+                data["base"] = base.text().strip()
+
+        def show_engine():
+            name = shown["name"] = engine.currentText()
+            info = translate.ENGINES[name]
+            for widget in (model, base, key):
+                widget.blockSignals(True)  # poner los valores del motor no es escribir
+            model.clear()  # la lista buscada era de otro motor
+            model.setEditText(data["models"].get(name) or info.get("model", ""))
+            key.setText(translate.unprotect(data["keys"].get(name, "")))
+            base.setText(data.get("base") or info.get("base", ""))
+            for widget in (model, base, key):
+                widget.blockSignals(False)
+            rows["model"].setVisible("model" in info)
+            rows["base"].setVisible(bool(info.get("custom")))
+            rows["key"].setVisible(info["kind"] != "google")
+            key.setPlaceholderText("Opcional" if info.get("custom") else "Clave API")
+            status.setText("")
+
+        def find_models():
+            """La lista de modelos de la API, en un hilo: sin conexión tardaría en fallar."""
+            name, info = engine.currentText(), translate.ENGINES[engine.currentText()]
+            if info.get("key") and not key.text().strip():
+                status.setText(f"Falta la clave de {name}: sin ella la API no da la lista.")
+                return
+            found, url = queue.Queue(), base.text().strip() if info.get("custom") else ""
+            typed = key.text().strip()
+
+            def ask():
+                try:
+                    found.put(translate.models(name, typed, url))
+                except Exception as e:  # TranslateError ya viene en español
+                    found.put(str(e) or type(e).__name__)
+
+            models_btn.setEnabled(False)
+            models_btn.setText("Buscando…")
+            threading.Thread(target=ask, daemon=True).start()
+
+            def wait():
+                if not shiboken6.isValid(models_btn):  # Opciones se cerró o cambió de página
+                    return
+                try:
+                    result = found.get_nowait()
+                except queue.Empty:
+                    qtk.after(200, wait)
+                    return
+                models_btn.setText("Buscar modelos")
+                models_btn.setEnabled(True)
+                if isinstance(result, str) or not result or engine.currentText() != name:
+                    if engine.currentText() == name:
+                        status.setText(result or f"{name} no devolvió ningún modelo.")
+                    return
+                current = model.currentText().strip()
+                model.clear()
+                model.addItems(result)
+                model.setEditText(current or result[0])
+                keep()
+                count = f"{len(result)} modelo" + ("s" if len(result) != 1 else "")
+                status.setText(f"{name} ofrece {count}: elige uno en «Modelo».")
+
+            qtk.after(200, wait)
+
+        engine.activated.connect(lambda _: (keep(), show_engine(), keep()))
+        model.currentTextChanged.connect(lambda _: keep())
+        base.textChanged.connect(lambda _: keep())
+        key.textChanged.connect(lambda _: keep())
+        src.activated.connect(lambda _: keep())
+        dst.activated.connect(lambda _: keep())
+        models_btn.clicked.connect(find_models)
+        show_engine()
+        self.parts.update(engine=engine, model=model, base=base, key=key, eye=eye, src=src, dst=dst,
+                          models=find_models, status=status)
 
     def pick_folder(self, key):
         folder = self.owner.ask_folder()

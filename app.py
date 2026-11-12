@@ -3003,6 +3003,9 @@ class App:
         translation = self.settings.setdefault("translate", {})
         translation.clear()  # el mismo dict: Traducir, si está abierto, lo tiene y ve lo nuevo
         translation.update(values["translate"])
+        open_translation = getattr(self, "translate_window", None)
+        if open_translation and shiboken6.isValid(open_translation) and hasattr(open_translation, "parts"):
+            open_translation.parts["reload"]()  # Traducir abierto: el motor y la clave nuevos, no los de antes
         if values["echoes"] != self.echoes_var.get():
             self.echoes_var.set(values["echoes"])
             self.update_quality()
@@ -4793,7 +4796,9 @@ class App:
         series = self.series_var.get()
         memory = _series_memory(pdf, series)  # lo ya traducido en los otros tomos de la serie
         sources = {v["source"]: k for k, v in memory.items() if v.get("source")}  # original -> su clave
-        prefs = self.settings.get("translate") if isinstance(self.settings.get("translate"), dict) else {}
+        if not isinstance(self.settings.get("translate"), dict):
+            self.settings["translate"] = {}
+        prefs = self.settings["translate"]  # el mismo dict que edita Opciones → Traducción
         for name in ("models", "keys"):
             if not isinstance(prefs.get(name), dict):
                 prefs[name] = {}
@@ -4830,9 +4835,16 @@ class App:
         inside = QVBoxLayout(settings)
         inside.setContentsMargins(12, 10, 12, 10)
         inside.setSpacing(8)
-        inside.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, QLabel("Motor:"), engine, 1, QLabel("Traducir:"),
+        # Motor, modelo y clave se eligen en Opciones → Traducción; aquí solo se ven en el resumen. Los controles
+        # siguen, ocultos: de ellos leen traducir, revisar con la IA y el glosario
+        summary = _label("", "muted")
+        engine_btn = _button("Motor y claves…", lambda: self.open_options("Traducción"))
+        engine_box = QWidget()
+        engine_box.setLayout(_row(engine, model_label, model, models_btn, base_label, base, key_label, api_key))
+        engine_box.hide()
+        inside.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, summary, engine_btn, 1, QLabel("Traducir:"),
                               scope))
-        inside.addLayout(_row(model_label, model, models_btn, base_label, base, key_label, api_key, 1, glossary_btn))
+        inside.addLayout(_row(engine_box, 1, glossary_btn))
         hint = _label("", "muted")
         hint.setWordWrap(True)
         inside.addWidget(hint)
@@ -4992,12 +5004,17 @@ class App:
             model.setEditText(prefs["models"].get(name) or info.get("model", ""))
             api_key.setText(translate.unprotect(prefs["keys"].get(name, "")))
             base.setText(prefs.get("base") or info.get("base", ""))
-            for widget, shown in ((model_label, "model" in info), (model, "model" in info), (models_btn, "model" in info),
-                                  (base_label, info.get("custom")), (base, info.get("custom")),
-                                  (key_label, info["kind"] != "google"), (api_key, info["kind"] != "google")):
-                widget.setVisible(bool(shown))
             api_key.setPlaceholderText("Opcional" if info.get("custom") else "Clave API")
             hint.setText(hints["custom" if info.get("custom") else "openai" if "model" in info else info["kind"]])
+            missing = info.get("key") and not api_key.text().strip()
+            summary.setText(f"Motor: {name}" + (f" · {model.currentText().strip()}" if "model" in info else "")
+                            + (" · falta la clave" if missing else ""))
+
+        def reload():
+            """Tras «Opciones»: el motor y la clave de las preferencias, que acaban de cambiar."""
+            if shiboken6.isValid(win):
+                engine.setCurrentIndex(max(0, engine.findText(str(prefs.get("engine", "")))))
+                show_engine()
 
         def applied():
             """Textos ya puestos en el libro: un párrafo así está «Aplicado», no pendiente."""
@@ -5392,8 +5409,8 @@ class App:
             name = engine.currentText()
             info = translate.ENGINES[name]
             if info.get("key") and not api_key.text().strip():
-                messagebox.showerror("Traducir", f"Falta la clave de {name}.", parent=win)
-                api_key.setFocus()
+                messagebox.showerror("Traducir", f"Falta la clave de {name}. Ponla en «Motor y claves…».", parent=win)
+                self.open_options("Traducción")
                 return
             remember()
             order, wanted = table.get_children(), set(ids)
@@ -5449,8 +5466,8 @@ class App:
                                                       "(OpenAI, DeepSeek, Gemini, Claude…).", parent=win)
                 return
             if info.get("key") and not api_key.text().strip():
-                messagebox.showerror("Revisar con IA", f"Falta la clave de {name}.", parent=win)
-                api_key.setFocus()
+                messagebox.showerror("Revisar con IA", f"Falta la clave de {name}. Ponla en «Motor y claves…».", parent=win)
+                self.open_options("Traducción")
                 return
             order = table.get_children()
             picked = {i for i in table.selection() if not table.rows[i].isHidden()}
@@ -5989,7 +6006,8 @@ class App:
         dst.activated.connect(lambda _: fill())  # con lo de la serie que esté traducido a ese idioma
         show_engine()
         fill()
-        win.parts = {"table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
+        win.parts = {"summary": summary, "engine_btn": engine_btn, "reload": reload,
+                     "table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
                      "scope": scope, "dst": dst, "src": src, "key": api_key, "status": status, "work": work, "done": done,
                      "glossary": edit_glossary, "close": close, "merge": merge, "pdf": pdf, "book": self.book,
                      "model": model, "models": find_models, "chips": chips, "search": search, "step": step,
