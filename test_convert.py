@@ -733,6 +733,32 @@ def test_links_and_centered_paragraphs_reach_the_epub():
     assert not problems, problems
 
 
+def test_superscript_small_caps_and_right_reach_the_epub():
+    """El editor escribe superíndice (<sup>), versalitas (<sc>) y párrafos a la derecha (<derecha> delante): llegan
+    a los bloques y al EPUB con su CSS, section_text los devuelve igual (también dentro de una nota) y una <sc> sin
+    cerrar se quita para no romper el libro."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno.")]
+    book = convert.Book("Libro", "", JPEG, blocks, [0])
+    lines = ["El 1.<sup>er</sup> aventurero de <sc>Rango S</sc>.", "<derecha>Firmado: Rudeus",
+             "Entró[Nota: el <sc>gremio</sc> de Rosa] al salón.", "Mal <sc>cerrado."]
+    convert.edit_section(book, 1, 2, "\n\n".join(lines))
+    htmls = [(b.html, b.align) for b in book.blocks[1:]]
+    again = convert.section_text(book, 1, 5).split("\n\n")
+    out = TMP / "versalitas.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out)
+    text, problems = epub_text(out), convert.check_epub(str(out))
+    with zipfile.ZipFile(out) as z:
+        css = "".join(z.read(n).decode() for n in z.namelist() if n.endswith(".css"))
+    assert htmls[0] == ('El 1.<sup>er</sup> aventurero de <small class="sc">Rango S</small>.', ""), htmls
+    assert htmls[1] == ("Firmado: Rudeus", "right"), htmls
+    assert htmls[3] == ("Mal cerrado.", ""), htmls
+    assert again == lines[:3] + ["Mal cerrado."], again
+    assert convert._plain(book.blocks[1]) == "El 1.er aventurero de Rango S.", convert._plain(book.blocks[1])
+    assert 'class="right"' in text and '<small class="sc">Rango S</small>' in text and "<sup>er</sup>" in text, text
+    assert "small.sc { font-size: 1em; font-variant: small-caps; }" in css and "p.right" in css, css
+    assert not problems, problems
+
+
 def test_separator_options():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
               convert.Block("break", 1, "☆"), convert.Block("p", 1, "Dos."),
@@ -1920,13 +1946,13 @@ def test_window_illustrations_export_and_replace_with_comparison():
         new2, new3 = jpeg(640, 880), jpeg(680, 960)
         (folder / exported[1]).write_bytes(new2)
         (folder / exported[2]).write_bytes(new3)
-        window.confirm_image = lambda k, data, batch=False: asked.append((k, batch)) or answers.pop(0)
+        window.confirm_image = lambda k, data, batch=False, parent=None: asked.append((k, batch)) or answers.pop(0)
         click("Reemplazar desde carpeta…")
         note = dialog.parts["note"].text()
         after = [b.image for b in window.book.blocks if b.kind == "image"]
         state = app.json.loads(app.json.dumps(window.review_state()))  # como se guarda: Ctrl+Z ya no la toca
         # Cancelar a mitad de un lote: nada cambia
-        window.confirm_image = lambda k, data, batch=False: None
+        window.confirm_image = lambda k, data, batch=False, parent=None: None
         before_cancel = [b.image for b in window.book.blocks]
         cancelled = window.replace_from_folder(folder)
         unchanged = [b.image for b in window.book.blocks] == before_cancel
@@ -2858,6 +2884,28 @@ def test_editor_sheet_round_trip():
     assert sources == [2, 3, 4, 5, 6, 7, 8, 9, 10], sources
 
 
+def test_editor_pastes_html_with_italics():
+    """Pegar de Word o de la web (HTML) conserva cursiva, negrita (también la de un estilo font-weight) y
+    superíndice; colores y tamaños no. «[Ilustración 1]» de fuera entra como texto, no como ilustración."""
+    import qtk
+    from PySide6.QtCore import QMimeData
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Inicio.")], {})
+    sheet.moveCursor(QTextCursor.MoveOperation.End)
+    mime = QMimeData()
+    mime.setHtml('<p>Hola <i>mundo</i></p><p style="color:red;font-size:20pt"><span style="font-weight:700">Fuerte'
+                 '</span> 1<sup>o</sup></p><p>[Ilustración 1]</p>')
+    sheet.insertFromMimeData(mime)
+    assert sheet.content().split("\n\n") == ["Inicio.Hola <i>mundo</i>", "<b>Fuerte</b> 1<sup>o</sup>",
+                                             "[Ilustración 1]"], sheet.content()
+    assert not sheet.objects(), sheet.objects()
+
+
 def test_editor_sheet_actions_paste_and_undo():
     """Cursiva, negrita y título como en Word; Enter parte y el párrafo nuevo sigue apuntando a su bloque;
     unir deja un espacio; pegar de fuera trae solo texto; una ilustración no se duplica al pegarla."""
@@ -2911,7 +2959,7 @@ def test_editor_sheet_actions_paste_and_undo():
     sheet.moveCursor(QTextCursor.MoveOperation.End)
     sheet.split_here()
     sheet.insertFromMimeData(mime)
-    seen.append(sheet.content().split(chr(10) * 2)[-1])      # solo texto, sin negrita
+    seen.append(sheet.content().split(chr(10) * 2)[-1])      # con su negrita, sin el tamaño
     sheet.selectAll()
     copy = sheet.createMimeDataFromSelection()
     sheet.moveCursor(QTextCursor.MoveOperation.End)
@@ -2925,7 +2973,58 @@ def test_editor_sheet_actions_paste_and_undo():
     sheet.insertFromMimeData(cut)
     seen.append(sheet.content().count("[Ilustración 3]"))    # cortar y pegar la mueve
     assert seen == ["<i>Fin</i>.", "Fin.", "<b>Fin</b>.", "# Fin.", "Fin. Dijo hola, y se fue.", "Fin.",
-                    ["Dijo", "hola, y se fue."], 2, "Pegado de fuera", 1, 1], seen
+                    ["Dijo", "hola, y se fue."], 2, "<b>Pegado</b> de fuera", 1, 1], seen
+
+
+def test_editor_sheet_superscript_small_caps_right():
+    """Superíndice, versalitas y párrafo a la derecha se cargan y vuelven igual; los botones de la hoja los ponen
+    en lo elegido; derecha y centrado se excluyen; Ctrl+D pone a la derecha y Ctrl+Mayús+= el superíndice."""
+    import qtk
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    lines = [(1, "El 1.<sup>er</sup> de <sc>Rango S</sc>."), (2, "<derecha>Firmado: Rudeus"), (3, "<center>Uno dos"),
+             (4, "tres cuatro")]
+    sheet.set_content(lines, {})
+    same = sheet.content() == "\n\n".join(line for _, line in lines)
+
+    def at(n, start=0, end=None):
+        block = sheet.document().findBlockByNumber(n)
+        c = sheet.textCursor()
+        c.setPosition(block.position() + start)
+        if end is not None:
+            c.setPosition(block.position() + end, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+
+    def line(n):
+        return sheet.content().split("\n\n")[n]
+
+    at(3, 0, 4)
+    sheet.toggle_sup()
+    at(3, 5, 11)
+    sheet.toggle_small_caps()
+    marked = line(3)
+    at(2)
+    sheet.toggle_right()
+    right = line(2)
+    at(1)
+    sheet.toggle_right()  # quita la derecha
+    left = line(1)
+    at(3)
+    QTest.keyClick(sheet, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
+    keyed = line(3)
+    at(0, 0, 2)
+    QTest.keyClick(sheet, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+    assert same, sheet.content()
+    assert marked == "<sup>tres</sup> <sc>cuatro</sc>", marked
+    assert right == "<derecha>Uno dos" and left == "Firmado: Rudeus", (right, left)
+    assert keyed.startswith("<derecha>"), keyed
+    assert line(0).startswith("<sup>El</sup> 1.<sup>er</sup>"), line(0)
 
 
 def test_editor_sheet_links_center_levels_case_and_search():
@@ -3472,6 +3571,306 @@ def editor_on(blocks, candidates):
     window.show_book(convert.Book("Libro", "", b"", blocks, candidates))
     window.tree.selection_set("0")
     return root, window, app.TextEditor(window, "0", *window.section_bounds(0))
+
+
+def test_editor_draft_recovers_after_crash():
+    """El editor escribe un borrador con lo cambiado; si la aplicación se cerró sin aceptar, al abrirlo otra vez
+    ofrece recuperarlo: vuelve el texto, el cambio se ve como cambio (F7) y el párrafo igual conserva su página.
+    Con el libro cambiado desde entonces, esa sección no se recupera y se avisa. Aceptar borra el borrador, y sin
+    cambios no se deja ninguno."""
+    import app
+    from PySide6.QtGui import QTextCursor
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Primer párrafo."), B("p", 2, "Segundo párrafo.")]
+    root, window, editor = editor_on(blocks, [0])
+    path = app._draft_path(window.pdf)
+    editor.write_draft()
+    none_clean = not path.exists()
+    c = editor.sheet.textCursor()
+    c.setPosition(editor.sheet.document().findBlockByNumber(2).position())
+    c.insertText("Nuevo. ")
+    editor.write_draft()
+    draft = path.read_text(encoding="utf-8")
+    editor.win.done(0)  # cerrar sin aceptar: el borrador se va
+    closed_drops = not path.exists()
+    asked, infos = [], []
+    saved = app.messagebox.askyesno, app.messagebox.showinfo
+    app.messagebox.askyesno = lambda title, message, **kw: asked.append(message) or True
+    app.messagebox.showinfo = lambda title, message, **kw: infos.append(message)
+    try:
+        path.write_text(draft, encoding="utf-8")  # como si la aplicación se hubiera cerrado de golpe
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        recovered = editor.sheet.content().split("\n\n")
+        changed = [b.blockNumber() for b in editor.sheet.changed_blocks()]
+        dirty = editor.dirty()
+        editor.save()
+        saved_text = [convert._plain(b) for b in window.book.blocks]
+        kept_page = window.book.blocks[1].page
+        accept_drops = not path.exists()
+        path.write_text(draft.replace("Primer párrafo.", "Otro texto."), encoding="utf-8")
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        stale = editor.sheet.content()
+        editor.win.done(0)
+    finally:
+        app.messagebox.askyesno, app.messagebox.showinfo = saved
+        window.close()
+    assert none_clean and closed_drops, (none_clean, closed_drops)
+    assert len(asked) == 2 and "¿Recuperarlos?" in asked[0], asked
+    assert recovered == ["# Capítulo 1", "Primer párrafo.", "Nuevo. Segundo párrafo."], recovered
+    assert changed == [2] and dirty, (changed, dirty)
+    assert saved_text == ["Capítulo 1", "Primer párrafo.", "Nuevo. Segundo párrafo."] and kept_page == 1, saved_text
+    assert accept_drops
+    assert "Otro texto." not in stale and infos and "el libro cambió" in infos[0], (stale, infos)
+
+
+def test_editor_draft_written_while_spelling_repaints():
+    """La ortografía repinta la hoja y avisa de cambios sin parar mientras revisa el libro: el borrador se escribe
+    igual a los 5 s del primer cambio, no espera a que la hoja se quede quieta (con ella, nunca se escribía)."""
+    from PySide6.QtTest import QTest
+    import app
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
+    QTest.keyClicks(editor.sheet, "hola ")
+    for _ in range(30):  # 6 s de repintados, uno cada 200 ms
+        editor.sheet.textChanged.emit()
+        QTest.qWait(200)
+    written = app._draft_path(window.pdf).exists()
+    editor.win.done(0)
+    window.close()
+    assert written, "el borrador no se escribió mientras la hoja avisaba de cambios"
+
+
+def test_editor_resume_bar_goes_where_you_left():
+    """Al cerrar el editor se recuerda el párrafo del cursor, también en la revisión; abrirlo en otro capítulo
+    ofrece «Lo dejaste en «Capítulo 2»» e «Ir allí» lleva a ese párrafo. En el mismo capítulo no sale la barra."""
+    from PySide6.QtGui import QTextCursor
+    import app
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("heading", 2, "Capítulo 2"), B("p", 2, "Dos."),
+              B("p", 2, "Tres.")]
+    root, window, editor = editor_on(blocks, [0, 2])
+    editor.open_section(*window.section_bounds(2), 4)
+    editor.win.done(0)
+    remembered = window.editor_at
+    saved = window.review_state()["editor_at"]
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    shown = not editor.resume_frame.isHidden() and "«Capítulo 2»" in editor.resume_label.text()
+    editor.resume_go.click()
+    went = editor.current == window.section_bounds(2) and editor.sheet.current_source() == 4
+    hidden_after = editor.resume_frame.isHidden()
+    editor.win.done(0)
+    editor = app.TextEditor(window, "2", *window.section_bounds(2))
+    same_chapter = editor.resume_frame.isHidden()
+    editor.win.done(0)
+    window.close()
+    assert remembered == 4 and saved == 4, (remembered, saved)
+    assert shown and went and hidden_after and same_chapter, (shown, went, hidden_after, same_chapter)
+
+
+def test_editor_navigation_panel():
+    """F9 abre el panel de navegación con los títulos, avisos, comentarios y cambios del capítulo y su cuenta; un
+    clic lleva al párrafo. Se recuerda abierto para la próxima vez."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import app
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno dos."), B("heading", 1, "Parte dos"), B("p", 1, "Tres."),
+              B("p", 1, "Cuatro.")]
+    root, window, editor = editor_on(blocks, [0])
+    editor.issues = {3: [convert.Issue("x", 3, 1, "Menor", "Aviso de prueba", "", "")],
+                     4: [convert.Issue("comment", 4, 1, "Revisar", "Comentario del revisor", "Mirar esto", "")]}
+    c = editor.sheet.textCursor()
+    c.setPosition(editor.sheet.document().findBlockByNumber(1).position())
+    c.insertText("Cambiado. ")
+    editor.refresh_marks()
+    hidden = editor.nav.isHidden()
+    QTest.keyClick(editor.sheet, Qt.Key.Key_F9)
+    groups = [editor.nav.topLevelItem(n) for n in range(editor.nav.topLevelItemCount())]
+    names = [g.text(0) for g in groups]
+    notes = [groups[2].child(0).text(0)] if groups[2].childCount() else []
+    target = groups[1].child(0)
+    editor.nav_go(target)
+    went = editor.sheet.textCursor().block().blockNumber()
+    remembered = window.settings.get("editor_nav")
+    editor.win.done(0)
+    again = app.TextEditor(window, "0", *window.section_bounds(0))
+    shown_again = not again.nav.isHidden()
+    QTest.keyClick(again.sheet, Qt.Key.Key_F9)
+    again.win.done(0)
+    window.close()
+    assert hidden, "el panel empieza oculto"
+    assert names == ["Títulos (2)", "Avisos (1)", "Comentarios (1)", "Cambios (1)"], names
+    assert notes == ["Mirar esto"] and went == 3, (notes, went)
+    assert remembered is True and shown_again and window.settings["editor_nav"] is False
+
+
+def test_editor_shows_changes():
+    """«Mostrar cambios»: en el párrafo cambiado se subraya lo puesto («perro») y la barra muestra el original con
+    lo quitado tachado y lo puesto subrayado; en un párrafo sin cambios la barra se oculta. Apagarlo quita todo."""
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+    import editor as ed
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "El gato <i>negro</i> duerme."),
+                                      B("p", 1, "Sin tocar.")], [0])
+    sheet = editor.sheet
+    block = sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.setPosition(block.position() + 3)
+    c.setPosition(block.position() + 7, QTextCursor.MoveMode.KeepAnchor)
+    c.insertText("perro")
+    sheet.setTextCursor(c)
+    editor.show_changes_action.setChecked(True)
+
+    def underlined(block, at):
+        layout = block.layout()
+        return any(r.start <= at < r.start + r.length
+                   and r.format.underlineStyle() == QTextCharFormat.UnderlineStyle.SingleUnderline
+                   for r in layout.formats())
+
+    marked = underlined(block, 4) and not underlined(block, 0) and not underlined(block, 12)
+    shown = not editor.diff_frame.isHidden()
+    bar = editor.diff_label.text()
+    sheet.setTextCursor(QTextCursor(sheet.document().findBlockByNumber(2)))
+    editor.update_diff()
+    hidden_clean = editor.diff_frame.isHidden()
+    editor.show_changes_action.setChecked(False)
+    gone = not underlined(block, 4)
+    editor.win.done(0)
+    window.close()
+    assert ed.added_spans("El gato duerme.", "El perro duerme.") == [(3, 5)]
+    assert marked and shown, (marked, shown, bar)
+    assert ">gato</s>" in bar and ">perro</u>" in bar and "negro" in bar and "<i>" not in bar, bar
+    assert hidden_clean and gone, (hidden_clean, gone)
+
+
+def test_editor_focus_mode():
+    """F11 deja solo la hoja: sin cinta ni panel del PDF. Esc vuelve a como estaba sin preguntar si se descartan
+    los cambios, y el editor sigue abierto con ellos."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import app
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
+    editor.sheet.textCursor().insertText("Cambio. ")
+    asked = []
+    saved = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda *a, **kw: asked.append(a) or False
+    try:
+        QTest.keyClick(editor.sheet, Qt.Key.Key_F11)
+        focused = editor.ribbon_bar.isHidden() and editor.side.isHidden() and not editor.sheet.isHidden()
+        QTest.keyClick(editor.win, Qt.Key.Key_Escape)
+        back = not editor.ribbon_bar.isHidden() and not editor.side.isHidden() and editor.win.isVisible()
+        kept = editor.dirty()
+    finally:
+        app.messagebox.askyesno = saved
+        editor.win.done(0)
+        window.close()
+    assert focused and back and kept and not asked, (focused, back, kept, asked)
+
+
+def test_editor_work_log():
+    """«Cifras» cuenta el trabajo: aceptar suma los párrafos cambiados y el tiempo de hoy, marcar revisado suma un
+    capítulo (desmarcar no resta), y el resumen da hoy, los últimos 7 días y el total."""
+    from datetime import date, timedelta
+    import app
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos."), B("heading", 2, "Capítulo 2"),
+              B("p", 2, "Tres.")]
+    root, window, editor = editor_on(blocks, [0, 3])
+    today = date.today().isoformat()
+    window.work = {"2000-01-01": {"minutes": 30, "paragraphs": 5, "reviewed": 1}}
+    c = editor.sheet.textCursor()
+    c.setPosition(editor.sheet.document().findBlockByNumber(1).position())
+    c.insertText("Cambiado. ")
+    editor.opened -= 120  # dos minutos abierto
+    editor.toggle_reviewed()
+    editor.open_section(*window.section_bounds(0))
+    editor.toggle_reviewed()  # desmarcar
+    editor.show_stats()
+    stats = [w.text() for w in editor.stats_window.findChildren(app.QLabel)]
+    editor.stats_window.close()
+    editor.save()
+    day = window.work[today]
+    saved = window.review_state()["work"][today]
+    old = (date.today() - timedelta(days=3)).isoformat()
+    summary = app._work_summary({today: {"minutes": 10, "paragraphs": 2}, old: {"minutes": 50, "reviewed": 1},
+                                 "2000-01-01": {"minutes": 5}}, today)
+    window.close()
+    assert day["paragraphs"] == 1 and day["reviewed"] == 1 and 2 <= day["minutes"] < 3, day
+    assert saved == day, saved
+    assert "Tu trabajo" in stats and "Párrafos cambiados" in stats and "2 min" in stats, stats
+    assert summary == [("Hoy", 10, 2, 0), ("Últimos 7 días", 60, 2, 1), ("Total del libro", 65, 2, 1)], summary
+    assert app._duration(65) == "1 h 05 min" and app._duration(45) == "45 min"
+
+
+def test_editor_changes_illustration():
+    """Clic derecho en una ilustración: «Cambiar ilustración…» la cambia en el libro (App.replace_image) y la hoja
+    muestra ya la nueva con su forma; el texto no cuenta como cambiado."""
+    import dataclasses
+    from PySide6.QtGui import QTextCursor
+
+    B = convert.Block
+    wide = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 400, 100), False)
+    wide.clear_with(200)
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("image", 1, image=JPEG), B("p", 1, "Uno.")],
+                                     [0])
+
+    def fake(k, parent=None):
+        window.book.blocks[k] = dataclasses.replace(window.book.blocks[k], image=wide.tobytes("png"))
+        return parent is editor.win
+
+    window.replace_image = fake
+
+    def size():
+        block = editor.sheet.document().findBlockByNumber(1)
+        f = block.begin().fragment().charFormat().toImageFormat()
+        return round(f.width() / f.height(), 1)
+
+    before = size()
+    pos = editor.sheet.cursorRect(QTextCursor(editor.sheet.document().findBlockByNumber(1))).center()
+    actions = [a.text() for a in editor.mark_menu(pos).actions()]
+    editor.change_picture(1)
+    after = size()
+    dirty = editor.dirty()
+    editor.win.done(0)
+    window.close()
+    assert "Cambiar ilustración…" in actions, actions
+    assert before != 4.0 and after == 4.0 and not dirty, (before, after, dirty)
+
+
+def test_synonyms():
+    """Sinónimos del tesauro: de la palabra, de su singular y de su masculino, devueltos a su forma («casas» →
+    «hogares», «bonita» → «linda»); nada de una inventada. Se respetan
+    las mayúsculas, y el menú del clic derecho los ofrece y reemplaza la palabra."""
+    from PySide6.QtGui import QTextCursor
+    import editor as ed
+
+    house, houses, pretty = ed.synonyms("casa"), ed.synonyms("casas"), ed.synonyms("bonita")
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Una Casa grande.")], [0])
+    block = editor.sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.setPosition(block.position() + 5)
+    pos = editor.sheet.cursorRect(c).center()
+    menu = editor.mark_menu(pos)
+    sub = next(a.menu() for a in menu.actions() if a.text() == "Sinónimos")
+    first = sub.actions()[0]
+    first.trigger()
+    text = editor.sheet.content().split("\n\n")[1]
+    editor.win.done(0)
+    window.close()
+    assert "hogar" in house and "casa" not in house and len(house) <= 12, house
+    assert "hogares" in houses and "edificaciones" in houses and "linda" in pretty, (houses, pretty)
+    assert ed.synonyms("xyzwq") == []
+    assert ed.match_case("CASA", "hogar") == "HOGAR" and ed.match_case("Casa", "hogar") == "Hogar"
+    assert first.text()[0].isupper() and text == f"Una {first.text()} grande.", (first.text(), text)
 
 
 def test_window_editor_split_back_keeps_paragraph_source():
@@ -5622,7 +6021,7 @@ def test_window_add_page_change_image_and_reviewed():
         window.fill_tree(window.rows())
         image = str(len(window.book.blocks) - 1)
         window.tree.selection_set(image)
-        window.confirm_image = lambda k, data, batch=False: "replace"  # el antes y después: Reemplazar
+        window.confirm_image = lambda k, data, batch=False, parent=None: "replace"  # el antes y después: Reemplazar
         window.change_image()
     finally:
         app.filedialog.askopenfilename = original
@@ -5660,7 +6059,7 @@ def test_window_change_double_image_for_single():
     split = window.tree.set("1", "inc")
     original = app.filedialog.askopenfilename
     app.filedialog.askopenfilename = lambda **kwargs: str(picture)
-    window.confirm_image = lambda k, data, batch=False: "replace"  # el antes y después: Reemplazar
+    window.confirm_image = lambda k, data, batch=False, parent=None: "replace"  # el antes y después: Reemplazar
     try:
         window.change_image()
     finally:

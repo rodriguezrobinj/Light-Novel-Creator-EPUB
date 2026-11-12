@@ -40,7 +40,7 @@ from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QRectF, QSize, Qt, 
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
                            QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
-                               QInputDialog,
+                               QInputDialog, QTreeWidget, QTreeWidgetItem,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit,
                                QProgressBar,
                                QAbstractItemView, QButtonGroup, QHeaderView, QStyle, QStyledItemDelegate,
@@ -558,6 +558,38 @@ def _review_path(pdf):
     return Path(pdf).with_name(Path(pdf).stem + ".lnepub.json")
 
 
+WORK_KEYS = ("minutes", "paragraphs", "reviewed")
+
+
+def _log_work(work, day, **amounts):
+    """Suma minutos, párrafos cambiados o capítulos revisados al día day ("AAAA-MM-DD") de work."""
+    entry = work.setdefault(day, {})
+    for key, n in amounts.items():
+        entry[key] = round(entry.get(key, 0) + n, 1)
+
+
+def _work_summary(work, today):
+    """[(rótulo, minutos, párrafos, revisados)] de hoy, de los últimos 7 días y del total del libro."""
+    from datetime import date, timedelta
+    week = {(date.fromisoformat(today) - timedelta(days=n)).isoformat() for n in range(7)}
+    out = []
+    for label, days in (("Hoy", {today}), ("Últimos 7 días", week), ("Total del libro", None)):
+        picked = [w for day, w in work.items() if days is None or day in days]
+        out.append((label, *(sum(w.get(key, 0) for w in picked) for key in WORK_KEYS)))
+    return out
+
+
+def _duration(minutes):
+    """«45 min», «1 h 05 min»."""
+    minutes = round(minutes)
+    return f"{minutes // 60} h {minutes % 60:02d} min" if minutes >= 60 else f"{minutes} min"
+
+
+def _draft_path(pdf):
+    """Borrador del editor: lo cambiado sin aceptar, por si la aplicación se cierra a mitad."""
+    return Path(pdf).with_name(Path(pdf).stem + ".lnepub.borrador.json")
+
+
 def _translation_path(pdf):
     return Path(pdf).with_name(Path(pdf).stem + ".lnepub.traduccion.json")
 
@@ -745,7 +777,8 @@ def _set_aside(pdf):
 
 # Versiones del trabajo de un libro, como los commits de git: copias completas de la revisión en un zip junto al
 # PDF. Restaurar una no borra las posteriores: así conviven alternativas del mismo tomo.
-VERSION_NOISE = ("problems", "pdf")  # no cuentan para saber si una versión automática repite la última
+# No cuentan para saber si una versión automática repite la última
+VERSION_NOISE = ("problems", "pdf", "editor_at", "work")
 COMPARE_LIMIT = 300  # párrafos cambiados que se muestran al comparar: más no se leen y la ventana tardaría
 FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volume": "Vol.", "publisher": "Grupo",
                 "translator": "Traductor", "illustrator": "Ilustraciones", "proofreader": "Corrección",
@@ -1449,7 +1482,7 @@ class StatusLabel(QLabel):
                          self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.width()))
 
 
-MARKUP = re.compile(r"</?[ib]>")  # cursiva y negrita de section_text: en la lista no se leen las etiquetas
+MARKUP = re.compile(r"</?(?:i|b|sup|sc)>")  # cursiva y negrita de section_text: en la lista no se leen las etiquetas
 LANG_ROLE = Qt.ItemDataRole.UserRole + 7  # («EN → ES», otro destino que el elegido) de una fila de «Traducir»
 WARN_ROLE = Qt.ItemDataRole.UserRole + 8  # avisos de español de la traducción de una fila de «Traducir»
 DONE_STATES = ("Traducido", "Revisado", "Aplicado")  # estados de «Traducir» que junta el filtro «Traducidos»
@@ -1504,7 +1537,8 @@ class _Cards(QStyledItemDelegate):
             original, translation = item.text(0), item.text(1)
             head = QFont(opt.font)
             head.setBold(original.startswith("# "))
-            original = MARKUP.sub("", original.removeprefix("# ").removeprefix(convert.CENTER).removeprefix(convert.FRAME))
+            original = MARKUP.sub("", original.removeprefix("# ").removeprefix(convert.CENTER)
+                                    .removeprefix(convert.FRAME).removeprefix(convert.RIGHT))
             hint = QFont(opt.font)
             hint.setItalic(True)
             blocks = [(original, head, tones["muted"]),
@@ -1612,6 +1646,8 @@ class App:
         self.tr_glossary = []                  # glosario de traducción de la serie: [[original, traducción]]
         self.tr_notes = ""                     # personajes y estilo para la IA que traduce, de la serie
         self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
+        self.editor_at = None                  # bloque del cursor al cerrar el editor: «Lo dejaste en…»
+        self.work = {}                         # trabajo en el editor por día: {"AAAA-MM-DD": {"minutes", …}}
         self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
         self.thumbs, self.thumbs_tried = None, set()  # proceso de miniaturas de recientes y archivos ya probados
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
@@ -2479,7 +2515,7 @@ class App:
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
         # Son del libro: llegan con la revisión (el glosario, también heredado de otro tomo)
         self.glossary, self.tr_glossary, self.comments, self.alts = [], [], [], {}
-        self.tr_notes = ""
+        self.tr_notes, self.editor_at, self.work = "", None, {}
         if report is not None and not self.echoes_var.get() and self.spanish():  # el del proceso: sin opciones, en español
             self.reports[self.report_key()] = report
         if memos:
@@ -2751,9 +2787,10 @@ class App:
         self.add_version(f"{kind} generado · {Path(out).name}", auto=True)  # lo publicado, para compararlo luego
         self.result_dialog(out, problems)
 
-    def dialog(self, title, modal=False):
-        """Ventana secundaria con su columna; sin modal, la principal sigue usable (como Toplevel)."""
-        win = Dialog(self.root)
+    def dialog(self, title, modal=False, parent=None):
+        """Ventana secundaria con su columna; sin modal, la principal sigue usable (como Toplevel). parent: otra
+        ventana encima de la que debe salir (el editor, que es modal)."""
+        win = Dialog(parent or self.root)
         win.setWindowTitle(title)
         win.setModal(modal)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -3576,7 +3613,7 @@ class App:
         except ValueError as e:
             messagebox.showerror("Error", str(e), parent=parent)
             return False
-        if self.confirm_image(k, data) != "replace":
+        if self.confirm_image(k, data, parent=parent) != "replace":
             return False
         self.replace_images([(k, data, _store_image(path))])
         self.status.setText(f"Ilustración cambiada por {Path(path).name} · Ctrl+Z para deshacer")
@@ -3615,11 +3652,11 @@ class App:
         dropped = self.tree.exists(str(k)) and self.tree.set(str(k), "inc") == DROPPED
         return f"Ilustración {n} · pág. {self.book.blocks[k].page} · {chapter}" + (" (descartada)" if dropped else "")
 
-    def confirm_image(self, k, new, batch=False):
+    def confirm_image(self, k, new, batch=False, parent=None):
         """Antes y después de cambiar la ilustración del bloque k: "replace", "skip" (solo en lote) o None si se
-        cancela. Nada cambia hasta pulsar Reemplazar."""
+        cancela. Nada cambia hasta pulsar Reemplazar. parent: la ventana desde la que se pide (el editor)."""
         n = self.image_blocks().index(k) + 1
-        win, column = self.dialog("Reemplazar ilustración", modal=True)
+        win, column = self.dialog("Reemplazar ilustración", modal=True, parent=parent)
         column.addWidget(_label(self.image_title(n, k), "title"))
         sides = []
         for caption, data in (("Antes", self.book.blocks[k].image), ("Después", new)):
@@ -4526,7 +4563,7 @@ class App:
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
                      glossary=self.glossary, tr_glossary=self.tr_glossary, ignored=self.ignored, comments=self.comments,
-                     alts=self.alts, tr_notes=self.tr_notes)
+                     alts=self.alts, tr_notes=self.tr_notes, editor_at=self.editor_at, work=self.work)
         return state
 
     def save_review(self):
@@ -4592,6 +4629,11 @@ class App:
         self.alts = {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}
         self.comments = [c for c in state.get("comments", []) if isinstance(c, dict)  # el .json se edita a mano
                          and isinstance(c.get("note"), str) and isinstance(c.get("text"), str)]
+        at = state.get("editor_at")
+        self.editor_at = at if isinstance(at, int) and not isinstance(at, bool) else None
+        work = state.get("work") if isinstance(state.get("work"), dict) else {}
+        self.work = {str(day): {key: w[key] for key in WORK_KEYS if isinstance(w.get(key), (int, float))}
+                     for day, w in work.items() if isinstance(w, dict)}
         if state.get("cover"):
             try:
                 self.set_cover(state["cover"])
@@ -4993,7 +5035,7 @@ class App:
                     rows[str(k)] = code, prefix, text
                     index.setdefault(code, []).append(str(k))
                     table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER)
-                                                                 .removeprefix(convert.FRAME) + text,
+                                                                 .removeprefix(convert.FRAME).removeprefix(convert.RIGHT) + text,
                                                                  done.get(code, {}).get("text", ""),
                                                                  state_of(code, text, texts)))
                     mark_langs(str(k))
@@ -6161,7 +6203,11 @@ class TextEditor:
         self.win = win = Dialog(app.root)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         # Esc y la X de la ventana preguntan antes de descartar cambios; leyendo en voz alta, Esc solo calla la voz
-        win.on_reject = lambda: self.stop_reading() if self.reading is not None else self.cancel()
+        # En modo concentración, Esc vuelve a la vista normal antes que nada
+        win.on_reject = lambda: (self.stop_reading() if self.reading is not None else self.toggle_focus()
+                                 if self.focused else self.cancel())
+        self.focused, self.before_focus = False, []
+        QShortcut(QKeySequence("F11"), win, self.toggle_focus)  # también con el foco fuera de la hoja
         self.reading, self.speaker = None, None  # párrafo que se lee en voz alta (QTextBlock) y la voz (Speaker)
         self.colors = theme.colors(app.dark)
         self.sheet = sheet = editor.Sheet()
@@ -6185,6 +6231,8 @@ class TextEditor:
         column.addWidget(self.link_bar())
         column.addWidget(self.split_bar())
         column.addWidget(self.issue_bar())
+        column.addWidget(self.resume_bar())
+        column.addWidget(self.diff_bar())
         # Hoja centrada sobre el escritorio gris, como la vista de impresión de Word
         desk = QFrame(objectName="desk")
         desk_row = QHBoxLayout(desk)
@@ -6200,7 +6248,7 @@ class TextEditor:
         self.page_label = _label("", "muted")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.zoom_label = _label("100 %", "muted")
-        side = QWidget()
+        side = self.side = QWidget()
         side_column = QVBoxLayout(side)
         side_column.setContentsMargins(8, 8, 8, 0)
         side_column.addWidget(self.scroll, 1)
@@ -6211,10 +6259,11 @@ class TextEditor:
                                    1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
                                    _button("+", lambda: self.zoom(25))))
         self.split = QSplitter()
+        self.split.addWidget(self.nav_panel())
         self.split.addWidget(desk)
         self.split.addWidget(side)
-        self.split.setStretchFactor(0, 1)
         self.split.setStretchFactor(1, 1)
+        self.split.setStretchFactor(2, 1)
         self.split.splitterMoved.connect(lambda *_: self.later("panel", 80, self.redraw))
         column.addWidget(self.split, 1)
         # Barra de estado como Word: dónde estás y el zoom del texto
@@ -6237,7 +6286,14 @@ class TextEditor:
         self.pending = {}  # trabajo diferido: nombre -> temporizador
         self.set_text_zoom(100)
         self.open_section(start, end, int(item))
+        self.recover_draft()
+        self.offer_resume()
+        self.opened, self.saved_paragraphs = time.monotonic(), 0  # para «Tu trabajo» de «Cifras»
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
+        # Sin reiniciar la cuenta en cada aviso (la ortografía repinta y avisa sin parar): como mucho 5 s de trabajo perdido
+        sheet.textChanged.connect(lambda: "draft" in self.pending or self.later("draft", 5000, self.write_draft))
+        sheet.textChanged.connect(lambda: self.later("diff", 150, self.update_diff))
+        sheet.cursorPositionChanged.connect(lambda: self.later("diff", 150, self.update_diff))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
         sheet.cursorPositionChanged.connect(self.update_tools)
         # Un clic o una tecla en la hoja mientras se lee: la voz se calla, como al pulsar Parar
@@ -6317,7 +6373,10 @@ class TextEditor:
         self.italic_btn = tool("K", "Cursiva (Ctrl+K)", sheet.toggle_italic, True, italic_font)
         self.case_btn = tool("Aa Mayúsculas", "Mayúsculas y minúsculas (Mayús+F3)", sheet.change_case, short="Aa",
                              level=2)
-        group("Fuente", [self.bold_btn, self.italic_btn], [self.case_btn])
+        self.sup_btn = tool("x²", "Superíndice: 1.ᵉʳ, m² (Ctrl+Mayús+=)", sheet.toggle_sup, True)
+        self.caps_btn = tool("Vᴇʀs", "Versalitas: rangos, habilidades, sonidos en letra pequeña", sheet.toggle_small_caps,
+                             True)
+        group("Fuente", [self.bold_btn, self.italic_btn, self.sup_btn], [self.case_btn, self.caps_btn])
         self.style = QComboBox()
         self.style.addItems(STYLES)
         self.style.setToolTip("Estilo del párrafo: título de capítulo o subtítulo (Ctrl+T: capítulo o normal)")
@@ -6328,7 +6387,9 @@ class TextEditor:
                                short="≡", level=2)
         self.frame_btn = tool("▭ Recuadro", "Meter los párrafos elegidos en un recuadro, como las ventanas de estado, "
                               "o sacarlos de él", sheet.toggle_frame, True, short="▭", level=2)
-        group("Párrafo", [self.style, self.center_btn], [self.frame_btn,
+        self.right_btn = tool("⇥ Derecha", "Alinear el párrafo a la derecha: firmas y fechas de cartas (Ctrl+D)",
+                              sheet.toggle_right, True, short="⇥", level=2)
+        group("Párrafo", [self.style, self.center_btn, self.right_btn], [self.frame_btn,
               tool("⤒ Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
                    sheet.join_next, short="Unir", level=2),  # «⤒» solo se veía poco
               tool("✂ Dividir", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo que el PDF unió "
@@ -6362,8 +6423,10 @@ class TextEditor:
               [tool("🔗 Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)", self.show_link_bar,
                     short="🔗"),
                tool("✎ Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note, short="✎")])
+        self.nav_btn = tool("☰ Navegación", "Panel con los títulos, avisos, comentarios y cambios del capítulo (F9)",
+                            self.toggle_nav, True, short="☰", level=2)
         group("Buscar", [tool("🔍 Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
-                              lambda: self.show_find_bar(False), short="🔍")])
+                              lambda: self.show_find_bar(False), short="🔍")], [self.nav_btn])
         self.changes_btn, self.changes_menu = menu_tool("Cambios ▾", "Párrafos que editaste en este capítulo", [
             ("Cambio siguiente   (F7)", self.next_change), ("Volver al original", self.restore_current)])
         self.issues_btn, self.issues_menu = menu_tool("Avisos ▾", "Avisos del informe de calidad en este capítulo", [
@@ -6373,6 +6436,10 @@ class TextEditor:
             info.setEnabled(False)
             menu.insertAction(menu.actions()[0], info)
             menu.insertSeparator(menu.actions()[1])
+        self.changes_menu.addSeparator()
+        self.show_changes_action = self.changes_menu.addAction("Mostrar cambios")
+        self.show_changes_action.setCheckable(True)
+        self.show_changes_action.toggled.connect(self.set_show_changes)
         self.read_btn = tool("🔊 Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
                              "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, short="🔊", level=2)
         group("Revisar", [self.changes_btn, self.issues_btn],
@@ -6531,15 +6598,105 @@ class TextEditor:
     def on_command(self, name):
         """Atajos de la hoja que abren una barra: Ctrl+Alt+K enlace, Ctrl+F buscar, Ctrl+H reemplazar."""
         actions = {"link": self.show_link_bar, "reviewed": self.toggle_reviewed, "next_change": self.next_change,
-                   "next_issue": self.next_issue}
+                   "next_issue": self.next_issue, "nav": self.toggle_nav, "focus": self.toggle_focus}
         if name in actions:
             actions[name]()
         else:
             self.show_find_bar(name == "replace")
 
     def hide_bars(self):
-        for bar in (self.find_frame, self.link_frame, self.split_frame, self.issue_frame):
+        for bar in (self.find_frame, self.link_frame, self.split_frame, self.issue_frame, self.resume_frame):
             bar.hide()
+
+    def toggle_focus(self):
+        """F11: modo concentración, solo la hoja a pantalla completa, sin cinta, barras ni paneles. F11 o Esc
+        vuelven como estaba."""
+        self.focused = not self.focused
+        if self.focused:
+            self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.find_frame, self.link_frame,
+                                             self.split_frame, self.issue_frame, self.resume_frame, self.diff_frame)
+                                 if not w.isHidden()]
+            for widget in self.before_focus:
+                widget.hide()
+            self.win.showFullScreen()
+            self.tell("Modo concentración: F11 o Esc para salir")
+        else:
+            for widget in self.before_focus:
+                widget.show()
+            # De pantalla completa a maximizada de golpe, Windows la dejaba más ancha que la pantalla
+            self.win.showNormal()
+            qtk.after(0, lambda: shiboken6.isValid(self.win) and self.win.showMaximized())
+            self.note.setText("")
+        self.sheet.setFocus()
+
+    # Mostrar cambios, como el control de cambios de Word: lo puesto subrayado en la hoja y el original en una barra
+    def diff_bar(self):
+        bar = self.diff_frame = QFrame(objectName="ribbon")
+        self.diff_label = QLabel()
+        self.diff_label.setTextFormat(Qt.TextFormat.RichText)
+        self.diff_label.setWordWrap(True)
+        self.diff_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bar.setLayout(_row(_label("Cambios:", "muted"), self.diff_label, margins=(10, 6, 10, 6)))
+        bar.hide()
+        return bar
+
+    def set_show_changes(self, on):
+        color = theme.mark_colors(self.app.dark)["changed"] if on else None
+        for page in self.pages.values():
+            page["look"].show_changes(color)
+        self.update_diff()
+
+    def update_diff(self):
+        """El original del párrafo del cursor con lo quitado tachado y lo puesto subrayado; sin cambios, se oculta."""
+        if not shiboken6.isValid(self.diff_frame):
+            return
+        block = self.sheet.textCursor().block()
+        original = block.blockFormat().property(editor.ORIGINAL)
+        if (not self.show_changes_action.isChecked() or editor.objects_of(block) or not block.text().strip()
+                or (original is not None and editor.block_lines(block) == [original])):
+            self.diff_frame.hide()
+            return
+        if original is None:
+            self.diff_label.setText("<i>Párrafo nuevo</i>")
+        else:
+            colors = theme.mark_colors(self.app.dark)
+            parts, diff = [], _word_diff(editor.plain_line(original), block.text())
+            for n, (text, tag) in enumerate(diff):
+                text = html.escape(text)
+                gap = " " if tag == "old" and n + 1 < len(diff) and diff[n + 1][1] == "new" else ""  # «cargada grávida»
+                parts.append(f'<s style="color:{colors["Grave"]}">{text}</s>{gap}' if tag == "old" else
+                             f'<u style="color:{colors["changed"]}">{text}</u>' if tag == "new" else text)
+            self.diff_label.setText("".join(parts))
+        self.diff_frame.show()
+
+    def resume_bar(self):
+        """«Lo dejaste en «Capítulo 5» · Ir allí»: el editor no salta solo, quien lo abre desde un aviso o una fila
+        quiere ir ahí."""
+        bar = self.resume_frame = QFrame(objectName="ribbon")
+        self.resume_label = _label("")
+        self.resume_go = _button("Ir allí", self.resume, "primary")
+        bar.setLayout(_row(self.resume_label, self.resume_go, 1,
+                           _button("✕", lambda: (bar.hide(), self.sheet.setFocus())), margins=(10, 6, 10, 6)))
+        self.resume_at = None
+        bar.hide()
+        return bar
+
+    def offer_resume(self):
+        at, blocks = self.app.editor_at, len(self.app.book.blocks)
+        if at is None or not 0 <= at < blocks:
+            return
+        section = next((s for s in self.sections if s[1] <= at < s[2]), None)
+        if section is None or section[1:3] == self.current:
+            return
+        self.resume_at = at
+        self.resume_label.setText(f"Lo dejaste en «{section[0]}»")
+        self.resume_frame.show()
+
+    def resume(self):
+        section = next((s for s in self.sections if s[1] <= self.resume_at < s[2]), None)
+        self.resume_frame.hide()
+        if section:
+            self.open_section(section[1], section[2], self.resume_at)
 
     def show_link_bar(self):
         self.link_selection = QTextCursor(self.sheet.textCursor())  # el foco se va a la barra
@@ -6705,9 +6862,16 @@ class TextEditor:
             return
         colors = theme.mark_colors(self.app.dark)
         selections, changed, issues = [], self.sheet.changed_blocks(), 0
+        nav = {"Títulos": [], "Avisos": [], "Comentarios": [], "Cambios": [(b, b.text()) for b in changed]}
         block = self.sheet.document().firstBlock()
         while block.isValid():
+            if block.blockFormat().property(editor.HEADING):
+                nav["Títulos"].append((block, block.text()))
             for issue in self.block_issues(block):
+                if issue.kind == "comment":
+                    nav["Comentarios"].append((block, issue.problem))
+                else:
+                    nav["Avisos"].append((block, f"{issue.title}: {block.text()}"))
                 start, end = self.issue_range(block, issue)
                 selection = QTextEdit.ExtraSelection()
                 if issue.kind == "comment":  # como una nota adhesiva: fondo amarillo, no ondulado de error
@@ -6732,6 +6896,51 @@ class TextEditor:
         self.sheet.set_bars(changed, colors["changed"])
         self.counts = len(changed), issues
         self.show_counts()
+        self.nav_entries = nav
+        if not self.nav.isHidden():
+            self.fill_nav()
+
+    # Panel de navegación, como el de Word: lo que hay en el capítulo, a un clic
+    def nav_panel(self):
+        self.nav = QTreeWidget()
+        self.nav.setHeaderHidden(True)
+        self.nav.setMinimumWidth(200)
+        self.nav.itemClicked.connect(self.nav_go)
+        self.nav_entries = {}
+        self.nav.setVisible(bool(self.app.settings.get("editor_nav")))
+        self.nav_btn.setChecked(not self.nav.isHidden())
+        return self.nav
+
+    def toggle_nav(self):
+        """F9: muestra u oculta el panel; se recuerda para la próxima vez."""
+        self.nav.setVisible(self.nav.isHidden())
+        self.nav_btn.setChecked(not self.nav.isHidden())
+        self.app.settings["editor_nav"] = not self.nav.isHidden()
+        self.app.save_settings()
+        if not self.nav.isHidden():
+            self.fill_nav()
+
+    def fill_nav(self):
+        """Cuatro grupos con su cuenta; cada entrada, el párrafo recortado. Los vacíos salen sin desplegar."""
+        self.nav.clear()
+        for name, entries in self.nav_entries.items():
+            group = QTreeWidgetItem(self.nav, [f"{name} ({len(entries)})"])
+            for block, text in entries:
+                text = " ".join(text.replace("￼", "").split())
+                item = QTreeWidgetItem(group, [text[:60] + ("…" if len(text) > 60 else "")])
+                item.setToolTip(0, text)
+                item.setData(0, Qt.ItemDataRole.UserRole, block.blockNumber())
+            group.setExpanded(bool(entries))
+
+    def nav_go(self, item):
+        number = item.data(0, Qt.ItemDataRole.UserRole)
+        if number is None:
+            item.setExpanded(not item.isExpanded())
+            return
+        block = self.sheet.document().findBlockByNumber(number)
+        if block.isValid():
+            self.goto_block(block)
+            self.sheet.setFocus()
 
     def show_counts(self):
         """Recuentos de Cambios y Avisos en la cinta (más cortos si no cabe) y en la primera línea de su menú."""
@@ -6919,6 +7128,8 @@ class TextEditor:
         row = next((n for n, s in enumerate(self.sections) if s[1:3] == self.current), 0)
         following = next((s for s in self.sections[row + 1:] if tree.exists(str(s[1]))
                           and tree.set(str(s[1]), "inc") == ON and not tree.set(str(s[1]), "ok")), None)
+        if mark:  # desmarcar no resta: el trabajo de revisarlo ya se hizo
+            _log_work(self.app.work, datetime.now().date().isoformat(), reviewed=1)
         if mark and following:
             self.open_section(*following[1:3])
         self.update_review()
@@ -6963,6 +7174,23 @@ class TextEditor:
                 grid.addWidget(label, r, c)
         grid.setHorizontalSpacing(24)
         column.addLayout(grid)
+        # Tu trabajo: lo guardado de días anteriores y esta sesión, aunque aún no se haya aceptado
+        work = copy.deepcopy(self.app.work)
+        _log_work(work, datetime.now().date().isoformat(), paragraphs=self.changed_count(),
+                  minutes=(time.monotonic() - self.opened) / 60)
+        mine = QGridLayout()
+        for c, text in enumerate(("Tu trabajo", "Tiempo", "Párrafos cambiados", "Capítulos revisados")):
+            mine.addWidget(_label(text, "muted"), 0, c)
+        for r, (label, minutes, paragraphs, reviewed) in enumerate(_work_summary(
+                work, datetime.now().date().isoformat()), 1):
+            for c, text in enumerate((label, _duration(minutes), number(round(paragraphs)), number(round(reviewed)))):
+                cell = _label(text, "muted" if c == 0 else None)
+                if c:
+                    cell.setAlignment(Qt.AlignmentFlag.AlignRight)
+                mine.addWidget(cell, r, c)
+        mine.setHorizontalSpacing(24)
+        column.addSpacing(12)
+        column.addLayout(mine)
         chapters = sum(1 for s in self.sections if s[0] != FRONT)
         extra = f"{convert.counted(chapters, 'capítulo')} en el libro"
         if selected.strip():
@@ -7196,6 +7424,12 @@ class TextEditor:
             menu.addAction("Añadir al diccionario de la serie", lambda: self.add_word(word))
             menu.addSeparator()
         block = here.block()
+        for name in editor.objects_of(block):
+            if name.startswith("Ilustración "):
+                k = int(name.split()[1])
+                menu.addAction("Cambiar ilustración…", lambda k=k: self.change_picture(k)).setToolTip(
+                    "Para moverla, córtala (Ctrl+X) y pégala donde vaya")
+                menu.addSeparator()
         offset = here.position() - block.position()
         colors = theme.mark_colors(self.app.dark)
         for issue in self.block_issues(block):
@@ -7226,6 +7460,14 @@ class TextEditor:
             menu.addAction("Cambiar comentario…" if has else "Comentario…", lambda: self.edit_comment(block))
         if sheet.can_restore(block, self.loaded()):
             menu.addAction("Volver al original", lambda: (sheet.setTextCursor(QTextCursor(block)), self.restore_current()))
+        # Sinónimos de una palabra bien escrita, tras los avisos: como en Word, lo que hay que arreglar va primero
+        if word and word.isalpha() and word not in self.unknown - self.ignored_words and self.app.spanish():
+            found = editor.synonyms(word)
+            if found:
+                sub = menu.addMenu("Sinónimos")
+                for synonym in found:
+                    shown = editor.match_case(word, synonym)
+                    sub.addAction(shown, lambda s=shown: self.replace_word(word_cursor, s))
         if menu.actions() and not menu.actions()[-1].isSeparator():
             menu.addSeparator()
         selection = sheet.textCursor().hasSelection()
@@ -7237,6 +7479,15 @@ class TextEditor:
             else:
                 menu.addAction(item[0], item[1]).setEnabled(item[2])
         return menu
+
+    def change_picture(self, k):
+        """Cambia la ilustración del bloque k por un archivo (App.replace_image) y la hoja la muestra ya."""
+        if self.app.replace_image(k, parent=self.win):
+            pictures = self.pictures(k, k + 1)
+            if k in pictures:
+                self.sheet.refresh_picture(k, pictures[k])
+            self.drawn = None
+            self.draw_source()
 
     def replace_word(self, cursor, new):
         cursor.beginEditBlock()
@@ -7252,7 +7503,7 @@ class TextEditor:
     def center(self):
         """Barra divisoria al medio y el párrafo del cursor a la vista."""
         if shiboken6.isValid(self.split):
-            self.split.setSizes([10 ** 4, 10 ** 4])  # hoja y PDF, mitad y mitad
+            self.split.setSizes([240, 10 ** 4, 10 ** 4])  # panel de navegación (si se ve), hoja y PDF a medias
             self.sheet.ensureCursorVisible()
 
     def update_tools(self):
@@ -7264,7 +7515,10 @@ class TextEditor:
         self.italic_btn.setChecked(f.fontItalic())
         level = self.sheet.heading_level()
         self.style.setCurrentIndex(0 if level is None else 1 if level == ON else 2)
+        self.sup_btn.setChecked(self.sheet.is_sup())
+        self.caps_btn.setChecked(self.sheet.is_small_caps())
         self.center_btn.setChecked(self.sheet.is_centered())
+        self.right_btn.setChecked(self.sheet.is_right())
         self.frame_btn.setChecked(self.sheet.is_framed())
 
     def outline(self):
@@ -7286,14 +7540,11 @@ class TextEditor:
             self.stop_reading()
         page = self.pages.get((start, end))
         if page is None:
-            # Un título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)
-            book, tree = self.app.book, self.app.tree
-            lines = [(k, "# " + tree.set(str(k), "title") if book.blocks[k].kind == "heading" and tree.exists(str(k))
-                      else convert.section_text(book, k, k + 1)) for k in range(start, end)]
-            levels = {k: tree.set(str(k), "inc") for k in range(start, end)
-                      if book.blocks[k].kind == "heading" and tree.exists(str(k))}
+            lines, levels = self.section_lines(start, end)
             doc, look = self.sheet.set_content(lines, self.pictures(start, end), self.colors["muted"], levels)
             page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
+            if self.show_changes_action.isChecked():
+                look.show_changes(theme.mark_colors(self.app.dark)["changed"])
         else:
             self.sheet.use(page["doc"], page["look"])
         self.current = (start, end)
@@ -7313,6 +7564,75 @@ class TextEditor:
             self.request_suggestions()
         self.sheet.ensureCursorVisible()
         self.sheet.setFocus()
+
+    def section_lines(self, start, end):
+        """Líneas de la sección como se cargan en la hoja, [(bloque, línea)], y {bloque: tipo} de sus títulos. Un
+        título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)."""
+        book, tree = self.app.book, self.app.tree
+        lines = [(k, "# " + tree.set(str(k), "title") if book.blocks[k].kind == "heading" and tree.exists(str(k))
+                  else convert.section_text(book, k, k + 1)) for k in range(start, end)]
+        levels = {k: tree.set(str(k), "inc") for k in range(start, end)
+                  if book.blocks[k].kind == "heading" and tree.exists(str(k))}
+        return lines, levels
+
+    # Borrador: lo cambiado sin aceptar sobrevive a un cierre de la aplicación
+    def write_draft(self):
+        """Escribe el borrador con las secciones cambiadas; sin cambios lo borra. Un fallo no para el trabajo."""
+        if not self.app.pdf or not shiboken6.isValid(self.win):
+            return
+        path = _draft_path(self.app.pdf)
+        pages = [{"start": start, "end": end, "lines": [line for _, line in page["lines"]],
+                  "text": editor.dump(page["doc"])} for (start, end), page in self.pages.items() if self.page_dirty(page)]
+        try:
+            if pages:
+                _write_json(path, {"saved": datetime.now().isoformat(timespec="minutes"), "pages": pages})
+            else:
+                path.unlink(missing_ok=True)
+        except OSError as e:  # carpeta de solo lectura, OneDrive bloqueándolo
+            self.tell(f"No se pudo guardar el borrador: {e.strerror or e}")
+
+    def drop_draft(self):
+        if self.app.pdf:
+            with contextlib.suppress(OSError):
+                _draft_path(self.app.pdf).unlink(missing_ok=True)
+
+    def recover_draft(self):
+        """Si la aplicación se cerró con cambios sin aceptar, ofrece recuperarlos. Una sección vuelve solo si el
+        libro la tiene igual que cuando se escribió el borrador: si no, el texto ya no encajaría en sus bloques."""
+        if not self.app.pdf:
+            return
+        path = _draft_path(self.app.pdf)
+        try:
+            draft = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return  # sin borrador, o roto: nada que recuperar
+        pages = [p for p in draft.get("pages", []) if isinstance(p, dict)] if isinstance(draft, dict) else []
+        try:
+            when = datetime.fromisoformat(str(draft.get("saved"))).strftime("del %d/%m a las %H:%M")
+        except (AttributeError, ValueError):
+            when = "de una sesión anterior"
+        if not pages or not messagebox.askyesno(
+                "Recuperar cambios", f"Hay cambios sin guardar {when}: la aplicación se cerró antes de aceptarlos."
+                "\n\n¿Recuperarlos?", parent=self.win):
+            self.drop_draft()
+            return
+        lost, blocks = 0, len(self.app.book.blocks)
+        for p in pages:
+            try:
+                start, end, text, old = int(p["start"]), int(p["end"]), str(p["text"]), [str(x) for x in p["lines"]]
+            except (KeyError, TypeError, ValueError):
+                lost += 1
+                continue
+            lines, levels = self.section_lines(start, end) if 0 <= start < end <= blocks else ([], {})
+            if not lines or [line for _, line in lines] != old:
+                lost += 1
+                continue
+            doc, look = self.sheet.set_draft(lines, text, self.pictures(start, end), self.colors["muted"], levels)
+            self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
+        self.open_section(*self.current)
+        if lost:
+            what = "sección no se recuperó" if lost == 1 else "secciones no se recuperaron"
+            messagebox.showinfo("Recuperar cambios", f"{lost} {what}: el libro cambió desde entonces.", parent=self.win)
 
     def show_chapter(self, row):
         """Indicador de la cinta: «☰ Capítulo 3 de 31 · Título ▾», y ◀ ▶ activos si hay a dónde ir."""
@@ -7386,6 +7706,13 @@ class TextEditor:
         for job in self.pending.values():
             qtk.cancel(job)
         self.pending.clear()
+        self.drop_draft()  # se aceptó o se descartó: el borrador ya no hace falta
+        # shortcut: tras aceptar, un párrafo añadido antes desplaza el bloque; se queda cerca, que basta para volver
+        _log_work(self.app.work, datetime.now().date().isoformat(), paragraphs=self.saved_paragraphs,
+                  minutes=(time.monotonic() - self.opened) / 60)
+        if shiboken6.isValid(self.sheet) and self.sheet.current_source() is not None:
+            self.app.editor_at = self.sheet.current_source()
+        self.app.save_review()
         if self.spell:
             self.spell[2].terminate()  # nada que guardar: lo aprendido ya está en App.words
             self.spell = None
@@ -7586,9 +7913,20 @@ class TextEditor:
         edits.sort(reverse=True)
         return edits, titles, [kinds[e[0]] for e in edits], retype
 
+    def changed_count(self):
+        """Párrafos cambiados, nuevos o quitados en las secciones visitadas, frente a lo cargado."""
+        count = 0
+        for page in self.pages.values():
+            old = [line for _, line in page["lines"]]
+            new = [line for line in editor.dump(page["doc"]).split("\n\n") if line.strip()]
+            count += sum(max(i2 - i1, j2 - j1) for op, i1, i2, j1, j2 in
+                         difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes() if op != "equal")
+        return count
+
     def save(self):
         """Aplica solo lo que cambió: un párrafo rehecho pierde su página del PDF, y un título rehecho su tipo."""
         if self.dirty():
+            self.saved_paragraphs = self.changed_count()
             edits, titles, kinds, retype = self.changes()
             self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype)
         self.win.done(0)

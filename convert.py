@@ -1013,7 +1013,7 @@ def count_matches(book, replacements):
     return counts
 
 
-SAFE = re.compile(r"(</?[ib]>|\[Nota: )")  # marcas del editor que un reemplazo no debe romper
+SAFE = re.compile(r"(</?(?:i|b|sup|sc)>|\[Nota: )")  # marcas del editor que un reemplazo no debe romper
 
 
 def replace_text(book, find, new, word=False, blocks=None):
@@ -1035,12 +1035,15 @@ def replace_text(book, find, new, word=False, blocks=None):
 
 
 TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
-INLINE = re.compile(r"&lt;(/?)([ib])&gt;")
+INLINE = re.compile(r"&lt;(/?)(i|b|sup|sc)&gt;")
 NOTE_MARK = re.compile(r"\[Nota: (.+?)\]")  # nota al pie en el editor de texto
 # Enlace escrito en el editor, ya escapado: solo direcciones web (un javascript: no sirve en un libro)
 LINK_MARK = re.compile(r'&lt;a href="(https?://[^"\s<>]+)"&gt;(.*?)&lt;/a&gt;')
 CENTER = "<center>"  # al principio de una línea del editor: párrafo centrado (carta, cartel)
 FRAME = "<marco>"  # al principio de una línea del editor: párrafo dentro de un recuadro (ventana de estado)
+RIGHT = "<derecha>"  # al principio de una línea del editor: párrafo a la derecha (firma de una carta)
+# Versalitas en el libro: <small> y no <span>, que cortaría la nota (<span class="nota">…</span>) que la lleve
+SC_OPEN, SC_CLOSE = '<small class="sc">', "</small>"
 BULLETS = "■◆●▪•◇□▶►◼"  # viñetas: dentro de un recuadro, las líneas sin ella van sangradas bajo la anterior
 
 
@@ -1054,8 +1057,9 @@ def section_text(book, start, end):
 def _line(b, k):
     """Línea de section_text del bloque b, que es el número k del libro."""
     if b.kind == "p":
-        prefix = CENTER if b.align == "center" else FRAME if b.align == "frame" else ""
-        return prefix + html.unescape(NOTE.sub(r"[Nota: \1]", b.html))
+        prefix = {"center": CENTER, "frame": FRAME, "right": RIGHT}.get(b.align, "")
+        text = NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>")
+        return prefix + html.unescape(text)
     if b.kind == "heading":
         return "# " + html.unescape(b.html)
     return f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]"
@@ -1063,7 +1067,7 @@ def _line(b, k):
 
 def _balanced(out):
     stack = []
-    for close, tag in re.findall(r"<(/?)([ib])>", out):
+    for close, tag in re.findall(r"<(/?)(i|b|sup|sc)>", out):
         if not close:
             stack.append(tag)
         elif not stack or stack.pop() != tag:
@@ -1078,7 +1082,8 @@ def _inline(text):
     out = INLINE.sub(r"<\1\2>", html.escape(text, quote=False))
     out = out if _balanced(out) else TAGS.sub("", out)
     out = LINK_MARK.sub(lambda m: f'<a href="{m[1]}">{m[2]}</a>' if _balanced(m[2]) else m[0], out)
-    return NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
+    out = NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
+    return out.replace("<sc>", SC_OPEN).replace("</sc>", SC_CLOSE)
 
 
 def edit_section(book, start, end, text):
@@ -1123,6 +1128,8 @@ def edit_section(book, start, end, text):
             new.append(Block("p", page, _inline(line[len(CENTER):].strip()), align="center"))
         elif line.startswith(FRAME):
             new.append(Block("p", page, _inline(line[len(FRAME):].strip()), align="frame"))
+        elif line.startswith(RIGHT):
+            new.append(Block("p", page, _inline(line[len(RIGHT):].strip()), align="right"))
         else:
             new.append(Block("p", page, _inline(line)))
         if j in origin and new[-1].kind in ("p", "heading") and not (m or line in same):
@@ -1647,7 +1654,7 @@ def _remojibake(text):
 # comillas no cortan: «¿El grupo que... los fundó?», «¿Conoces este país —el reino— ahora?» (Re Zero 2,
 # Nageki 1), «¿Desde cuándo el concepto de «hacer trampa» se aplica?» (Maryoku)
 SENTENCE = re.compile(r"((?:\.{2,}|[^.!?])*?)([?!]+)")
-LEAD = re.compile(r"(?:\s|[«»“”\"'(—–-]|</?[ib]>)*")   # lo que va antes de la primera palabra
+LEAD = re.compile(r"(?:\s|[«»“”\"'(—–-]|</?(?:i|b|sup)>|<small class=\"sc\">|</small>)*")   # lo que va antes de la primera palabra
 DOUBLED = re.compile(r"\b(de|la|el|que|en|y|los|las|un|una|por|con|se|lo) \1\b", re.I)
 
 
@@ -2776,6 +2783,8 @@ ol.toc li { margin: 0.35em 0; }
 ol.toc a { text-decoration: none; color: inherit; }
 p.credits { text-indent: 0; text-align: center; margin: 0.6em 0; }
 p.center { text-indent: 0; text-align: center; }
+p.right { text-indent: 0; text-align: right; }
+small.sc { font-size: 1em; font-variant: small-caps; }
 div.marco { border: 3px double #777777; padding: 0.5em 0.9em; margin: 1em 0; font-family: sans-serif;
   font-size: 0.95em; }
 div.marco p { text-indent: 0; margin: 0; text-align: left; }
@@ -3040,7 +3049,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     css = ("sub" if at in bulleted and not bullet else "head" if bullet and at and framed[at - 1]
                            else "")
                 else:
-                    css = "status" if STATUS.fullmatch(_plain(b)) else "center" if b.align else ""
+                    css = ("status" if STATUS.fullmatch(_plain(b)) else "right" if b.align == "right"
+                           else "center" if b.align else "")
                 attr = f' class="{css}"' if css else ""
                 body = NOTE.sub(noteref, fix(b.html, dashes=not framed[at]))  # la nota sale del párrafo: no se parte
                 parts.append(f"<p{attr}>{mark()}{_hyphenate(body) if hyphenate else body}</p>")

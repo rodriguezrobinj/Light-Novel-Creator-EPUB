@@ -1,6 +1,7 @@
 """Hoja del editor de texto estilo Word: lo que se ve es lo que sale en el EPUB. Lee y escribe el formato de
 convert.section_text (un párrafo por línea con <i>/<b>, "# " delante de un título, las ilustraciones y los
 separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda convert.edit_section."""
+import difflib
 import html
 import re
 
@@ -20,10 +21,11 @@ OBJECT = _USER + 5    # imagen: "Ilustración 12" / "Separador 7", la marca que 
 LEVEL = _USER + 6     # título: tipo de su fila ("Capítulo", "Subtítulo"); al aceptar, la fila queda así
 CENTERED = _USER + 7  # párrafo centrado (carta, cartel): vuelve a section_text con <center> delante
 FRAMED = _USER + 8    # párrafo dentro de un recuadro (ventana de estado): vuelve con <marco> delante
+RIGHTED = _USER + 9   # párrafo a la derecha (firma de una carta): vuelve con <derecha> delante
 FRAME_PAD = 16        # píxeles entre el recuadro y su texto
 SUB = 18              # sangría de una línea sin viñeta en un recuadro con viñetas («HP: 10/10» bajo «■ Lorna»)
 MIME = "application/x-lnc-hoja"  # copiar y pegar dentro de la hoja conserva formato e ilustraciones
-MARKS = re.compile(r'(</?[ib]>|<a href="[^"]*">|</a>)')
+MARKS = re.compile(r'(</?(?:i|b|sup|sc)>|<a href="[^"]*">|</a>)')
 LINK = re.compile(r'<a href="([^"]*)">')
 LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; app.py pone el del tema
 NOTE = re.compile(r"\[Nota: [^\]]*\]")
@@ -37,20 +39,30 @@ def _plain_format():
 
 
 def _runs(text):
-    """Trozos de texto con <i>, <b> y <a href>: [(texto, cursiva, negrita, enlace)]."""
-    runs, italic, bold, href = [], False, False, ""
+    """Trozos de texto con <i>, <b>, <sup>, <sc> y <a href>: [(texto, cursiva, negrita, enlace, sup, sc)]."""
+    runs, on, href = [], {"i": False, "b": False, "sup": False, "sc": False}, ""
     for part in MARKS.split(text):
-        if part in ("<i>", "</i>"):
-            italic = part == "<i>"
-        elif part in ("<b>", "</b>"):
-            bold = part == "<b>"
+        tag = part.strip("</>")
+        if tag in on and part in (f"<{tag}>", f"</{tag}>"):
+            on[tag] = not part.startswith("</")
         elif part == "</a>":
             href = ""
         elif LINK.fullmatch(part):
             href = LINK.fullmatch(part).group(1)
         elif part:
-            runs.append((part, italic, bold, href))
+            runs.append((part, on["i"], on["b"], href, on["sup"], on["sc"]))
     return runs
+
+
+def char_format(italic=False, bold=False, href="", sup=False, sc=False):
+    """Formato de carácter de un trozo de _runs."""
+    f = link_format(href) if href else QTextCharFormat()
+    f.setFontItalic(italic)
+    f.setFontWeight(QFont.Weight.Bold if bold else QFont.Weight.Normal)
+    f.setVerticalAlignment(QTextCharFormat.VerticalAlignment.AlignSuperScript if sup
+                           else QTextCharFormat.VerticalAlignment.AlignNormal)
+    f.setFontCapitalization(QFont.Capitalization.SmallCaps if sc else QFont.Capitalization.MixedCase)
+    return f
 
 
 def link_format(href, f=None):
@@ -67,12 +79,9 @@ def link_format(href, f=None):
 
 
 def _insert_marked(cursor, text):
-    """Texto con <i>/<b>/<a href> como cursiva, negrita y enlaces reales."""
-    for part, italic, bold, href in _runs(text):
-        f = link_format(href) if href else QTextCharFormat()
-        f.setFontItalic(italic)
-        f.setFontWeight(QFont.Weight.Bold if bold else QFont.Weight.Normal)
-        cursor.insertText(part, f)
+    """Texto con <i>/<b>/<sup>/<sc>/<a href> como cursiva, negrita, superíndice, versalitas y enlaces reales."""
+    for part, *marks in _runs(text):
+        cursor.insertText(part, char_format(*marks))
 
 
 def _symbol(text, color, height=28):
@@ -106,17 +115,29 @@ def _insert_object(cursor, kind, n, pictures, color):
 
 
 def _strip(line):
-    """La línea sin su prefijo de section_text: "# ", "<center>" o "<marco>"."""
-    for prefix in ("# ", convert.CENTER, convert.FRAME):
+    """La línea sin su prefijo de section_text: "# ", "<center>", "<marco>" o "<derecha>"."""
+    for prefix in ("# ", convert.CENTER, convert.FRAME, convert.RIGHT):
         if line.startswith(prefix):
             return line[len(prefix):]
     return line
 
 
+def align_format(f, how=None):
+    """Párrafo centrado ("center"), a la derecha ("right") o a la izquierda (None): se excluyen entre sí."""
+    for prop, name in ((CENTERED, "center"), (RIGHTED, "right")):
+        if how == name:
+            f.setProperty(prop, True)
+        else:
+            f.clearProperty(prop)
+    f.setAlignment({"center": Qt.AlignmentFlag.AlignHCenter, "right": Qt.AlignmentFlag.AlignRight}.get(
+        how, Qt.AlignmentFlag.AlignLeft))
+    return f
+
+
 def frame_format(f, first=False, last=False, sub=False):
     """Formato de un párrafo en recuadro: juntos, sin el espacio entre párrafos, y con sitio para el borde."""
     f.setProperty(FRAMED, True)
-    f.setAlignment(Qt.AlignmentFlag.AlignLeft)
+    align_format(f)
     f.setLeftMargin(FRAME_PAD + (SUB if sub else 0))
     f.setRightMargin(FRAME_PAD)
     f.setTopMargin(FRAME_PAD if first else 0)
@@ -139,20 +160,21 @@ def _frame_runs(lines):
     return out
 
 
-def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888888", levels=None):
+def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888888", levels=None, objects=True):
     """Pone lines ([(bloque, línea de section_text)]) en el cursor. La primera línea de texto va dentro del
     párrafo del cursor (pegar una palabra no parte el párrafo); el resto, en párrafos nuevos. remember: carga
     del editor, cada párrafo recuerda su línea. raw: texto de fuera, sin leer marcas. levels: {bloque: tipo
-    de su fila} de los títulos."""
+    de su fila} de los títulos. objects=False: "[Ilustración N]" queda como texto (pegado de fuera)."""
     frames = {} if raw else _frame_runs(list(lines))
     for i, (k, line) in enumerate(lines):
         bare = line.strip()
-        token = None if raw else convert.TOKEN.fullmatch(bare)
+        token = None if raw or not objects else convert.TOKEN.fullmatch(bare)
         heading = not raw and line.startswith("# ")
         centered = not raw and line.startswith(convert.CENTER)
+        right = not raw and line.startswith(convert.RIGHT)
         framed = i in frames
         scene = not raw and not token and bool(bare) and bool(convert.SCENE_BREAK.fullmatch(bare))
-        special = bool(token or heading or scene or centered or framed)
+        special = bool(token or heading or scene or centered or framed or right)
         if i or (special and cursor.block().length() > 1):
             cursor.insertBlock(QTextBlockFormat(), _plain_format())
         if i or special or remember:
@@ -162,8 +184,8 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
                 f.setProperty(SOURCE, k)
             if token or scene or centered:
                 f.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            if centered:
-                f.setProperty(CENTERED, True)
+            if centered or right:
+                align_format(f, "center" if centered else "right")
             if framed:
                 frame_format(f, *frames[i])
             if heading:
@@ -194,14 +216,15 @@ def load(document, lines, pictures, color="#888888", levels=None):
 
 
 def _marked(runs):
-    """[(texto, cursiva, negrita, enlace)] -> texto con <a href>/<b>/<i> bien anidados: se cierra lo justo y
-    se abre lo que falta (enlace fuera, luego negrita, cursiva dentro)."""
+    """[(texto, cursiva, negrita, enlace, sup, sc)] -> texto con <a href>/<b>/<i>/<sc>/<sup> bien anidados: se
+    cierra lo justo y se abre lo que falta (enlace fuera, luego negrita, cursiva, versalitas, superíndice dentro)."""
     def opening(t):
         return f'<a href="{t[2:]}">' if t.startswith("a:") else f"<{t}>"
 
     out, stack = [], []
-    for text, italic, bold, href in runs:
-        want = ([f"a:{href}"] if href else []) + [t for t, on in (("b", bold), ("i", italic)) if on]
+    for text, italic, bold, href, sup, sc in runs:
+        want = ([f"a:{href}"] if href else []) + [t for t, on in (("b", bold), ("i", italic), ("sc", sc),
+                                                                  ("sup", sup)) if on]
         while any(t not in want for t in stack):
             t = stack.pop()
             out.append("</a>" if t.startswith("a:") else f"</{t}>")
@@ -228,7 +251,7 @@ def _lines(block):
     f = block.blockFormat()
     heading = bool(f.property(HEADING))
     prefix = ("# " if heading else convert.CENTER if f.property(CENTERED) else convert.FRAME if f.property(FRAMED)
-              else "")
+              else convert.RIGHT if f.property(RIGHTED) else "")
     out, runs = [], []
 
     def flush():
@@ -250,7 +273,9 @@ def _lines(block):
         text = fragment.text().replace(" ", " ").replace("￼", "")
         if text:
             runs.append((text, f.fontItalic(), f.fontWeight() >= QFont.Weight.DemiBold,
-                         f.anchorHref() if f.isAnchor() else ""))
+                         f.anchorHref() if f.isAnchor() else "",
+                         f.verticalAlignment() == QTextCharFormat.VerticalAlignment.AlignSuperScript,
+                         f.fontCapitalization() == QFont.Capitalization.SmallCaps))
     flush()
     return out
 
@@ -321,6 +346,83 @@ WORD = re.compile(r"\w+")  # como (?<!\w)palabra(?!\w): «abc1» no es «abc»
 REPAINT_BATCH = 40  # párrafos subrayados por tanda (Look._repaint)
 
 
+_thesaurus = None  # {palabra en minúsculas: [[sinónimos de cada acepción]]}, leído la primera vez que se pide
+
+
+def synonyms(word, limit=12):
+    """Sinónimos de word del tesauro de LibreOffice (OpenThesaurus-es, dict/th_es_v2.dat), sin repetir ni la
+    propia palabra, alternando sus acepciones («casa»: vivienda, hogar, edificio…) para que las 12 no sean de
+    una sola. El tesauro solo trae lemas: si no está, se prueba el singular y el masculino.
+    shortcut: las formas verbales conjugadas («corría») no tienen sinónimos; con Hunspell se podría buscar su infinitivo."""
+    global _thesaurus
+    if _thesaurus is None:
+        _thesaurus = {}
+        try:
+            lines = (convert.SPELL_DIR / "th_es_v2.dat").read_text(encoding="latin-1").splitlines()
+        except OSError:
+            lines = []  # sin el archivo, sin sinónimos: el menú no los ofrece
+        i = 1  # la primera línea es la codificación
+        while i < len(lines):
+            head, _, count = lines[i].partition("|")
+            n = int(count) if count.isdigit() else 0
+            found = _thesaurus.setdefault(head.lower(), [])
+            for line in lines[i + 1:i + 1 + n]:
+                found.append([re.sub(r"\s*\(.*?\)", "", w).strip() for w in line.split("|")[1:]])  # «necio (fig.)»
+            i += 1 + n
+    low = word.lower()
+    # (lema, ¿plural?, ¿femenino?): lo hallado vuelve a la forma de word («casas» → «hogares», «bonita» → «linda»)
+    tries = [(low, False, False)] + ([(low[:-2], True, False), (low[:-1], True, False)] if low.endswith("es")
+                                     else [(low[:-1], True, False)] if low.endswith("s") else [])
+    tries += [(key[:-1] + "o", plural, True) for key, plural, _ in tries if key.endswith("a")]
+    out = []
+    for key, plural, feminine in tries:
+        senses = _thesaurus.get(key, [])
+        for n in range(max(map(len, senses), default=0)):
+            for w in (sense[n] for sense in senses if n < len(sense)):
+                if " " not in w:  # una locución («en seguida») no se declina
+                    w = w[:-1] + "a" if feminine and w.endswith("o") else w
+                    w = _plural(w) if plural and w else w
+                if w and w.lower() not in (low, key) and w not in out:
+                    out.append(w)
+        if out:
+            break
+    return out[:limit]
+
+
+def _plural(word):
+    """Plural español sencillo: «casa» → «casas», «hogar» → «hogares», «edificación» → «edificaciones»; lo que
+    ya acaba en s o x («crisis») queda igual."""
+    if word[-1] in "aeiouáéíóú":
+        return word + "s"
+    if word[-1] in "sx":
+        return word
+    if len(word) > 1 and word[-2] in "áéíóú":  # la tilde de «-ción» se va al ganar una sílaba
+        word = word[:-2] + "aeiou"["áéíóú".index(word[-2])] + word[-1]
+    return word + "es"
+
+
+def match_case(model, word):
+    """word con las mayúsculas de model: «CASA» → «HOGAR», «Casa» → «Hogar»."""
+    if model.isupper() and len(model) > 1:
+        return word.upper()
+    return word[:1].upper() + word[1:] if model[:1].isupper() else word
+
+
+def plain_line(line):
+    """Texto de una línea de section_text como se ve en la hoja: sin su prefijo ni sus marcas de formato."""
+    return MARKS.sub("", _strip(line))
+
+
+def added_spans(before, after):
+    """[(inicio, largo)] de lo puesto en after que no estaba en before, palabra a palabra."""
+    x, y = re.findall(r"\S+|\s+", before), re.findall(r"\S+|\s+", after)
+    starts = [0]
+    for token in y:
+        starts.append(starts[-1] + len(token))
+    return [(starts[j1], starts[j2] - starts[j1]) for op, _, _, j1, j2 in
+            difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes() if op in ("replace", "insert")]
+
+
 class Look(QSyntaxHighlighter):
     """Aspecto que no se guarda: títulos grandes, notas en gris, separadores escritos y palabras desconocidas
     subrayadas. Solo pinta: no cambia el texto ni entra en deshacer."""
@@ -330,6 +432,12 @@ class Look(QSyntaxHighlighter):
         self.unknown = set()
         self.job = 0  # tanda de repintado en curso (_repaint)
         self.tags = {}
+        self.changes = None  # color con que se subraya lo puesto en cada párrafo cambiado; None: no se marca
+
+    def show_changes(self, color):
+        """«Mostrar cambios»: subraya, del color dado (None lo quita), lo que se puso frente al original."""
+        self.changes = color
+        self.rehighlight()
 
     def set_tags(self, tags):
         """Colores de theme.editor_tags del tema actual."""
@@ -395,6 +503,21 @@ class Look(QSyntaxHighlighter):
                 f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
                 f.setUnderlineColor(self.color("broken"))
                 self.setFormat(c, 1, f)
+        if self.changes and text.strip() and not objects_of(block):
+            original = block.blockFormat().property(ORIGINAL)
+            if original is None:
+                spans = [(0, len(text))]  # párrafo nuevo: todo es lo puesto
+            elif block_lines(block) == [original]:
+                spans = []
+            else:
+                spans = added_spans(plain_line(original), text)
+            for start, size in spans:
+                for c in range(start, start + size):
+                    f = QTextCharFormat(self.format(c))
+                    f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
+                    f.setUnderlineColor(QColor(self.changes))
+                    f.setForeground(QColor(self.changes))
+                    self.setFormat(c, 1, f)
 
 
 class _Filter(QObject):
@@ -445,6 +568,58 @@ class Sheet(QTextEdit):
         look.set_unknown(self.unknown)
         self.use(document, look)
         self.moveCursor(QTextCursor.MoveOperation.Start)
+        return document, look
+
+    def refresh_picture(self, n, picture):
+        """La ilustración del bloque n cambió: la nueva imagen, con su tamaño, en todas las hojas que la tienen."""
+        self.pictures[n] = picture
+        for document in list(self.origins):
+            block = document.firstBlock()
+            while block.isValid():
+                if f"Ilustración {n}" in objects_of(block):
+                    cursor = QTextCursor(block)
+                    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+                    cursor.beginEditBlock()
+                    cursor.removeSelectedText()
+                    _insert_object(cursor, "Ilustración", n, self.pictures, self.color)
+                    cursor.endEditBlock()  # el texto no cambia (misma marca): no cuenta como cambio al aceptar
+                block = block.next()
+        self.viewport().update()
+
+    def set_draft(self, lines, text, pictures, color="#888888", levels=None):
+        """Como set_content, con text (un borrador de dump) sobre las líneas cargadas lines: un párrafo igual
+        conserva su origen y su original; uno cambiado en su sitio recuerda el que reemplaza (F7 lo encuentra y
+        «Volver al original» lo deshace); uno nuevo toma el origen de la línea vieja de su sitio o la anterior."""
+        old = [line for _, line in lines]
+        new = [line for line in text.split("\n\n") if line.strip()]
+        pairs, originals = [], []
+        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+            for n in range(j2 - j1):
+                if op == "equal" or (op == "replace" and i2 - i1 == j2 - j1):
+                    pairs.append((lines[i1 + n][0], new[j1 + n]))
+                    originals.append(old[i1 + n])
+                    continue
+                at = min(i1 + n, i2 - 1) if i2 > i1 else i1 - 1
+                pairs.append((lines[at][0] if 0 <= at < len(lines) else None, new[j1 + n]))
+                originals.append(None)
+        document, look = self.set_content(pairs, pictures, color, levels)
+        self.origins[document] = list(lines)
+        block, n = document.firstBlock(), 0
+        self.relinking = True  # solo se corrige lo que recuerda cada párrafo: no es una edición
+        try:
+            while block.isValid() and n < len(originals):
+                f = block.blockFormat()
+                if originals[n] is None:
+                    f.clearProperty(ORIGINAL)
+                    f.clearProperty(CANON)
+                else:
+                    f.setProperty(ORIGINAL, originals[n])
+                    f.setProperty(CANON, _canonical(originals[n]))
+                QTextCursor(block).setBlockFormat(f)
+                block, n = block.next(), n + 1
+        finally:
+            self.relinking = False
+        document.clearUndoRedoStacks()
         return document, look
 
     def relink(self, document, loaded, pos, added):
@@ -651,6 +826,22 @@ class Sheet(QTextEdit):
         self._toggle(lambda f: f.fontWeight() >= QFont.Weight.DemiBold,
                      lambda f, on: f.setFontWeight(QFont.Weight.Bold if on else QFont.Weight.Normal))
 
+    def toggle_sup(self):
+        """Superíndice (1.ᵉʳ, m²), como Ctrl+Mayús+= de Word."""
+        sup, normal = QTextCharFormat.VerticalAlignment.AlignSuperScript, QTextCharFormat.VerticalAlignment.AlignNormal
+        self._toggle(lambda f: f.verticalAlignment() == sup, lambda f, on: f.setVerticalAlignment(sup if on else normal))
+
+    def toggle_small_caps(self):
+        """Versalitas: rangos, nombres de habilidades y sonidos que el PDF pone en letra pequeña."""
+        sc, mixed = QFont.Capitalization.SmallCaps, QFont.Capitalization.MixedCase
+        self._toggle(lambda f: f.fontCapitalization() == sc, lambda f, on: f.setFontCapitalization(sc if on else mixed))
+
+    def is_sup(self):
+        return self.currentCharFormat().verticalAlignment() == QTextCharFormat.VerticalAlignment.AlignSuperScript
+
+    def is_small_caps(self):
+        return self.currentCharFormat().fontCapitalization() == QFont.Capitalization.SmallCaps
+
     def heading_level(self):
         """Estilo del párrafo del cursor: None (normal), "Capítulo" o "Subtítulo" (o el tipo de su fila)."""
         f = self.textCursor().blockFormat()
@@ -669,13 +860,12 @@ class Sheet(QTextEdit):
         if level:
             f.setProperty(HEADING, True)
             f.setProperty(LEVEL, level)
-            f.clearProperty(CENTERED)
             if f.property(FRAMED):  # un título no va en recuadro
                 f.clearProperty(FRAMED)
                 f.setLeftMargin(0)
                 f.setRightMargin(0)
                 f.setBottomMargin(SPACE)
-            f.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            align_format(f)
         else:
             f.clearProperty(HEADING)
             f.clearProperty(LEVEL)
@@ -686,24 +876,28 @@ class Sheet(QTextEdit):
     def toggle_heading(self):
         self.set_heading(None if self.heading_level() else "Capítulo")
 
-    def toggle_center(self):
-        """Ctrl+E: centra el párrafo (carta, cartel) o lo devuelve a su sitio. Solo párrafos de texto."""
+    def _toggle_align(self, how, prop):
         cursor = self.textCursor()
         block = cursor.block()
-        if not _is_text(block):
+        if not _is_text(block) or block.blockFormat().property(FRAMED):  # el recuadro va siempre a la izquierda
             QApplication.beep()
             return
         f = cursor.blockFormat()
-        on = not f.property(CENTERED)
-        if on:
-            f.setProperty(CENTERED, True)
-        else:
-            f.clearProperty(CENTERED)
-        f.setAlignment(Qt.AlignmentFlag.AlignHCenter if on else Qt.AlignmentFlag.AlignLeft)
-        cursor.setBlockFormat(f)
+        cursor.setBlockFormat(align_format(f, None if f.property(prop) else how))
+
+    def toggle_center(self):
+        """Ctrl+E: centra el párrafo (carta, cartel) o lo devuelve a su sitio. Solo párrafos de texto."""
+        self._toggle_align("center", CENTERED)
+
+    def toggle_right(self):
+        """Ctrl+D, como Word en español: el párrafo a la derecha (firma, fecha de una carta) o a su sitio."""
+        self._toggle_align("right", RIGHTED)
 
     def is_centered(self):
         return bool(self.textCursor().blockFormat().property(CENTERED))
+
+    def is_right(self):
+        return bool(self.textCursor().blockFormat().property(RIGHTED))
 
     def toggle_frame(self):
         """Mete en un recuadro los párrafos de la selección (ventana de estado, cartel) o los saca. Solo texto."""
@@ -726,7 +920,7 @@ class Sheet(QTextEdit):
         for n, block in enumerate(blocks):
             f = block.blockFormat()
             if on:
-                f.clearProperty(CENTERED)
+                align_format(f)
                 f.clearProperty(HEADING)
                 f.clearProperty(LEVEL)
                 frame_format(f, n == 0 and not block.previous().blockFormat().property(FRAMED),
@@ -1002,7 +1196,7 @@ class Sheet(QTextEdit):
         """Devuelve el párrafo a su línea original (título, centrado y texto): un paso de deshacer."""
         original = block.blockFormat().property(ORIGINAL)
         heading, centered = original.startswith("# "), original.startswith(convert.CENTER)
-        framed = original.startswith(convert.FRAME)
+        framed, right = original.startswith(convert.FRAME), original.startswith(convert.RIGHT)
         cursor = QTextCursor(self.document())
         cursor.setPosition(block.position())
         cursor.beginEditBlock()
@@ -1012,11 +1206,7 @@ class Sheet(QTextEdit):
         else:
             f.clearProperty(HEADING)
             f.clearProperty(LEVEL)
-        if centered:
-            f.setProperty(CENTERED, True)
-        else:
-            f.clearProperty(CENTERED)
-        f.setAlignment(Qt.AlignmentFlag.AlignHCenter if centered else Qt.AlignmentFlag.AlignLeft)
+        align_format(f, "center" if centered else "right" if right else None)
         if framed:
             frame_format(f, not block.previous().blockFormat().property(FRAMED),
                          not block.next().blockFormat().property(FRAMED))
@@ -1112,6 +1302,7 @@ class Sheet(QTextEdit):
         actions = {Qt.Key.Key_K: self.toggle_italic, Qt.Key.Key_I: self.toggle_italic,
                    Qt.Key.Key_N: self.toggle_bold, Qt.Key.Key_B: self.toggle_bold,
                    Qt.Key.Key_T: self.toggle_heading, Qt.Key.Key_J: self.join_next, Qt.Key.Key_E: self.toggle_center,
+                   Qt.Key.Key_D: self.toggle_right,
                    Qt.Key.Key_F: lambda: self.command.emit("find"), Qt.Key.Key_H: lambda: self.command.emit("replace")}
         typed = event.text()
         symbols = {Qt.Key.Key_Minus: lambda: self.insert_symbol("—"), Qt.Key.Key_Period: lambda: self.insert_symbol("…"),
@@ -1126,6 +1317,12 @@ class Sheet(QTextEdit):
             self.command.emit("next_change")
         elif key == Qt.Key.Key_F8:
             self.command.emit("next_issue")
+        elif key == Qt.Key.Key_F9:
+            self.command.emit("nav")
+        elif key == Qt.Key.Key_F11:
+            self.command.emit("focus")
+        elif ctrl and not alt and key in (Qt.Key.Key_Equal, Qt.Key.Key_Plus) and mods & Qt.KeyboardModifier.ShiftModifier:
+            self.toggle_sup()  # Ctrl+Mayús+= de Word; en el teclado español «=» es Mayús+0
         elif ctrl and not alt and key in actions:
             actions[key]()
         elif key == Qt.Key.Key_F3 and mods & Qt.KeyboardModifier.ShiftModifier:
@@ -1146,16 +1343,22 @@ class Sheet(QTextEdit):
         return mime
 
     def canInsertFromMimeData(self, source):
-        return source.hasFormat(MIME) or source.hasText()
+        return source.hasFormat(MIME) or source.hasHtml() or source.hasText()
 
     def insertFromMimeData(self, source):
-        """De la hoja: con su formato, sin repetir una ilustración que ya está. De fuera: solo el texto."""
+        """De la hoja: con su formato, sin repetir una ilustración que ya está. De Word, Google Docs o la web
+        (HTML): con cursiva, negrita, superíndice, versalitas y enlaces, sin colores ni tamaños. Si no, solo el
+        texto."""
         k = self.current_source()
+        raw, objects = False, True
         if source.hasFormat(MIME):
             present = self.objects()
             lines = [line for line in bytes(source.data(MIME)).decode("utf-8").split("\n\n")
                      if not (convert.TOKEN.fullmatch(line) and line[1:-1] in present)]
-            raw = False
+        elif source.hasHtml():
+            outside = QTextDocument()
+            outside.setHtml(source.html())
+            lines, objects = [line for line in dump(outside).split("\n\n") if line.strip()], False
         else:
             lines, raw = [line.strip() for line in source.text().splitlines() if line.strip()], True
         if not lines:
@@ -1163,6 +1366,7 @@ class Sheet(QTextEdit):
         cursor = self.textCursor()
         cursor.beginEditBlock()
         cursor.removeSelectedText()
-        insert_lines(cursor, [(k, line) for line in lines], self.pictures, raw=raw, color=self.color)
+        insert_lines(cursor, [(k, line) for line in lines], self.pictures, raw=raw, color=self.color,
+                     objects=objects)
         cursor.endEditBlock()
         self.setTextCursor(cursor)
