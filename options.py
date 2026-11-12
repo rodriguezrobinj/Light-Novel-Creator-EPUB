@@ -160,7 +160,8 @@ class OptionsDialog:
         listing.currentItemChanged.connect(lambda item, _: item and self.show(item.text().strip()))
         this_book.toggled.connect(lambda on: self.set_scope("book" if on else "new"))
         self.category = None
-        self.show(category if category in self.items and category not in CATEGORIES else CATEGORIES[BOOK][0])
+        pages = [name for group in CATEGORIES.values() for name in group]  # ajustes.json se puede editar a mano
+        self.show(category if category in pages else CATEGORIES[BOOK][0])
         win.show()
 
     def is_book(self, category=None):

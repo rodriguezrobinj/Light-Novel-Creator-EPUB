@@ -4115,10 +4115,12 @@ def test_window_new_books_use_saved_defaults():
     import json
     import options
     settings = TMP / f"ajustes-viejos-{time_ns()}.json"
-    settings.write_text(json.dumps({"gray": True, "style": "Novela ligera", "credits": "sí", "translate": []}),
-                        encoding="utf-8")
+    settings.write_text(json.dumps({"gray": True, "style": "Novela ligera", "credits": "sí", "translate": [],
+                                    "options_page": ["mal"]}), encoding="utf-8")
     root, window = visible_window(settings)
     migrated = dict(window.settings["defaults"])
+    page = window.open_options().category  # última página mal escrita a mano: abre en la primera
+    window.options_window.parts["cancel"]()
     folder = TMP / f"libros-{time_ns()}"
     folder.mkdir()
     books = {}
@@ -4146,7 +4148,7 @@ def test_window_new_books_use_saved_defaults():
     assert fresh == (True, "Novela ligera", False), fresh
     assert reviewed is False
     assert defaults["gray"] is True and set(defaults) == set(options.BOOK_KEYS), defaults
-    assert translation == {}, translation
+    assert translation == {} and page == "Perfil y formato", (translation, page)
 
 
 def test_window_options_this_book_live_and_cancel():
