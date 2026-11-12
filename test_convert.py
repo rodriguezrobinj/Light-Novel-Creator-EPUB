@@ -3730,6 +3730,32 @@ def test_editor_shows_changes():
     assert hidden_clean and gone, (hidden_clean, gone)
 
 
+def test_editor_focus_mode():
+    """F11 deja solo la hoja: sin cinta ni panel del PDF. Esc vuelve a como estaba sin preguntar si se descartan
+    los cambios, y el editor sigue abierto con ellos."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import app
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
+    editor.sheet.textCursor().insertText("Cambio. ")
+    asked = []
+    saved = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda *a, **kw: asked.append(a) or False
+    try:
+        QTest.keyClick(editor.sheet, Qt.Key.Key_F11)
+        focused = editor.ribbon_bar.isHidden() and editor.side.isHidden() and not editor.sheet.isHidden()
+        QTest.keyClick(editor.win, Qt.Key.Key_Escape)
+        back = not editor.ribbon_bar.isHidden() and not editor.side.isHidden() and editor.win.isVisible()
+        kept = editor.dirty()
+    finally:
+        app.messagebox.askyesno = saved
+        editor.win.done(0)
+        window.close()
+    assert focused and back and kept and not asked, (focused, back, kept, asked)
+
+
 def test_editor_work_log():
     """«Cifras» cuenta el trabajo: aceptar suma los párrafos cambiados y el tiempo de hoy, marcar revisado suma un
     capítulo (desmarcar no resta), y el resumen da hoy, los últimos 7 días y el total."""

@@ -6202,7 +6202,11 @@ class TextEditor:
         self.win = win = Dialog(app.root)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         # Esc y la X de la ventana preguntan antes de descartar cambios; leyendo en voz alta, Esc solo calla la voz
-        win.on_reject = lambda: self.stop_reading() if self.reading is not None else self.cancel()
+        # En modo concentración, Esc vuelve a la vista normal antes que nada
+        win.on_reject = lambda: (self.stop_reading() if self.reading is not None else self.toggle_focus()
+                                 if self.focused else self.cancel())
+        self.focused, self.before_focus = False, []
+        QShortcut(QKeySequence("F11"), win, self.toggle_focus)  # también con el foco fuera de la hoja
         self.reading, self.speaker = None, None  # párrafo que se lee en voz alta (QTextBlock) y la voz (Speaker)
         self.colors = theme.colors(app.dark)
         self.sheet = sheet = editor.Sheet()
@@ -6243,7 +6247,7 @@ class TextEditor:
         self.page_label = _label("", "muted")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.zoom_label = _label("100 %", "muted")
-        side = QWidget()
+        side = self.side = QWidget()
         side_column = QVBoxLayout(side)
         side_column.setContentsMargins(8, 8, 8, 0)
         side_column.addWidget(self.scroll, 1)
@@ -6592,7 +6596,7 @@ class TextEditor:
     def on_command(self, name):
         """Atajos de la hoja que abren una barra: Ctrl+Alt+K enlace, Ctrl+F buscar, Ctrl+H reemplazar."""
         actions = {"link": self.show_link_bar, "reviewed": self.toggle_reviewed, "next_change": self.next_change,
-                   "next_issue": self.next_issue, "nav": self.toggle_nav}
+                   "next_issue": self.next_issue, "nav": self.toggle_nav, "focus": self.toggle_focus}
         if name in actions:
             actions[name]()
         else:
@@ -6601,6 +6605,24 @@ class TextEditor:
     def hide_bars(self):
         for bar in (self.find_frame, self.link_frame, self.split_frame, self.issue_frame, self.resume_frame):
             bar.hide()
+
+    def toggle_focus(self):
+        """F11: modo concentración, solo la hoja a pantalla completa, sin cinta, barras ni paneles. F11 o Esc
+        vuelven como estaba."""
+        self.focused = not self.focused
+        if self.focused:
+            self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.find_frame, self.link_frame,
+                                             self.split_frame, self.issue_frame, self.resume_frame, self.diff_frame)
+                                 if not w.isHidden()]
+            for widget in self.before_focus:
+                widget.hide()
+            self.win.showFullScreen()
+            self.tell("Modo concentración: F11 o Esc para salir")
+        else:
+            for widget in self.before_focus:
+                widget.show()
+            self.win.showMaximized()
+        self.sheet.setFocus()
 
     # Mostrar cambios, como el control de cambios de Word: lo puesto subrayado en la hoja y el original en una barra
     def diff_bar(self):
