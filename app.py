@@ -78,7 +78,7 @@ INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "la
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
-         "font_file", "epub2", "reading", "profile", "autocase", "kepub", "hyphenate", "echoes")
+         "font_file", "epub2", "reading", "profile", "autocase", "kepub", "hyphenate", "echoes", "whole_words")
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
@@ -1634,6 +1634,7 @@ class App:
         self.epub2_var, self.kepub_var = qtk.Var(False), qtk.Var(False)
         self.echoes_var = qtk.Var(False)  # ecos en el informe: muchos avisos de estilo, solo si se piden
         self.hyphenate_var = qtk.Var(False)  # guiones blandos: el Kindle apenas parte palabras en español
+        self.whole_words_var = qtk.Var(False)  # PDF maquetado sin palabras partidas al final de línea
 
         root.setWindowTitle(APP_NAME)
         root.on_close, root.on_drop = self.close, self.open_path
@@ -1811,6 +1812,10 @@ class App:
         pdf_menu = QMenu(root)
         for size, label in (("A5", "A5, para leer o imprimir"), ("e-reader 6″", "e-reader 6″"), ("A4", "A4")):
             pdf_menu.addAction(f"Generar PDF ({label})…", lambda size=size: self.generate_pdf(size))
+        pdf_menu.addSeparator()
+        whole = pdf_menu.addAction("No partir palabras al final de línea")
+        whole.setCheckable(True)
+        self.whole_words_var.check(whole)
         self.pdf_btn = _menu_button("PDF", pdf_menu)
         self.pdf_btn.setToolTip("El libro maquetado en PDF, con las mismas opciones que el EPUB")
         self.gen_btn.setEnabled(False)
@@ -2732,7 +2737,8 @@ class App:
             return
         chapters, removed, breaks = self.prepare_output()
         self.status.setText(f"Generando PDF {size}…")
-        if self.run(_write_pdf, (self.book, chapters, out, removed, self.write_options(breaks), size),
+        options = {**self.write_options(breaks), "whole_words": self.whole_words_var.get()}  # solo el PDF
+        if self.run(_write_pdf, (self.book, chapters, out, removed, options, size),
                     lambda problems: self.saved(out, problems), report=True, busy="Maquetando el PDF…"):
             self.partial = f"{out}.tmp"
 
@@ -4492,7 +4498,7 @@ class App:
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var,
-                "hyphenate": self.hyphenate_var, "echoes": self.echoes_var}
+                "hyphenate": self.hyphenate_var, "echoes": self.echoes_var, "whole_words": self.whole_words_var}
 
     def rows(self):
         return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title"), self.tree.set(item, "ok")]
@@ -6258,10 +6264,14 @@ class TextEditor:
             button.clicked.connect(lambda: (action(), self.sheet.setFocus(), self.update_tools()))
             return button
 
-        def group(caption, *widgets):
+        def group(caption, *rows):
+            """Grupo de la cinta con sus botones en dos filas, como Office: así caben con su nombre en
+            1366 px, y no solo con el icono, que no decía qué era cada herramienta."""
             box = QVBoxLayout()
             box.setSpacing(2)
-            box.addLayout(_row(*widgets, spacing=2))
+            for widgets in rows:
+                box.addLayout(_row(*widgets, 1, spacing=2))
+            box.addStretch(1)
             label = _label(caption, "muted")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             box.addWidget(label)
@@ -6274,11 +6284,12 @@ class TextEditor:
         self.redo_btn = tool("↷ Rehacer", "Rehacer (Ctrl+Y)", sheet.redo, short="↷")
         self.undo_btn.setEnabled(False)
         self.redo_btn.setEnabled(False)
-        group("Deshacer", self.undo_btn, self.redo_btn)
+        group("Deshacer", [self.undo_btn], [self.redo_btn])
         self.bold_btn = tool("N", "Negrita (Ctrl+N)", sheet.toggle_bold, True, bold_font)
         self.italic_btn = tool("K", "Cursiva (Ctrl+K)", sheet.toggle_italic, True, italic_font)
-        self.case_btn = tool("Aa", "Mayúsculas y minúsculas (Mayús+F3)", sheet.change_case)
-        group("Fuente", self.bold_btn, self.italic_btn, self.case_btn)
+        self.case_btn = tool("Aa Mayúsculas", "Mayúsculas y minúsculas (Mayús+F3)", sheet.change_case, short="Aa",
+                             level=2)
+        group("Fuente", [self.bold_btn, self.italic_btn], [self.case_btn])
         self.style = QComboBox()
         self.style.addItems(STYLES)
         self.style.setToolTip("Estilo del párrafo: título de capítulo o subtítulo (Ctrl+T: capítulo o normal)")
@@ -6289,11 +6300,11 @@ class TextEditor:
                                short="≡", level=2)
         self.frame_btn = tool("▭ Recuadro", "Meter los párrafos elegidos en un recuadro, como las ventanas de estado, "
                               "o sacarlos de él", sheet.toggle_frame, True, short="▭", level=2)
-        group("Párrafo", self.style, self.center_btn, self.frame_btn,
+        group("Párrafo", [self.style, self.center_btn], [self.frame_btn,
               tool("⤒ Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
                    sheet.join_next, short="Unir", level=2),  # «⤒» solo se veía poco
               tool("✂ Dividir", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo que el PDF unió "
-                   "con el anterior", self.show_split_bar, short="✂", level=2))
+                   "con el anterior", self.show_split_bar, short="✂", level=2)])
 
         def menu_tool(text, tip, items, short=None, level=1):
             """Botón con menú («Símbolos ▾»): items [(texto, acción)] y None para una línea separadora."""
@@ -6318,13 +6329,13 @@ class TextEditor:
             ("« » Comillas   (Ctrl+Alt+Q)", lambda: sheet.wrap("«", "»")),
             ("¿ ? Pregunta", lambda: sheet.wrap("¿", "?")), ("¡ ! Exclamación", lambda: sheet.wrap("¡", "!")), None,
             ("Corregir tipografía del capítulo", self.fix_typography)], short="Ω ▾")
-        group("Insertar", self.symbols_btn,
-              tool("❖ Separador", "Separador de escena tras el párrafo", sheet.insert_break, short="❖"),
-              tool("🔗 Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)", self.show_link_bar,
-                   short="🔗"),
-              tool("✎ Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note, short="✎"))
-        group("Buscar", tool("🔍 Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
-                             lambda: self.show_find_bar(False), short="🔍"))
+        group("Insertar", [self.symbols_btn,
+              tool("❖ Separador", "Separador de escena tras el párrafo", sheet.insert_break, short="❖")],
+              [tool("🔗 Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)", self.show_link_bar,
+                    short="🔗"),
+               tool("✎ Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note, short="✎")])
+        group("Buscar", [tool("🔍 Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
+                              lambda: self.show_find_bar(False), short="🔍")])
         self.changes_btn, self.changes_menu = menu_tool("Cambios ▾", "Párrafos que editaste en este capítulo", [
             ("Cambio siguiente   (F7)", self.next_change), ("Volver al original", self.restore_current)])
         self.issues_btn, self.issues_menu = menu_tool("Avisos ▾", "Avisos del informe de calidad en este capítulo", [
@@ -6336,9 +6347,9 @@ class TextEditor:
             menu.insertSeparator(menu.actions()[1])
         self.read_btn = tool("🔊 Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
                              "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, short="🔊", level=2)
-        group("Revisar", self.changes_btn, self.issues_btn,
-              tool("Σ Cifras", "Cifras: palabras, párrafos, minutos de lectura y diálogo del capítulo y del libro",
-                   self.show_stats, short="Σ", level=2), self.read_btn)
+        group("Revisar", [self.changes_btn, self.issues_btn],
+              [tool("Σ Cifras", "Cifras: palabras, párrafos, minutos de lectura y diálogo del capítulo y del libro",
+                    self.show_stats, short="Σ", level=2), self.read_btn])
         row.addStretch(1)
         # A la derecha, como el panel de navegación de Word pero sin quitar sitio: dónde estás y a dónde ir
         self.prev_chapter = tool("◀", "Capítulo anterior", lambda: self.step_section(-1))
@@ -6348,7 +6359,7 @@ class TextEditor:
         self.chapter_btn.clicked.connect(self.show_chapters)
         self.review_btn = tool("✓", "Marca el capítulo como revisado y pasa al siguiente sin revisar (Ctrl+Intro)",
                                self.toggle_reviewed, True)
-        group("Capítulo", self.prev_chapter, self.chapter_btn, self.next_chapter, self.review_btn)
+        group("Capítulo", [self.prev_chapter, self.chapter_btn, self.next_chapter], [self.review_btn])
         self.chapters_popup()
         return bar
 
@@ -6860,7 +6871,7 @@ class TextEditor:
             return
         done, total = self.app.update_reviewed()
         item = str(self.current[0]) if self.current else ""
-        self.review_btn.setText("✓" if self.ribbon_level >= 3 else f"✓ {done}/{total}")
+        self.review_btn.setText("✓" if self.ribbon_level >= 3 else f"✓ Revisado · {done}/{total}")
         self.review_btn.setToolTip(f"Capítulos revisados: {done} de {total}. Marca este como revisado y pasa al "
                                    "siguiente sin revisar (Ctrl+Intro)")
         self.review_btn.setChecked(bool(item and self.app.tree.exists(item) and self.app.tree.set(item, "ok")))

@@ -2605,6 +2605,7 @@ def analyze(pdf_path, progress=None):
                 # de una ficha de estado («NOMBRE: Chise», Maryoku)
                 if (prev is not None and scene_gap and r.y - prev.y > scene_gap and not prev.heading and not r.heading
                         and abs(prev.size - body) < 0.5 and abs(r.size - body) < 0.5
+                        and not prev.bold  # Maryoku 1: subtítulo en negrita del tamaño del texto; es su aire
                         and id(prev) not in inside and id(r) not in inside
                         and not any(prev.y < (box[1] + box[3]) / 2 < r.y for box in boxes)
                         and blocks and blocks[-1].kind == "p"
@@ -2932,7 +2933,7 @@ def _fit_style(data, page):
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
                breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
-               progress=None, fit=None):
+               progress=None, fit=None, whole_words=False):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -2949,6 +2950,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     epub2: paquete EPUB 2 para lectores antiguos. reading: minutos de lectura en la página "Contenido".
     kepub: secciones en formato Kobo (_kepub); el archivo debe acabar en .kepub.epub.
     hyphenate: guiones blandos en los párrafos (_hyphenate), solo en libros en español.
+    whole_words: ninguna palabra se parte con guion al final de línea; la que no cabe pasa entera a la siguiente.
     alts: {image_key: descripción} de las ilustraciones que describió el usuario; las demás, «Ilustración de
     «capítulo»». Con los metadatos de accesibilidad (EPUB 3), el lector de pantalla las anuncia.
     Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número.
@@ -2956,7 +2958,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     fit: (ancho, alto) de la página de la vista previa: cada ilustración lleva un tamaño que cabe en ella
     (_fit_style). Solo para MuPDF; el EPUB de verdad no lo lleva."""
     rules = _rules(replacements)
-    hyphenate = hyphenate and lang.split("-")[0].lower() == "es"
+    hyphenate = hyphenate and not whole_words and lang.split("-")[0].lower() == "es"
     typo = (lambda s, dashes=False: _typography(s, dashes)) if typography else (lambda s, dashes=False: s)
     fix = lambda s, dashes=False: typo(_replace(s, rules) if rules else s, dashes)  # títulos: sin rayas
     limit = SHRINK if shrink is True else int(shrink or 0)
@@ -3107,6 +3109,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                  for k, src in enumerate(images)]
     fonts = {}  # ruta en el EPUB -> archivo de la carpeta fonts
     css = BASE_CSS + STYLES[style]
+    if whole_words:  # el PDF maquetado por MuPDF partía «mu-jer», «cue-ro» con hyphens: auto
+        css += "p { -webkit-hyphens: none; hyphens: none; }\n"
     if font in FONTS:
         for weight, slant in (("400", "normal"), ("400", "italic"), ("700", "normal"), ("700", "italic")):
             fonts[f"fonts/{FONTS[font]}-{weight}-{slant}.ttf"] = FONT_DIR / f"{FONTS[font]}-{weight}-{slant}.ttf"
