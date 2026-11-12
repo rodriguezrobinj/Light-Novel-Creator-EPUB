@@ -6318,7 +6318,10 @@ class TextEditor:
         self.italic_btn = tool("K", "Cursiva (Ctrl+K)", sheet.toggle_italic, True, italic_font)
         self.case_btn = tool("Aa Mayúsculas", "Mayúsculas y minúsculas (Mayús+F3)", sheet.change_case, short="Aa",
                              level=2)
-        group("Fuente", [self.bold_btn, self.italic_btn], [self.case_btn])
+        self.sup_btn = tool("x²", "Superíndice: 1.ᵉʳ, m² (Ctrl+Mayús+=)", sheet.toggle_sup, True)
+        self.caps_btn = tool("Vᴇʀs", "Versalitas: rangos, habilidades, sonidos en letra pequeña", sheet.toggle_small_caps,
+                             True)
+        group("Fuente", [self.bold_btn, self.italic_btn, self.sup_btn], [self.case_btn, self.caps_btn])
         self.style = QComboBox()
         self.style.addItems(STYLES)
         self.style.setToolTip("Estilo del párrafo: título de capítulo o subtítulo (Ctrl+T: capítulo o normal)")
@@ -6329,7 +6332,9 @@ class TextEditor:
                                short="≡", level=2)
         self.frame_btn = tool("▭ Recuadro", "Meter los párrafos elegidos en un recuadro, como las ventanas de estado, "
                               "o sacarlos de él", sheet.toggle_frame, True, short="▭", level=2)
-        group("Párrafo", [self.style, self.center_btn], [self.frame_btn,
+        self.right_btn = tool("⇥ Derecha", "Alinear el párrafo a la derecha: firmas y fechas de cartas (Ctrl+D)",
+                              sheet.toggle_right, True, short="⇥", level=2)
+        group("Párrafo", [self.style, self.center_btn, self.right_btn], [self.frame_btn,
               tool("⤒ Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
                    sheet.join_next, short="Unir", level=2),  # «⤒» solo se veía poco
               tool("✂ Dividir", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo que el PDF unió "
@@ -7265,7 +7270,10 @@ class TextEditor:
         self.italic_btn.setChecked(f.fontItalic())
         level = self.sheet.heading_level()
         self.style.setCurrentIndex(0 if level is None else 1 if level == ON else 2)
+        self.sup_btn.setChecked(self.sheet.is_sup())
+        self.caps_btn.setChecked(self.sheet.is_small_caps())
         self.center_btn.setChecked(self.sheet.is_centered())
+        self.right_btn.setChecked(self.sheet.is_right())
         self.frame_btn.setChecked(self.sheet.is_framed())
 
     def outline(self):

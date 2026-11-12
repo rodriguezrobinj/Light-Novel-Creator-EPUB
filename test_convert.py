@@ -2954,6 +2954,57 @@ def test_editor_sheet_actions_paste_and_undo():
                     ["Dijo", "hola, y se fue."], 2, "Pegado de fuera", 1, 1], seen
 
 
+def test_editor_sheet_superscript_small_caps_right():
+    """Superíndice, versalitas y párrafo a la derecha se cargan y vuelven igual; los botones de la hoja los ponen
+    en lo elegido; derecha y centrado se excluyen; Ctrl+D pone a la derecha y Ctrl+Mayús+= el superíndice."""
+    import qtk
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    lines = [(1, "El 1.<sup>er</sup> de <sc>Rango S</sc>."), (2, "<derecha>Firmado: Rudeus"), (3, "<center>Uno dos"),
+             (4, "tres cuatro")]
+    sheet.set_content(lines, {})
+    same = sheet.content() == "\n\n".join(line for _, line in lines)
+
+    def at(n, start=0, end=None):
+        block = sheet.document().findBlockByNumber(n)
+        c = sheet.textCursor()
+        c.setPosition(block.position() + start)
+        if end is not None:
+            c.setPosition(block.position() + end, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+
+    def line(n):
+        return sheet.content().split("\n\n")[n]
+
+    at(3, 0, 4)
+    sheet.toggle_sup()
+    at(3, 5, 11)
+    sheet.toggle_small_caps()
+    marked = line(3)
+    at(2)
+    sheet.toggle_right()
+    right = line(2)
+    at(1)
+    sheet.toggle_right()  # quita la derecha
+    left = line(1)
+    at(3)
+    QTest.keyClick(sheet, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
+    keyed = line(3)
+    at(0, 0, 2)
+    QTest.keyClick(sheet, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+    assert same, sheet.content()
+    assert marked == "<sup>tres</sup> <sc>cuatro</sc>", marked
+    assert right == "<derecha>Uno dos" and left == "Firmado: Rudeus", (right, left)
+    assert keyed.startswith("<derecha>"), keyed
+    assert line(0).startswith("<sup>El</sup> 1.<sup>er</sup>"), line(0)
+
+
 def test_editor_sheet_links_center_levels_case_and_search():
     """Enlaces, párrafos centrados y tipo de título se ven en la hoja y vuelven al formato del texto; Mayús+F3
     cambia mayúsculas; buscar y reemplazar en la hoja, con un solo deshacer."""

@@ -20,10 +20,11 @@ OBJECT = _USER + 5    # imagen: "Ilustración 12" / "Separador 7", la marca que 
 LEVEL = _USER + 6     # título: tipo de su fila ("Capítulo", "Subtítulo"); al aceptar, la fila queda así
 CENTERED = _USER + 7  # párrafo centrado (carta, cartel): vuelve a section_text con <center> delante
 FRAMED = _USER + 8    # párrafo dentro de un recuadro (ventana de estado): vuelve con <marco> delante
+RIGHTED = _USER + 9   # párrafo a la derecha (firma de una carta): vuelve con <derecha> delante
 FRAME_PAD = 16        # píxeles entre el recuadro y su texto
 SUB = 18              # sangría de una línea sin viñeta en un recuadro con viñetas («HP: 10/10» bajo «■ Lorna»)
 MIME = "application/x-lnc-hoja"  # copiar y pegar dentro de la hoja conserva formato e ilustraciones
-MARKS = re.compile(r'(</?[ib]>|<a href="[^"]*">|</a>)')
+MARKS = re.compile(r'(</?(?:i|b|sup|sc)>|<a href="[^"]*">|</a>)')
 LINK = re.compile(r'<a href="([^"]*)">')
 LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; app.py pone el del tema
 NOTE = re.compile(r"\[Nota: [^\]]*\]")
@@ -37,20 +38,30 @@ def _plain_format():
 
 
 def _runs(text):
-    """Trozos de texto con <i>, <b> y <a href>: [(texto, cursiva, negrita, enlace)]."""
-    runs, italic, bold, href = [], False, False, ""
+    """Trozos de texto con <i>, <b>, <sup>, <sc> y <a href>: [(texto, cursiva, negrita, enlace, sup, sc)]."""
+    runs, on, href = [], {"i": False, "b": False, "sup": False, "sc": False}, ""
     for part in MARKS.split(text):
-        if part in ("<i>", "</i>"):
-            italic = part == "<i>"
-        elif part in ("<b>", "</b>"):
-            bold = part == "<b>"
+        tag = part.strip("</>")
+        if tag in on and part in (f"<{tag}>", f"</{tag}>"):
+            on[tag] = not part.startswith("</")
         elif part == "</a>":
             href = ""
         elif LINK.fullmatch(part):
             href = LINK.fullmatch(part).group(1)
         elif part:
-            runs.append((part, italic, bold, href))
+            runs.append((part, on["i"], on["b"], href, on["sup"], on["sc"]))
     return runs
+
+
+def char_format(italic=False, bold=False, href="", sup=False, sc=False):
+    """Formato de carácter de un trozo de _runs."""
+    f = link_format(href) if href else QTextCharFormat()
+    f.setFontItalic(italic)
+    f.setFontWeight(QFont.Weight.Bold if bold else QFont.Weight.Normal)
+    f.setVerticalAlignment(QTextCharFormat.VerticalAlignment.AlignSuperScript if sup
+                           else QTextCharFormat.VerticalAlignment.AlignNormal)
+    f.setFontCapitalization(QFont.Capitalization.SmallCaps if sc else QFont.Capitalization.MixedCase)
+    return f
 
 
 def link_format(href, f=None):
@@ -67,12 +78,9 @@ def link_format(href, f=None):
 
 
 def _insert_marked(cursor, text):
-    """Texto con <i>/<b>/<a href> como cursiva, negrita y enlaces reales."""
-    for part, italic, bold, href in _runs(text):
-        f = link_format(href) if href else QTextCharFormat()
-        f.setFontItalic(italic)
-        f.setFontWeight(QFont.Weight.Bold if bold else QFont.Weight.Normal)
-        cursor.insertText(part, f)
+    """Texto con <i>/<b>/<sup>/<sc>/<a href> como cursiva, negrita, superíndice, versalitas y enlaces reales."""
+    for part, *marks in _runs(text):
+        cursor.insertText(part, char_format(*marks))
 
 
 def _symbol(text, color, height=28):
@@ -106,17 +114,29 @@ def _insert_object(cursor, kind, n, pictures, color):
 
 
 def _strip(line):
-    """La línea sin su prefijo de section_text: "# ", "<center>" o "<marco>"."""
-    for prefix in ("# ", convert.CENTER, convert.FRAME):
+    """La línea sin su prefijo de section_text: "# ", "<center>", "<marco>" o "<derecha>"."""
+    for prefix in ("# ", convert.CENTER, convert.FRAME, convert.RIGHT):
         if line.startswith(prefix):
             return line[len(prefix):]
     return line
 
 
+def align_format(f, how=None):
+    """Párrafo centrado ("center"), a la derecha ("right") o a la izquierda (None): se excluyen entre sí."""
+    for prop, name in ((CENTERED, "center"), (RIGHTED, "right")):
+        if how == name:
+            f.setProperty(prop, True)
+        else:
+            f.clearProperty(prop)
+    f.setAlignment({"center": Qt.AlignmentFlag.AlignHCenter, "right": Qt.AlignmentFlag.AlignRight}.get(
+        how, Qt.AlignmentFlag.AlignLeft))
+    return f
+
+
 def frame_format(f, first=False, last=False, sub=False):
     """Formato de un párrafo en recuadro: juntos, sin el espacio entre párrafos, y con sitio para el borde."""
     f.setProperty(FRAMED, True)
-    f.setAlignment(Qt.AlignmentFlag.AlignLeft)
+    align_format(f)
     f.setLeftMargin(FRAME_PAD + (SUB if sub else 0))
     f.setRightMargin(FRAME_PAD)
     f.setTopMargin(FRAME_PAD if first else 0)
@@ -150,9 +170,10 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
         token = None if raw else convert.TOKEN.fullmatch(bare)
         heading = not raw and line.startswith("# ")
         centered = not raw and line.startswith(convert.CENTER)
+        right = not raw and line.startswith(convert.RIGHT)
         framed = i in frames
         scene = not raw and not token and bool(bare) and bool(convert.SCENE_BREAK.fullmatch(bare))
-        special = bool(token or heading or scene or centered or framed)
+        special = bool(token or heading or scene or centered or framed or right)
         if i or (special and cursor.block().length() > 1):
             cursor.insertBlock(QTextBlockFormat(), _plain_format())
         if i or special or remember:
@@ -162,8 +183,8 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
                 f.setProperty(SOURCE, k)
             if token or scene or centered:
                 f.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            if centered:
-                f.setProperty(CENTERED, True)
+            if centered or right:
+                align_format(f, "center" if centered else "right")
             if framed:
                 frame_format(f, *frames[i])
             if heading:
@@ -194,14 +215,15 @@ def load(document, lines, pictures, color="#888888", levels=None):
 
 
 def _marked(runs):
-    """[(texto, cursiva, negrita, enlace)] -> texto con <a href>/<b>/<i> bien anidados: se cierra lo justo y
-    se abre lo que falta (enlace fuera, luego negrita, cursiva dentro)."""
+    """[(texto, cursiva, negrita, enlace, sup, sc)] -> texto con <a href>/<b>/<i>/<sc>/<sup> bien anidados: se
+    cierra lo justo y se abre lo que falta (enlace fuera, luego negrita, cursiva, versalitas, superíndice dentro)."""
     def opening(t):
         return f'<a href="{t[2:]}">' if t.startswith("a:") else f"<{t}>"
 
     out, stack = [], []
-    for text, italic, bold, href in runs:
-        want = ([f"a:{href}"] if href else []) + [t for t, on in (("b", bold), ("i", italic)) if on]
+    for text, italic, bold, href, sup, sc in runs:
+        want = ([f"a:{href}"] if href else []) + [t for t, on in (("b", bold), ("i", italic), ("sc", sc),
+                                                                  ("sup", sup)) if on]
         while any(t not in want for t in stack):
             t = stack.pop()
             out.append("</a>" if t.startswith("a:") else f"</{t}>")
@@ -228,7 +250,7 @@ def _lines(block):
     f = block.blockFormat()
     heading = bool(f.property(HEADING))
     prefix = ("# " if heading else convert.CENTER if f.property(CENTERED) else convert.FRAME if f.property(FRAMED)
-              else "")
+              else convert.RIGHT if f.property(RIGHTED) else "")
     out, runs = [], []
 
     def flush():
@@ -250,7 +272,9 @@ def _lines(block):
         text = fragment.text().replace(" ", " ").replace("￼", "")
         if text:
             runs.append((text, f.fontItalic(), f.fontWeight() >= QFont.Weight.DemiBold,
-                         f.anchorHref() if f.isAnchor() else ""))
+                         f.anchorHref() if f.isAnchor() else "",
+                         f.verticalAlignment() == QTextCharFormat.VerticalAlignment.AlignSuperScript,
+                         f.fontCapitalization() == QFont.Capitalization.SmallCaps))
     flush()
     return out
 
@@ -651,6 +675,22 @@ class Sheet(QTextEdit):
         self._toggle(lambda f: f.fontWeight() >= QFont.Weight.DemiBold,
                      lambda f, on: f.setFontWeight(QFont.Weight.Bold if on else QFont.Weight.Normal))
 
+    def toggle_sup(self):
+        """Superíndice (1.ᵉʳ, m²), como Ctrl+Mayús+= de Word."""
+        sup, normal = QTextCharFormat.VerticalAlignment.AlignSuperScript, QTextCharFormat.VerticalAlignment.AlignNormal
+        self._toggle(lambda f: f.verticalAlignment() == sup, lambda f, on: f.setVerticalAlignment(sup if on else normal))
+
+    def toggle_small_caps(self):
+        """Versalitas: rangos, nombres de habilidades y sonidos que el PDF pone en letra pequeña."""
+        sc, mixed = QFont.Capitalization.SmallCaps, QFont.Capitalization.MixedCase
+        self._toggle(lambda f: f.fontCapitalization() == sc, lambda f, on: f.setFontCapitalization(sc if on else mixed))
+
+    def is_sup(self):
+        return self.currentCharFormat().verticalAlignment() == QTextCharFormat.VerticalAlignment.AlignSuperScript
+
+    def is_small_caps(self):
+        return self.currentCharFormat().fontCapitalization() == QFont.Capitalization.SmallCaps
+
     def heading_level(self):
         """Estilo del párrafo del cursor: None (normal), "Capítulo" o "Subtítulo" (o el tipo de su fila)."""
         f = self.textCursor().blockFormat()
@@ -669,13 +709,12 @@ class Sheet(QTextEdit):
         if level:
             f.setProperty(HEADING, True)
             f.setProperty(LEVEL, level)
-            f.clearProperty(CENTERED)
             if f.property(FRAMED):  # un título no va en recuadro
                 f.clearProperty(FRAMED)
                 f.setLeftMargin(0)
                 f.setRightMargin(0)
                 f.setBottomMargin(SPACE)
-            f.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            align_format(f)
         else:
             f.clearProperty(HEADING)
             f.clearProperty(LEVEL)
@@ -686,24 +725,28 @@ class Sheet(QTextEdit):
     def toggle_heading(self):
         self.set_heading(None if self.heading_level() else "Capítulo")
 
-    def toggle_center(self):
-        """Ctrl+E: centra el párrafo (carta, cartel) o lo devuelve a su sitio. Solo párrafos de texto."""
+    def _toggle_align(self, how, prop):
         cursor = self.textCursor()
         block = cursor.block()
-        if not _is_text(block):
+        if not _is_text(block) or block.blockFormat().property(FRAMED):  # el recuadro va siempre a la izquierda
             QApplication.beep()
             return
         f = cursor.blockFormat()
-        on = not f.property(CENTERED)
-        if on:
-            f.setProperty(CENTERED, True)
-        else:
-            f.clearProperty(CENTERED)
-        f.setAlignment(Qt.AlignmentFlag.AlignHCenter if on else Qt.AlignmentFlag.AlignLeft)
-        cursor.setBlockFormat(f)
+        cursor.setBlockFormat(align_format(f, None if f.property(prop) else how))
+
+    def toggle_center(self):
+        """Ctrl+E: centra el párrafo (carta, cartel) o lo devuelve a su sitio. Solo párrafos de texto."""
+        self._toggle_align("center", CENTERED)
+
+    def toggle_right(self):
+        """Ctrl+D, como Word en español: el párrafo a la derecha (firma, fecha de una carta) o a su sitio."""
+        self._toggle_align("right", RIGHTED)
 
     def is_centered(self):
         return bool(self.textCursor().blockFormat().property(CENTERED))
+
+    def is_right(self):
+        return bool(self.textCursor().blockFormat().property(RIGHTED))
 
     def toggle_frame(self):
         """Mete en un recuadro los párrafos de la selección (ventana de estado, cartel) o los saca. Solo texto."""
@@ -726,7 +769,7 @@ class Sheet(QTextEdit):
         for n, block in enumerate(blocks):
             f = block.blockFormat()
             if on:
-                f.clearProperty(CENTERED)
+                align_format(f)
                 f.clearProperty(HEADING)
                 f.clearProperty(LEVEL)
                 frame_format(f, n == 0 and not block.previous().blockFormat().property(FRAMED),
@@ -1002,7 +1045,7 @@ class Sheet(QTextEdit):
         """Devuelve el párrafo a su línea original (título, centrado y texto): un paso de deshacer."""
         original = block.blockFormat().property(ORIGINAL)
         heading, centered = original.startswith("# "), original.startswith(convert.CENTER)
-        framed = original.startswith(convert.FRAME)
+        framed, right = original.startswith(convert.FRAME), original.startswith(convert.RIGHT)
         cursor = QTextCursor(self.document())
         cursor.setPosition(block.position())
         cursor.beginEditBlock()
@@ -1012,11 +1055,7 @@ class Sheet(QTextEdit):
         else:
             f.clearProperty(HEADING)
             f.clearProperty(LEVEL)
-        if centered:
-            f.setProperty(CENTERED, True)
-        else:
-            f.clearProperty(CENTERED)
-        f.setAlignment(Qt.AlignmentFlag.AlignHCenter if centered else Qt.AlignmentFlag.AlignLeft)
+        align_format(f, "center" if centered else "right" if right else None)
         if framed:
             frame_format(f, not block.previous().blockFormat().property(FRAMED),
                          not block.next().blockFormat().property(FRAMED))
@@ -1112,6 +1151,7 @@ class Sheet(QTextEdit):
         actions = {Qt.Key.Key_K: self.toggle_italic, Qt.Key.Key_I: self.toggle_italic,
                    Qt.Key.Key_N: self.toggle_bold, Qt.Key.Key_B: self.toggle_bold,
                    Qt.Key.Key_T: self.toggle_heading, Qt.Key.Key_J: self.join_next, Qt.Key.Key_E: self.toggle_center,
+                   Qt.Key.Key_D: self.toggle_right,
                    Qt.Key.Key_F: lambda: self.command.emit("find"), Qt.Key.Key_H: lambda: self.command.emit("replace")}
         typed = event.text()
         symbols = {Qt.Key.Key_Minus: lambda: self.insert_symbol("—"), Qt.Key.Key_Period: lambda: self.insert_symbol("…"),
@@ -1126,6 +1166,8 @@ class Sheet(QTextEdit):
             self.command.emit("next_change")
         elif key == Qt.Key.Key_F8:
             self.command.emit("next_issue")
+        elif ctrl and not alt and key in (Qt.Key.Key_Equal, Qt.Key.Key_Plus) and mods & Qt.KeyboardModifier.ShiftModifier:
+            self.toggle_sup()  # Ctrl+Mayús+= de Word; en el teclado español «=» es Mayús+0
         elif ctrl and not alt and key in actions:
             actions[key]()
         elif key == Qt.Key.Key_F3 and mods & Qt.KeyboardModifier.ShiftModifier:
