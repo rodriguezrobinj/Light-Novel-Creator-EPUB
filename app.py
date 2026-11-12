@@ -558,6 +558,33 @@ def _review_path(pdf):
     return Path(pdf).with_name(Path(pdf).stem + ".lnepub.json")
 
 
+WORK_KEYS = ("minutes", "paragraphs", "reviewed")
+
+
+def _log_work(work, day, **amounts):
+    """Suma minutos, párrafos cambiados o capítulos revisados al día day ("AAAA-MM-DD") de work."""
+    entry = work.setdefault(day, {})
+    for key, n in amounts.items():
+        entry[key] = round(entry.get(key, 0) + n, 1)
+
+
+def _work_summary(work, today):
+    """[(rótulo, minutos, párrafos, revisados)] de hoy, de los últimos 7 días y del total del libro."""
+    from datetime import date, timedelta
+    week = {(date.fromisoformat(today) - timedelta(days=n)).isoformat() for n in range(7)}
+    out = []
+    for label, days in (("Hoy", {today}), ("Últimos 7 días", week), ("Total del libro", None)):
+        picked = [w for day, w in work.items() if days is None or day in days]
+        out.append((label, *(sum(w.get(key, 0) for w in picked) for key in WORK_KEYS)))
+    return out
+
+
+def _duration(minutes):
+    """«45 min», «1 h 05 min»."""
+    minutes = round(minutes)
+    return f"{minutes // 60} h {minutes % 60:02d} min" if minutes >= 60 else f"{minutes} min"
+
+
 def _draft_path(pdf):
     """Borrador del editor: lo cambiado sin aceptar, por si la aplicación se cierra a mitad."""
     return Path(pdf).with_name(Path(pdf).stem + ".lnepub.borrador.json")
@@ -750,7 +777,8 @@ def _set_aside(pdf):
 
 # Versiones del trabajo de un libro, como los commits de git: copias completas de la revisión en un zip junto al
 # PDF. Restaurar una no borra las posteriores: así conviven alternativas del mismo tomo.
-VERSION_NOISE = ("problems", "pdf")  # no cuentan para saber si una versión automática repite la última
+# No cuentan para saber si una versión automática repite la última
+VERSION_NOISE = ("problems", "pdf", "editor_at", "work")
 COMPARE_LIMIT = 300  # párrafos cambiados que se muestran al comparar: más no se leen y la ventana tardaría
 FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volume": "Vol.", "publisher": "Grupo",
                 "translator": "Traductor", "illustrator": "Ilustraciones", "proofreader": "Corrección",
@@ -1618,6 +1646,8 @@ class App:
         self.tr_glossary = []                  # glosario de traducción de la serie: [[original, traducción]]
         self.tr_notes = ""                     # personajes y estilo para la IA que traduce, de la serie
         self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
+        self.editor_at = None                  # bloque del cursor al cerrar el editor: «Lo dejaste en…»
+        self.work = {}                         # trabajo en el editor por día: {"AAAA-MM-DD": {"minutes", …}}
         self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
         self.thumbs, self.thumbs_tried = None, set()  # proceso de miniaturas de recientes y archivos ya probados
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
@@ -2485,7 +2515,7 @@ class App:
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
         # Son del libro: llegan con la revisión (el glosario, también heredado de otro tomo)
         self.glossary, self.tr_glossary, self.comments, self.alts = [], [], [], {}
-        self.tr_notes = ""
+        self.tr_notes, self.editor_at, self.work = "", None, {}
         if report is not None and not self.echoes_var.get() and self.spanish():  # el del proceso: sin opciones, en español
             self.reports[self.report_key()] = report
         if memos:
@@ -4532,7 +4562,7 @@ class App:
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
                      glossary=self.glossary, tr_glossary=self.tr_glossary, ignored=self.ignored, comments=self.comments,
-                     alts=self.alts, tr_notes=self.tr_notes)
+                     alts=self.alts, tr_notes=self.tr_notes, editor_at=self.editor_at, work=self.work)
         return state
 
     def save_review(self):
@@ -4598,6 +4628,11 @@ class App:
         self.alts = {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}
         self.comments = [c for c in state.get("comments", []) if isinstance(c, dict)  # el .json se edita a mano
                          and isinstance(c.get("note"), str) and isinstance(c.get("text"), str)]
+        at = state.get("editor_at")
+        self.editor_at = at if isinstance(at, int) and not isinstance(at, bool) else None
+        work = state.get("work") if isinstance(state.get("work"), dict) else {}
+        self.work = {str(day): {key: w[key] for key in WORK_KEYS if isinstance(w.get(key), (int, float))}
+                     for day, w in work.items() if isinstance(w, dict)}
         if state.get("cover"):
             try:
                 self.set_cover(state["cover"])
@@ -6191,6 +6226,7 @@ class TextEditor:
         column.addWidget(self.link_bar())
         column.addWidget(self.split_bar())
         column.addWidget(self.issue_bar())
+        column.addWidget(self.resume_bar())
         # Hoja centrada sobre el escritorio gris, como la vista de impresión de Word
         desk = QFrame(objectName="desk")
         desk_row = QHBoxLayout(desk)
@@ -6244,6 +6280,8 @@ class TextEditor:
         self.set_text_zoom(100)
         self.open_section(start, end, int(item))
         self.recover_draft()
+        self.offer_resume()
+        self.opened, self.saved_paragraphs = time.monotonic(), 0  # para «Tu trabajo» de «Cifras»
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         sheet.textChanged.connect(lambda: self.later("draft", 5000, self.write_draft))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
@@ -6551,8 +6589,37 @@ class TextEditor:
             self.show_find_bar(name == "replace")
 
     def hide_bars(self):
-        for bar in (self.find_frame, self.link_frame, self.split_frame, self.issue_frame):
+        for bar in (self.find_frame, self.link_frame, self.split_frame, self.issue_frame, self.resume_frame):
             bar.hide()
+
+    def resume_bar(self):
+        """«Lo dejaste en «Capítulo 5» · Ir allí»: el editor no salta solo, quien lo abre desde un aviso o una fila
+        quiere ir ahí."""
+        bar = self.resume_frame = QFrame(objectName="ribbon")
+        self.resume_label = _label("")
+        self.resume_go = _button("Ir allí", self.resume, "primary")
+        bar.setLayout(_row(self.resume_label, self.resume_go, 1,
+                           _button("✕", lambda: (bar.hide(), self.sheet.setFocus())), margins=(10, 6, 10, 6)))
+        self.resume_at = None
+        bar.hide()
+        return bar
+
+    def offer_resume(self):
+        at, blocks = self.app.editor_at, len(self.app.book.blocks)
+        if at is None or not 0 <= at < blocks:
+            return
+        section = next((s for s in self.sections if s[1] <= at < s[2]), None)
+        if section is None or section[1:3] == self.current:
+            return
+        self.resume_at = at
+        self.resume_label.setText(f"Lo dejaste en «{section[0]}»")
+        self.resume_frame.show()
+
+    def resume(self):
+        section = next((s for s in self.sections if s[1] <= self.resume_at < s[2]), None)
+        self.resume_frame.hide()
+        if section:
+            self.open_section(section[1], section[2], self.resume_at)
 
     def show_link_bar(self):
         self.link_selection = QTextCursor(self.sheet.textCursor())  # el foco se va a la barra
@@ -6932,6 +6999,8 @@ class TextEditor:
         row = next((n for n, s in enumerate(self.sections) if s[1:3] == self.current), 0)
         following = next((s for s in self.sections[row + 1:] if tree.exists(str(s[1]))
                           and tree.set(str(s[1]), "inc") == ON and not tree.set(str(s[1]), "ok")), None)
+        if mark:  # desmarcar no resta: el trabajo de revisarlo ya se hizo
+            _log_work(self.app.work, datetime.now().date().isoformat(), reviewed=1)
         if mark and following:
             self.open_section(*following[1:3])
         self.update_review()
@@ -6976,6 +7045,23 @@ class TextEditor:
                 grid.addWidget(label, r, c)
         grid.setHorizontalSpacing(24)
         column.addLayout(grid)
+        # Tu trabajo: lo guardado de días anteriores y esta sesión, aunque aún no se haya aceptado
+        work = copy.deepcopy(self.app.work)
+        _log_work(work, datetime.now().date().isoformat(), paragraphs=self.changed_count(),
+                  minutes=(time.monotonic() - self.opened) / 60)
+        mine = QGridLayout()
+        for c, text in enumerate(("Tu trabajo", "Tiempo", "Párrafos cambiados", "Capítulos revisados")):
+            mine.addWidget(_label(text, "muted"), 0, c)
+        for r, (label, minutes, paragraphs, reviewed) in enumerate(_work_summary(
+                work, datetime.now().date().isoformat()), 1):
+            for c, text in enumerate((label, _duration(minutes), number(round(paragraphs)), number(round(reviewed)))):
+                cell = _label(text, "muted" if c == 0 else None)
+                if c:
+                    cell.setAlignment(Qt.AlignmentFlag.AlignRight)
+                mine.addWidget(cell, r, c)
+        mine.setHorizontalSpacing(24)
+        column.addSpacing(12)
+        column.addLayout(mine)
         chapters = sum(1 for s in self.sections if s[0] != FRONT)
         extra = f"{convert.counted(chapters, 'capítulo')} en el libro"
         if selected.strip():
@@ -7467,6 +7553,12 @@ class TextEditor:
             qtk.cancel(job)
         self.pending.clear()
         self.drop_draft()  # se aceptó o se descartó: el borrador ya no hace falta
+        # shortcut: tras aceptar, un párrafo añadido antes desplaza el bloque; se queda cerca, que basta para volver
+        _log_work(self.app.work, datetime.now().date().isoformat(), paragraphs=self.saved_paragraphs,
+                  minutes=(time.monotonic() - self.opened) / 60)
+        if shiboken6.isValid(self.sheet) and self.sheet.current_source() is not None:
+            self.app.editor_at = self.sheet.current_source()
+        self.app.save_review()
         if self.spell:
             self.spell[2].terminate()  # nada que guardar: lo aprendido ya está en App.words
             self.spell = None
@@ -7667,9 +7759,20 @@ class TextEditor:
         edits.sort(reverse=True)
         return edits, titles, [kinds[e[0]] for e in edits], retype
 
+    def changed_count(self):
+        """Párrafos cambiados, nuevos o quitados en las secciones visitadas, frente a lo cargado."""
+        count = 0
+        for page in self.pages.values():
+            old = [line for _, line in page["lines"]]
+            new = [line for line in editor.dump(page["doc"]).split("\n\n") if line.strip()]
+            count += sum(max(i2 - i1, j2 - j1) for op, i1, i2, j1, j2 in
+                         difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes() if op != "equal")
+        return count
+
     def save(self):
         """Aplica solo lo que cambió: un párrafo rehecho pierde su página del PDF, y un título rehecho su tipo."""
         if self.dirty():
+            self.saved_paragraphs = self.changed_count()
             edits, titles, kinds, retype = self.changes()
             self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype)
         self.win.done(0)

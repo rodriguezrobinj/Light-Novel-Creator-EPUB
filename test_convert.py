@@ -3624,6 +3624,70 @@ def test_editor_draft_recovers_after_crash():
     assert "Otro texto." not in stale and infos and "el libro cambió" in infos[0], (stale, infos)
 
 
+def test_editor_resume_bar_goes_where_you_left():
+    """Al cerrar el editor se recuerda el párrafo del cursor, también en la revisión; abrirlo en otro capítulo
+    ofrece «Lo dejaste en «Capítulo 2»» e «Ir allí» lleva a ese párrafo. En el mismo capítulo no sale la barra."""
+    from PySide6.QtGui import QTextCursor
+    import app
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("heading", 2, "Capítulo 2"), B("p", 2, "Dos."),
+              B("p", 2, "Tres.")]
+    root, window, editor = editor_on(blocks, [0, 2])
+    editor.open_section(*window.section_bounds(2), 4)
+    editor.win.done(0)
+    remembered = window.editor_at
+    saved = window.review_state()["editor_at"]
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    shown = not editor.resume_frame.isHidden() and "«Capítulo 2»" in editor.resume_label.text()
+    editor.resume_go.click()
+    went = editor.current == window.section_bounds(2) and editor.sheet.current_source() == 4
+    hidden_after = editor.resume_frame.isHidden()
+    editor.win.done(0)
+    editor = app.TextEditor(window, "2", *window.section_bounds(2))
+    same_chapter = editor.resume_frame.isHidden()
+    editor.win.done(0)
+    window.close()
+    assert remembered == 4 and saved == 4, (remembered, saved)
+    assert shown and went and hidden_after and same_chapter, (shown, went, hidden_after, same_chapter)
+
+
+def test_editor_work_log():
+    """«Cifras» cuenta el trabajo: aceptar suma los párrafos cambiados y el tiempo de hoy, marcar revisado suma un
+    capítulo (desmarcar no resta), y el resumen da hoy, los últimos 7 días y el total."""
+    from datetime import date, timedelta
+    import app
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos."), B("heading", 2, "Capítulo 2"),
+              B("p", 2, "Tres.")]
+    root, window, editor = editor_on(blocks, [0, 3])
+    today = date.today().isoformat()
+    window.work = {"2000-01-01": {"minutes": 30, "paragraphs": 5, "reviewed": 1}}
+    c = editor.sheet.textCursor()
+    c.setPosition(editor.sheet.document().findBlockByNumber(1).position())
+    c.insertText("Cambiado. ")
+    editor.opened -= 120  # dos minutos abierto
+    editor.toggle_reviewed()
+    editor.open_section(*window.section_bounds(0))
+    editor.toggle_reviewed()  # desmarcar
+    editor.show_stats()
+    stats = [w.text() for w in editor.stats_window.findChildren(app.QLabel)]
+    editor.stats_window.close()
+    editor.save()
+    day = window.work[today]
+    saved = window.review_state()["work"][today]
+    old = (date.today() - timedelta(days=3)).isoformat()
+    summary = app._work_summary({today: {"minutes": 10, "paragraphs": 2}, old: {"minutes": 50, "reviewed": 1},
+                                 "2000-01-01": {"minutes": 5}}, today)
+    window.close()
+    assert day["paragraphs"] == 1 and day["reviewed"] == 1 and 2 <= day["minutes"] < 3, day
+    assert saved == day, saved
+    assert "Tu trabajo" in stats and "Párrafos cambiados" in stats and "2 min" in stats, stats
+    assert summary == [("Hoy", 10, 2, 0), ("Últimos 7 días", 60, 2, 1), ("Total del libro", 65, 2, 1)], summary
+    assert app._duration(65) == "1 h 05 min" and app._duration(45) == "45 min"
+
+
 def test_window_editor_split_back_keeps_paragraph_source():
     """Unir dos párrafos (Retroceso) y volver a partirlos (Intro) donde estaban: el segundo recupera su origen, la
     vista del PDF lo recuadra a él y no al primero, y se guarda como estaba (sin cambios). Ctrl+Z deshace todo."""
