@@ -1818,14 +1818,10 @@ class App:
         self.quality_btn = _button("Calidad", self.quality)
         self.quality_btn.setEnabled(False)
         self.gen_btn = _button("Generar EPUB…", self.generate, "primary")
-        pdf_menu = QMenu(root)
-        for size, label in (("A5", "A5, para leer o imprimir"), ("e-reader 6″", "e-reader 6″"), ("A4", "A4")):
-            pdf_menu.addAction(f"Generar PDF ({label})…", lambda size=size: self.generate_pdf(size))
-        pdf_menu.addSeparator()
-        whole = pdf_menu.addAction("No partir palabras al final de línea")
-        whole.setCheckable(True)
-        self.whole_words_var.check(whole)
-        self.pdf_btn = _menu_button("PDF", pdf_menu)
+        self.pdf_menu = QMenu(root)
+        self.pdf_menu.aboutToShow.connect(self.fill_pdf_menu)  # el tamaño preferido puede cambiar en Opciones
+        self.fill_pdf_menu()
+        self.pdf_btn = _menu_button("PDF", self.pdf_menu)
         self.pdf_btn.setToolTip("El libro maquetado en PDF, con las mismas opciones que el EPUB")
         self.gen_btn.setEnabled(False)
         self.pdf_btn.setEnabled(False)
@@ -2735,6 +2731,15 @@ class App:
         if self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
                     lambda problems: self.saved(out, problems), report=True, busy="Generando EPUB…"):
             self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
+
+    def fill_pdf_menu(self):
+        """«PDF ▾»: el tamaño preferido (Opciones → PDF) primero."""
+        labels = {"A5": "A5, para leer o imprimir", "e-reader 6″": "e-reader 6″", "A4": "A4"}
+        preferred = self.pdf_size_var.get()
+        self.pdf_menu.clear()
+        for size in sorted(labels, key=lambda s: s != preferred):
+            mark = " (preferido)" if size == preferred else ""
+            self.pdf_menu.addAction(f"Generar PDF ({labels[size]}){mark}…", lambda size=size: self.generate_pdf(size))
 
     def generate_pdf(self, size):
         """«PDF ▾»: el libro maquetado en PDF al tamaño elegido (convert.PDF_SIZES), con las opciones del EPUB."""

@@ -2094,7 +2094,7 @@ def test_write_pdf_bookmarks_numbers_and_metadata():
 def test_write_pdf_whole_words_never_splits_a_word():
     """PDF maquetado: el CSS pide hyphens: auto y MuPDF parte «mu-jer», «cue-ro» al final de línea. Con
     whole_words la palabra que no cabe pasa entera a la línea siguiente; sin la opción se sigue partiendo.
-    Con el menú «PDF ▾» de la ventana, la opción marcada llega a write_pdf."""
+    Marcada en Opciones → PDF, la opción llega a write_pdf."""
     B = convert.Block
     text = ("Los que aparecieron ante nosotros eran humanos: un hombre y una mujer cargando a un hombre herido "
             "sobre sus hombros. Su armadura de cuero estaba manchada de sangre y cubierta de suciedad. ") * 4
@@ -2112,8 +2112,9 @@ def test_write_pdf_whole_words_never_splits_a_word():
     root, window = visible_window()
     window.show_book(book)
     window.pdf = TMP / "original.pdf"
-    action = next(a for a in window.pdf_btn.menu().actions() if a.isCheckable())
-    action.trigger()
+    dialog = window.open_options("PDF", "book")  # la casilla vive en Opciones → PDF
+    dialog.parts["widgets"]["whole_words"].setChecked(True)
+    dialog.parts["accept"]()
     sent = []
     originals = app.filedialog.asksaveasfilename, window.run
     app.filedialog.asksaveasfilename = lambda **kwargs: str(TMP / "menu.pdf")
@@ -2122,10 +2123,9 @@ def test_write_pdf_whole_words_never_splits_a_word():
         window.generate_pdf("A5")
     finally:
         app.filedialog.asksaveasfilename, window.run = originals
-    label, checked = action.text(), window.whole_words_var.get()
+    checked = window.whole_words_var.get()
     window.close()
     assert checked and sent and sent[0]["whole_words"] is True, (checked, sent)
-    assert "palabras" in label, label
 
 
 def test_write_epub_and_pdf_report_progress():
@@ -4304,6 +4304,16 @@ def test_window_options_translation_page():
     window.close()
     assert hidden and shown, (hidden, shown)
     assert "DeepSeek" in summary and used == ("DeepSeek", "sk-nueva") and stored == "sk-nueva", (summary, used, stored)
+
+
+def test_window_pdf_menu_puts_preferred_size_first():
+    """El tamaño preferido en Opciones sale primero en «PDF ▾», con «(preferido)»."""
+    root, window = visible_window()
+    window.pdf_size_var.set("A4")
+    window.fill_pdf_menu()
+    first = window.pdf_btn.menu().actions()[0].text()
+    window.close()
+    assert first.startswith("Generar PDF (A4") and "(preferido)" in first, first
 
 
 def test_window_kindle_profile_hyphenates():
