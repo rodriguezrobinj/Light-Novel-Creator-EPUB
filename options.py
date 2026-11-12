@@ -185,6 +185,9 @@ class OptionsDialog:
             changes["profile"] = "Personalizado"
         for name, new in changes.items():
             self.store(name, new)
+        if key == "theme":  # el tema se ve al momento; Cancelar lo devuelve (restore_options)
+            self.owner.theme_var.set(value)
+            self.owner.apply_theme()
         if key in BOOK_KEYS and self.scope == "book":
             self.owner.update_preview()
         if len(changes) > 1:
@@ -241,7 +244,20 @@ class OptionsDialog:
     def add_option(self, layout, option):
         """Control de una opción y, debajo, su ayuda en gris."""
         key, value = option.key, self.get(option.key)
-        if option.kind == "check":
+        if option.kind == "folder":
+            widget = QLabel(value or "Ninguna")
+            widget.setWordWrap(True)
+            pick, stop = QPushButton("Elegir…"), QPushButton("Dejar de vigilar")
+            stop.setEnabled(bool(value))
+            pick.clicked.connect(lambda: self.pick_folder(key))
+            stop.clicked.connect(lambda: (self.put(key, ""), self.show(self.category)))
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.addWidget(widget, 1)
+            line.addWidget(pick)
+            line.addWidget(stop)
+        elif option.kind == "check":
             widget = QCheckBox(option.label)
             widget.setChecked(bool(value))
             widget.toggled.connect(lambda on, key=key: self.put(key, on))
@@ -291,7 +307,20 @@ class OptionsDialog:
             error.setWordWrap(True)
             layout.addWidget(error)
             self.parts["font_error"] = error
+        if option.kind == "folder":
+            self.parts["watch_error"] = None
+            if value and not Path(value).is_dir():
+                error = QLabel("La carpeta ya no existe: elige otra o deja de vigilarla.")
+                error.setObjectName("warn")
+                layout.addWidget(error)
+                self.parts["watch_error"] = error
         self.parts["widgets"][key], self.parts["notes"][key] = widget, note
+
+    def pick_folder(self, key):
+        folder = self.owner.ask_folder()
+        if folder:
+            self.put(key, folder)
+            self.show(self.category)
 
     def font_choices(self, current):
         """Letras incrustadas, la propia si la hay, y «Otra…» al final para elegir un archivo."""

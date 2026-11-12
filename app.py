@@ -3026,6 +3026,9 @@ class App:
         if changed and self.book:
             self.update_preview()
 
+    def ask_folder(self):
+        return filedialog.askdirectory(initialdir=self.settings.get("folder"), title="Carpeta que vigilar")
+
     def ask_font_file(self):
         return filedialog.askopenfilename(filetypes=[("Fuente", "*.ttf *.otf")])
 

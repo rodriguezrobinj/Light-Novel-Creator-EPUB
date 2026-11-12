@@ -4239,6 +4239,47 @@ def test_window_options_search_profile_and_missing_font():
     assert copied is False and "No se encuentra" in error_text, (copied, error_text)
 
 
+def test_window_options_app_pages():
+    """Tema: se ve al momento y Cancelar lo devuelve. Aceptar guarda dispositivo, modo oscuro y ecos, que la ventana
+    usa al abrir la próxima vez. Carpeta vigilada: elegir y aceptar la vigila; una que ya no existe avisa en rojo."""
+    import app
+    from PySide6.QtWidgets import QPushButton
+    root, window = visible_window()
+    dialog = window.open_options("Apariencia")
+    dialog.parts["put"]("theme", "Oscuro")
+    live = window.dark
+    dialog.parts["cancel"]()
+    back = window.dark
+    folder = TMP / f"vigilada-{time_ns()}"
+    folder.mkdir()
+    window.ask_folder = lambda: str(folder)
+    dialog = window.open_options("Carpeta vigilada")
+    next(b for b in dialog.win.findChildren(QPushButton) if b.text() == "Elegir…").click()
+    dialog.parts["put"]("device", "Tablet")
+    dialog.parts["put"]("dark", True)
+    dialog.parts["put"]("echoes", True)
+    dialog.parts["accept"]()
+    watching, echoes = window.watch, window.echoes_var.get()
+    folder.rmdir()
+    dialog = window.open_options("Carpeta vigilada")
+    lost = dialog.parts["watch_error"]
+    lost_text = lost.text() if lost else ""
+    dialog.parts["cancel"]()
+    window.set_watch("")  # que la ventana siguiente no vigile una carpeta borrada
+    window.save_settings()
+    settings = app.SETTINGS
+    window.close()
+    root, again = visible_window(settings)
+    reopened = (again.device_var.get(), again.dark_var.get(), again.echoes_var.get())
+    again.close()
+    import qtk
+    import theme
+    theme.apply(qtk.app(), "Claro")  # las demás pruebas, en claro
+    assert live and not back and watching == str(folder) and echoes, (live, back, watching, echoes)
+    assert "ya no existe" in lost_text, lost_text
+    assert reopened == ("Tablet", True, True), reopened
+
+
 def test_window_kindle_profile_hyphenates():
     root, window = visible_window()
     window.profile_var.set("Kindle")
