@@ -110,7 +110,7 @@ LEVEL_NAMES = {"Grave": ("grave", "graves"), "Revisar": ("por revisar", "por rev
 LEVEL_PLURAL = {level: names[1] for level, names in LEVEL_NAMES.items()}
 SHORTCUTS = ("Clic en Tipo, o teclas C (capítulo), S (subtítulo), X (separador), Q (quitar), I (ilustración),"
              " D/G (doble: dividir o girar)\nDoble clic o F2: editar título · E: editar texto · R: revisado\n"
-             "Arrastrar o Alt+↑/↓: mover · Ctrl+F: buscar · Ctrl+Z: deshacer")
+             "Arrastrar o Alt+↑/↓: mover · Ctrl+F: buscar · Ctrl+Z: deshacer · Ctrl+,: opciones")
 
 
 def _quality_summary(report):
