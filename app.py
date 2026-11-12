@@ -2787,9 +2787,10 @@ class App:
         self.add_version(f"{kind} generado · {Path(out).name}", auto=True)  # lo publicado, para compararlo luego
         self.result_dialog(out, problems)
 
-    def dialog(self, title, modal=False):
-        """Ventana secundaria con su columna; sin modal, la principal sigue usable (como Toplevel)."""
-        win = Dialog(self.root)
+    def dialog(self, title, modal=False, parent=None):
+        """Ventana secundaria con su columna; sin modal, la principal sigue usable (como Toplevel). parent: otra
+        ventana encima de la que debe salir (el editor, que es modal)."""
+        win = Dialog(parent or self.root)
         win.setWindowTitle(title)
         win.setModal(modal)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -3612,7 +3613,7 @@ class App:
         except ValueError as e:
             messagebox.showerror("Error", str(e), parent=parent)
             return False
-        if self.confirm_image(k, data) != "replace":
+        if self.confirm_image(k, data, parent=parent) != "replace":
             return False
         self.replace_images([(k, data, _store_image(path))])
         self.status.setText(f"Ilustración cambiada por {Path(path).name} · Ctrl+Z para deshacer")
@@ -3651,11 +3652,11 @@ class App:
         dropped = self.tree.exists(str(k)) and self.tree.set(str(k), "inc") == DROPPED
         return f"Ilustración {n} · pág. {self.book.blocks[k].page} · {chapter}" + (" (descartada)" if dropped else "")
 
-    def confirm_image(self, k, new, batch=False):
+    def confirm_image(self, k, new, batch=False, parent=None):
         """Antes y después de cambiar la ilustración del bloque k: "replace", "skip" (solo en lote) o None si se
-        cancela. Nada cambia hasta pulsar Reemplazar."""
+        cancela. Nada cambia hasta pulsar Reemplazar. parent: la ventana desde la que se pide (el editor)."""
         n = self.image_blocks().index(k) + 1
-        win, column = self.dialog("Reemplazar ilustración", modal=True)
+        win, column = self.dialog("Reemplazar ilustración", modal=True, parent=parent)
         column.addWidget(_label(self.image_title(n, k), "title"))
         sides = []
         for caption, data in (("Antes", self.book.blocks[k].image), ("Después", new)):
@@ -7418,6 +7419,12 @@ class TextEditor:
             menu.addAction("Añadir al diccionario de la serie", lambda: self.add_word(word))
             menu.addSeparator()
         block = here.block()
+        for name in editor.objects_of(block):
+            if name.startswith("Ilustración "):
+                k = int(name.split()[1])
+                menu.addAction("Cambiar ilustración…", lambda k=k: self.change_picture(k)).setToolTip(
+                    "Para moverla, córtala (Ctrl+X) y pégala donde vaya")
+                menu.addSeparator()
         offset = here.position() - block.position()
         colors = theme.mark_colors(self.app.dark)
         for issue in self.block_issues(block):
@@ -7448,6 +7455,14 @@ class TextEditor:
             menu.addAction("Cambiar comentario…" if has else "Comentario…", lambda: self.edit_comment(block))
         if sheet.can_restore(block, self.loaded()):
             menu.addAction("Volver al original", lambda: (sheet.setTextCursor(QTextCursor(block)), self.restore_current()))
+        # Sinónimos de una palabra bien escrita, tras los avisos: como en Word, lo que hay que arreglar va primero
+        if word and word.isalpha() and word not in self.unknown - self.ignored_words and self.app.spanish():
+            found = editor.synonyms(word)
+            if found:
+                sub = menu.addMenu("Sinónimos")
+                for synonym in found:
+                    shown = editor.match_case(word, synonym)
+                    sub.addAction(shown, lambda s=shown: self.replace_word(word_cursor, s))
         if menu.actions() and not menu.actions()[-1].isSeparator():
             menu.addSeparator()
         selection = sheet.textCursor().hasSelection()
@@ -7459,6 +7474,15 @@ class TextEditor:
             else:
                 menu.addAction(item[0], item[1]).setEnabled(item[2])
         return menu
+
+    def change_picture(self, k):
+        """Cambia la ilustración del bloque k por un archivo (App.replace_image) y la hoja la muestra ya."""
+        if self.app.replace_image(k, parent=self.win):
+            pictures = self.pictures(k, k + 1)
+            if k in pictures:
+                self.sheet.refresh_picture(k, pictures[k])
+            self.drawn = None
+            self.draw_source()
 
     def replace_word(self, cursor, new):
         cursor.beginEditBlock()

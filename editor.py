@@ -346,6 +346,68 @@ WORD = re.compile(r"\w+")  # como (?<!\w)palabra(?!\w): «abc1» no es «abc»
 REPAINT_BATCH = 40  # párrafos subrayados por tanda (Look._repaint)
 
 
+_thesaurus = None  # {palabra en minúsculas: [[sinónimos de cada acepción]]}, leído la primera vez que se pide
+
+
+def synonyms(word, limit=12):
+    """Sinónimos de word del tesauro de LibreOffice (OpenThesaurus-es, dict/th_es_v2.dat), sin repetir ni la
+    propia palabra, alternando sus acepciones («casa»: vivienda, hogar, edificio…) para que las 12 no sean de
+    una sola. El tesauro solo trae lemas: si no está, se prueba el singular y el masculino.
+    shortcut: las formas verbales conjugadas («corría») no tienen sinónimos; con Hunspell se podría buscar su infinitivo."""
+    global _thesaurus
+    if _thesaurus is None:
+        _thesaurus = {}
+        try:
+            lines = (convert.SPELL_DIR / "th_es_v2.dat").read_text(encoding="latin-1").splitlines()
+        except OSError:
+            lines = []  # sin el archivo, sin sinónimos: el menú no los ofrece
+        i = 1  # la primera línea es la codificación
+        while i < len(lines):
+            head, _, count = lines[i].partition("|")
+            n = int(count) if count.isdigit() else 0
+            found = _thesaurus.setdefault(head.lower(), [])
+            for line in lines[i + 1:i + 1 + n]:
+                found.append([re.sub(r"\s*\(.*?\)", "", w).strip() for w in line.split("|")[1:]])  # «necio (fig.)»
+            i += 1 + n
+    low = word.lower()
+    # (lema, ¿plural?, ¿femenino?): lo hallado vuelve a la forma de word («casas» → «hogares», «bonita» → «linda»)
+    tries = [(low, False, False)] + ([(low[:-2], True, False), (low[:-1], True, False)] if low.endswith("es")
+                                     else [(low[:-1], True, False)] if low.endswith("s") else [])
+    tries += [(key[:-1] + "o", plural, True) for key, plural, _ in tries if key.endswith("a")]
+    out = []
+    for key, plural, feminine in tries:
+        senses = _thesaurus.get(key, [])
+        for n in range(max(map(len, senses), default=0)):
+            for w in (sense[n] for sense in senses if n < len(sense)):
+                if " " not in w:  # una locución («en seguida») no se declina
+                    w = w[:-1] + "a" if feminine and w.endswith("o") else w
+                    w = _plural(w) if plural and w else w
+                if w and w.lower() not in (low, key) and w not in out:
+                    out.append(w)
+        if out:
+            break
+    return out[:limit]
+
+
+def _plural(word):
+    """Plural español sencillo: «casa» → «casas», «hogar» → «hogares», «edificación» → «edificaciones»; lo que
+    ya acaba en s o x («crisis») queda igual."""
+    if word[-1] in "aeiouáéíóú":
+        return word + "s"
+    if word[-1] in "sx":
+        return word
+    if len(word) > 1 and word[-2] in "áéíóú":  # la tilde de «-ción» se va al ganar una sílaba
+        word = word[:-2] + "aeiou"["áéíóú".index(word[-2])] + word[-1]
+    return word + "es"
+
+
+def match_case(model, word):
+    """word con las mayúsculas de model: «CASA» → «HOGAR», «Casa» → «Hogar»."""
+    if model.isupper() and len(model) > 1:
+        return word.upper()
+    return word[:1].upper() + word[1:] if model[:1].isupper() else word
+
+
 def plain_line(line):
     """Texto de una línea de section_text como se ve en la hoja: sin su prefijo ni sus marcas de formato."""
     return MARKS.sub("", _strip(line))
@@ -507,6 +569,22 @@ class Sheet(QTextEdit):
         self.use(document, look)
         self.moveCursor(QTextCursor.MoveOperation.Start)
         return document, look
+
+    def refresh_picture(self, n, picture):
+        """La ilustración del bloque n cambió: la nueva imagen, con su tamaño, en todas las hojas que la tienen."""
+        self.pictures[n] = picture
+        for document in list(self.origins):
+            block = document.firstBlock()
+            while block.isValid():
+                if f"Ilustración {n}" in objects_of(block):
+                    cursor = QTextCursor(block)
+                    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+                    cursor.beginEditBlock()
+                    cursor.removeSelectedText()
+                    _insert_object(cursor, "Ilustración", n, self.pictures, self.color)
+                    cursor.endEditBlock()  # el texto no cambia (misma marca): no cuenta como cambio al aceptar
+                block = block.next()
+        self.viewport().update()
 
     def set_draft(self, lines, text, pictures, color="#888888", levels=None):
         """Como set_content, con text (un borrador de dump) sobre las líneas cargadas lines: un párrafo igual

@@ -1946,13 +1946,13 @@ def test_window_illustrations_export_and_replace_with_comparison():
         new2, new3 = jpeg(640, 880), jpeg(680, 960)
         (folder / exported[1]).write_bytes(new2)
         (folder / exported[2]).write_bytes(new3)
-        window.confirm_image = lambda k, data, batch=False: asked.append((k, batch)) or answers.pop(0)
+        window.confirm_image = lambda k, data, batch=False, parent=None: asked.append((k, batch)) or answers.pop(0)
         click("Reemplazar desde carpeta…")
         note = dialog.parts["note"].text()
         after = [b.image for b in window.book.blocks if b.kind == "image"]
         state = app.json.loads(app.json.dumps(window.review_state()))  # como se guarda: Ctrl+Z ya no la toca
         # Cancelar a mitad de un lote: nada cambia
-        window.confirm_image = lambda k, data, batch=False: None
+        window.confirm_image = lambda k, data, batch=False, parent=None: None
         before_cancel = [b.image for b in window.book.blocks]
         cancelled = window.replace_from_folder(folder)
         unchanged = [b.image for b in window.book.blocks] == before_cancel
@@ -3790,6 +3790,69 @@ def test_editor_work_log():
     assert "Tu trabajo" in stats and "Párrafos cambiados" in stats and "2 min" in stats, stats
     assert summary == [("Hoy", 10, 2, 0), ("Últimos 7 días", 60, 2, 1), ("Total del libro", 65, 2, 1)], summary
     assert app._duration(65) == "1 h 05 min" and app._duration(45) == "45 min"
+
+
+def test_editor_changes_illustration():
+    """Clic derecho en una ilustración: «Cambiar ilustración…» la cambia en el libro (App.replace_image) y la hoja
+    muestra ya la nueva con su forma; el texto no cuenta como cambiado."""
+    import dataclasses
+    from PySide6.QtGui import QTextCursor
+
+    B = convert.Block
+    wide = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 400, 100), False)
+    wide.clear_with(200)
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("image", 1, image=JPEG), B("p", 1, "Uno.")],
+                                     [0])
+
+    def fake(k, parent=None):
+        window.book.blocks[k] = dataclasses.replace(window.book.blocks[k], image=wide.tobytes("png"))
+        return parent is editor.win
+
+    window.replace_image = fake
+
+    def size():
+        block = editor.sheet.document().findBlockByNumber(1)
+        f = block.begin().fragment().charFormat().toImageFormat()
+        return round(f.width() / f.height(), 1)
+
+    before = size()
+    pos = editor.sheet.cursorRect(QTextCursor(editor.sheet.document().findBlockByNumber(1))).center()
+    actions = [a.text() for a in editor.mark_menu(pos).actions()]
+    editor.change_picture(1)
+    after = size()
+    dirty = editor.dirty()
+    editor.win.done(0)
+    window.close()
+    assert "Cambiar ilustración…" in actions, actions
+    assert before != 4.0 and after == 4.0 and not dirty, (before, after, dirty)
+
+
+def test_synonyms():
+    """Sinónimos del tesauro: de la palabra, de su singular y de su masculino, devueltos a su forma («casas» →
+    «hogares», «bonita» → «linda»); nada de una inventada. Se respetan
+    las mayúsculas, y el menú del clic derecho los ofrece y reemplaza la palabra."""
+    from PySide6.QtGui import QTextCursor
+    import editor as ed
+
+    house, houses, pretty = ed.synonyms("casa"), ed.synonyms("casas"), ed.synonyms("bonita")
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Una Casa grande.")], [0])
+    block = editor.sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.setPosition(block.position() + 5)
+    pos = editor.sheet.cursorRect(c).center()
+    menu = editor.mark_menu(pos)
+    sub = next(a.menu() for a in menu.actions() if a.text() == "Sinónimos")
+    first = sub.actions()[0]
+    first.trigger()
+    text = editor.sheet.content().split("\n\n")[1]
+    editor.win.done(0)
+    window.close()
+    assert "hogar" in house and "casa" not in house and len(house) <= 12, house
+    assert "hogares" in houses and "edificaciones" in houses and "linda" in pretty, (houses, pretty)
+    assert ed.synonyms("xyzwq") == []
+    assert ed.match_case("CASA", "hogar") == "HOGAR" and ed.match_case("Casa", "hogar") == "Hogar"
+    assert first.text()[0].isupper() and text == f"Una {first.text()} grande.", (first.text(), text)
 
 
 def test_window_editor_split_back_keeps_paragraph_source():
@@ -5940,7 +6003,7 @@ def test_window_add_page_change_image_and_reviewed():
         window.fill_tree(window.rows())
         image = str(len(window.book.blocks) - 1)
         window.tree.selection_set(image)
-        window.confirm_image = lambda k, data, batch=False: "replace"  # el antes y después: Reemplazar
+        window.confirm_image = lambda k, data, batch=False, parent=None: "replace"  # el antes y después: Reemplazar
         window.change_image()
     finally:
         app.filedialog.askopenfilename = original
@@ -5978,7 +6041,7 @@ def test_window_change_double_image_for_single():
     split = window.tree.set("1", "inc")
     original = app.filedialog.askopenfilename
     app.filedialog.askopenfilename = lambda **kwargs: str(picture)
-    window.confirm_image = lambda k, data, batch=False: "replace"  # el antes y después: Reemplazar
+    window.confirm_image = lambda k, data, batch=False, parent=None: "replace"  # el antes y después: Reemplazar
     try:
         window.change_image()
     finally:
