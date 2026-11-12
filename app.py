@@ -6290,7 +6290,8 @@ class TextEditor:
         self.offer_resume()
         self.opened, self.saved_paragraphs = time.monotonic(), 0  # para «Tu trabajo» de «Cifras»
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
-        sheet.textChanged.connect(lambda: self.later("draft", 5000, self.write_draft))
+        # Sin reiniciar la cuenta en cada aviso (la ortografía repinta y avisa sin parar): como mucho 5 s de trabajo perdido
+        sheet.textChanged.connect(lambda: "draft" in self.pending or self.later("draft", 5000, self.write_draft))
         sheet.textChanged.connect(lambda: self.later("diff", 150, self.update_diff))
         sheet.cursorPositionChanged.connect(lambda: self.later("diff", 150, self.update_diff))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
@@ -6622,7 +6623,10 @@ class TextEditor:
         else:
             for widget in self.before_focus:
                 widget.show()
-            self.win.showMaximized()
+            # De pantalla completa a maximizada de golpe, Windows la dejaba más ancha que la pantalla
+            self.win.showNormal()
+            qtk.after(0, lambda: shiboken6.isValid(self.win) and self.win.showMaximized())
+            self.note.setText("")
         self.sheet.setFocus()
 
     # Mostrar cambios, como el control de cambios de Word: lo puesto subrayado en la hoja y el original en una barra
@@ -6632,7 +6636,7 @@ class TextEditor:
         self.diff_label.setTextFormat(Qt.TextFormat.RichText)
         self.diff_label.setWordWrap(True)
         self.diff_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        bar.setLayout(_row(_label("Original:", "muted"), self.diff_label, margins=(10, 6, 10, 6)))
+        bar.setLayout(_row(_label("Cambios:", "muted"), self.diff_label, margins=(10, 6, 10, 6)))
         bar.hide()
         return bar
 
@@ -6656,10 +6660,11 @@ class TextEditor:
             self.diff_label.setText("<i>Párrafo nuevo</i>")
         else:
             colors = theme.mark_colors(self.app.dark)
-            parts = []
-            for text, tag in _word_diff(editor.plain_line(original), block.text()):
+            parts, diff = [], _word_diff(editor.plain_line(original), block.text())
+            for n, (text, tag) in enumerate(diff):
                 text = html.escape(text)
-                parts.append(f'<s style="color:{colors["Grave"]}">{text}</s>' if tag == "old" else
+                gap = " " if tag == "old" and n + 1 < len(diff) and diff[n + 1][1] == "new" else ""  # «cargada grávida»
+                parts.append(f'<s style="color:{colors["Grave"]}">{text}</s>{gap}' if tag == "old" else
                              f'<u style="color:{colors["changed"]}">{text}</u>' if tag == "new" else text)
             self.diff_label.setText("".join(parts))
         self.diff_frame.show()

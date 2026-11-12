@@ -3624,6 +3624,24 @@ def test_editor_draft_recovers_after_crash():
     assert "Otro texto." not in stale and infos and "el libro cambió" in infos[0], (stale, infos)
 
 
+def test_editor_draft_written_while_spelling_repaints():
+    """La ortografía repinta la hoja y avisa de cambios sin parar mientras revisa el libro: el borrador se escribe
+    igual a los 5 s del primer cambio, no espera a que la hoja se quede quieta (con ella, nunca se escribía)."""
+    from PySide6.QtTest import QTest
+    import app
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
+    QTest.keyClicks(editor.sheet, "hola ")
+    for _ in range(30):  # 6 s de repintados, uno cada 200 ms
+        editor.sheet.textChanged.emit()
+        QTest.qWait(200)
+    written = app._draft_path(window.pdf).exists()
+    editor.win.done(0)
+    window.close()
+    assert written, "el borrador no se escribió mientras la hoja avisaba de cambios"
+
+
 def test_editor_resume_bar_goes_where_you_left():
     """Al cerrar el editor se recuerda el párrafo del cursor, también en la revisión; abrirlo en otro capítulo
     ofrece «Lo dejaste en «Capítulo 2»» e «Ir allí» lleva a ese párrafo. En el mismo capítulo no sale la barra."""
