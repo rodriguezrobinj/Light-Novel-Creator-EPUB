@@ -4092,6 +4092,21 @@ def test_hyphenate_soft_hyphens_only_in_paragraph_text():
     assert convert.check_epub(out) == [], convert.check_epub(out)
 
 
+def test_options_table_and_search():
+    """Cada opción está una vez, en una categoría que existe; buscar «guion» lleva a Texto y a PDF, sin tildes ni
+    mayúsculas; y las claves de libro son las que se guardan por libro."""
+    import options
+    keys = [o.key for o in options.OPTIONS]
+    categories = {c for group in options.CATEGORIES.values() for c in group}
+    found = sorted({o.category for o in options.find("GUIÓN")})
+    assert len(keys) == len(set(keys)), keys
+    assert all(o.category in categories for o in options.OPTIONS)
+    assert found == ["PDF", "Texto"], found
+    assert options.find("zzz") == []
+    assert "font_file" in options.BOOK_KEYS and "theme" not in options.BOOK_KEYS
+    assert options.fold("Tipografía ÚNICA") == "tipografia unica"
+
+
 def test_window_kindle_profile_hyphenates():
     root, window = visible_window()
     window.profile_var.set("Kindle")
