@@ -4149,6 +4149,63 @@ def test_window_new_books_use_saved_defaults():
     assert translation == {}, translation
 
 
+def test_window_options_this_book_live_and_cancel():
+    """Opciones en «Este libro»: el estilo cambia el libro y la vista previa al momento; Cancelar lo deja todo
+    como estaba. Aceptar lo guarda en la revisión. «Opciones del libro…» abre en «Perfil y formato»."""
+    import json
+    import app
+    from PySide6.QtWidgets import QPushButton
+    root, window = visible_window()
+    window.pdf = TMP / f"opciones-{time_ns()}.pdf"
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Uno", 20, "helv")])
+    doc.save(window.pdf)
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1: Uno"),
+                                                    convert.Block("p", 1, "Texto.")], [0]))
+    redrawn = []
+    window.update_preview = lambda _=None: redrawn.append(window.style_var.get())
+    before = window.style_var.get()
+    other = next(s for s in convert.STYLES if s != before)
+    dialog = window.open_options()
+    first = dialog.scope
+    dialog.parts["show"]("Aspecto")
+    dialog.parts["put"]("style", other)
+    live = window.style_var.get()
+    dialog.parts["cancel"]()
+    cancelled, redrawn_after_cancel = window.style_var.get(), redrawn[-1]
+    book_button = next(b for b in window.options_row.findChildren(QPushButton) if b.text() == "Opciones del libro…")
+    book_button.click()
+    root.update()
+    dialog = window.options_window
+    opened = dialog.category
+    dialog.parts["show"]("Aspecto")
+    dialog.parts["put"]("style", other)
+    dialog.parts["accept"]()
+    saved = json.loads(app._review_path(window.pdf).read_text(encoding="utf-8"))["style"]
+    window.close()
+    assert first == "book" and live == other and redrawn_after_cancel == before, (first, live, redrawn)
+    assert cancelled == before and opened == "Perfil y formato" and saved == other, (cancelled, opened, saved)
+
+
+def test_window_options_new_books_without_book():
+    """Sin libro abierto, «Este libro» está desactivado y lo cambiado va a «Libros nuevos» al Aceptar; Cancelar no
+    guarda nada."""
+    import json
+    import app
+    root, window = visible_window()
+    dialog = window.open_options("Ilustraciones")
+    disabled, scope = not dialog.parts["this_book"].isEnabled(), dialog.scope
+    dialog.parts["put"]("gray", True)
+    dialog.parts["cancel"]()
+    after_cancel = window.settings["defaults"].get("gray")
+    dialog = window.open_options("Ilustraciones")
+    dialog.parts["put"]("gray", True)
+    dialog.parts["accept"]()
+    stored = json.loads(app.SETTINGS.read_text(encoding="utf-8"))["defaults"]["gray"]
+    window.close()
+    assert disabled and scope == "new" and after_cancel in (None, False) and stored is True, (disabled, scope, stored)
+
+
 def test_window_kindle_profile_hyphenates():
     root, window = visible_window()
     window.profile_var.set("Kindle")

@@ -1,7 +1,15 @@
 """Ventana «Opciones»: todos los ajustes en un sitio, como las Preferencias de Acrobat.
 La tabla OPTIONS declara cada opción una vez; páginas, buscador y ayudas salen de ella."""
+import copy
 import unicodedata
 from collections import namedtuple
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QPushButton, QRadioButton, QScrollArea, QSpinBox,
+                               QSplitter, QVBoxLayout, QWidget)
 
 BOOK, APP = "El libro", "La aplicación"
 CATEGORIES = {BOOK: ("Perfil y formato", "Aspecto", "Texto", "Ilustraciones", "PDF"),
@@ -59,3 +67,225 @@ def find(text):
     """Opciones cuyo nombre o ayuda contiene text."""
     needle = fold(text).strip()
     return [o for o in OPTIONS if needle and (needle in fold(o.label) or needle in fold(o.help))]
+
+
+class OptionsDialog:
+    """«Opciones»: categorías a la izquierda y su página a la derecha. Lo de «Este libro» va a los Var del libro
+    al momento (la vista previa se ve); lo de «Libros nuevos» y de la aplicación espera a Aceptar. Cancelar
+    vuelve todo a como estaba al abrir."""
+
+    def __init__(self, owner, choices, profiles, category=None, scope=None, on_close=None):
+        self.owner, self.choices, self.profiles, self.on_close = owner, choices, profiles, on_close
+        self.scope = "book" if owner.book and scope != "new" else "new"  # sin libro, solo «Libros nuevos»
+        self.defaults = dict(owner.new_book_options())  # «Libros nuevos», pendiente hasta Aceptar
+        self.values = owner.app_values()  # de la aplicación, pendiente hasta Aceptar (el tema se ve ya)
+        self.book_before = {k: v.get() for k, v in owner.fields().items() if k in BOOK_KEYS}
+        self.values_before = copy.deepcopy(self.values)
+        win, column = owner.dialog("Opciones", modal=True)
+        self.win = win
+        win.resize(860, 560)
+        win.on_reject = self.escape
+        split = QSplitter(Qt.Orientation.Horizontal)
+        column.addWidget(split, 1)
+        left = QWidget()
+        side = QVBoxLayout(left)
+        side.setContentsMargins(0, 0, 0, 0)
+        search = QLineEdit(placeholderText="Buscar (Ctrl+F)")
+        search.setClearButtonEnabled(True)
+        QShortcut(QKeySequence("Ctrl+F"), win, search.setFocus)
+        listing = QListWidget()
+        side.addWidget(search)
+        side.addWidget(listing, 1)
+        split.addWidget(left)
+        right = QWidget()
+        page_column = QVBoxLayout(right)
+        page_column.setContentsMargins(8, 0, 0, 0)
+        this_book, new_books = QRadioButton("Este libro"), QRadioButton("Libros nuevos")
+        group = QButtonGroup(win)
+        group.addButton(this_book)
+        group.addButton(new_books)
+        this_book.setEnabled(bool(owner.book))
+        (this_book if self.scope == "book" else new_books).setChecked(True)
+        self.scope_row = QWidget()
+        scope_layout = QHBoxLayout(self.scope_row)
+        scope_layout.setContentsMargins(0, 0, 0, 0)
+        scope_layout.addWidget(QLabel("Aplicar a:"))
+        scope_layout.addWidget(this_book)
+        scope_layout.addWidget(new_books)
+        scope_layout.addStretch(1)
+        page_column.addWidget(self.scope_row)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        page_column.addWidget(self.scroll, 1)
+        split.addWidget(right)
+        split.setSizes([230, 630])
+        accept, cancel = QPushButton("Aceptar"), QPushButton("Cancelar")
+        accept.setObjectName("primary")
+        accept.clicked.connect(self.accept)
+        cancel.clicked.connect(self.cancel)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(accept)
+        buttons.addWidget(cancel)
+        column.addLayout(buttons)
+        self.items = {}  # categoría o encabezado -> QListWidgetItem
+        bold = QFont(listing.font())
+        bold.setBold(True)
+        for header, names in CATEGORIES.items():
+            item = QListWidgetItem(header.upper())
+            item.setFlags(Qt.ItemFlag.NoItemFlags)  # encabezado: no se elige
+            item.setFont(bold)
+            listing.addItem(item)
+            self.items[header] = item
+            for name in names:
+                self.items[name] = QListWidgetItem(f"   {name}")
+                listing.addItem(self.items[name])
+        self.parts = {"list": listing, "search": search, "this_book": this_book, "new_books": new_books,
+                      "widgets": {}, "notes": {}, "accept": self.accept, "cancel": self.cancel, "show": self.show,
+                      "put": self.put}
+        listing.currentItemChanged.connect(lambda item, _: item and self.show(item.text().strip()))
+        this_book.toggled.connect(lambda on: self.set_scope("book" if on else "new"))
+        self.category = None
+        self.show(category if category in self.items and category not in CATEGORIES else CATEGORIES[BOOK][0])
+        win.show()
+
+    def is_book(self, category=None):
+        return (category or self.category) in CATEGORIES[BOOK]
+
+    def get(self, key):
+        if key in BOOK_KEYS:
+            return self.owner.fields()[key].get() if self.scope == "book" else self.defaults.get(key)
+        return self.values[key]
+
+    def store(self, key, value):
+        if key in BOOK_KEYS and self.scope == "book":
+            self.owner.fields()[key].set(value)
+        elif key in BOOK_KEYS:
+            self.defaults[key] = value
+        else:
+            self.values[key] = value
+
+    def put(self, key, value):
+        """Un cambio del usuario. El perfil arrastra sus opciones; tocar una opción que fija el perfil lo deja en
+        «Personalizado»."""
+        changes = {key: value}
+        profile = self.get("profile")
+        if key == "profile":
+            changes.update(self.profiles.get(value, {}))
+        elif key in self.profiles.get(profile, {}) and self.profiles[profile][key] != value:
+            changes["profile"] = "Personalizado"
+        for name, new in changes.items():
+            self.store(name, new)
+        if key in BOOK_KEYS and self.scope == "book":
+            self.owner.update_preview()
+        if len(changes) > 1:
+            self.show(self.category)  # las casillas del perfil cambiaron
+
+    def set_scope(self, scope):
+        self.scope = scope
+        self.show(self.category)
+
+    def show(self, category):
+        """Página de una categoría, hecha de nuevo con los valores del alcance elegido."""
+        self.category = category
+        self.owner.settings["options_page"] = category
+        listing = self.parts["list"]
+        listing.blockSignals(True)
+        listing.setCurrentItem(self.items[category])
+        listing.blockSignals(False)
+        self.scope_row.setVisible(self.is_book())
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 12, 4)
+        layout.setSpacing(4)
+        title = QLabel(category)
+        title.setObjectName("title")
+        layout.addWidget(title)
+        self.parts["widgets"], self.parts["notes"] = {}, {}
+        for option in OPTIONS:
+            if option.category == category:
+                self.add_option(layout, option)
+        layout.addStretch(1)
+        self.scroll.setWidget(page)  # la página anterior se borra con su scroll
+
+    def add_option(self, layout, option):
+        """Control de una opción y, debajo, su ayuda en gris."""
+        key, value = option.key, self.get(option.key)
+        if option.kind == "check":
+            widget = QCheckBox(option.label)
+            widget.setChecked(bool(value))
+            widget.toggled.connect(lambda on, key=key: self.put(key, on))
+            row = widget
+        else:
+            if option.kind == "number":
+                widget = QSpinBox()
+                widget.setRange(400, 4000)
+                widget.setSingleStep(100)
+                widget.setValue(int(value))
+                widget.valueChanged.connect(lambda n, key=key: self.put(key, n))
+            else:
+                widget = QComboBox()
+                values = self.font_choices(value) if option.kind == "font" else list(self.choices.get(key, []))
+                widget.addItems(values)
+                widget.setEditable(option.kind == "language")
+                widget.setCurrentText(str(value))
+                widget.setMinimumContentsLength(18)
+                if option.kind == "font":
+                    widget.activated.connect(lambda _, w=widget: self.pick_font(w))
+                elif option.kind == "language":
+                    widget.currentTextChanged.connect(lambda text, key=key: self.put(key, text.strip()))
+                else:
+                    widget.activated.connect(lambda _, w=widget, key=key: self.put(key, w.currentText()))
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.addWidget(QLabel(f"{option.label}:"))
+            line.addWidget(widget)
+            line.addStretch(1)
+        note = QLabel(option.help)
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        note.setContentsMargins(22 if option.kind == "check" else 0, 0, 0, 8)
+        layout.addWidget(row)
+        layout.addWidget(note)
+        self.parts["widgets"][key], self.parts["notes"][key] = widget, note
+
+    def font_choices(self, current):
+        """Letras incrustadas, la propia si la hay, y «Otra…» al final para elegir un archivo."""
+        values = [name for name in self.choices["font"] if name != "Otra…"]
+        if current and current not in values:
+            values.append(current)
+        return values + ["Otra…"]
+
+    def pick_font(self, widget):
+        """«Otra…» pide un archivo .ttf u .otf; sin elegir ninguno se queda la letra de antes."""
+        if widget.currentText() != "Otra…":
+            self.put("font", widget.currentText())
+            return
+        path = self.owner.ask_font_file()
+        if path:
+            self.store("font_file", path)
+            self.put("font", Path(path).name)
+        self.show(self.category)
+
+    def accept(self):
+        self.owner.accept_options(self.defaults, self.values)
+        self.close()
+
+    def cancel(self):
+        self.owner.restore_options(self.book_before, self.values_before)
+        self.close()
+
+    def escape(self):
+        """Esc o la ✕: con texto en el buscador lo vacía; si no, como Cancelar."""
+        if self.parts["search"].text():
+            self.parts["search"].clear()
+        else:
+            self.cancel()
+
+    def close(self):
+        self.win.on_reject = None
+        self.win.close()
+        if self.on_close:
+            self.on_close()

@@ -3,6 +3,7 @@ import base64
 import collections
 import concurrent.futures
 import contextlib
+import copy
 import ctypes
 import dataclasses
 import difflib
@@ -1679,6 +1680,7 @@ class App:
         tools.addAction("Volumen recopilatorio…", self.omnibus)
         tools.addAction("Vigilar una carpeta…", self.watch_folder)
         tools.addSeparator()
+        tools.addAction("Opciones…  (Ctrl+,)", lambda: self.open_options())
         themes = tools.addMenu("Tema")
         group = QActionGroup(root)
         self.theme_actions = {}
@@ -1698,6 +1700,7 @@ class App:
                            self.file_label, 1, self.find_btn, margins=(10, 8, 10, 8)))
         outer.addWidget(top)
         QShortcut(QKeySequence("Ctrl+F"), root, self.find)
+        QShortcut(QKeySequence("Ctrl+,"), root, lambda: self.open_options())
         # En toda la ventana: tras «Editar texto…» o «Todos» el foco se queda en el botón, no en la lista.
         # Un campo de texto con el foco se queda Ctrl+Z para deshacer lo escrito en él.
         QShortcut(QKeySequence("Ctrl+Z"), root, self.undo)
@@ -1830,6 +1833,7 @@ class App:
         rows.addWidget(self.options_row)
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
                                                                  changed=self.apply_profile),
+                            _button("Opciones del libro…", lambda: self.open_options("Perfil y formato", "book")),
                             _label("Separador:"), _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12,
                                                          changed=self.update_preview),
                             _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
@@ -2973,6 +2977,57 @@ class App:
         chosen = self.settings.get("theme")
         self.theme_var.set(chosen if chosen in theme.CHOICES else "Sistema")
         self.fill_recent()
+
+    def option_choices(self):
+        """Valores de las listas de «Opciones»."""
+        return {"profile": list(PROFILES), "style": list(convert.STYLES), "separator": convert.SEPARATOR_CHOICES,
+                "lang": LANGUAGES, "font": FONT_CHOICES, "pdf_size": list(convert.PDF_SIZES),
+                "theme": theme.CHOICES, "device": list(DEVICES)}
+
+    def open_options(self, category=None, scope=None, on_close=None):
+        """«Opciones»: en category, o en la última vista."""
+        self.options_window = options.OptionsDialog(self, self.option_choices(), PROFILES,
+                                                    category or self.settings.get("options_page"), scope, on_close)
+        return self.options_window
+
+    def app_values(self):
+        """Lo de «La aplicación» en Opciones, copiado: se edita sin tocar nada hasta Aceptar."""
+        return {"theme": self.theme_var.get(), "device": self.settings.get("device", self.device_var.get()),
+                "dark": self.settings.get("dark") is True, "echoes": self.echoes_var.get(), "watch": self.watch,
+                "translate": copy.deepcopy(self.settings.get("translate") or {})}
+
+    def accept_options(self, defaults, values):
+        """Aceptar en Opciones: «Libros nuevos» y la aplicación a ajustes.json, el libro a su revisión."""
+        self.settings["defaults"] = dict(defaults)
+        self.settings.update(device=values["device"], dark=values["dark"], echoes=values["echoes"])
+        translation = self.settings.setdefault("translate", {})
+        translation.clear()  # el mismo dict: Traducir, si está abierto, lo tiene y ve lo nuevo
+        translation.update(values["translate"])
+        if values["echoes"] != self.echoes_var.get():
+            self.echoes_var.set(values["echoes"])
+            self.update_quality()
+        if values["theme"] != self.theme_var.get():
+            self.theme_var.set(values["theme"])
+            self.apply_theme()
+        if values["watch"] != self.watch:
+            self.set_watch(values["watch"])
+        self.save_settings()
+        self.save_review()
+
+    def restore_options(self, book, values):
+        """Cancelar en Opciones: el libro y el tema vuelven a como estaban al abrirla."""
+        fields = self.fields()
+        changed = [key for key, value in book.items() if fields[key].get() != value]
+        for key in changed:
+            fields[key].set(book[key])
+        if self.theme_var.get() != values["theme"]:
+            self.theme_var.set(values["theme"])
+            self.apply_theme()
+        if changed and self.book:
+            self.update_preview()
+
+    def ask_font_file(self):
+        return filedialog.askopenfilename(filetypes=[("Fuente", "*.ttf *.otf")])
 
     def new_book_options(self):
         """Opciones con las que abre un libro sin revisión ni serie: «Libros nuevos» sobre los valores de fábrica."""
