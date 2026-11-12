@@ -346,6 +346,21 @@ WORD = re.compile(r"\w+")  # como (?<!\w)palabra(?!\w): «abc1» no es «abc»
 REPAINT_BATCH = 40  # párrafos subrayados por tanda (Look._repaint)
 
 
+def plain_line(line):
+    """Texto de una línea de section_text como se ve en la hoja: sin su prefijo ni sus marcas de formato."""
+    return MARKS.sub("", _strip(line))
+
+
+def added_spans(before, after):
+    """[(inicio, largo)] de lo puesto en after que no estaba en before, palabra a palabra."""
+    x, y = re.findall(r"\S+|\s+", before), re.findall(r"\S+|\s+", after)
+    starts = [0]
+    for token in y:
+        starts.append(starts[-1] + len(token))
+    return [(starts[j1], starts[j2] - starts[j1]) for op, _, _, j1, j2 in
+            difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes() if op in ("replace", "insert")]
+
+
 class Look(QSyntaxHighlighter):
     """Aspecto que no se guarda: títulos grandes, notas en gris, separadores escritos y palabras desconocidas
     subrayadas. Solo pinta: no cambia el texto ni entra en deshacer."""
@@ -355,6 +370,12 @@ class Look(QSyntaxHighlighter):
         self.unknown = set()
         self.job = 0  # tanda de repintado en curso (_repaint)
         self.tags = {}
+        self.changes = None  # color con que se subraya lo puesto en cada párrafo cambiado; None: no se marca
+
+    def show_changes(self, color):
+        """«Mostrar cambios»: subraya, del color dado (None lo quita), lo que se puso frente al original."""
+        self.changes = color
+        self.rehighlight()
 
     def set_tags(self, tags):
         """Colores de theme.editor_tags del tema actual."""
@@ -420,6 +441,21 @@ class Look(QSyntaxHighlighter):
                 f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
                 f.setUnderlineColor(self.color("broken"))
                 self.setFormat(c, 1, f)
+        if self.changes and text.strip() and not objects_of(block):
+            original = block.blockFormat().property(ORIGINAL)
+            if original is None:
+                spans = [(0, len(text))]  # párrafo nuevo: todo es lo puesto
+            elif block_lines(block) == [original]:
+                spans = []
+            else:
+                spans = added_spans(plain_line(original), text)
+            for start, size in spans:
+                for c in range(start, start + size):
+                    f = QTextCharFormat(self.format(c))
+                    f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
+                    f.setUnderlineColor(QColor(self.changes))
+                    f.setForeground(QColor(self.changes))
+                    self.setFormat(c, 1, f)
 
 
 class _Filter(QObject):

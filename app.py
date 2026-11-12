@@ -6227,6 +6227,7 @@ class TextEditor:
         column.addWidget(self.split_bar())
         column.addWidget(self.issue_bar())
         column.addWidget(self.resume_bar())
+        column.addWidget(self.diff_bar())
         # Hoja centrada sobre el escritorio gris, como la vista de impresión de Word
         desk = QFrame(objectName="desk")
         desk_row = QHBoxLayout(desk)
@@ -6285,6 +6286,8 @@ class TextEditor:
         self.opened, self.saved_paragraphs = time.monotonic(), 0  # para «Tu trabajo» de «Cifras»
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         sheet.textChanged.connect(lambda: self.later("draft", 5000, self.write_draft))
+        sheet.textChanged.connect(lambda: self.later("diff", 150, self.update_diff))
+        sheet.cursorPositionChanged.connect(lambda: self.later("diff", 150, self.update_diff))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
         sheet.cursorPositionChanged.connect(self.update_tools)
         # Un clic o una tecla en la hoja mientras se lee: la voz se calla, como al pulsar Parar
@@ -6427,6 +6430,10 @@ class TextEditor:
             info.setEnabled(False)
             menu.insertAction(menu.actions()[0], info)
             menu.insertSeparator(menu.actions()[1])
+        self.changes_menu.addSeparator()
+        self.show_changes_action = self.changes_menu.addAction("Mostrar cambios")
+        self.show_changes_action.setCheckable(True)
+        self.show_changes_action.toggled.connect(self.set_show_changes)
         self.read_btn = tool("🔊 Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
                              "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, short="🔊", level=2)
         group("Revisar", [self.changes_btn, self.issues_btn],
@@ -6594,6 +6601,45 @@ class TextEditor:
     def hide_bars(self):
         for bar in (self.find_frame, self.link_frame, self.split_frame, self.issue_frame, self.resume_frame):
             bar.hide()
+
+    # Mostrar cambios, como el control de cambios de Word: lo puesto subrayado en la hoja y el original en una barra
+    def diff_bar(self):
+        bar = self.diff_frame = QFrame(objectName="ribbon")
+        self.diff_label = QLabel()
+        self.diff_label.setTextFormat(Qt.TextFormat.RichText)
+        self.diff_label.setWordWrap(True)
+        self.diff_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bar.setLayout(_row(_label("Original:", "muted"), self.diff_label, margins=(10, 6, 10, 6)))
+        bar.hide()
+        return bar
+
+    def set_show_changes(self, on):
+        color = theme.mark_colors(self.app.dark)["changed"] if on else None
+        for page in self.pages.values():
+            page["look"].show_changes(color)
+        self.update_diff()
+
+    def update_diff(self):
+        """El original del párrafo del cursor con lo quitado tachado y lo puesto subrayado; sin cambios, se oculta."""
+        if not shiboken6.isValid(self.diff_frame):
+            return
+        block = self.sheet.textCursor().block()
+        original = block.blockFormat().property(editor.ORIGINAL)
+        if (not self.show_changes_action.isChecked() or editor.objects_of(block) or not block.text().strip()
+                or (original is not None and editor.block_lines(block) == [original])):
+            self.diff_frame.hide()
+            return
+        if original is None:
+            self.diff_label.setText("<i>Párrafo nuevo</i>")
+        else:
+            colors = theme.mark_colors(self.app.dark)
+            parts = []
+            for text, tag in _word_diff(editor.plain_line(original), block.text()):
+                text = html.escape(text)
+                parts.append(f'<s style="color:{colors["Grave"]}">{text}</s>' if tag == "old" else
+                             f'<u style="color:{colors["changed"]}">{text}</u>' if tag == "new" else text)
+            self.diff_label.setText("".join(parts))
+        self.diff_frame.show()
 
     def resume_bar(self):
         """«Lo dejaste en «Capítulo 5» · Ir allí»: el editor no salta solo, quien lo abre desde un aviso o una fila
@@ -7446,6 +7492,8 @@ class TextEditor:
             lines, levels = self.section_lines(start, end)
             doc, look = self.sheet.set_content(lines, self.pictures(start, end), self.colors["muted"], levels)
             page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
+            if self.show_changes_action.isChecked():
+                look.show_changes(theme.mark_colors(self.app.dark)["changed"])
         else:
             self.sheet.use(page["doc"], page["look"])
         self.current = (start, end)

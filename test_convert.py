@@ -3690,6 +3690,46 @@ def test_editor_navigation_panel():
     assert remembered is True and shown_again and window.settings["editor_nav"] is False
 
 
+def test_editor_shows_changes():
+    """«Mostrar cambios»: en el párrafo cambiado se subraya lo puesto («perro») y la barra muestra el original con
+    lo quitado tachado y lo puesto subrayado; en un párrafo sin cambios la barra se oculta. Apagarlo quita todo."""
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+    import editor as ed
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "El gato <i>negro</i> duerme."),
+                                      B("p", 1, "Sin tocar.")], [0])
+    sheet = editor.sheet
+    block = sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.setPosition(block.position() + 3)
+    c.setPosition(block.position() + 7, QTextCursor.MoveMode.KeepAnchor)
+    c.insertText("perro")
+    sheet.setTextCursor(c)
+    editor.show_changes_action.setChecked(True)
+
+    def underlined(block, at):
+        layout = block.layout()
+        return any(r.start <= at < r.start + r.length
+                   and r.format.underlineStyle() == QTextCharFormat.UnderlineStyle.SingleUnderline
+                   for r in layout.formats())
+
+    marked = underlined(block, 4) and not underlined(block, 0) and not underlined(block, 12)
+    shown = not editor.diff_frame.isHidden()
+    bar = editor.diff_label.text()
+    sheet.setTextCursor(QTextCursor(sheet.document().findBlockByNumber(2)))
+    editor.update_diff()
+    hidden_clean = editor.diff_frame.isHidden()
+    editor.show_changes_action.setChecked(False)
+    gone = not underlined(block, 4)
+    editor.win.done(0)
+    window.close()
+    assert ed.added_spans("El gato duerme.", "El perro duerme.") == [(3, 5)]
+    assert marked and shown, (marked, shown, bar)
+    assert ">gato</s>" in bar and ">perro</u>" in bar and "negro" in bar and "<i>" not in bar, bar
+    assert hidden_clean and gone, (hidden_clean, gone)
+
+
 def test_editor_work_log():
     """«Cifras» cuenta el trabajo: aceptar suma los párrafos cambiados y el tiempo de hoy, marcar revisado suma un
     capítulo (desmarcar no resta), y el resumen da hoy, los últimos 7 días y el total."""
