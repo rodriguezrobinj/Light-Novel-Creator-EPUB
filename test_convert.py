@@ -733,6 +733,32 @@ def test_links_and_centered_paragraphs_reach_the_epub():
     assert not problems, problems
 
 
+def test_superscript_small_caps_and_right_reach_the_epub():
+    """El editor escribe superíndice (<sup>), versalitas (<sc>) y párrafos a la derecha (<derecha> delante): llegan
+    a los bloques y al EPUB con su CSS, section_text los devuelve igual (también dentro de una nota) y una <sc> sin
+    cerrar se quita para no romper el libro."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno.")]
+    book = convert.Book("Libro", "", JPEG, blocks, [0])
+    lines = ["El 1.<sup>er</sup> aventurero de <sc>Rango S</sc>.", "<derecha>Firmado: Rudeus",
+             "Entró[Nota: el <sc>gremio</sc> de Rosa] al salón.", "Mal <sc>cerrado."]
+    convert.edit_section(book, 1, 2, "\n\n".join(lines))
+    htmls = [(b.html, b.align) for b in book.blocks[1:]]
+    again = convert.section_text(book, 1, 5).split("\n\n")
+    out = TMP / "versalitas.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out)
+    text, problems = epub_text(out), convert.check_epub(str(out))
+    with zipfile.ZipFile(out) as z:
+        css = "".join(z.read(n).decode() for n in z.namelist() if n.endswith(".css"))
+    assert htmls[0] == ('El 1.<sup>er</sup> aventurero de <small class="sc">Rango S</small>.', ""), htmls
+    assert htmls[1] == ("Firmado: Rudeus", "right"), htmls
+    assert htmls[3] == ("Mal cerrado.", ""), htmls
+    assert again == lines[:3] + ["Mal cerrado."], again
+    assert convert._plain(book.blocks[1]) == "El 1.er aventurero de Rango S.", convert._plain(book.blocks[1])
+    assert 'class="right"' in text and '<small class="sc">Rango S</small>' in text and "<sup>er</sup>" in text, text
+    assert "small.sc { font-size: 1em; font-variant: small-caps; }" in css and "p.right" in css, css
+    assert not problems, problems
+
+
 def test_separator_options():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
               convert.Block("break", 1, "☆"), convert.Block("p", 1, "Dos."),

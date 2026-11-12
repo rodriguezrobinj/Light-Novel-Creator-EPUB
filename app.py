@@ -1449,7 +1449,7 @@ class StatusLabel(QLabel):
                          self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.width()))
 
 
-MARKUP = re.compile(r"</?[ib]>")  # cursiva y negrita de section_text: en la lista no se leen las etiquetas
+MARKUP = re.compile(r"</?(?:i|b|sup|sc)>")  # cursiva y negrita de section_text: en la lista no se leen las etiquetas
 LANG_ROLE = Qt.ItemDataRole.UserRole + 7  # («EN → ES», otro destino que el elegido) de una fila de «Traducir»
 WARN_ROLE = Qt.ItemDataRole.UserRole + 8  # avisos de español de la traducción de una fila de «Traducir»
 DONE_STATES = ("Traducido", "Revisado", "Aplicado")  # estados de «Traducir» que junta el filtro «Traducidos»
@@ -1504,7 +1504,8 @@ class _Cards(QStyledItemDelegate):
             original, translation = item.text(0), item.text(1)
             head = QFont(opt.font)
             head.setBold(original.startswith("# "))
-            original = MARKUP.sub("", original.removeprefix("# ").removeprefix(convert.CENTER).removeprefix(convert.FRAME))
+            original = MARKUP.sub("", original.removeprefix("# ").removeprefix(convert.CENTER)
+                                    .removeprefix(convert.FRAME).removeprefix(convert.RIGHT))
             hint = QFont(opt.font)
             hint.setItalic(True)
             blocks = [(original, head, tones["muted"]),
@@ -4993,7 +4994,7 @@ class App:
                     rows[str(k)] = code, prefix, text
                     index.setdefault(code, []).append(str(k))
                     table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER)
-                                                                 .removeprefix(convert.FRAME) + text,
+                                                                 .removeprefix(convert.FRAME).removeprefix(convert.RIGHT) + text,
                                                                  done.get(code, {}).get("text", ""),
                                                                  state_of(code, text, texts)))
                     mark_langs(str(k))
