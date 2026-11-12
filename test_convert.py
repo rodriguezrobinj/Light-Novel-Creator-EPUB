@@ -3573,6 +3573,57 @@ def editor_on(blocks, candidates):
     return root, window, app.TextEditor(window, "0", *window.section_bounds(0))
 
 
+def test_editor_draft_recovers_after_crash():
+    """El editor escribe un borrador con lo cambiado; si la aplicación se cerró sin aceptar, al abrirlo otra vez
+    ofrece recuperarlo: vuelve el texto, el cambio se ve como cambio (F7) y el párrafo igual conserva su página.
+    Con el libro cambiado desde entonces, esa sección no se recupera y se avisa. Aceptar borra el borrador, y sin
+    cambios no se deja ninguno."""
+    import app
+    from PySide6.QtGui import QTextCursor
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Primer párrafo."), B("p", 2, "Segundo párrafo.")]
+    root, window, editor = editor_on(blocks, [0])
+    path = app._draft_path(window.pdf)
+    editor.write_draft()
+    none_clean = not path.exists()
+    c = editor.sheet.textCursor()
+    c.setPosition(editor.sheet.document().findBlockByNumber(2).position())
+    c.insertText("Nuevo. ")
+    editor.write_draft()
+    draft = path.read_text(encoding="utf-8")
+    editor.win.done(0)  # cerrar sin aceptar: el borrador se va
+    closed_drops = not path.exists()
+    asked, infos = [], []
+    saved = app.messagebox.askyesno, app.messagebox.showinfo
+    app.messagebox.askyesno = lambda title, message, **kw: asked.append(message) or True
+    app.messagebox.showinfo = lambda title, message, **kw: infos.append(message)
+    try:
+        path.write_text(draft, encoding="utf-8")  # como si la aplicación se hubiera cerrado de golpe
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        recovered = editor.sheet.content().split("\n\n")
+        changed = [b.blockNumber() for b in editor.sheet.changed_blocks()]
+        dirty = editor.dirty()
+        editor.save()
+        saved_text = [convert._plain(b) for b in window.book.blocks]
+        kept_page = window.book.blocks[1].page
+        accept_drops = not path.exists()
+        path.write_text(draft.replace("Primer párrafo.", "Otro texto."), encoding="utf-8")
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        stale = editor.sheet.content()
+        editor.win.done(0)
+    finally:
+        app.messagebox.askyesno, app.messagebox.showinfo = saved
+        window.close()
+    assert none_clean and closed_drops, (none_clean, closed_drops)
+    assert len(asked) == 2 and "¿Recuperarlos?" in asked[0], asked
+    assert recovered == ["# Capítulo 1", "Primer párrafo.", "Nuevo. Segundo párrafo."], recovered
+    assert changed == [2] and dirty, (changed, dirty)
+    assert saved_text == ["Capítulo 1", "Primer párrafo.", "Nuevo. Segundo párrafo."] and kept_page == 1, saved_text
+    assert accept_drops
+    assert "Otro texto." not in stale and infos and "el libro cambió" in infos[0], (stale, infos)
+
+
 def test_window_editor_split_back_keeps_paragraph_source():
     """Unir dos párrafos (Retroceso) y volver a partirlos (Intro) donde estaban: el segundo recupera su origen, la
     vista del PDF lo recuadra a él y no al primero, y se guarda como estaba (sin cambios). Ctrl+Z deshace todo."""

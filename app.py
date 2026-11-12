@@ -558,6 +558,11 @@ def _review_path(pdf):
     return Path(pdf).with_name(Path(pdf).stem + ".lnepub.json")
 
 
+def _draft_path(pdf):
+    """Borrador del editor: lo cambiado sin aceptar, por si la aplicación se cierra a mitad."""
+    return Path(pdf).with_name(Path(pdf).stem + ".lnepub.borrador.json")
+
+
 def _translation_path(pdf):
     return Path(pdf).with_name(Path(pdf).stem + ".lnepub.traduccion.json")
 
@@ -6238,7 +6243,9 @@ class TextEditor:
         self.pending = {}  # trabajo diferido: nombre -> temporizador
         self.set_text_zoom(100)
         self.open_section(start, end, int(item))
+        self.recover_draft()
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
+        sheet.textChanged.connect(lambda: self.later("draft", 5000, self.write_draft))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
         sheet.cursorPositionChanged.connect(self.update_tools)
         # Un clic o una tecla en la hoja mientras se lee: la voz se calla, como al pulsar Parar
@@ -7295,12 +7302,7 @@ class TextEditor:
             self.stop_reading()
         page = self.pages.get((start, end))
         if page is None:
-            # Un título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)
-            book, tree = self.app.book, self.app.tree
-            lines = [(k, "# " + tree.set(str(k), "title") if book.blocks[k].kind == "heading" and tree.exists(str(k))
-                      else convert.section_text(book, k, k + 1)) for k in range(start, end)]
-            levels = {k: tree.set(str(k), "inc") for k in range(start, end)
-                      if book.blocks[k].kind == "heading" and tree.exists(str(k))}
+            lines, levels = self.section_lines(start, end)
             doc, look = self.sheet.set_content(lines, self.pictures(start, end), self.colors["muted"], levels)
             page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
         else:
@@ -7322,6 +7324,75 @@ class TextEditor:
             self.request_suggestions()
         self.sheet.ensureCursorVisible()
         self.sheet.setFocus()
+
+    def section_lines(self, start, end):
+        """Líneas de la sección como se cargan en la hoja, [(bloque, línea)], y {bloque: tipo} de sus títulos. Un
+        título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)."""
+        book, tree = self.app.book, self.app.tree
+        lines = [(k, "# " + tree.set(str(k), "title") if book.blocks[k].kind == "heading" and tree.exists(str(k))
+                  else convert.section_text(book, k, k + 1)) for k in range(start, end)]
+        levels = {k: tree.set(str(k), "inc") for k in range(start, end)
+                  if book.blocks[k].kind == "heading" and tree.exists(str(k))}
+        return lines, levels
+
+    # Borrador: lo cambiado sin aceptar sobrevive a un cierre de la aplicación
+    def write_draft(self):
+        """Escribe el borrador con las secciones cambiadas; sin cambios lo borra. Un fallo no para el trabajo."""
+        if not self.app.pdf or not shiboken6.isValid(self.win):
+            return
+        path = _draft_path(self.app.pdf)
+        pages = [{"start": start, "end": end, "lines": [line for _, line in page["lines"]],
+                  "text": editor.dump(page["doc"])} for (start, end), page in self.pages.items() if self.page_dirty(page)]
+        try:
+            if pages:
+                _write_json(path, {"saved": datetime.now().isoformat(timespec="minutes"), "pages": pages})
+            else:
+                path.unlink(missing_ok=True)
+        except OSError as e:  # carpeta de solo lectura, OneDrive bloqueándolo
+            self.tell(f"No se pudo guardar el borrador: {e.strerror or e}")
+
+    def drop_draft(self):
+        if self.app.pdf:
+            with contextlib.suppress(OSError):
+                _draft_path(self.app.pdf).unlink(missing_ok=True)
+
+    def recover_draft(self):
+        """Si la aplicación se cerró con cambios sin aceptar, ofrece recuperarlos. Una sección vuelve solo si el
+        libro la tiene igual que cuando se escribió el borrador: si no, el texto ya no encajaría en sus bloques."""
+        if not self.app.pdf:
+            return
+        path = _draft_path(self.app.pdf)
+        try:
+            draft = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return  # sin borrador, o roto: nada que recuperar
+        pages = [p for p in draft.get("pages", []) if isinstance(p, dict)] if isinstance(draft, dict) else []
+        try:
+            when = datetime.fromisoformat(str(draft.get("saved"))).strftime("del %d/%m a las %H:%M")
+        except (AttributeError, ValueError):
+            when = "de una sesión anterior"
+        if not pages or not messagebox.askyesno(
+                "Recuperar cambios", f"Hay cambios sin guardar {when}: la aplicación se cerró antes de aceptarlos."
+                "\n\n¿Recuperarlos?", parent=self.win):
+            self.drop_draft()
+            return
+        lost, blocks = 0, len(self.app.book.blocks)
+        for p in pages:
+            try:
+                start, end, text, old = int(p["start"]), int(p["end"]), str(p["text"]), [str(x) for x in p["lines"]]
+            except (KeyError, TypeError, ValueError):
+                lost += 1
+                continue
+            lines, levels = self.section_lines(start, end) if 0 <= start < end <= blocks else ([], {})
+            if not lines or [line for _, line in lines] != old:
+                lost += 1
+                continue
+            doc, look = self.sheet.set_draft(lines, text, self.pictures(start, end), self.colors["muted"], levels)
+            self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
+        self.open_section(*self.current)
+        if lost:
+            what = "sección no se recuperó" if lost == 1 else "secciones no se recuperaron"
+            messagebox.showinfo("Recuperar cambios", f"{lost} {what}: el libro cambió desde entonces.", parent=self.win)
 
     def show_chapter(self, row):
         """Indicador de la cinta: «☰ Capítulo 3 de 31 · Título ▾», y ◀ ▶ activos si hay a dónde ir."""
@@ -7395,6 +7466,7 @@ class TextEditor:
         for job in self.pending.values():
             qtk.cancel(job)
         self.pending.clear()
+        self.drop_draft()  # se aceptó o se descartó: el borrador ya no hace falta
         if self.spell:
             self.spell[2].terminate()  # nada que guardar: lo aprendido ya está en App.words
             self.spell = None

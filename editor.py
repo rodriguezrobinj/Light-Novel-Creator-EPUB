@@ -1,6 +1,7 @@
 """Hoja del editor de texto estilo Word: lo que se ve es lo que sale en el EPUB. Lee y escribe el formato de
 convert.section_text (un párrafo por línea con <i>/<b>, "# " delante de un título, las ilustraciones y los
 separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda convert.edit_section."""
+import difflib
 import html
 import re
 
@@ -469,6 +470,42 @@ class Sheet(QTextEdit):
         look.set_unknown(self.unknown)
         self.use(document, look)
         self.moveCursor(QTextCursor.MoveOperation.Start)
+        return document, look
+
+    def set_draft(self, lines, text, pictures, color="#888888", levels=None):
+        """Como set_content, con text (un borrador de dump) sobre las líneas cargadas lines: un párrafo igual
+        conserva su origen y su original; uno cambiado en su sitio recuerda el que reemplaza (F7 lo encuentra y
+        «Volver al original» lo deshace); uno nuevo toma el origen de la línea vieja de su sitio o la anterior."""
+        old = [line for _, line in lines]
+        new = [line for line in text.split("\n\n") if line.strip()]
+        pairs, originals = [], []
+        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+            for n in range(j2 - j1):
+                if op == "equal" or (op == "replace" and i2 - i1 == j2 - j1):
+                    pairs.append((lines[i1 + n][0], new[j1 + n]))
+                    originals.append(old[i1 + n])
+                    continue
+                at = min(i1 + n, i2 - 1) if i2 > i1 else i1 - 1
+                pairs.append((lines[at][0] if 0 <= at < len(lines) else None, new[j1 + n]))
+                originals.append(None)
+        document, look = self.set_content(pairs, pictures, color, levels)
+        self.origins[document] = list(lines)
+        block, n = document.firstBlock(), 0
+        self.relinking = True  # solo se corrige lo que recuerda cada párrafo: no es una edición
+        try:
+            while block.isValid() and n < len(originals):
+                f = block.blockFormat()
+                if originals[n] is None:
+                    f.clearProperty(ORIGINAL)
+                    f.clearProperty(CANON)
+                else:
+                    f.setProperty(ORIGINAL, originals[n])
+                    f.setProperty(CANON, _canonical(originals[n]))
+                QTextCursor(block).setBlockFormat(f)
+                block, n = block.next(), n + 1
+        finally:
+            self.relinking = False
+        document.clearUndoRedoStacks()
         return document, look
 
     def relink(self, document, loaded, pos, added):
