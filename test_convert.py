@@ -4316,6 +4316,25 @@ def test_window_pdf_menu_puts_preferred_size_first():
     assert first.startswith("Generar PDF (A4") and "(preferido)" in first, first
 
 
+def test_window_options_are_only_in_options():
+    """Los ajustes ya no están repartidos: la barra deja Perfil, «Opciones del libro…», PDF y Generar; no hay menú
+    «Opciones ▾», ni Tema en Herramientas, ni idioma en «Editar datos». El informe lleva a sus opciones."""
+    from PySide6.QtWidgets import QComboBox, QPushButton, QToolButton
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
+    bar = [b.text() for b in window.options_row.findChildren(QToolButton)]
+    combos = window.options_row.findChildren(QComboBox)
+    menus = [a.text() for b in window.root.findChildren(QToolButton) if b.menu() for a in b.menu().actions()]
+    data_combos = window.data_panel.findChildren(QComboBox)
+    window.quality()
+    report = root.dialogs()[-1]
+    link = [b.text() for b in report.findChildren(QPushButton) if b.text() == "Opciones del informe…"]
+    window.close()
+    assert "Opciones ▾" not in bar and len(combos) == 1, (bar, len(combos))
+    assert "Tema" not in menus and "Opciones…  (Ctrl+,)" in menus, menus
+    assert not data_combos and link, (data_combos, link)
+
+
 def test_window_kindle_profile_hyphenates():
     root, window = visible_window()
     window.profile_var.set("Kindle")
@@ -5837,8 +5856,8 @@ def test_replay_image_and_page_at_start():
 
 
 def test_window_echoes_and_glossary_in_quality_report():
-    """La casilla «Buscar ecos» del informe añade los ecos; el glosario guardado va en la revisión y el informe
-    avisa de la variante; «Añadir nombres de este tomo» propone los frecuentes."""
+    """«Opciones del informe…» → «Buscar ecos» añade los ecos al informe abierto; el glosario guardado va en la
+    revisión y el informe avisa de la variante; «Añadir nombres de este tomo» propone los frecuentes."""
     from PySide6.QtWidgets import QPushButton
     B = convert.Block
     blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Miró la puerta y luego volvió a mirar la puerta cerrada."),
@@ -5850,7 +5869,11 @@ def test_window_echoes_and_glossary_in_quality_report():
     parts = root.dialogs()[-1].parts
     titles = lambda: [parts["table"].set(i, "title") for i in parts["table"].get_children()]
     without = titles()
-    parts["echoes"].click()
+    parts["echoes"].click()  # «Opciones del informe…»
+    root.update()
+    dialog = window.options_window
+    dialog.parts["widgets"]["echoes"].setChecked(True)
+    dialog.parts["accept"]()
     root.update()
     with_echoes = titles()
     window.edit_glossary()
@@ -6279,21 +6302,22 @@ def test_custom_font_is_embedded():
     assert names == ["OEBPS/fonts/propia.ttf"] and css.count("@font-face") == 1, (names, css)
     assert 'font-family: "Mi Letra"' in css and convert.check_epub(out) == [], css
     root, window = visible_window()
+    window.show_book(book)
     window.apply_state({"font": "Mi Letra.ttf", "font_file": str(font)})
-    shown, option = window.font_box.currentText(), window.write_options()["font"]
+    dialog = window.open_options("Aspecto", "book")
+    shown, option = dialog.parts["widgets"]["font"].currentText(), window.write_options()["font"]
+    dialog.parts["cancel"]()
     window.apply_state({"font": "Otra.ttf", "font_file": str(TMP / "Otra.ttf")})
     fallback, status = window.font_var.get(), window.status.text()
-    import app
-    original = app.filedialog.askopenfilename
-    try:
-        picked = []
-        for answer in (str(font), ""):  # elegir el archivo; después, cancelar: se queda la anterior
-            app.filedialog.askopenfilename = lambda **kw: answer
-            window.font_box.setCurrentText("Otra…")
-            window.font_changed()
-            picked.append((window.font_var.get(), window.font_box.currentText()))
-    finally:
-        app.filedialog.askopenfilename = original
+    picked = []
+    dialog = window.open_options("Aspecto", "book")
+    for answer in (str(font), ""):  # elegir el archivo; después, cancelar: se queda la anterior
+        window.ask_font_file = lambda: answer
+        box = dialog.parts["widgets"]["font"]
+        box.setCurrentText("Otra…")
+        box.activated.emit(box.currentIndex())
+        picked.append((window.font_var.get(), dialog.parts["widgets"]["font"].currentText()))
+    dialog.parts["cancel"]()
     window.close()
     assert picked == [("Mi Letra.ttf", "Mi Letra.ttf")] * 2, picked
     assert shown == "Mi Letra.ttf" and option == str(font), (shown, option)

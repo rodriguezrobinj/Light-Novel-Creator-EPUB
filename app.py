@@ -37,7 +37,7 @@ import pymupdf
 import segno
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
+from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
                            QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QInputDialog,
@@ -760,7 +760,8 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "words": "Diccionario de la serie", "glossary": "Glosario", "tr_glossary": "Glosario de traducción",
                 "tr_notes": "Personajes y estilo de traducción", "ignored": "Avisos ignorados", "comments": "Comentarios",
                 "alts": "Descripciones de ilustraciones",
-                "echoes": "Buscar ecos"}
+                "echoes": "Buscar ecos", "whole_words": "No partir palabras en el PDF",
+                "pdf_size": "Tamaño de PDF preferido"}
 
 
 def _versions_path(pdf):
@@ -1631,7 +1632,6 @@ class App:
         self.style_var = qtk.Var("Clásico")  # aspecto del EPUB: letra, párrafos e inicio de capítulo
         self.font_var = qtk.Var("Del lector")  # tipografía incrustada (convert.FONTS) o nombre de la propia
         self.font_file_var = qtk.Var("")  # ruta de la fuente propia
-        self.font_last = "Del lector"  # a la que se vuelve si «Otra…» no elige archivo
         self.typography_var = qtk.Var(True)  # comillas «», puntos suspensivos, raya, espacios
         self.gray_var = qtk.Var(False)  # para e-readers de tinta: pesa menos y se ve igual
         self.shrink_var = qtk.Var(True)  # las imágenes son casi todo el peso del EPUB
@@ -1678,18 +1678,9 @@ class App:
         self.book_actions.append(tools.addSeparator())
         tools.addAction("Panel de serie…", self.series_panel)
         tools.addAction("Volumen recopilatorio…", self.omnibus)
-        tools.addAction("Vigilar una carpeta…", self.watch_folder)
+        tools.addAction("Vigilar una carpeta…", lambda: self.open_options("Carpeta vigilada"))
         tools.addSeparator()
         tools.addAction("Opciones…  (Ctrl+,)", lambda: self.open_options())
-        themes = tools.addMenu("Tema")
-        group = QActionGroup(root)
-        self.theme_actions = {}
-        for name in theme.CHOICES:
-            action = themes.addAction(name)
-            action.setCheckable(True)
-            group.addAction(action)
-            action.triggered.connect(lambda _, name=name: (self.theme_var.set(name), self.apply_theme()))
-            self.theme_actions[name] = action
         tools.addAction("Atajos de teclado…", lambda: messagebox.showinfo("Atajos de teclado", SHORTCUTS))
         tools.addSeparator()
         tools.addAction("Instalar en este equipo", self.install)
@@ -1801,20 +1792,6 @@ class App:
         rows = QVBoxLayout(bottom)
         rows.setContentsMargins(10, 6, 10, 6)
         rows.setSpacing(4)
-        extras = QMenu(root)
-        for label, var in (("Limpieza tipográfica", self.typography_var), ("Imágenes en gris", self.gray_var),
-                           ("Reducir imágenes", self.shrink_var),
-                           ("Recortar márgenes blancos de las ilustraciones", self.trim_var),
-                           ("Página de créditos", self.credits_var),
-                           ("Minutos de lectura en el índice", self.reading_var),
-                           ("EPUB 2 (lectores antiguos)", self.epub2_var),
-                           ("Formato Kobo (KEPUB)", self.kepub_var),
-                           ("Partir palabras con guiones (Kindle)", self.hyphenate_var)):
-            action = extras.addAction(label)
-            action.setCheckable(True)
-            var.check(action)
-            action.triggered.connect(lambda _: self.update_preview())
-        self.font_box = _combo(self.font_var, FONT_CHOICES, 8, changed=self.font_changed)
         self.quality_btn = _button("Calidad", self.quality)
         self.quality_btn.setEnabled(False)
         self.gen_btn = _button("Generar EPUB…", self.generate, "primary")
@@ -1825,17 +1802,13 @@ class App:
         self.pdf_btn.setToolTip("El libro maquetado en PDF, con las mismas opciones que el EPUB")
         self.gen_btn.setEnabled(False)
         self.pdf_btn.setEnabled(False)
-        self.options_row = QWidget()  # opciones del EPUB y «Generar»: solo con un libro abierto (update_chrome)
+        self.options_row = QWidget()  # perfil, opciones del libro y «Generar»: solo con un libro abierto (update_chrome)
         rows.addWidget(self.options_row)
+        # El resto de opciones vive en «Opciones»: aquí solo lo que más se cambia, el lector de destino
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
                                                                  changed=self.apply_profile),
                             _button("Opciones del libro…", lambda: self.open_options("Perfil y formato", "book")),
-                            _label("Separador:"), _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12,
-                                                         changed=self.update_preview),
-                            _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
-                                                      changed=self.update_preview),
-                            _label("Letra:"), self.font_box,
-                            _menu_button("Opciones", extras), 1, self.pdf_btn, self.gen_btn))
+                            1, self.pdf_btn, self.gen_btn))
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setFixedWidth(160)
@@ -1941,18 +1914,15 @@ class App:
         fields = ((("Título:", self.title_var), ("Autor:", self.author_var), ("Serie:", self.series_var),
                    ("Vol.:", self.volume_var)),
                   (("Grupo:", self.publisher_var), ("Traductor:", self.translator_var),
-                   ("Ilustraciones:", self.illustrator_var), ("Idioma:", self.lang_var)),
+                   ("Ilustraciones:", self.illustrator_var)),  # el idioma está en Opciones → Perfil y formato
                   (("Corrección:", self.proofreader_var), ("Edición:", self.editor_var),
                    ("Título original:", self.original_title_var), ("Fecha:", self.date_var)))
         for r, row in enumerate(fields):
             for c, (label, var) in enumerate(row):
                 grid.addWidget(QLabel(label), r, c * 2)
-                if var is self.lang_var:
-                    widget = _combo(var, LANGUAGES, 4, editable=True)
-                else:
-                    widget = var.entry(QLineEdit())
-                    if var is self.date_var:
-                        widget.setPlaceholderText("AAAA o AAAA-MM-DD")
+                widget = var.entry(QLineEdit())
+                if var is self.date_var:
+                    widget.setPlaceholderText("AAAA o AAAA-MM-DD")
                 grid.addWidget(widget, r, c * 2 + 1)
         grid.addWidget(QLabel("Géneros:"), 3, 0)
         subjects = self.subjects_var.entry(QLineEdit(placeholderText="separados por comas"))
@@ -1966,10 +1936,6 @@ class App:
         titles.addAction("Mayúsculas al estilo español", self.fix_case)
         titles.addAction("Numeración uniforme (Capítulo 1, 2…)", self.fix_numbers)
         titles.addAction("Apartados sin nombre (Parte 1…) como separador", self.parts_as_breaks)
-        titles.addSeparator()
-        autocase = titles.addAction("Corregir las mayúsculas al abrir si vienen en MAYÚSCULAS")
-        autocase.setCheckable(True)
-        self.autocase_var.check(autocase)
         self.cover_label = _label("", "muted")
         grid.addLayout(_row(_button("Portada…", self.choose_cover), self.cover_label,
                             _button("Reemplazos…", self.edit_replacements),
@@ -2006,8 +1972,6 @@ class App:
     def apply_theme(self):
         """Pone el tema elegido y vuelve a pintar lo que tiene colores propios (lista y vistas previas)."""
         self.dark = theme.apply(qtk.app(), self.theme_var.get())
-        if self.theme_var.get() in self.theme_actions:
-            self.theme_actions[self.theme_var.get()].setChecked(True)
         colors = theme.kind_colors(self.dark)
         for tag in KIND_TAG.values():
             self.tree.tag_configure(tag, font=self.fonts[tag], foreground=colors[tag])
@@ -3903,20 +3867,6 @@ class App:
         if folder:
             self.result_dialog(folder)
 
-    def watch_folder(self):
-        """Activa o desactiva la carpeta vigilada; se recuerda entre sesiones."""
-        if self.watch:
-            if messagebox.askyesno("Carpeta vigilada", f"Se está vigilando:\n{self.watch}\n\n¿Dejar de vigilarla?"):
-                self.set_watch("")
-            return
-        folder = filedialog.askdirectory(initialdir=self.settings.get("folder"), title="Carpeta que vigilar")
-        if folder:
-            self.set_watch(folder)
-            messagebox.showinfo("Carpeta vigilada", f"Mientras esta ventana esté abierta, cada PDF nuevo de\n{folder}\n"
-                                "se convierte solo, junto al PDF, con su revisión, los datos de su serie o las "
-                                "opciones actuales.\n\nLos PDF que ya están en la carpeta no: para esos, "
-                                "«Convertir carpeta…».")
-
     def set_watch(self, folder):
         # Lo que ya hay al activarla no se toca: solo lo que llegue después
         self.watch, self.watch_sizes = folder, {}
@@ -4112,23 +4062,6 @@ class App:
             self.update_preview()
         self.status.setText(f"{convert.counted(len(changed), 'apartado')} como separador")
 
-    def font_changed(self):
-        """«Otra…» pide un archivo de fuente; sin elegir ninguno, se queda la letra de antes."""
-        if self.font_var.get() == "Otra…":
-            path = filedialog.askopenfilename(filetypes=[("Fuente", "*.ttf *.otf")])
-            if path:
-                self.font_file_var.set(path)
-                self.show_font(Path(path).name)
-            self.font_var.set(Path(path).name if path else self.font_last)
-        self.font_last = self.font_var.get()
-        self.update_preview()
-
-    def show_font(self, name):
-        """Pone la fuente propia en el combo, antes de «Otra…», y la deja elegida."""
-        if self.font_box.findText(name) < 0:
-            self.font_box.insertItem(self.font_box.count() - 1, name)
-        self.font_box.setCurrentText(name)
-
     def apply_profile(self):
         """El perfil fija las opciones que importan para ese lector (PROFILES)."""
         for name, value in PROFILES.get(self.profile_var.get(), {}).items():
@@ -4282,10 +4215,9 @@ class App:
         show = qtk.Var("Todos")
         shown = _combo(show, ["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS] + ["Ignorados"],
                        12, changed=lambda: fill())
-        echoes = QCheckBox("Buscar ecos (palabras repetidas cerca)", checked=self.echoes_var.get())
-        # Sin Var.check: el diálogo se cierra y la variable no debe seguir poniendo valor a una casilla borrada
-        echoes.toggled.connect(lambda on: (self.echoes_var.set(on), self.settings.update(echoes=on), fill(),
-                                           self.update_quality()))
+        # Los ecos se activan en Opciones → Informe de calidad; al volver, la lista se rehace con ellos
+        echoes = _button("Opciones del informe…", lambda: self.open_options(
+            "Informe de calidad", on_close=lambda: shiboken6.isValid(win) and fill()))
         export_btn = _button("Exportar…", lambda: self.export_report(state["all"], state["score"], win))
         export_btn.setToolTip("Guardar el informe como página web (.html) o tabla para Excel (.csv), para otra persona")
         column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown, export_btn))
@@ -4621,12 +4553,9 @@ class App:
             self.style_var.set("Clásico")
         font, path = self.font_var.get(), Path(self.font_file_var.get())
         if font not in FONT_CHOICES or font == "Otra…":
-            if self.font_file_var.get() and path.name == font and path.is_file():
-                self.show_font(font)
-            else:
+            if not (self.font_file_var.get() and path.name == font and path.is_file()):
                 self.font_var.set("Del lector")
                 self.status.setText(f"No se encontró la fuente {font}: se usa la del lector.")
-        self.font_last = self.font_var.get()
         try:
             self.replacements = [[str(a), str(b)] for a, b in state["replacements"]]
         except (KeyError, TypeError, ValueError):
