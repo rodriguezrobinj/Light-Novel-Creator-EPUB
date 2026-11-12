@@ -2090,6 +2090,43 @@ def test_write_pdf_bookmarks_numbers_and_metadata():
     assert not list(TMP.glob("libro.pdf.tmp")), "queda el .tmp"
 
 
+def test_write_pdf_whole_words_never_splits_a_word():
+    """PDF maquetado: el CSS pide hyphens: auto y MuPDF parte «mu-jer», «cue-ro» al final de línea. Con
+    whole_words la palabra que no cabe pasa entera a la línea siguiente; sin la opción se sigue partiendo.
+    Con el menú «PDF ▾» de la ventana, la opción marcada llega a write_pdf."""
+    B = convert.Block
+    text = ("Los que aparecieron ante nosotros eran humanos: un hombre y una mujer cargando a un hombre herido "
+            "sobre sus hombros. Su armadura de cuero estaba manchada de sangre y cubierta de suciedad. ") * 4
+    book = convert.Book("Mi novela", "Autora X", jpeg(400, 600), [B("heading", 1, "Capítulo 1: Inicio")]
+                        + [B("p", 1, text) for _ in range(4)], [0])
+    split = {}
+    for whole in (False, True):
+        out = TMP / f"palabras-{whole}.pdf"
+        convert.write_pdf(book, [(0, "Capítulo 1: Inicio")], out, size="A5", hyphenate=True, whole_words=whole)
+        with pymupdf.open(out) as pdf:
+            split[whole] = sum(line.rstrip().endswith(("-", "­")) for page in pdf
+                               for line in page.get_text().splitlines())
+    assert split[False] > 0 and split[True] == 0, split
+    import app
+    root, window = visible_window()
+    window.show_book(book)
+    window.pdf = TMP / "original.pdf"
+    action = next(a for a in window.pdf_btn.menu().actions() if a.isCheckable())
+    action.trigger()
+    sent = []
+    originals = app.filedialog.asksaveasfilename, window.run
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(TMP / "menu.pdf")
+    window.run = lambda fn, args, *rest, **kwargs: sent.append(args[4]) or True
+    try:
+        window.generate_pdf("A5")
+    finally:
+        app.filedialog.asksaveasfilename, window.run = originals
+    label, checked = action.text(), window.whole_words_var.get()
+    window.close()
+    assert checked and sent and sent[0]["whole_words"] is True, (checked, sent)
+    assert "palabras" in label, label
+
+
 def test_write_epub_and_pdf_report_progress():
     """Generar EPUB o PDF avanza la barra de abajo con su porcentaje, como al abrir: el progreso sube sin
     retroceder y acaba lleno."""
@@ -4398,6 +4435,26 @@ def test_blank_gap_between_paragraphs_is_a_scene_break():
     doc.save(TMP / "huecos-estilo.pdf")
     styled = [b.kind for b in convert.analyze(TMP / "huecos-estilo.pdf").blocks]
     assert "break" not in styled, styled
+
+
+def test_blank_line_after_bold_subtitle_is_not_a_scene_break():
+    """Maryoku 1 (pág. 177): «Historias Cortas Adicionales» y «Un Lindo Monstruo» van en negrita del tamaño del
+    texto, con una línea en blanco debajo. Ese hueco es el aire del subtítulo: salían dos separadores de escena
+    que el PDF no tiene."""
+    doc = pymupdf.open()
+    # Sin sangría: interlínea de 14, párrafos a 21 (línea y media) y la línea en blanco deja 42 (tres líneas)
+    para = lambda y, t: [(72, y, line(t, 60), 11, "cour"), (72, y + 14, line("sigue el parrafo", 60), 11, "cour"),
+                         (72, y + 28, "fin.", 11, "cour")]
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv")] + para(150, "Primer parrafo del epilogo")
+             + para(199, "Segundo parrafo del epilogo") + para(248, "Tercer parrafo del epilogo")
+             + [(72, 297, "Historias cortas adicionales", 11, "cobo"), (72, 339, "Un lindo monstruo", 11, "cobo")]
+             + para(381, "Texto de la historia corta") + para(430, "Sigue la historia corta"))
+    path = TMP / "subtitulo-negrita-hueco.pdf"
+    doc.save(path)
+    blocks = convert.analyze(path).blocks
+    kinds = [b.kind for b in blocks]
+    assert "break" not in kinds, [(b.kind, b.html[:30]) for b in blocks]
+    assert any("Un lindo monstruo" in b.html for b in blocks), [b.html[:30] for b in blocks]
 
 
 def test_heading_decoration_and_lowercase_continuation_across_pages():
