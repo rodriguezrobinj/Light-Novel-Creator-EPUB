@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFra
 
 import convert
 import editor
+import options
 import qtk
 import theme
 import translate
@@ -77,8 +78,6 @@ INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "la
              "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
-PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
-         "font_file", "epub2", "reading", "profile", "autocase", "kepub", "hyphenate", "echoes", "whole_words")
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
@@ -454,6 +453,12 @@ def _write_json(path, data):
 def _ps_quote(text):
     """Texto entre comillas simples de PowerShell: un apóstrofo (O'Neil) se escribe doble."""
     return "'" + str(text).replace("'", "''") + "'"
+
+
+def _same_type(value, like):
+    """Valor de ajustes.json válido para una opción: el mismo tipo que su valor de fábrica (escrito a mano puede
+    traer «sí» donde va true)."""
+    return isinstance(value, bool) if isinstance(like, bool) else type(value) is type(like)
 
 
 def _write_options(state, breaks=()):
@@ -1635,6 +1640,7 @@ class App:
         self.echoes_var = qtk.Var(False)  # ecos en el informe: muchos avisos de estilo, solo si se piden
         self.hyphenate_var = qtk.Var(False)  # guiones blandos: el Kindle apenas parte palabras en español
         self.whole_words_var = qtk.Var(False)  # PDF maquetado sin palabras partidas al final de línea
+        self.pdf_size_var = qtk.Var("A5")  # tamaño de PDF que sale primero en «PDF ▾»
 
         root.setWindowTitle(APP_NAME)
         root.on_close, root.on_drop = self.close, self.open_path
@@ -1868,6 +1874,8 @@ class App:
         # Marcos de tamaño fijo: solo cambian si cambia el sitio de las vistas previas, no con cada página
         self.idle_text, self.views_size = "Abre un PDF para ver la vista previa", None
         self.pages.resized.connect(self.on_resize)
+        # Valores de fábrica: lo que no esté en «Libros nuevos» (o esté mal escrito) sale de aquí
+        self.factory = {key: var.get() for key, var in self.fields().items() if key in options.BOOK_KEYS}
         self.load_settings()
         self.update_chrome()
         self.apply_theme()
@@ -2518,6 +2526,7 @@ class App:
         self.stack.setCurrentIndex(1)
         self.update_chrome()
         self.save_thumb()
+        self.apply_state(self.new_book_options())  # la revisión o la serie, si las hay, mandan después
         self.title_var.set(book.title)
         self.author_var.set(book.author)
         self.series_var.set(book.series)
@@ -2949,17 +2958,27 @@ class App:
                 raise ValueError
         except (OSError, ValueError):
             self.settings = {}
-        try:
-            self.apply_state({name: self.settings[name] for name in PREFS if name in self.settings})
-        except (ValueError, TypeError):
-            pass  # valor mal escrito a mano en el .json
+        defaults = self.settings.get("defaults")
+        if not isinstance(defaults, dict):  # ajustes de antes: las opciones de libro iban en la raíz
+            defaults = {key: self.settings[key] for key in options.BOOK_KEYS if key in self.settings}
+        self.settings["defaults"] = {key: value for key, value in defaults.items()
+                                     if key in self.factory and _same_type(value, self.factory[key])}
+        if not isinstance(self.settings.get("translate"), dict):
+            self.settings["translate"] = {}
+        self.apply_state(self.new_book_options())
+        self.echoes_var.set(self.settings.get("echoes") is True)
+        if self.settings.get("device") in DEVICES:
+            self.device_var.set(self.settings["device"])
+        self.dark_var.set(self.settings.get("dark") is True)
         chosen = self.settings.get("theme")
         self.theme_var.set(chosen if chosen in theme.CHOICES else "Sistema")
         self.fill_recent()
 
+    def new_book_options(self):
+        """Opciones con las que abre un libro sin revisión ni serie: «Libros nuevos» sobre los valores de fábrica."""
+        return {**self.factory, **self.settings.get("defaults", {})}
+
     def save_settings(self):
-        fields = self.fields()
-        self.settings.update({name: fields[name].get() for name in PREFS})
         self.settings["theme"] = self.theme_var.get()
         try:
             SETTINGS.parent.mkdir(parents=True, exist_ok=True)
@@ -3799,8 +3818,7 @@ class App:
         if not pdfs:
             messagebox.showinfo("Convertir carpeta", "No hay PDF que convertir en esa carpeta.")
             return
-        fields = self.fields()
-        options = {name: fields[name].get() for name in PREFS}
+        options = self.new_book_options()
         self.run(_batch, ([str(p) for p in pdfs], options), lambda results: self.batch_done(results, folder),
                  report=True, busy="Convirtiendo…")
 
@@ -3847,8 +3865,7 @@ class App:
         ready, self.watch_sizes = _ready(self.watch, self.watch_sizes, self.watch_skip)
         if ready:
             self.watch_skip.update(ready)  # un PDF que falla no se reintenta en cada vuelta
-            fields = self.fields()
-            options = {name: fields[name].get() for name in PREFS}
+            options = self.new_book_options()
             self.run(_batch, (ready, options), self.watch_done, report=True, busy="Carpeta vigilada:")
 
     def watch_done(self, results):
@@ -4201,7 +4218,8 @@ class App:
                        12, changed=lambda: fill())
         echoes = QCheckBox("Buscar ecos (palabras repetidas cerca)", checked=self.echoes_var.get())
         # Sin Var.check: el diálogo se cierra y la variable no debe seguir poniendo valor a una casilla borrada
-        echoes.toggled.connect(lambda on: (self.echoes_var.set(on), fill(), self.update_quality()))
+        echoes.toggled.connect(lambda on: (self.echoes_var.set(on), self.settings.update(echoes=on), fill(),
+                                           self.update_quality()))
         export_btn = _button("Exportar…", lambda: self.export_report(state["all"], state["score"], win))
         export_btn.setToolTip("Guardar el informe como página web (.html) o tabla para Excel (.csv), para otra persona")
         column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown, export_btn))
@@ -4394,7 +4412,7 @@ class App:
             return
         out = _epub_name(out, self.kepub_var.get())
         self.save_review()  # el tomo abierto entra con lo revisado hasta ahora
-        options = {name: self.fields()[name].get() for name in PREFS}
+        options = self.new_book_options()
         options["replacements"] = self.replacements
         if self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems), report=True,
                     busy="Preparando el recopilatorio…"):
@@ -4498,7 +4516,7 @@ class App:
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var,
-                "hyphenate": self.hyphenate_var, "echoes": self.echoes_var, "whole_words": self.whole_words_var}
+                "hyphenate": self.hyphenate_var, "whole_words": self.whole_words_var, "pdf_size": self.pdf_size_var}
 
     def rows(self):
         return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title"), self.tree.set(item, "ok")]

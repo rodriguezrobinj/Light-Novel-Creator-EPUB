@@ -1025,11 +1025,12 @@ class Root:
         return [w for w in self.window.root.findChildren(QDialog) if w.isVisible()]
 
 
-def visible_window():
-    """Ventana Qt sin pantalla (QT_QPA_PLATFORM=offscreen), con su tamaño: la lista calcula posiciones."""
+def visible_window(settings=None):
+    """Ventana Qt sin pantalla (QT_QPA_PLATFORM=offscreen), con su tamaño: la lista calcula posiciones.
+    settings: ajustes.json ya escrito, para probar lo que la ventana hace con él."""
     import app
 
-    app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"  # cada ventana sin preferencias de otra prueba
+    app.SETTINGS = settings or TMP / f"ajustes-{time_ns()}.json"  # cada ventana sin preferencias de otra prueba
     app._start_spell_process = lambda: None  # sin el proceso de ortografía del editor (su prueba pone uno falso)
     app._start_thumbs = lambda jobs: None  # ni el de las miniaturas de recientes (su prueba llama a _render_thumbs)
     window = app.App(app.Window())
@@ -4107,6 +4108,47 @@ def test_options_table_and_search():
     assert options.fold("Tipografía ÚNICA") == "tipografia unica"
 
 
+def test_window_new_books_use_saved_defaults():
+    """Libros nuevos: un ajustes.json antiguo (opciones en la raíz, sin «defaults») pasa a «Libros nuevos» sin cambiar
+    nada. Un libro sin revisión ni serie abre con esos valores, no con los del libro anterior; uno con revisión, con
+    la suya. Un valor mal escrito a mano se ignora."""
+    import json
+    import options
+    settings = TMP / f"ajustes-viejos-{time_ns()}.json"
+    settings.write_text(json.dumps({"gray": True, "style": "Novela ligera", "credits": "sí", "translate": []}),
+                        encoding="utf-8")
+    root, window = visible_window(settings)
+    migrated = dict(window.settings["defaults"])
+    folder = TMP / f"libros-{time_ns()}"
+    folder.mkdir()
+    books = {}
+    for name in ("con-revision", "nuevo"):
+        doc = pymupdf.open()
+        add_page(doc, 1, [(72, 100, "Capitulo 1: Uno", 20, "helv"), (72, 150, "Texto.", 11, "cour")])
+        doc.save(folder / f"{name}.pdf")
+        books[name] = folder / f"{name}.pdf"
+    book = lambda: convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1: Uno"),
+                                                  convert.Block("p", 1, "Texto.")], [0])
+    window.pdf = books["con-revision"]
+    window.show_book(book())
+    window.gray_var.set(False)  # este libro, sin gris
+    window.save_review()
+    window.pdf = books["nuevo"]
+    window.show_book(book())  # sin revisión ni serie: «Libros nuevos», no lo del libro anterior
+    fresh = (window.gray_var.get(), window.style_var.get(), window.credits_var.get())
+    window.pdf = books["con-revision"]
+    window.show_book(book())
+    reviewed = window.gray_var.get()
+    defaults = window.new_book_options()
+    translation = window.settings["translate"]
+    window.close()
+    assert migrated["gray"] is True and migrated["style"] == "Novela ligera" and "credits" not in migrated, migrated
+    assert fresh == (True, "Novela ligera", False), fresh
+    assert reviewed is False
+    assert defaults["gray"] is True and set(defaults) == set(options.BOOK_KEYS), defaults
+    assert translation == {}, translation
+
+
 def test_window_kindle_profile_hyphenates():
     root, window = visible_window()
     window.profile_var.set("Kindle")
@@ -4281,8 +4323,7 @@ def test_window_remembers_settings_and_recent_pdfs():
 
     root, window = visible_window()
     settings = app.SETTINGS
-    window.style_var.set("Moderno")
-    window.gray_var.set(True)
+    window.settings["defaults"].update(style="Moderno", gray=True)  # «Libros nuevos», no lo del último libro
     pdf = make_novel()
     window.open_path(str(pdf))  # como un PDF arrastrado sobre el .exe
     deadline = time.time() + 60
@@ -5654,11 +5695,13 @@ def test_window_echoes_and_glossary_in_quality_report():
     save()
     root.update()
     state = window.review_state()
+    echoes_saved = window.settings.get("echoes")
     kinds = [i.kind for i in window.quality_report()]
     window.close()
     assert "Palabra repetida cerca" not in without and "Palabra repetida cerca" in with_echoes, (without, with_echoes)
     assert proposed == "Emilia  # 5 veces", proposed
-    assert state["glossary"] == ["Emilia"] and state["echoes"] is True, state["glossary"]
+    # Los ecos son de la aplicación (Opciones → Informe de calidad), no del libro
+    assert state["glossary"] == ["Emilia"] and "echoes" not in state and echoes_saved is True, state
     assert "glossary" in kinds and "echo" in kinds, kinds
 
 
@@ -6358,7 +6401,7 @@ def test_kepub_option_profiles_and_names():
     assert app.PROFILES["Kindle"]["shrink_size"] == 1600 and not app.PROFILES["Kindle"]["gray"]
     assert all("kepub" in p for name, p in app.PROFILES.items() if name != "Personalizado")
     assert app._write_options({"kepub": True})["kepub"] and not app._write_options({})["kepub"]
-    assert "kepub" in app.INHERITED and "kepub" in app.PREFS
+    assert "kepub" in app.INHERITED and "kepub" in __import__("options").BOOK_KEYS
 
 
 def test_batch_with_kobo_writes_kepub():

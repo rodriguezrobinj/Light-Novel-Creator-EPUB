@@ -90,10 +90,9 @@ Hoy el paso 3 no existe: un libro sin revisión ni serie se queda con lo que ten
 
 ### Migración
 
-Si `ajustes.json` no tiene `defaults`, se crea con los valores de libro que ya guarda en su raíz
-(`PREFS`: lo último usado). El usuario no ve ningún cambio hasta que toque «Libros nuevos». Las claves
-de la raíz se siguen escribiendo para lo que aún las lee (convertir carpeta, carpeta vigilada,
-recopilatorio): toman los valores de `defaults`.
+Si `ajustes.json` no tiene `defaults`, se crea con los valores de libro que ya guarda en su raíz (lo
+último usado). El usuario no ve ningún cambio hasta que toque «Libros nuevos». Convertir carpeta, la
+carpeta vigilada y el recopilatorio leen de `defaults`; la raíz ya no se escribe.
 
 ### Perfil
 
