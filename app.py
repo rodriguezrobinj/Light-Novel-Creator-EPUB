@@ -40,7 +40,7 @@ from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QRectF, QSize, Qt, 
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
                            QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
-                               QInputDialog,
+                               QInputDialog, QTreeWidget, QTreeWidgetItem,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit,
                                QProgressBar,
                                QAbstractItemView, QButtonGroup, QHeaderView, QStyle, QStyledItemDelegate,
@@ -6253,10 +6253,11 @@ class TextEditor:
                                    1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
                                    _button("+", lambda: self.zoom(25))))
         self.split = QSplitter()
+        self.split.addWidget(self.nav_panel())
         self.split.addWidget(desk)
         self.split.addWidget(side)
-        self.split.setStretchFactor(0, 1)
         self.split.setStretchFactor(1, 1)
+        self.split.setStretchFactor(2, 1)
         self.split.splitterMoved.connect(lambda *_: self.later("panel", 80, self.redraw))
         column.addWidget(self.split, 1)
         # Barra de estado como Word: dónde estás y el zoom del texto
@@ -6413,8 +6414,10 @@ class TextEditor:
               [tool("🔗 Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)", self.show_link_bar,
                     short="🔗"),
                tool("✎ Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note, short="✎")])
+        self.nav_btn = tool("☰ Navegación", "Panel con los títulos, avisos, comentarios y cambios del capítulo (F9)",
+                            self.toggle_nav, True, short="☰", level=2)
         group("Buscar", [tool("🔍 Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
-                              lambda: self.show_find_bar(False), short="🔍")])
+                              lambda: self.show_find_bar(False), short="🔍")], [self.nav_btn])
         self.changes_btn, self.changes_menu = menu_tool("Cambios ▾", "Párrafos que editaste en este capítulo", [
             ("Cambio siguiente   (F7)", self.next_change), ("Volver al original", self.restore_current)])
         self.issues_btn, self.issues_menu = menu_tool("Avisos ▾", "Avisos del informe de calidad en este capítulo", [
@@ -6582,7 +6585,7 @@ class TextEditor:
     def on_command(self, name):
         """Atajos de la hoja que abren una barra: Ctrl+Alt+K enlace, Ctrl+F buscar, Ctrl+H reemplazar."""
         actions = {"link": self.show_link_bar, "reviewed": self.toggle_reviewed, "next_change": self.next_change,
-                   "next_issue": self.next_issue}
+                   "next_issue": self.next_issue, "nav": self.toggle_nav}
         if name in actions:
             actions[name]()
         else:
@@ -6785,9 +6788,16 @@ class TextEditor:
             return
         colors = theme.mark_colors(self.app.dark)
         selections, changed, issues = [], self.sheet.changed_blocks(), 0
+        nav = {"Títulos": [], "Avisos": [], "Comentarios": [], "Cambios": [(b, b.text()) for b in changed]}
         block = self.sheet.document().firstBlock()
         while block.isValid():
+            if block.blockFormat().property(editor.HEADING):
+                nav["Títulos"].append((block, block.text()))
             for issue in self.block_issues(block):
+                if issue.kind == "comment":
+                    nav["Comentarios"].append((block, issue.problem))
+                else:
+                    nav["Avisos"].append((block, f"{issue.title}: {block.text()}"))
                 start, end = self.issue_range(block, issue)
                 selection = QTextEdit.ExtraSelection()
                 if issue.kind == "comment":  # como una nota adhesiva: fondo amarillo, no ondulado de error
@@ -6812,6 +6822,51 @@ class TextEditor:
         self.sheet.set_bars(changed, colors["changed"])
         self.counts = len(changed), issues
         self.show_counts()
+        self.nav_entries = nav
+        if not self.nav.isHidden():
+            self.fill_nav()
+
+    # Panel de navegación, como el de Word: lo que hay en el capítulo, a un clic
+    def nav_panel(self):
+        self.nav = QTreeWidget()
+        self.nav.setHeaderHidden(True)
+        self.nav.setMinimumWidth(200)
+        self.nav.itemClicked.connect(self.nav_go)
+        self.nav_entries = {}
+        self.nav.setVisible(bool(self.app.settings.get("editor_nav")))
+        self.nav_btn.setChecked(not self.nav.isHidden())
+        return self.nav
+
+    def toggle_nav(self):
+        """F9: muestra u oculta el panel; se recuerda para la próxima vez."""
+        self.nav.setVisible(self.nav.isHidden())
+        self.nav_btn.setChecked(not self.nav.isHidden())
+        self.app.settings["editor_nav"] = not self.nav.isHidden()
+        self.app.save_settings()
+        if not self.nav.isHidden():
+            self.fill_nav()
+
+    def fill_nav(self):
+        """Cuatro grupos con su cuenta; cada entrada, el párrafo recortado. Los vacíos salen sin desplegar."""
+        self.nav.clear()
+        for name, entries in self.nav_entries.items():
+            group = QTreeWidgetItem(self.nav, [f"{name} ({len(entries)})"])
+            for block, text in entries:
+                text = " ".join(text.replace("￼", "").split())
+                item = QTreeWidgetItem(group, [text[:60] + ("…" if len(text) > 60 else "")])
+                item.setToolTip(0, text)
+                item.setData(0, Qt.ItemDataRole.UserRole, block.blockNumber())
+            group.setExpanded(bool(entries))
+
+    def nav_go(self, item):
+        number = item.data(0, Qt.ItemDataRole.UserRole)
+        if number is None:
+            item.setExpanded(not item.isExpanded())
+            return
+        block = self.sheet.document().findBlockByNumber(number)
+        if block.isValid():
+            self.goto_block(block)
+            self.sheet.setFocus()
 
     def show_counts(self):
         """Recuentos de Cambios y Avisos en la cinta (más cortos si no cabe) y en la primera línea de su menú."""
@@ -7351,7 +7406,7 @@ class TextEditor:
     def center(self):
         """Barra divisoria al medio y el párrafo del cursor a la vista."""
         if shiboken6.isValid(self.split):
-            self.split.setSizes([10 ** 4, 10 ** 4])  # hoja y PDF, mitad y mitad
+            self.split.setSizes([240, 10 ** 4, 10 ** 4])  # panel de navegación (si se ve), hoja y PDF a medias
             self.sheet.ensureCursorVisible()
 
     def update_tools(self):

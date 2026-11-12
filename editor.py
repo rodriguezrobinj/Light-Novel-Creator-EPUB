@@ -1203,6 +1203,8 @@ class Sheet(QTextEdit):
             self.command.emit("next_change")
         elif key == Qt.Key.Key_F8:
             self.command.emit("next_issue")
+        elif key == Qt.Key.Key_F9:
+            self.command.emit("nav")
         elif ctrl and not alt and key in (Qt.Key.Key_Equal, Qt.Key.Key_Plus) and mods & Qt.KeyboardModifier.ShiftModifier:
             self.toggle_sup()  # Ctrl+Mayús+= de Word; en el teclado español «=» es Mayús+0
         elif ctrl and not alt and key in actions:

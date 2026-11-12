@@ -3652,6 +3652,44 @@ def test_editor_resume_bar_goes_where_you_left():
     assert shown and went and hidden_after and same_chapter, (shown, went, hidden_after, same_chapter)
 
 
+def test_editor_navigation_panel():
+    """F9 abre el panel de navegación con los títulos, avisos, comentarios y cambios del capítulo y su cuenta; un
+    clic lleva al párrafo. Se recuerda abierto para la próxima vez."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import app
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno dos."), B("heading", 1, "Parte dos"), B("p", 1, "Tres."),
+              B("p", 1, "Cuatro.")]
+    root, window, editor = editor_on(blocks, [0])
+    editor.issues = {3: [convert.Issue("x", 3, 1, "Menor", "Aviso de prueba", "", "")],
+                     4: [convert.Issue("comment", 4, 1, "Revisar", "Comentario del revisor", "Mirar esto", "")]}
+    c = editor.sheet.textCursor()
+    c.setPosition(editor.sheet.document().findBlockByNumber(1).position())
+    c.insertText("Cambiado. ")
+    editor.refresh_marks()
+    hidden = editor.nav.isHidden()
+    QTest.keyClick(editor.sheet, Qt.Key.Key_F9)
+    groups = [editor.nav.topLevelItem(n) for n in range(editor.nav.topLevelItemCount())]
+    names = [g.text(0) for g in groups]
+    notes = [groups[2].child(0).text(0)] if groups[2].childCount() else []
+    target = groups[1].child(0)
+    editor.nav_go(target)
+    went = editor.sheet.textCursor().block().blockNumber()
+    remembered = window.settings.get("editor_nav")
+    editor.win.done(0)
+    again = app.TextEditor(window, "0", *window.section_bounds(0))
+    shown_again = not again.nav.isHidden()
+    QTest.keyClick(again.sheet, Qt.Key.Key_F9)
+    again.win.done(0)
+    window.close()
+    assert hidden, "el panel empieza oculto"
+    assert names == ["Títulos (2)", "Avisos (1)", "Comentarios (1)", "Cambios (1)"], names
+    assert notes == ["Mirar esto"] and went == 3, (notes, went)
+    assert remembered is True and shown_again and window.settings["editor_nav"] is False
+
+
 def test_editor_work_log():
     """«Cifras» cuenta el trabajo: aceptar suma los párrafos cambiados y el tiempo de hoy, marcar revisado suma un
     capítulo (desmarcar no resta), y el resumen da hoy, los últimos 7 días y el total."""
