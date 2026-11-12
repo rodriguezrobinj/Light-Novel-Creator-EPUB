@@ -2884,6 +2884,28 @@ def test_editor_sheet_round_trip():
     assert sources == [2, 3, 4, 5, 6, 7, 8, 9, 10], sources
 
 
+def test_editor_pastes_html_with_italics():
+    """Pegar de Word o de la web (HTML) conserva cursiva, negrita (también la de un estilo font-weight) y
+    superíndice; colores y tamaños no. «[Ilustración 1]» de fuera entra como texto, no como ilustración."""
+    import qtk
+    from PySide6.QtCore import QMimeData
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Inicio.")], {})
+    sheet.moveCursor(QTextCursor.MoveOperation.End)
+    mime = QMimeData()
+    mime.setHtml('<p>Hola <i>mundo</i></p><p style="color:red;font-size:20pt"><span style="font-weight:700">Fuerte'
+                 '</span> 1<sup>o</sup></p><p>[Ilustración 1]</p>')
+    sheet.insertFromMimeData(mime)
+    assert sheet.content().split("\n\n") == ["Inicio.Hola <i>mundo</i>", "<b>Fuerte</b> 1<sup>o</sup>",
+                                             "[Ilustración 1]"], sheet.content()
+    assert not sheet.objects(), sheet.objects()
+
+
 def test_editor_sheet_actions_paste_and_undo():
     """Cursiva, negrita y título como en Word; Enter parte y el párrafo nuevo sigue apuntando a su bloque;
     unir deja un espacio; pegar de fuera trae solo texto; una ilustración no se duplica al pegarla."""
@@ -2937,7 +2959,7 @@ def test_editor_sheet_actions_paste_and_undo():
     sheet.moveCursor(QTextCursor.MoveOperation.End)
     sheet.split_here()
     sheet.insertFromMimeData(mime)
-    seen.append(sheet.content().split(chr(10) * 2)[-1])      # solo texto, sin negrita
+    seen.append(sheet.content().split(chr(10) * 2)[-1])      # con su negrita, sin el tamaño
     sheet.selectAll()
     copy = sheet.createMimeDataFromSelection()
     sheet.moveCursor(QTextCursor.MoveOperation.End)
@@ -2951,7 +2973,7 @@ def test_editor_sheet_actions_paste_and_undo():
     sheet.insertFromMimeData(cut)
     seen.append(sheet.content().count("[Ilustración 3]"))    # cortar y pegar la mueve
     assert seen == ["<i>Fin</i>.", "Fin.", "<b>Fin</b>.", "# Fin.", "Fin. Dijo hola, y se fue.", "Fin.",
-                    ["Dijo", "hola, y se fue."], 2, "Pegado de fuera", 1, 1], seen
+                    ["Dijo", "hola, y se fue."], 2, "<b>Pegado</b> de fuera", 1, 1], seen
 
 
 def test_editor_sheet_superscript_small_caps_right():

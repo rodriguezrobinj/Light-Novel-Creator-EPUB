@@ -159,15 +159,15 @@ def _frame_runs(lines):
     return out
 
 
-def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888888", levels=None):
+def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888888", levels=None, objects=True):
     """Pone lines ([(bloque, línea de section_text)]) en el cursor. La primera línea de texto va dentro del
     párrafo del cursor (pegar una palabra no parte el párrafo); el resto, en párrafos nuevos. remember: carga
     del editor, cada párrafo recuerda su línea. raw: texto de fuera, sin leer marcas. levels: {bloque: tipo
-    de su fila} de los títulos."""
+    de su fila} de los títulos. objects=False: "[Ilustración N]" queda como texto (pegado de fuera)."""
     frames = {} if raw else _frame_runs(list(lines))
     for i, (k, line) in enumerate(lines):
         bare = line.strip()
-        token = None if raw else convert.TOKEN.fullmatch(bare)
+        token = None if raw or not objects else convert.TOKEN.fullmatch(bare)
         heading = not raw and line.startswith("# ")
         centered = not raw and line.startswith(convert.CENTER)
         right = not raw and line.startswith(convert.RIGHT)
@@ -1188,16 +1188,22 @@ class Sheet(QTextEdit):
         return mime
 
     def canInsertFromMimeData(self, source):
-        return source.hasFormat(MIME) or source.hasText()
+        return source.hasFormat(MIME) or source.hasHtml() or source.hasText()
 
     def insertFromMimeData(self, source):
-        """De la hoja: con su formato, sin repetir una ilustración que ya está. De fuera: solo el texto."""
+        """De la hoja: con su formato, sin repetir una ilustración que ya está. De Word, Google Docs o la web
+        (HTML): con cursiva, negrita, superíndice, versalitas y enlaces, sin colores ni tamaños. Si no, solo el
+        texto."""
         k = self.current_source()
+        raw, objects = False, True
         if source.hasFormat(MIME):
             present = self.objects()
             lines = [line for line in bytes(source.data(MIME)).decode("utf-8").split("\n\n")
                      if not (convert.TOKEN.fullmatch(line) and line[1:-1] in present)]
-            raw = False
+        elif source.hasHtml():
+            outside = QTextDocument()
+            outside.setHtml(source.html())
+            lines, objects = [line for line in dump(outside).split("\n\n") if line.strip()], False
         else:
             lines, raw = [line.strip() for line in source.text().splitlines() if line.strip()], True
         if not lines:
@@ -1205,6 +1211,7 @@ class Sheet(QTextEdit):
         cursor = self.textCursor()
         cursor.beginEditBlock()
         cursor.removeSelectedText()
-        insert_lines(cursor, [(k, line) for line in lines], self.pictures, raw=raw, color=self.color)
+        insert_lines(cursor, [(k, line) for line in lines], self.pictures, raw=raw, color=self.color,
+                     objects=objects)
         cursor.endEditBlock()
         self.setTextCursor(cursor)
