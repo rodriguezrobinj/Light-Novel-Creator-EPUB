@@ -3,6 +3,7 @@ import base64
 import collections
 import concurrent.futures
 import contextlib
+import copy
 import ctypes
 import dataclasses
 import difflib
@@ -36,7 +37,7 @@ import pymupdf
 import segno
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
+from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
                            QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QInputDialog,
@@ -49,6 +50,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFra
 
 import convert
 import editor
+import options
 import qtk
 import theme
 import translate
@@ -77,8 +79,6 @@ INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "la
              "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
-PREFS = ("lang", "style", "separator", "typography", "shrink", "shrink_size", "gray", "credits", "trim", "font",
-         "font_file", "epub2", "reading", "profile", "autocase", "kepub", "hyphenate", "echoes", "whole_words")
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
@@ -110,7 +110,7 @@ LEVEL_NAMES = {"Grave": ("grave", "graves"), "Revisar": ("por revisar", "por rev
 LEVEL_PLURAL = {level: names[1] for level, names in LEVEL_NAMES.items()}
 SHORTCUTS = ("Clic en Tipo, o teclas C (capítulo), S (subtítulo), X (separador), Q (quitar), I (ilustración),"
              " D/G (doble: dividir o girar)\nDoble clic o F2: editar título · E: editar texto · R: revisado\n"
-             "Arrastrar o Alt+↑/↓: mover · Ctrl+F: buscar · Ctrl+Z: deshacer")
+             "Arrastrar o Alt+↑/↓: mover · Ctrl+F: buscar · Ctrl+Z: deshacer · Ctrl+,: opciones")
 
 
 def _quality_summary(report):
@@ -456,6 +456,12 @@ def _ps_quote(text):
     return "'" + str(text).replace("'", "''") + "'"
 
 
+def _same_type(value, like):
+    """Valor de ajustes.json válido para una opción: el mismo tipo que su valor de fábrica (escrito a mano puede
+    traer «sí» donde va true)."""
+    return isinstance(value, bool) if isinstance(like, bool) else type(value) is type(like)
+
+
 def _write_options(state, breaks=()):
     """Opciones de write_epub a partir de una revisión, de los campos de la ventana o de lo heredado."""
     lang, style = str(state.get("lang", "es")).strip(), state.get("style")
@@ -754,7 +760,8 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "words": "Diccionario de la serie", "glossary": "Glosario", "tr_glossary": "Glosario de traducción",
                 "tr_notes": "Personajes y estilo de traducción", "ignored": "Avisos ignorados", "comments": "Comentarios",
                 "alts": "Descripciones de ilustraciones",
-                "echoes": "Buscar ecos"}
+                "echoes": "Buscar ecos", "whole_words": "No partir palabras en el PDF",
+                "pdf_size": "Tamaño de PDF preferido"}
 
 
 def _versions_path(pdf):
@@ -1625,7 +1632,6 @@ class App:
         self.style_var = qtk.Var("Clásico")  # aspecto del EPUB: letra, párrafos e inicio de capítulo
         self.font_var = qtk.Var("Del lector")  # tipografía incrustada (convert.FONTS) o nombre de la propia
         self.font_file_var = qtk.Var("")  # ruta de la fuente propia
-        self.font_last = "Del lector"  # a la que se vuelve si «Otra…» no elige archivo
         self.typography_var = qtk.Var(True)  # comillas «», puntos suspensivos, raya, espacios
         self.gray_var = qtk.Var(False)  # para e-readers de tinta: pesa menos y se ve igual
         self.shrink_var = qtk.Var(True)  # las imágenes son casi todo el peso del EPUB
@@ -1635,6 +1641,7 @@ class App:
         self.echoes_var = qtk.Var(False)  # ecos en el informe: muchos avisos de estilo, solo si se piden
         self.hyphenate_var = qtk.Var(False)  # guiones blandos: el Kindle apenas parte palabras en español
         self.whole_words_var = qtk.Var(False)  # PDF maquetado sin palabras partidas al final de línea
+        self.pdf_size_var = qtk.Var("A5")  # tamaño de PDF que sale primero en «PDF ▾»
 
         root.setWindowTitle(APP_NAME)
         root.on_close, root.on_drop = self.close, self.open_path
@@ -1671,17 +1678,9 @@ class App:
         self.book_actions.append(tools.addSeparator())
         tools.addAction("Panel de serie…", self.series_panel)
         tools.addAction("Volumen recopilatorio…", self.omnibus)
-        tools.addAction("Vigilar una carpeta…", self.watch_folder)
+        tools.addAction("Vigilar una carpeta…", lambda: self.open_options("Carpeta vigilada"))
         tools.addSeparator()
-        themes = tools.addMenu("Tema")
-        group = QActionGroup(root)
-        self.theme_actions = {}
-        for name in theme.CHOICES:
-            action = themes.addAction(name)
-            action.setCheckable(True)
-            group.addAction(action)
-            action.triggered.connect(lambda _, name=name: (self.theme_var.set(name), self.apply_theme()))
-            self.theme_actions[name] = action
+        tools.addAction("Opciones…  (Ctrl+,)", lambda: self.open_options())
         tools.addAction("Atajos de teclado…", lambda: messagebox.showinfo("Atajos de teclado", SHORTCUTS))
         tools.addSeparator()
         tools.addAction("Instalar en este equipo", self.install)
@@ -1692,6 +1691,7 @@ class App:
                            self.file_label, 1, self.find_btn, margins=(10, 8, 10, 8)))
         outer.addWidget(top)
         QShortcut(QKeySequence("Ctrl+F"), root, self.find)
+        QShortcut(QKeySequence("Ctrl+,"), root, lambda: self.open_options())
         # En toda la ventana: tras «Editar texto…» o «Todos» el foco se queda en el botón, no en la lista.
         # Un campo de texto con el foco se queda Ctrl+Z para deshacer lo escrito en él.
         QShortcut(QKeySequence("Ctrl+Z"), root, self.undo)
@@ -1792,44 +1792,23 @@ class App:
         rows = QVBoxLayout(bottom)
         rows.setContentsMargins(10, 6, 10, 6)
         rows.setSpacing(4)
-        extras = QMenu(root)
-        for label, var in (("Limpieza tipográfica", self.typography_var), ("Imágenes en gris", self.gray_var),
-                           ("Reducir imágenes", self.shrink_var),
-                           ("Recortar márgenes blancos de las ilustraciones", self.trim_var),
-                           ("Página de créditos", self.credits_var),
-                           ("Minutos de lectura en el índice", self.reading_var),
-                           ("EPUB 2 (lectores antiguos)", self.epub2_var),
-                           ("Formato Kobo (KEPUB)", self.kepub_var),
-                           ("Partir palabras con guiones (Kindle)", self.hyphenate_var)):
-            action = extras.addAction(label)
-            action.setCheckable(True)
-            var.check(action)
-            action.triggered.connect(lambda _: self.update_preview())
-        self.font_box = _combo(self.font_var, FONT_CHOICES, 8, changed=self.font_changed)
         self.quality_btn = _button("Calidad", self.quality)
         self.quality_btn.setEnabled(False)
         self.gen_btn = _button("Generar EPUB…", self.generate, "primary")
-        pdf_menu = QMenu(root)
-        for size, label in (("A5", "A5, para leer o imprimir"), ("e-reader 6″", "e-reader 6″"), ("A4", "A4")):
-            pdf_menu.addAction(f"Generar PDF ({label})…", lambda size=size: self.generate_pdf(size))
-        pdf_menu.addSeparator()
-        whole = pdf_menu.addAction("No partir palabras al final de línea")
-        whole.setCheckable(True)
-        self.whole_words_var.check(whole)
-        self.pdf_btn = _menu_button("PDF", pdf_menu)
+        self.pdf_menu = QMenu(root)
+        self.pdf_menu.aboutToShow.connect(self.fill_pdf_menu)  # el tamaño preferido puede cambiar en Opciones
+        self.fill_pdf_menu()
+        self.pdf_btn = _menu_button("PDF", self.pdf_menu)
         self.pdf_btn.setToolTip("El libro maquetado en PDF, con las mismas opciones que el EPUB")
         self.gen_btn.setEnabled(False)
         self.pdf_btn.setEnabled(False)
-        self.options_row = QWidget()  # opciones del EPUB y «Generar»: solo con un libro abierto (update_chrome)
+        self.options_row = QWidget()  # perfil, opciones del libro y «Generar»: solo con un libro abierto (update_chrome)
         rows.addWidget(self.options_row)
+        # El resto de opciones vive en «Opciones»: aquí solo lo que más se cambia, el lector de destino
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
                                                                  changed=self.apply_profile),
-                            _label("Separador:"), _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12,
-                                                         changed=self.update_preview),
-                            _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
-                                                      changed=self.update_preview),
-                            _label("Letra:"), self.font_box,
-                            _menu_button("Opciones", extras), 1, self.pdf_btn, self.gen_btn))
+                            _button("Opciones del libro…", lambda: self.open_options("Perfil y formato", "book")),
+                            1, self.pdf_btn, self.gen_btn))
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setFixedWidth(160)
@@ -1868,6 +1847,8 @@ class App:
         # Marcos de tamaño fijo: solo cambian si cambia el sitio de las vistas previas, no con cada página
         self.idle_text, self.views_size = "Abre un PDF para ver la vista previa", None
         self.pages.resized.connect(self.on_resize)
+        # Valores de fábrica: lo que no esté en «Libros nuevos» (o esté mal escrito) sale de aquí
+        self.factory = {key: var.get() for key, var in self.fields().items() if key in options.BOOK_KEYS}
         self.load_settings()
         self.update_chrome()
         self.apply_theme()
@@ -1933,18 +1914,15 @@ class App:
         fields = ((("Título:", self.title_var), ("Autor:", self.author_var), ("Serie:", self.series_var),
                    ("Vol.:", self.volume_var)),
                   (("Grupo:", self.publisher_var), ("Traductor:", self.translator_var),
-                   ("Ilustraciones:", self.illustrator_var), ("Idioma:", self.lang_var)),
+                   ("Ilustraciones:", self.illustrator_var)),  # el idioma está en Opciones → Perfil y formato
                   (("Corrección:", self.proofreader_var), ("Edición:", self.editor_var),
                    ("Título original:", self.original_title_var), ("Fecha:", self.date_var)))
         for r, row in enumerate(fields):
             for c, (label, var) in enumerate(row):
                 grid.addWidget(QLabel(label), r, c * 2)
-                if var is self.lang_var:
-                    widget = _combo(var, LANGUAGES, 4, editable=True)
-                else:
-                    widget = var.entry(QLineEdit())
-                    if var is self.date_var:
-                        widget.setPlaceholderText("AAAA o AAAA-MM-DD")
+                widget = var.entry(QLineEdit())
+                if var is self.date_var:
+                    widget.setPlaceholderText("AAAA o AAAA-MM-DD")
                 grid.addWidget(widget, r, c * 2 + 1)
         grid.addWidget(QLabel("Géneros:"), 3, 0)
         subjects = self.subjects_var.entry(QLineEdit(placeholderText="separados por comas"))
@@ -1958,10 +1936,6 @@ class App:
         titles.addAction("Mayúsculas al estilo español", self.fix_case)
         titles.addAction("Numeración uniforme (Capítulo 1, 2…)", self.fix_numbers)
         titles.addAction("Apartados sin nombre (Parte 1…) como separador", self.parts_as_breaks)
-        titles.addSeparator()
-        autocase = titles.addAction("Corregir las mayúsculas al abrir si vienen en MAYÚSCULAS")
-        autocase.setCheckable(True)
-        self.autocase_var.check(autocase)
         self.cover_label = _label("", "muted")
         grid.addLayout(_row(_button("Portada…", self.choose_cover), self.cover_label,
                             _button("Reemplazos…", self.edit_replacements),
@@ -1998,8 +1972,6 @@ class App:
     def apply_theme(self):
         """Pone el tema elegido y vuelve a pintar lo que tiene colores propios (lista y vistas previas)."""
         self.dark = theme.apply(qtk.app(), self.theme_var.get())
-        if self.theme_var.get() in self.theme_actions:
-            self.theme_actions[self.theme_var.get()].setChecked(True)
         colors = theme.kind_colors(self.dark)
         for tag in KIND_TAG.values():
             self.tree.tag_configure(tag, font=self.fonts[tag], foreground=colors[tag])
@@ -2518,6 +2490,7 @@ class App:
         self.stack.setCurrentIndex(1)
         self.update_chrome()
         self.save_thumb()
+        self.apply_state(self.new_book_options())  # la revisión o la serie, si las hay, mandan después
         self.title_var.set(book.title)
         self.author_var.set(book.author)
         self.series_var.set(book.series)
@@ -2722,6 +2695,15 @@ class App:
         if self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
                     lambda problems: self.saved(out, problems), report=True, busy="Generando EPUB…"):
             self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
+
+    def fill_pdf_menu(self):
+        """«PDF ▾»: el tamaño preferido (Opciones → PDF) primero."""
+        labels = {"A5": "A5, para leer o imprimir", "e-reader 6″": "e-reader 6″", "A4": "A4"}
+        preferred = self.pdf_size_var.get()
+        self.pdf_menu.clear()
+        for size in sorted(labels, key=lambda s: s != preferred):
+            mark = " (preferido)" if size == preferred else ""
+            self.pdf_menu.addAction(f"Generar PDF ({labels[size]}){mark}…", lambda size=size: self.generate_pdf(size))
 
     def generate_pdf(self, size):
         """«PDF ▾»: el libro maquetado en PDF al tamaño elegido (convert.PDF_SIZES), con las opciones del EPUB."""
@@ -2949,17 +2931,84 @@ class App:
                 raise ValueError
         except (OSError, ValueError):
             self.settings = {}
-        try:
-            self.apply_state({name: self.settings[name] for name in PREFS if name in self.settings})
-        except (ValueError, TypeError):
-            pass  # valor mal escrito a mano en el .json
+        defaults = self.settings.get("defaults")
+        if not isinstance(defaults, dict):  # ajustes de antes: las opciones de libro iban en la raíz
+            defaults = {key: self.settings[key] for key in options.BOOK_KEYS if key in self.settings}
+        self.settings["defaults"] = {key: value for key, value in defaults.items()
+                                     if key in self.factory and _same_type(value, self.factory[key])}
+        if not isinstance(self.settings.get("translate"), dict):
+            self.settings["translate"] = {}
+        self.apply_state(self.new_book_options())
+        self.echoes_var.set(self.settings.get("echoes") is True)
+        if self.settings.get("device") in DEVICES:
+            self.device_var.set(self.settings["device"])
+        self.dark_var.set(self.settings.get("dark") is True)
         chosen = self.settings.get("theme")
         self.theme_var.set(chosen if chosen in theme.CHOICES else "Sistema")
         self.fill_recent()
 
-    def save_settings(self):
+    def option_choices(self):
+        """Valores de las listas de «Opciones»."""
+        return {"profile": list(PROFILES), "style": list(convert.STYLES), "separator": convert.SEPARATOR_CHOICES,
+                "lang": LANGUAGES, "font": FONT_CHOICES, "pdf_size": list(convert.PDF_SIZES),
+                "theme": theme.CHOICES, "device": list(DEVICES)}
+
+    def open_options(self, category=None, scope=None, on_close=None):
+        """«Opciones»: en category, o en la última vista."""
+        self.options_window = options.OptionsDialog(self, self.option_choices(), PROFILES,
+                                                    category or self.settings.get("options_page"), scope, on_close)
+        return self.options_window
+
+    def app_values(self):
+        """Lo de «La aplicación» en Opciones, copiado: se edita sin tocar nada hasta Aceptar."""
+        return {"theme": self.theme_var.get(), "device": self.settings.get("device", self.device_var.get()),
+                "dark": self.settings.get("dark") is True, "echoes": self.echoes_var.get(), "watch": self.watch,
+                "translate": copy.deepcopy(self.settings.get("translate") or {})}
+
+    def accept_options(self, defaults, values):
+        """Aceptar en Opciones: «Libros nuevos» y la aplicación a ajustes.json, el libro a su revisión."""
+        self.settings["defaults"] = dict(defaults)
+        self.settings.update(device=values["device"], dark=values["dark"], echoes=values["echoes"])
+        translation = self.settings.setdefault("translate", {})
+        translation.clear()  # el mismo dict: Traducir, si está abierto, lo tiene y ve lo nuevo
+        translation.update(values["translate"])
+        open_translation = getattr(self, "translate_window", None)
+        if open_translation and shiboken6.isValid(open_translation) and hasattr(open_translation, "parts"):
+            open_translation.parts["reload"]()  # Traducir abierto: el motor y la clave nuevos, no los de antes
+        if values["echoes"] != self.echoes_var.get():
+            self.echoes_var.set(values["echoes"])
+            self.update_quality()
+        if values["theme"] != self.theme_var.get():
+            self.theme_var.set(values["theme"])
+            self.apply_theme()
+        if values["watch"] != self.watch:
+            self.set_watch(values["watch"])
+        self.save_settings()
+        self.save_review()
+
+    def restore_options(self, book, values):
+        """Cancelar en Opciones: el libro y el tema vuelven a como estaban al abrirla."""
         fields = self.fields()
-        self.settings.update({name: fields[name].get() for name in PREFS})
+        changed = [key for key, value in book.items() if fields[key].get() != value]
+        for key in changed:
+            fields[key].set(book[key])
+        if self.theme_var.get() != values["theme"]:
+            self.theme_var.set(values["theme"])
+            self.apply_theme()
+        if changed and self.book:
+            self.update_preview()
+
+    def ask_folder(self):
+        return filedialog.askdirectory(initialdir=self.settings.get("folder"), title="Carpeta que vigilar")
+
+    def ask_font_file(self):
+        return filedialog.askopenfilename(filetypes=[("Fuente", "*.ttf *.otf")])
+
+    def new_book_options(self):
+        """Opciones con las que abre un libro sin revisión ni serie: «Libros nuevos» sobre los valores de fábrica."""
+        return {**self.factory, **self.settings.get("defaults", {})}
+
+    def save_settings(self):
         self.settings["theme"] = self.theme_var.get()
         try:
             SETTINGS.parent.mkdir(parents=True, exist_ok=True)
@@ -3799,8 +3848,7 @@ class App:
         if not pdfs:
             messagebox.showinfo("Convertir carpeta", "No hay PDF que convertir en esa carpeta.")
             return
-        fields = self.fields()
-        options = {name: fields[name].get() for name in PREFS}
+        options = self.new_book_options()
         self.run(_batch, ([str(p) for p in pdfs], options), lambda results: self.batch_done(results, folder),
                  report=True, busy="Convirtiendo…")
 
@@ -3819,20 +3867,6 @@ class App:
         if folder:
             self.result_dialog(folder)
 
-    def watch_folder(self):
-        """Activa o desactiva la carpeta vigilada; se recuerda entre sesiones."""
-        if self.watch:
-            if messagebox.askyesno("Carpeta vigilada", f"Se está vigilando:\n{self.watch}\n\n¿Dejar de vigilarla?"):
-                self.set_watch("")
-            return
-        folder = filedialog.askdirectory(initialdir=self.settings.get("folder"), title="Carpeta que vigilar")
-        if folder:
-            self.set_watch(folder)
-            messagebox.showinfo("Carpeta vigilada", f"Mientras esta ventana esté abierta, cada PDF nuevo de\n{folder}\n"
-                                "se convierte solo, junto al PDF, con su revisión, los datos de su serie o las "
-                                "opciones actuales.\n\nLos PDF que ya están en la carpeta no: para esos, "
-                                "«Convertir carpeta…».")
-
     def set_watch(self, folder):
         # Lo que ya hay al activarla no se toca: solo lo que llegue después
         self.watch, self.watch_sizes = folder, {}
@@ -3847,8 +3881,7 @@ class App:
         ready, self.watch_sizes = _ready(self.watch, self.watch_sizes, self.watch_skip)
         if ready:
             self.watch_skip.update(ready)  # un PDF que falla no se reintenta en cada vuelta
-            fields = self.fields()
-            options = {name: fields[name].get() for name in PREFS}
+            options = self.new_book_options()
             self.run(_batch, (ready, options), self.watch_done, report=True, busy="Carpeta vigilada:")
 
     def watch_done(self, results):
@@ -4029,23 +4062,6 @@ class App:
             self.update_preview()
         self.status.setText(f"{convert.counted(len(changed), 'apartado')} como separador")
 
-    def font_changed(self):
-        """«Otra…» pide un archivo de fuente; sin elegir ninguno, se queda la letra de antes."""
-        if self.font_var.get() == "Otra…":
-            path = filedialog.askopenfilename(filetypes=[("Fuente", "*.ttf *.otf")])
-            if path:
-                self.font_file_var.set(path)
-                self.show_font(Path(path).name)
-            self.font_var.set(Path(path).name if path else self.font_last)
-        self.font_last = self.font_var.get()
-        self.update_preview()
-
-    def show_font(self, name):
-        """Pone la fuente propia en el combo, antes de «Otra…», y la deja elegida."""
-        if self.font_box.findText(name) < 0:
-            self.font_box.insertItem(self.font_box.count() - 1, name)
-        self.font_box.setCurrentText(name)
-
     def apply_profile(self):
         """El perfil fija las opciones que importan para ese lector (PROFILES)."""
         for name, value in PROFILES.get(self.profile_var.get(), {}).items():
@@ -4199,9 +4215,9 @@ class App:
         show = qtk.Var("Todos")
         shown = _combo(show, ["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS] + ["Ignorados"],
                        12, changed=lambda: fill())
-        echoes = QCheckBox("Buscar ecos (palabras repetidas cerca)", checked=self.echoes_var.get())
-        # Sin Var.check: el diálogo se cierra y la variable no debe seguir poniendo valor a una casilla borrada
-        echoes.toggled.connect(lambda on: (self.echoes_var.set(on), fill(), self.update_quality()))
+        # Los ecos se activan en Opciones → Informe de calidad; al volver, la lista se rehace con ellos
+        echoes = _button("Opciones del informe…", lambda: self.open_options(
+            "Informe de calidad", on_close=lambda: shiboken6.isValid(win) and fill()))
         export_btn = _button("Exportar…", lambda: self.export_report(state["all"], state["score"], win))
         export_btn.setToolTip("Guardar el informe como página web (.html) o tabla para Excel (.csv), para otra persona")
         column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown, export_btn))
@@ -4394,7 +4410,7 @@ class App:
             return
         out = _epub_name(out, self.kepub_var.get())
         self.save_review()  # el tomo abierto entra con lo revisado hasta ahora
-        options = {name: self.fields()[name].get() for name in PREFS}
+        options = self.new_book_options()
         options["replacements"] = self.replacements
         if self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems), report=True,
                     busy="Preparando el recopilatorio…"):
@@ -4498,7 +4514,7 @@ class App:
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var,
-                "hyphenate": self.hyphenate_var, "echoes": self.echoes_var, "whole_words": self.whole_words_var}
+                "hyphenate": self.hyphenate_var, "whole_words": self.whole_words_var, "pdf_size": self.pdf_size_var}
 
     def rows(self):
         return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title"), self.tree.set(item, "ok")]
@@ -4537,12 +4553,9 @@ class App:
             self.style_var.set("Clásico")
         font, path = self.font_var.get(), Path(self.font_file_var.get())
         if font not in FONT_CHOICES or font == "Otra…":
-            if self.font_file_var.get() and path.name == font and path.is_file():
-                self.show_font(font)
-            else:
+            if not (self.font_file_var.get() and path.name == font and path.is_file()):
                 self.font_var.set("Del lector")
                 self.status.setText(f"No se encontró la fuente {font}: se usa la del lector.")
-        self.font_last = self.font_var.get()
         try:
             self.replacements = [[str(a), str(b)] for a, b in state["replacements"]]
         except (KeyError, TypeError, ValueError):
@@ -4717,7 +4730,9 @@ class App:
         series = self.series_var.get()
         memory = _series_memory(pdf, series)  # lo ya traducido en los otros tomos de la serie
         sources = {v["source"]: k for k, v in memory.items() if v.get("source")}  # original -> su clave
-        prefs = self.settings.get("translate") if isinstance(self.settings.get("translate"), dict) else {}
+        if not isinstance(self.settings.get("translate"), dict):
+            self.settings["translate"] = {}
+        prefs = self.settings["translate"]  # el mismo dict que edita Opciones → Traducción
         for name in ("models", "keys"):
             if not isinstance(prefs.get(name), dict):
                 prefs[name] = {}
@@ -4754,9 +4769,16 @@ class App:
         inside = QVBoxLayout(settings)
         inside.setContentsMargins(12, 10, 12, 10)
         inside.setSpacing(8)
-        inside.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, QLabel("Motor:"), engine, 1, QLabel("Traducir:"),
+        # Motor, modelo y clave se eligen en Opciones → Traducción; aquí solo se ven en el resumen. Los controles
+        # siguen, ocultos: de ellos leen traducir, revisar con la IA y el glosario
+        summary = _label("", "muted")
+        engine_btn = _button("Motor y claves…", lambda: self.open_options("Traducción"))
+        engine_box = QWidget()
+        engine_box.setLayout(_row(engine, model_label, model, models_btn, base_label, base, key_label, api_key))
+        engine_box.hide()
+        inside.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, summary, engine_btn, 1, QLabel("Traducir:"),
                               scope))
-        inside.addLayout(_row(model_label, model, models_btn, base_label, base, key_label, api_key, 1, glossary_btn))
+        inside.addLayout(_row(engine_box, 1, glossary_btn))
         hint = _label("", "muted")
         hint.setWordWrap(True)
         inside.addWidget(hint)
@@ -4916,12 +4938,17 @@ class App:
             model.setEditText(prefs["models"].get(name) or info.get("model", ""))
             api_key.setText(translate.unprotect(prefs["keys"].get(name, "")))
             base.setText(prefs.get("base") or info.get("base", ""))
-            for widget, shown in ((model_label, "model" in info), (model, "model" in info), (models_btn, "model" in info),
-                                  (base_label, info.get("custom")), (base, info.get("custom")),
-                                  (key_label, info["kind"] != "google"), (api_key, info["kind"] != "google")):
-                widget.setVisible(bool(shown))
             api_key.setPlaceholderText("Opcional" if info.get("custom") else "Clave API")
             hint.setText(hints["custom" if info.get("custom") else "openai" if "model" in info else info["kind"]])
+            missing = info.get("key") and not api_key.text().strip()
+            summary.setText(f"Motor: {name}" + (f" · {model.currentText().strip()}" if "model" in info else "")
+                            + (" · falta la clave" if missing else ""))
+
+        def reload():
+            """Tras «Opciones»: el motor y la clave de las preferencias, que acaban de cambiar."""
+            if shiboken6.isValid(win):
+                engine.setCurrentIndex(max(0, engine.findText(str(prefs.get("engine", "")))))
+                show_engine()
 
         def applied():
             """Textos ya puestos en el libro: un párrafo así está «Aplicado», no pendiente."""
@@ -5316,8 +5343,8 @@ class App:
             name = engine.currentText()
             info = translate.ENGINES[name]
             if info.get("key") and not api_key.text().strip():
-                messagebox.showerror("Traducir", f"Falta la clave de {name}.", parent=win)
-                api_key.setFocus()
+                messagebox.showerror("Traducir", f"Falta la clave de {name}. Ponla en «Motor y claves…».", parent=win)
+                self.open_options("Traducción")
                 return
             remember()
             order, wanted = table.get_children(), set(ids)
@@ -5373,8 +5400,8 @@ class App:
                                                       "(OpenAI, DeepSeek, Gemini, Claude…).", parent=win)
                 return
             if info.get("key") and not api_key.text().strip():
-                messagebox.showerror("Revisar con IA", f"Falta la clave de {name}.", parent=win)
-                api_key.setFocus()
+                messagebox.showerror("Revisar con IA", f"Falta la clave de {name}. Ponla en «Motor y claves…».", parent=win)
+                self.open_options("Traducción")
                 return
             order = table.get_children()
             picked = {i for i in table.selection() if not table.rows[i].isHidden()}
@@ -5913,7 +5940,8 @@ class App:
         dst.activated.connect(lambda _: fill())  # con lo de la serie que esté traducido a ese idioma
         show_engine()
         fill()
-        win.parts = {"table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
+        win.parts = {"summary": summary, "engine_btn": engine_btn, "reload": reload,
+                     "table": table, "run": run, "apply": apply, "translation": translation_box, "engine": engine,
                      "scope": scope, "dst": dst, "src": src, "key": api_key, "status": status, "work": work, "done": done,
                      "glossary": edit_glossary, "close": close, "merge": merge, "pdf": pdf, "book": self.book,
                      "model": model, "models": find_models, "chips": chips, "search": search, "step": step,

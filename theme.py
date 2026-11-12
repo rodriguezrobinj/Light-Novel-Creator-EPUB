@@ -74,6 +74,9 @@ QComboBox QAbstractItemView {{ background: {card}; border: 1px solid {line}; sel
     selection-color: {ink}; }}
 QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {muted}; border-radius: 3px; background: {base}; }}
 QCheckBox::indicator:checked {{ background: {acc}; border-color: {acc}; }}
+QRadioButton::indicator {{ width: 12px; height: 12px; border: 1px solid {muted}; border-radius: 7px; background: {base}; }}
+QRadioButton::indicator:checked {{ background: {acc}; border-color: {acc}; }}
+QRadioButton::indicator:disabled {{ border-color: {line}; }}
 QFrame#card {{ background: {card}; border: 1px solid {line}; border-radius: 8px; }}
 QFrame#bar {{ background: {card}; border: 0; }}
 QFrame#drop {{ background: {drop}; border: 2px dashed {drop_line}; border-radius: 12px; }}

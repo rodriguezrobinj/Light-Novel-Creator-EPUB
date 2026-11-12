@@ -1025,11 +1025,12 @@ class Root:
         return [w for w in self.window.root.findChildren(QDialog) if w.isVisible()]
 
 
-def visible_window():
-    """Ventana Qt sin pantalla (QT_QPA_PLATFORM=offscreen), con su tamaño: la lista calcula posiciones."""
+def visible_window(settings=None):
+    """Ventana Qt sin pantalla (QT_QPA_PLATFORM=offscreen), con su tamaño: la lista calcula posiciones.
+    settings: ajustes.json ya escrito, para probar lo que la ventana hace con él."""
     import app
 
-    app.SETTINGS = TMP / f"ajustes-{time_ns()}.json"  # cada ventana sin preferencias de otra prueba
+    app.SETTINGS = settings or TMP / f"ajustes-{time_ns()}.json"  # cada ventana sin preferencias de otra prueba
     app._start_spell_process = lambda: None  # sin el proceso de ortografía del editor (su prueba pone uno falso)
     app._start_thumbs = lambda jobs: None  # ni el de las miniaturas de recientes (su prueba llama a _render_thumbs)
     window = app.App(app.Window())
@@ -2093,7 +2094,7 @@ def test_write_pdf_bookmarks_numbers_and_metadata():
 def test_write_pdf_whole_words_never_splits_a_word():
     """PDF maquetado: el CSS pide hyphens: auto y MuPDF parte «mu-jer», «cue-ro» al final de línea. Con
     whole_words la palabra que no cabe pasa entera a la línea siguiente; sin la opción se sigue partiendo.
-    Con el menú «PDF ▾» de la ventana, la opción marcada llega a write_pdf."""
+    Marcada en Opciones → PDF, la opción llega a write_pdf."""
     B = convert.Block
     text = ("Los que aparecieron ante nosotros eran humanos: un hombre y una mujer cargando a un hombre herido "
             "sobre sus hombros. Su armadura de cuero estaba manchada de sangre y cubierta de suciedad. ") * 4
@@ -2111,8 +2112,9 @@ def test_write_pdf_whole_words_never_splits_a_word():
     root, window = visible_window()
     window.show_book(book)
     window.pdf = TMP / "original.pdf"
-    action = next(a for a in window.pdf_btn.menu().actions() if a.isCheckable())
-    action.trigger()
+    dialog = window.open_options("PDF", "book")  # la casilla vive en Opciones → PDF
+    dialog.parts["widgets"]["whole_words"].setChecked(True)
+    dialog.parts["accept"]()
     sent = []
     originals = app.filedialog.asksaveasfilename, window.run
     app.filedialog.asksaveasfilename = lambda **kwargs: str(TMP / "menu.pdf")
@@ -2121,10 +2123,9 @@ def test_write_pdf_whole_words_never_splits_a_word():
         window.generate_pdf("A5")
     finally:
         app.filedialog.asksaveasfilename, window.run = originals
-    label, checked = action.text(), window.whole_words_var.get()
+    checked = window.whole_words_var.get()
     window.close()
     assert checked and sent and sent[0]["whole_words"] is True, (checked, sent)
-    assert "palabras" in label, label
 
 
 def test_write_epub_and_pdf_report_progress():
@@ -4092,6 +4093,250 @@ def test_hyphenate_soft_hyphens_only_in_paragraph_text():
     assert convert.check_epub(out) == [], convert.check_epub(out)
 
 
+def test_options_table_and_search():
+    """Cada opción está una vez, en una categoría que existe; buscar «guion» lleva a Texto y a PDF, sin tildes ni
+    mayúsculas; y las claves de libro son las que se guardan por libro."""
+    import options
+    keys = [o.key for o in options.OPTIONS]
+    categories = {c for group in options.CATEGORIES.values() for c in group}
+    found = sorted({o.category for o in options.find("GUIÓN")})
+    assert len(keys) == len(set(keys)), keys
+    assert all(o.category in categories for o in options.OPTIONS)
+    assert found == ["PDF", "Texto"], found
+    assert options.find("zzz") == []
+    assert "font_file" in options.BOOK_KEYS and "theme" not in options.BOOK_KEYS
+    assert options.fold("Tipografía ÚNICA") == "tipografia unica"
+
+
+def test_window_new_books_use_saved_defaults():
+    """Libros nuevos: un ajustes.json antiguo (opciones en la raíz, sin «defaults») pasa a «Libros nuevos» sin cambiar
+    nada. Un libro sin revisión ni serie abre con esos valores, no con los del libro anterior; uno con revisión, con
+    la suya. Un valor mal escrito a mano se ignora."""
+    import json
+    import options
+    settings = TMP / f"ajustes-viejos-{time_ns()}.json"
+    settings.write_text(json.dumps({"gray": True, "style": "Novela ligera", "credits": "sí", "translate": [],
+                                    "options_page": ["mal"]}), encoding="utf-8")
+    root, window = visible_window(settings)
+    migrated = dict(window.settings["defaults"])
+    page = window.open_options().category  # última página mal escrita a mano: abre en la primera
+    window.options_window.parts["cancel"]()
+    folder = TMP / f"libros-{time_ns()}"
+    folder.mkdir()
+    books = {}
+    for name in ("con-revision", "nuevo"):
+        doc = pymupdf.open()
+        add_page(doc, 1, [(72, 100, "Capitulo 1: Uno", 20, "helv"), (72, 150, "Texto.", 11, "cour")])
+        doc.save(folder / f"{name}.pdf")
+        books[name] = folder / f"{name}.pdf"
+    book = lambda: convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1: Uno"),
+                                                  convert.Block("p", 1, "Texto.")], [0])
+    window.pdf = books["con-revision"]
+    window.show_book(book())
+    window.gray_var.set(False)  # este libro, sin gris
+    window.save_review()
+    window.pdf = books["nuevo"]
+    window.show_book(book())  # sin revisión ni serie: «Libros nuevos», no lo del libro anterior
+    fresh = (window.gray_var.get(), window.style_var.get(), window.credits_var.get())
+    window.pdf = books["con-revision"]
+    window.show_book(book())
+    reviewed = window.gray_var.get()
+    defaults = window.new_book_options()
+    translation = window.settings["translate"]
+    window.close()
+    assert migrated["gray"] is True and migrated["style"] == "Novela ligera" and "credits" not in migrated, migrated
+    assert fresh == (True, "Novela ligera", False), fresh
+    assert reviewed is False
+    assert defaults["gray"] is True and set(defaults) == set(options.BOOK_KEYS), defaults
+    assert translation == {} and page == "Perfil y formato", (translation, page)
+
+
+def test_window_options_this_book_live_and_cancel():
+    """Opciones en «Este libro»: el estilo cambia el libro y la vista previa al momento; Cancelar lo deja todo
+    como estaba. Aceptar lo guarda en la revisión. «Opciones del libro…» abre en «Perfil y formato»."""
+    import json
+    import app
+    from PySide6.QtWidgets import QPushButton
+    root, window = visible_window()
+    window.pdf = TMP / f"opciones-{time_ns()}.pdf"
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Uno", 20, "helv")])
+    doc.save(window.pdf)
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1: Uno"),
+                                                    convert.Block("p", 1, "Texto.")], [0]))
+    redrawn = []
+    window.update_preview = lambda _=None: redrawn.append(window.style_var.get())
+    before = window.style_var.get()
+    other = next(s for s in convert.STYLES if s != before)
+    dialog = window.open_options()
+    first = dialog.scope
+    dialog.parts["show"]("Aspecto")
+    dialog.parts["put"]("style", other)
+    live = window.style_var.get()
+    dialog.parts["cancel"]()
+    cancelled, redrawn_after_cancel = window.style_var.get(), redrawn[-1]
+    book_button = next(b for b in window.options_row.findChildren(QPushButton) if b.text() == "Opciones del libro…")
+    book_button.click()
+    root.update()
+    dialog = window.options_window
+    opened = dialog.category
+    dialog.parts["show"]("Aspecto")
+    dialog.parts["put"]("style", other)
+    dialog.parts["accept"]()
+    saved = json.loads(app._review_path(window.pdf).read_text(encoding="utf-8"))["style"]
+    window.close()
+    assert first == "book" and live == other and redrawn_after_cancel == before, (first, live, redrawn)
+    assert cancelled == before and opened == "Perfil y formato" and saved == other, (cancelled, opened, saved)
+
+
+def test_window_options_new_books_without_book():
+    """Sin libro abierto, «Este libro» está desactivado y lo cambiado va a «Libros nuevos» al Aceptar; Cancelar no
+    guarda nada."""
+    import json
+    import app
+    root, window = visible_window()
+    dialog = window.open_options("Ilustraciones")
+    disabled, scope = not dialog.parts["this_book"].isEnabled(), dialog.scope
+    dialog.parts["put"]("gray", True)
+    dialog.parts["cancel"]()
+    after_cancel = window.settings["defaults"].get("gray")
+    dialog = window.open_options("Ilustraciones")
+    dialog.parts["put"]("gray", True)
+    dialog.parts["accept"]()
+    stored = json.loads(app.SETTINGS.read_text(encoding="utf-8"))["defaults"]["gray"]
+    window.close()
+    assert disabled and scope == "new" and after_cancel in (None, False) and stored is True, (disabled, scope, stored)
+
+
+def test_window_options_search_profile_and_missing_font():
+    """Buscar «guion» deja Texto y PDF y resalta la opción; sin coincidencias, un aviso. El perfil Kindle marca los
+    guiones con su nota; desmarcarlos pasa a «Personalizado». «Usar también para libros nuevos» copia la página.
+    Una letra propia sin archivo avisa en rojo en la página, sin ventana."""
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
+    dialog = window.open_options("Perfil y formato", "book")
+    dialog.parts["search"].setText("guion")
+    listing = dialog.parts["list"]
+    shown = [listing.item(n).text().strip() for n in range(listing.count()) if not listing.item(n).isHidden()]
+    page = dialog.category
+    dialog.parts["search"].setText("zzz")
+    empty = not dialog.parts["empty"].isHidden()
+    dialog.parts["search"].clear()
+    dialog.parts["put"]("profile", "Kindle")
+    dialog.parts["show"]("Texto")
+    note = dialog.parts["notes"]["hyphenate"].text()
+    dialog.parts["put"]("hyphenate", False)
+    profile = window.profile_var.get()
+    dialog.parts["copy"].click()
+    copied = dialog.defaults["hyphenate"]
+    window.font_file_var.set(str(TMP / "no-existe.ttf"))
+    window.font_var.set("no-existe.ttf")
+    dialog.parts["show"]("Aspecto")
+    error = dialog.parts["font_error"]
+    error_text = error.text() if error else ""
+    dialog.parts["cancel"]()
+    window.close()
+    assert shown == ["EL LIBRO", "Texto", "PDF"] and page == "Texto", (shown, page)
+    assert empty and "Fijada por el perfil Kindle" in note and profile == "Personalizado", (empty, note, profile)
+    assert copied is False and "No se encuentra" in error_text, (copied, error_text)
+
+
+def test_window_options_app_pages():
+    """Tema: se ve al momento y Cancelar lo devuelve. Aceptar guarda dispositivo, modo oscuro y ecos, que la ventana
+    usa al abrir la próxima vez. Carpeta vigilada: elegir y aceptar la vigila; una que ya no existe avisa en rojo."""
+    import app
+    from PySide6.QtWidgets import QPushButton
+    root, window = visible_window()
+    dialog = window.open_options("Apariencia")
+    dialog.parts["put"]("theme", "Oscuro")
+    live = window.dark
+    dialog.parts["cancel"]()
+    back = window.dark
+    folder = TMP / f"vigilada-{time_ns()}"
+    folder.mkdir()
+    window.ask_folder = lambda: str(folder)
+    dialog = window.open_options("Carpeta vigilada")
+    next(b for b in dialog.win.findChildren(QPushButton) if b.text() == "Elegir…").click()
+    dialog.parts["put"]("device", "Tablet")
+    dialog.parts["put"]("dark", True)
+    dialog.parts["put"]("echoes", True)
+    dialog.parts["accept"]()
+    watching, echoes = window.watch, window.echoes_var.get()
+    folder.rmdir()
+    dialog = window.open_options("Carpeta vigilada")
+    lost = dialog.parts["watch_error"]
+    lost_text = lost.text() if lost else ""
+    dialog.parts["cancel"]()
+    window.set_watch("")  # que la ventana siguiente no vigile una carpeta borrada
+    window.save_settings()
+    settings = app.SETTINGS
+    window.close()
+    root, again = visible_window(settings)
+    reopened = (again.device_var.get(), again.dark_var.get(), again.echoes_var.get())
+    again.close()
+    import qtk
+    import theme
+    theme.apply(qtk.app(), "Claro")  # las demás pruebas, en claro
+    assert live and not back and watching == str(folder) and echoes, (live, back, watching, echoes)
+    assert "ya no existe" in lost_text, lost_text
+    assert reopened == ("Tablet", True, True), reopened
+
+
+def test_window_options_translation_page():
+    """Traducción en Opciones: clave oculta con 👁; al Aceptar, Traducir abierto usa el motor y la clave nuevos, y
+    al cerrarse no los pisa con los de antes."""
+    import translate
+    from PySide6.QtWidgets import QLineEdit
+    root, window = versioned_window()
+    tr = window.translate_book().parts
+    dialog = window.open_options("Traducción")
+    parts = dialog.parts
+    parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+    parts["engine"].activated.emit(parts["engine"].currentIndex())
+    hidden = parts["key"].echoMode() == QLineEdit.EchoMode.Password
+    parts["key"].setText("sk-nueva")
+    parts["eye"].click()
+    shown = parts["key"].echoMode() == QLineEdit.EchoMode.Normal
+    parts["accept"]()
+    root.update()
+    summary, used = tr["summary"].text(), (tr["engine"].currentText(), tr["key"].text())
+    tr["close"]()
+    root.update()
+    stored = translate.unprotect(window.settings["translate"]["keys"]["DeepSeek"])
+    window.close()
+    assert hidden and shown, (hidden, shown)
+    assert "DeepSeek" in summary and used == ("DeepSeek", "sk-nueva") and stored == "sk-nueva", (summary, used, stored)
+
+
+def test_window_pdf_menu_puts_preferred_size_first():
+    """El tamaño preferido en Opciones sale primero en «PDF ▾», con «(preferido)»."""
+    root, window = visible_window()
+    window.pdf_size_var.set("A4")
+    window.fill_pdf_menu()
+    first = window.pdf_btn.menu().actions()[0].text()
+    window.close()
+    assert first.startswith("Generar PDF (A4") and "(preferido)" in first, first
+
+
+def test_window_options_are_only_in_options():
+    """Los ajustes ya no están repartidos: la barra deja Perfil, «Opciones del libro…», PDF y Generar; no hay menú
+    «Opciones ▾», ni Tema en Herramientas, ni idioma en «Editar datos». El informe lleva a sus opciones."""
+    from PySide6.QtWidgets import QComboBox, QPushButton, QToolButton
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
+    bar = [b.text() for b in window.options_row.findChildren(QToolButton)]
+    combos = window.options_row.findChildren(QComboBox)
+    menus = [a.text() for b in window.root.findChildren(QToolButton) if b.menu() for a in b.menu().actions()]
+    data_combos = window.data_panel.findChildren(QComboBox)
+    window.quality()
+    report = root.dialogs()[-1]
+    link = [b.text() for b in report.findChildren(QPushButton) if b.text() == "Opciones del informe…"]
+    window.close()
+    assert "Opciones ▾" not in bar and len(combos) == 1, (bar, len(combos))
+    assert "Tema" not in menus and "Opciones…  (Ctrl+,)" in menus, menus
+    assert not data_combos and link, (data_combos, link)
+
+
 def test_window_kindle_profile_hyphenates():
     root, window = visible_window()
     window.profile_var.set("Kindle")
@@ -4266,8 +4511,7 @@ def test_window_remembers_settings_and_recent_pdfs():
 
     root, window = visible_window()
     settings = app.SETTINGS
-    window.style_var.set("Moderno")
-    window.gray_var.set(True)
+    window.settings["defaults"].update(style="Moderno", gray=True)  # «Libros nuevos», no lo del último libro
     pdf = make_novel()
     window.open_path(str(pdf))  # como un PDF arrastrado sobre el .exe
     deadline = time.time() + 60
@@ -5614,8 +5858,8 @@ def test_replay_image_and_page_at_start():
 
 
 def test_window_echoes_and_glossary_in_quality_report():
-    """La casilla «Buscar ecos» del informe añade los ecos; el glosario guardado va en la revisión y el informe
-    avisa de la variante; «Añadir nombres de este tomo» propone los frecuentes."""
+    """«Opciones del informe…» → «Buscar ecos» añade los ecos al informe abierto; el glosario guardado va en la
+    revisión y el informe avisa de la variante; «Añadir nombres de este tomo» propone los frecuentes."""
     from PySide6.QtWidgets import QPushButton
     B = convert.Block
     blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Miró la puerta y luego volvió a mirar la puerta cerrada."),
@@ -5627,7 +5871,11 @@ def test_window_echoes_and_glossary_in_quality_report():
     parts = root.dialogs()[-1].parts
     titles = lambda: [parts["table"].set(i, "title") for i in parts["table"].get_children()]
     without = titles()
-    parts["echoes"].click()
+    parts["echoes"].click()  # «Opciones del informe…»
+    root.update()
+    dialog = window.options_window
+    dialog.parts["widgets"]["echoes"].setChecked(True)
+    dialog.parts["accept"]()
     root.update()
     with_echoes = titles()
     window.edit_glossary()
@@ -5639,11 +5887,13 @@ def test_window_echoes_and_glossary_in_quality_report():
     save()
     root.update()
     state = window.review_state()
+    echoes_saved = window.settings.get("echoes")
     kinds = [i.kind for i in window.quality_report()]
     window.close()
     assert "Palabra repetida cerca" not in without and "Palabra repetida cerca" in with_echoes, (without, with_echoes)
     assert proposed == "Emilia  # 5 veces", proposed
-    assert state["glossary"] == ["Emilia"] and state["echoes"] is True, state["glossary"]
+    # Los ecos son de la aplicación (Opciones → Informe de calidad), no del libro
+    assert state["glossary"] == ["Emilia"] and "echoes" not in state and echoes_saved is True, state
     assert "glossary" in kinds and "echo" in kinds, kinds
 
 
@@ -6054,21 +6304,22 @@ def test_custom_font_is_embedded():
     assert names == ["OEBPS/fonts/propia.ttf"] and css.count("@font-face") == 1, (names, css)
     assert 'font-family: "Mi Letra"' in css and convert.check_epub(out) == [], css
     root, window = visible_window()
+    window.show_book(book)
     window.apply_state({"font": "Mi Letra.ttf", "font_file": str(font)})
-    shown, option = window.font_box.currentText(), window.write_options()["font"]
+    dialog = window.open_options("Aspecto", "book")
+    shown, option = dialog.parts["widgets"]["font"].currentText(), window.write_options()["font"]
+    dialog.parts["cancel"]()
     window.apply_state({"font": "Otra.ttf", "font_file": str(TMP / "Otra.ttf")})
     fallback, status = window.font_var.get(), window.status.text()
-    import app
-    original = app.filedialog.askopenfilename
-    try:
-        picked = []
-        for answer in (str(font), ""):  # elegir el archivo; después, cancelar: se queda la anterior
-            app.filedialog.askopenfilename = lambda **kw: answer
-            window.font_box.setCurrentText("Otra…")
-            window.font_changed()
-            picked.append((window.font_var.get(), window.font_box.currentText()))
-    finally:
-        app.filedialog.askopenfilename = original
+    picked = []
+    dialog = window.open_options("Aspecto", "book")
+    for answer in (str(font), ""):  # elegir el archivo; después, cancelar: se queda la anterior
+        window.ask_font_file = lambda: answer
+        box = dialog.parts["widgets"]["font"]
+        box.setCurrentText("Otra…")
+        box.activated.emit(box.currentIndex())
+        picked.append((window.font_var.get(), dialog.parts["widgets"]["font"].currentText()))
+    dialog.parts["cancel"]()
     window.close()
     assert picked == [("Mi Letra.ttf", "Mi Letra.ttf")] * 2, picked
     assert shown == "Mi Letra.ttf" and option == str(font), (shown, option)
@@ -6343,7 +6594,7 @@ def test_kepub_option_profiles_and_names():
     assert app.PROFILES["Kindle"]["shrink_size"] == 1600 and not app.PROFILES["Kindle"]["gray"]
     assert all("kepub" in p for name, p in app.PROFILES.items() if name != "Personalizado")
     assert app._write_options({"kepub": True})["kepub"] and not app._write_options({})["kepub"]
-    assert "kepub" in app.INHERITED and "kepub" in app.PREFS
+    assert "kepub" in app.INHERITED and "kepub" in __import__("options").BOOK_KEYS
 
 
 def test_batch_with_kobo_writes_kepub():
@@ -8033,8 +8284,9 @@ def test_window_translate_close_mid_batch():
 
 
 def test_window_translate_models_and_book_language():
-    """«Buscar modelos» llena la lista con los de la API; Google Cloud pide clave. Un libro en inglés: el informe
-    no da erratas del español, «Ortografía…» lo dice y el editor no revisa la ortografía."""
+    """Opciones → Traducción: «Buscar modelos» llena la lista con los de la API; Google Cloud pide clave y no
+    modelo; Traducir, abierto, muestra el motor elegido. Un libro en inglés: el informe no da erratas del español,
+    «Ortografía…» lo dice y el editor no revisa la ortografía."""
     import time
     import app
     import translate
@@ -8043,8 +8295,8 @@ def test_window_translate_models_and_book_language():
     original = translate._get
     translate._get = lambda url, headers=None: {"data": [{"id": "deepseek-reasoner"}, {"id": "deepseek-chat"}]}
     try:
-        win = window.translate_book()
-        parts = win.parts
+        tr = window.translate_book().parts
+        parts = window.open_options("Traducción").parts
         parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
         parts["engine"].activated.emit(parts["engine"].currentIndex())
         parts["key"].setText("k")
@@ -8059,7 +8311,10 @@ def test_window_translate_models_and_book_language():
         parts["engine"].setCurrentIndex(parts["engine"].findText("Google Cloud (clave)"))
         parts["engine"].activated.emit(parts["engine"].currentIndex())
         assert parts["key"].isVisible() and not parts["model"].isVisible()
-        parts["close"]()
+        parts["accept"]()
+        root.update()
+        assert "Google Cloud" in tr["summary"].text() and not tr["key"].isVisible(), tr["summary"].text()
+        tr["close"]()
     finally:
         translate._get = original
     item = first_title(window)
