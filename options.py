@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame, QHBox
                                QListWidget, QListWidgetItem, QPushButton, QRadioButton, QScrollArea, QSpinBox,
                                QSplitter, QVBoxLayout, QWidget)
 
+import theme
+
 BOOK, APP = "El libro", "La aplicación"
 CATEGORIES = {BOOK: ("Perfil y formato", "Aspecto", "Texto", "Ilustraciones", "PDF"),
               APP: ("Apariencia", "Vista previa", "Traducción", "Carpeta vigilada", "Informe de calidad")}
@@ -94,8 +96,13 @@ class OptionsDialog:
         search.setClearButtonEnabled(True)
         QShortcut(QKeySequence("Ctrl+F"), win, search.setFocus)
         listing = QListWidget()
+        empty = QLabel("")
+        empty.setObjectName("muted")
+        empty.setWordWrap(True)
+        empty.hide()
         side.addWidget(search)
         side.addWidget(listing, 1)
+        side.addWidget(empty)
         split.addWidget(left)
         right = QWidget()
         page_column = QVBoxLayout(right)
@@ -143,7 +150,8 @@ class OptionsDialog:
                 listing.addItem(self.items[name])
         self.parts = {"list": listing, "search": search, "this_book": this_book, "new_books": new_books,
                       "widgets": {}, "notes": {}, "accept": self.accept, "cancel": self.cancel, "show": self.show,
-                      "put": self.put}
+                      "put": self.put, "empty": empty, "copy": None, "font_error": None}
+        search.textChanged.connect(lambda _: self.filter())
         listing.currentItemChanged.connect(lambda item, _: item and self.show(item.text().strip()))
         this_book.toggled.connect(lambda on: self.set_scope("book" if on else "new"))
         self.category = None
@@ -182,6 +190,19 @@ class OptionsDialog:
         if len(changes) > 1:
             self.show(self.category)  # las casillas del perfil cambiaron
 
+    def filter(self):
+        """Solo las categorías con alguna opción que coincide; la página elegida resalta las que coinciden."""
+        text = self.parts["search"].text()
+        names = [name for group in CATEGORIES.values() for name in group]
+        hits = {o.category for o in find(text)} if text.strip() else set(names)
+        for header, group in CATEGORIES.items():
+            self.items[header].setHidden(not any(name in hits for name in group))
+            for name in group:
+                self.items[name].setHidden(name not in hits)
+        self.parts["empty"].setText("" if hits else f"Ninguna opción contiene «{text.strip()}»")
+        self.parts["empty"].setVisible(not hits)
+        self.show(self.category if self.category in hits or not hits else next(n for n in names if n in hits))
+
     def set_scope(self, scope):
         self.scope = scope
         self.show(self.category)
@@ -202,10 +223,18 @@ class OptionsDialog:
         title = QLabel(category)
         title.setObjectName("title")
         layout.addWidget(title)
-        self.parts["widgets"], self.parts["notes"] = {}, {}
+        self.parts["widgets"], self.parts["notes"], self.parts["font_error"] = {}, {}, None
         for option in OPTIONS:
             if option.category == category:
                 self.add_option(layout, option)
+        self.parts["copy"] = None
+        if self.is_book() and self.scope == "book":
+            copy_btn = QPushButton("Usar también para libros nuevos")
+            copy_btn.setToolTip("Copia los valores de esta página a «Libros nuevos»")
+            keys = [o.key for o in OPTIONS if o.category == category] + (["font_file"] if category == "Aspecto" else [])
+            copy_btn.clicked.connect(lambda: self.defaults.update({k: self.owner.fields()[k].get() for k in keys}))
+            layout.addWidget(copy_btn, 0, Qt.AlignmentFlag.AlignLeft)
+            self.parts["copy"] = copy_btn
         layout.addStretch(1)
         self.scroll.setWidget(page)  # la página anterior se borra con su scroll
 
@@ -247,8 +276,21 @@ class OptionsDialog:
         note.setObjectName("muted")
         note.setWordWrap(True)
         note.setContentsMargins(22 if option.kind == "check" else 0, 0, 0, 8)
+        fixed = self.profiles.get(self.get("profile"), {})
+        if key in fixed and key != "profile":
+            note.setText(f"{option.help} Fijada por el perfil {self.get('profile')}.")
+        text = self.parts["search"].text().strip()
+        if text and option in find(text):
+            row.setStyleSheet(f"background: {theme.colors(self.owner.dark)['sel']};")
         layout.addWidget(row)
         layout.addWidget(note)
+        if option.kind == "font" and value not in self.choices["font"] and not Path(
+                str(self.get("font_file") or "")).is_file():
+            error = QLabel("No se encuentra el archivo de la letra: el EPUB usará la del lector.")
+            error.setObjectName("warn")
+            error.setWordWrap(True)
+            layout.addWidget(error)
+            self.parts["font_error"] = error
         self.parts["widgets"][key], self.parts["notes"][key] = widget, note
 
     def font_choices(self, current):

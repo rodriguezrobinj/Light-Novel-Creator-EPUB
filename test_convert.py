@@ -4206,6 +4206,39 @@ def test_window_options_new_books_without_book():
     assert disabled and scope == "new" and after_cancel in (None, False) and stored is True, (disabled, scope, stored)
 
 
+def test_window_options_search_profile_and_missing_font():
+    """Buscar «guion» deja Texto y PDF y resalta la opción; sin coincidencias, un aviso. El perfil Kindle marca los
+    guiones con su nota; desmarcarlos pasa a «Personalizado». «Usar también para libros nuevos» copia la página.
+    Una letra propia sin archivo avisa en rojo en la página, sin ventana."""
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
+    dialog = window.open_options("Perfil y formato", "book")
+    dialog.parts["search"].setText("guion")
+    listing = dialog.parts["list"]
+    shown = [listing.item(n).text().strip() for n in range(listing.count()) if not listing.item(n).isHidden()]
+    page = dialog.category
+    dialog.parts["search"].setText("zzz")
+    empty = not dialog.parts["empty"].isHidden()
+    dialog.parts["search"].clear()
+    dialog.parts["put"]("profile", "Kindle")
+    dialog.parts["show"]("Texto")
+    note = dialog.parts["notes"]["hyphenate"].text()
+    dialog.parts["put"]("hyphenate", False)
+    profile = window.profile_var.get()
+    dialog.parts["copy"].click()
+    copied = dialog.defaults["hyphenate"]
+    window.font_file_var.set(str(TMP / "no-existe.ttf"))
+    window.font_var.set("no-existe.ttf")
+    dialog.parts["show"]("Aspecto")
+    error = dialog.parts["font_error"]
+    error_text = error.text() if error else ""
+    dialog.parts["cancel"]()
+    window.close()
+    assert shown == ["EL LIBRO", "Texto", "PDF"] and page == "Texto", (shown, page)
+    assert empty and "Fijada por el perfil Kindle" in note and profile == "Personalizado", (empty, note, profile)
+    assert copied is False and "No se encuentra" in error_text, (copied, error_text)
+
+
 def test_window_kindle_profile_hyphenates():
     root, window = visible_window()
     window.profile_var.set("Kindle")
