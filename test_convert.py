@@ -1860,6 +1860,38 @@ def test_window_runs_work_in_another_process():
     assert result and result[0] != os.getpid(), result
 
 
+def test_window_open_file_with_too_long_path():
+    """Making Magic: el PDF se guardó en una ruta de 298 caracteres y «Abrir PDF» decía «[WinError 2] El sistema no
+    puede encontrar el archivo», aunque estaba ahí: Windows y los visores (Foxit) no abren rutas de 260 o más. La
+    ventana lo explica y ofrece abrir su carpeta; «Abrir carpeta» abre la carpeta sin seleccionar el archivo, que
+    con esa ruta tampoco funciona."""
+    import app
+
+    folder = TMP / ("carpeta muy larga de una serie " * 4).strip() / ("otra carpeta larga con el nombre " * 3).strip()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / ("Nombre largo del libro vol 1 Premium (LNC) (A5)" + "x" * max(0, 262 - len(str(folder)) - 52) + ".pdf")
+    path.write_bytes(b"%PDF")
+    root, window = visible_window()
+    asked, launched = [], []
+    originals = app.os.startfile, app.subprocess.Popen, app.messagebox.askyesno, app.messagebox.showerror
+
+    def startfile(target):  # lo que hace Windows con una ruta así
+        raise FileNotFoundError(2, "El sistema no puede encontrar el archivo especificado", str(target))
+
+    app.os.startfile, app.subprocess.Popen = startfile, lambda args, **_: launched.append(args)
+    app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or True
+    app.messagebox.showerror = lambda title, message, **_: asked.append("error: " + message)
+    try:
+        window.open_external(path)
+        window.open_external(path, folder=True)
+    finally:
+        app.os.startfile, app.subprocess.Popen, app.messagebox.askyesno, app.messagebox.showerror = originals
+        root.destroy()
+    assert len(str(path)) >= 260, len(str(path))
+    assert len(asked) == 1 and "260" in asked[0] and "caracteres" in asked[0], asked
+    assert launched == [["explorer", str(folder)], ["explorer", str(folder)]], launched
+
+
 def test_window_reports_worker_crash():
     """Si el proceso de trabajo muere sin avisar, la ventana muestra el error y se desbloquea."""
     import os
