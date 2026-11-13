@@ -1,6 +1,7 @@
 """Hoja del editor de texto estilo Word: lo que se ve es lo que sale en el EPUB. Lee y escribe el formato de
 convert.section_text (un párrafo por línea con <i>/<b>, "# " delante de un título, las ilustraciones y los
 separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda convert.edit_section."""
+import base64
 import difflib
 import html
 import re
@@ -25,7 +26,8 @@ RIGHTED = _USER + 9   # párrafo a la derecha (firma de una carta): vuelve con <
 FRAME_PAD = 16        # píxeles entre el recuadro y su texto
 SUB = 18              # sangría de una línea sin viñeta en un recuadro con viñetas («HP: 10/10» bajo «■ Lorna»)
 MIME = "application/x-lnc-hoja"  # copiar y pegar dentro de la hoja conserva formato e ilustraciones
-MARKS = re.compile(r'(</?(?:i|b|sup|sc)>|<a href="[^"]*">|</a>)')
+ICON = _USER + 10     # imagen: la etiqueta <img> de un icono del texto (convert.ICON), que vuelve a section_text
+MARKS = re.compile(r'(</?(?:i|b|sup|sc)>|<a href="[^"]*">|</a>|<img class="icono" [^>]*>)')
 LINK = re.compile(r'<a href="([^"]*)">')
 LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; app.py pone el del tema
 NOTE = re.compile(r"\[Nota: [^\]]*\]")
@@ -78,10 +80,30 @@ def link_format(href, f=None):
     return f
 
 
-def _insert_marked(cursor, text):
-    """Texto con <i>/<b>/<sup>/<sc>/<a href> como cursiva, negrita, superíndice, versalitas y enlaces reales."""
+def _insert_marked(cursor, text, color="#888888"):
+    """Texto con <i>/<b>/<sup>/<sc>/<a href> como cursiva, negrita, superíndice, versalitas y enlaces reales, y
+    los iconos (convert.ICON) como imagen de la altura de la letra, del color del texto como los separadores."""
     for part, *marks in _runs(text):
-        cursor.insertText(part, char_format(*marks))
+        m = convert.ICON.fullmatch(part)
+        if not m:
+            cursor.insertText(part, char_format(*marks))
+            continue
+        picture = QImage.fromData(base64.b64decode(m[1]))
+        tinted = QPainter(picture)
+        tinted.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        tinted.fillRect(picture.rect(), QColor(color))
+        tinted.end()
+        name = f"icono:{hash(m[1])}"
+        cursor.document().addResource(QTextDocument.ResourceType.ImageResource, QUrl(name), picture)
+        f = QTextImageFormat()
+        f.merge(char_format(*marks))
+        f.setName(name)
+        height = QFontMetrics(cursor.document().defaultFont()).height() * 0.8
+        f.setHeight(height)
+        f.setWidth(picture.width() * height / max(picture.height(), 1))
+        f.setVerticalAlignment(QTextCharFormat.VerticalAlignment.AlignMiddle)
+        f.setProperty(ICON, part)
+        cursor.insertImage(f)
 
 
 def _symbol(text, color, height=28):
@@ -199,7 +221,7 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
         elif raw:
             cursor.insertText(line, _plain_format())
         else:
-            _insert_marked(cursor, line if raw else _strip(line))
+            _insert_marked(cursor, line if raw else _strip(line), color)
         if remember:
             f = cursor.blockFormat()
             f.setProperty(ORIGINAL, line)
@@ -270,7 +292,8 @@ def _lines(block):
             flush()
             out.append(f"[{name}]")
             continue
-        text = fragment.text().replace(" ", " ").replace("￼", "")
+        icon = f.property(ICON) if f.isImageFormat() else None
+        text = icon or fragment.text().replace(" ", " ").replace("￼", "")
         if text:
             runs.append((text, f.fontItalic(), f.fontWeight() >= QFont.Weight.DemiBold,
                          f.anchorHref() if f.isAnchor() else "",
@@ -410,7 +433,7 @@ def match_case(model, word):
 
 def plain_line(line):
     """Texto de una línea de section_text como se ve en la hoja: sin su prefijo ni sus marcas de formato."""
-    return MARKS.sub("", _strip(line))
+    return MARKS.sub("", convert.ICON.sub("￼", _strip(line)))  # el icono es un objeto: un carácter
 
 
 def added_spans(before, after):

@@ -1,4 +1,5 @@
 """Convierte PDFs de novelas ligeras en EPUB con texto fluido."""
+import base64
 import collections
 import colorsys
 import csv
@@ -255,7 +256,7 @@ def _row(spans):
             texts.append(" ")
             parts.append(" ")
         texts.append(t)
-        part = html.escape(t, quote=False)
+        part = s.get("icon") or html.escape(t, quote=False)
         if _italic(s):
             part = f"<i>{part}</i>"
         if _bold(s):
@@ -539,6 +540,11 @@ def _frames(page):
 # Símbolos que algunas novelas meten como imagen diminuta en el texto, y su dibujo en la fuente de símbolos de Windows
 GLYPHS = "■□◆◇●○♥♡★☆♪♫➔→▶▲△▼▽✓✗※"
 SYMBOLS_TTF = Path(os.environ.get("WINDIR") or r"C:\Windows") / "Fonts" / "seguisym.ttf"
+# Icono en imagen que no es ningún símbolo de GLYPHS: va en el párrafo con su PNG dentro, así lo llevan igual la vista
+# previa, el recopilatorio y las revisiones guardadas; write_epub lo saca a un archivo
+ICON = re.compile(r'<img class="icono" src="data:image/png;base64,([A-Za-z0-9+/]+=*)" alt=""/>')
+ICON_TAG = re.compile(r'(<img class="icono" [^>]*>)')  # para partir una línea por sus iconos
+ICON_MARK = re.compile(r'&lt;(img class="icono" src="data:image/png;base64,[A-Za-z0-9+/]+=*" alt=""/)&gt;')
 
 
 def _shape(pix):
@@ -610,6 +616,20 @@ def _classify(width, height, stride, samples):
     return best if score(shapes[best]) >= 0.55 else ""
 
 
+def _icon(page, box):
+    """<img> de ICON con el dibujo de box sin el papel: lo blanco queda transparente y el color, el mismo sobre
+    blanco. Un icono que no se reconoce se ve como en el PDF en vez de perderse."""
+    zoom = 48 / max(1, box.height)
+    pix = page.get_pixmap(clip=box, matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csRGB, alpha=False)
+    rgb, out = pix.samples, bytearray()
+    for i in range(0, len(rgb), 3):
+        px = rgb[i:i + 3]
+        a = 255 - min(px)
+        out += bytes(255 - (255 - c) * 255 // a if a else 255 for c in px) + bytes([a])
+    png = pymupdf.Pixmap(pymupdf.csRGB, pix.width, pix.height, bytes(out), True).tobytes("png")
+    return f'<img class="icono" src="data:image/png;base64,{base64.b64encode(png).decode()}" alt=""/>'
+
+
 def _split_span(page, span, x):
     """span partido en x, donde un símbolo en imagen va dentro de su texto («find! ♪”»); None si no se puede. Las
     letras salen de rawdict con las mismas opciones que _rows (con recorte, MuPDF añadía una letra de más)."""
@@ -657,8 +677,11 @@ def _inline_glyphs(page, spans):
             n = round(box.width / box.height)
             text = "".join(_glyph(page, pymupdf.Rect(box.x0 + box.width * j / n, box.y0,
                                                      box.x0 + box.width * (j + 1) / n, box.y1)) for j in range(n))
-        if not text:
+        # Nageki 1, pág. 9: con Cambria el bbox de la línea sube dos letras sobre su base y abarcaba el adorno-separador
+        # de encima; un icono va a la altura de las letras de su línea
+        if not text and not line["origin"][1] - 1.2 * line["size"] <= middle <= line["origin"][1] + 0.3 * line["size"]:
             continue
+        icon = "" if text else _icon(page, box)
         if line["bbox"][0] + 1 < box.x0 and box.x1 < line["bbox"][2] - 1:
             halves = _split_span(page, line, box.x0)
             if halves:
@@ -666,7 +689,7 @@ def _inline_glyphs(page, spans):
                 spans += halves
         # Sin negrita ni cursiva: el símbolo no parte la etiqueta de su línea («■ <b>Lorna</b>»)
         spans.append({**line, "text": text, "bbox": tuple(box), "origin": (box.x0, line["origin"][1]), "flags": 0,
-                      "font": "glyph"})
+                      "font": "glyph", "icon": icon})
 
 
 def _image_info(page, digests):
@@ -1013,7 +1036,7 @@ def count_matches(book, replacements):
     return counts
 
 
-SAFE = re.compile(r"(</?(?:i|b|sup|sc)>|\[Nota: )")  # marcas del editor que un reemplazo no debe romper
+SAFE = re.compile(r"(</?(?:i|b|sup|sc)>|\[Nota: |<img [^>]*>)")  # marcas del editor que un reemplazo no debe romper
 
 
 def replace_text(book, find, new, word=False, blocks=None):
@@ -1083,7 +1106,7 @@ def _inline(text):
     out = out if _balanced(out) else TAGS.sub("", out)
     out = LINK_MARK.sub(lambda m: f'<a href="{m[1]}">{m[2]}</a>' if _balanced(m[2]) else m[0], out)
     out = NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
-    return out.replace("<sc>", SC_OPEN).replace("</sc>", SC_CLOSE)
+    return ICON_MARK.sub(r"<\1>", out).replace("<sc>", SC_OPEN).replace("</sc>", SC_CLOSE)
 
 
 def edit_section(book, start, end, text):
@@ -1488,6 +1511,8 @@ def _plain(block):
 
 @_memo  # tras una edición casi todos los párrafos siguen igual
 def _unhtml(text):
+    if "icono" in text:  # «así ♡ y» sin el icono es «así y», no «así  y»
+        text = ICON_TAG.sub("", text.replace(' <img class="icono"', '<img class="icono"'))
     return html.unescape(TAGS.sub("", text))
 
 
@@ -2001,13 +2026,21 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
 )
 
 
+def _beside_icons(fix, line):
+    """fix(texto) aplicado a line salvo a sus iconos: las letras del base64 de su PNG no son palabras."""
+    if "icono" not in line:
+        return fix(line)
+    parts = ICON_TAG.split(line)
+    return "".join(p if n % 2 else fix(p) for n, p in enumerate(parts))
+
+
 @_memo
 def _typos(line):
     """Las erratas de TYPOS de una línea: ((índice en TYPOS, línea arreglada)…). Recordadas por línea: tras un
     arreglo, el informe solo vuelve a mirar los párrafos que cambiaron."""
     found = []
     for n, (_, _, rule, _, _) in enumerate(TYPOS):
-        fixed = rule(line)
+        fixed = _beside_icons(rule, line)
         # Lo que la limpieza tipográfica del EPUB ya arregla («— dijo» -> «—dijo»), no se avisa
         if fixed != line and _typography(_inline(fixed)) != _typography(_inline(line)):
             found.append((n, fixed))
@@ -2110,8 +2143,10 @@ def _issue_span(issue, blocks):
     """(inicio, fin) del problema del aviso en el texto del párrafo como lo muestra el editor (sin etiquetas, con
     «[Nota: …]»): el editor lo subraya ahí, como Word, y no el párrafo entero. None si no se sabe."""
     b = blocks[issue.block]
-    shown = TAGS.sub("", _line(b, issue.block))
+    shown = TAGS.sub("", ICON.sub("￼", _line(b, issue.block)))  # en la hoja, el icono es un objeto: un carácter
     shown = shown[2:] if b.kind == "heading" else shown
+    if issue.kind == "icon":
+        return shown.find("￼"), shown.find("￼") + 1
     text, lead = shown.strip(), len(shown) - len(shown.lstrip())
     edit = issue.edit
     if edit and edit[2] and edit[:2] == (issue.block, issue.block + 1):  # arreglo de este párrafo: lo que cambia
@@ -2254,6 +2289,13 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                                 "Cambia una por un sinónimo o reescribe la frase con «Editar texto…» (tecla E).",
                                 _around(text, *echo), text=text))
         line = _line(b, k)
+        if ICON.search(line):
+            report.append(Issue("icon", k, b.page, "Menor", "Icono sin reconocer",
+                                "El PDF dibuja aquí un símbolo como imagen y no se parece a ningún carácter conocido: "
+                                "va en el libro como una imagen pequeña dentro del texto.",
+                                "Si es un símbolo de texto (♡, ★, ♪…), bórralo y escribe el carácter con «Editar "
+                                "texto…» (tecla E), en «Ω Símbolos». Si se ve bien, ignora el aviso.",
+                                _cut(_unhtml(ICON.sub("[icono]", b.html)).strip()), text=text))
         for t, fixed in _typos(line) if spanish and not link else ():
             kind, title, _, why, solution = TYPOS[t]
             before, after = TAGS.sub("", line), TAGS.sub("", fixed)
@@ -2261,10 +2303,11 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
             report.append(Issue(kind, k, b.page, "Menor", title, why, solution,
                                 _around(before, n, n), _around(after, n, n + len(after) - len(before)),
                                 (k, k + 1, fixed), text))
-        m = honorific.search(line) if honorific else None
+        bare = ICON.sub("￼", line)  # honoríficos y nombres, no en las letras del PNG de un icono
+        m = honorific.search(bare) if honorific else None
         if m:
-            fixed = honorific.sub(lambda h: (str.upper if h[0][:1].isupper() else str.lower)(
-                honorifics[h[0].lower()][0][:1]) + honorifics[h[0].lower()][0][1:], line)
+            fixed = _beside_icons(lambda s: honorific.sub(lambda h: (str.upper if h[0][:1].isupper() else str.lower)(
+                honorifics[h[0].lower()][0][:1]) + honorifics[h[0].lower()][0][1:], s), line)
             best, n_best, n_here = honorifics[m[0].lower()]
             before, after = TAGS.sub("", line), TAGS.sub("", fixed)
             n = len(os.path.commonprefix([before, after]))
@@ -2273,9 +2316,9 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                                 f"{counted(n_here, 'vez', 'veces')}: mejor una sola forma.",
                                 f"Unificarlo en «{best}».", _around(before, n, n),
                                 _around(after, n, n + len(after) - len(before)), (k, k + 1, fixed), text))
-        m = names.search(line) if names else None
+        m = names.search(bare) if names else None
         if m:
-            fixed = names.sub(lambda h: named[h[0]], line)
+            fixed = _beside_icons(lambda s: names.sub(lambda h: named[h[0]], s), line)
             before, after = TAGS.sub("", line), TAGS.sub("", fixed)
             n = len(os.path.commonprefix([before, after]))
             report.append(Issue("glossary", k, b.page, "Menor", "Nombre distinto al glosario",
@@ -2785,6 +2828,7 @@ p.credits { text-indent: 0; text-align: center; margin: 0.6em 0; }
 p.center { text-indent: 0; text-align: center; }
 p.right { text-indent: 0; text-align: right; }
 small.sc { font-size: 1em; font-variant: small-caps; }
+img.icono { height: 1em; vertical-align: -0.15em; }
 div.marco { border: 3px double #777777; padding: 0.5em 0.9em; margin: 1em 0; font-family: sans-serif;
   font-size: 0.95em; }
 div.marco p { text-indent: 0; margin: 0; text-align: left; }
@@ -2990,6 +3034,14 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             sections[-1][2].append((k, b))
 
     files, images = {}, {}
+
+    def icon_file(m):
+        """El icono de ICON como archivo: el mismo ♡ en todo el libro, uno solo."""
+        data = base64.b64decode(m[1])
+        src = f"img/icono-{image_key(data)}.png"
+        images[src] = data
+        return f'<img class="icono" src="{src}" alt=""/>'
+
     subtitles = {}  # archivo -> [(ancla, título escapado)]: subentradas del índice
     pages, marked = [], set()  # [(archivo, página)] de la lista de páginas; páginas ya marcadas
     noted = 0  # notas al pie escritas: numeración seguida en todo el libro, ids únicos
@@ -3052,7 +3104,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     css = ("status" if STATUS.fullmatch(_plain(b)) else "right" if b.align == "right"
                            else "center" if b.align else "")
                 attr = f' class="{css}"' if css else ""
-                body = NOTE.sub(noteref, fix(b.html, dashes=not framed[at]))  # la nota sale del párrafo: no se parte
+                body = NOTE.sub(noteref, ICON.sub(icon_file, fix(b.html, dashes=not framed[at])))  # la nota sale del párrafo: no se parte
                 parts.append(f"<p{attr}>{mark()}{_hyphenate(body) if hyphenate else body}</p>")
             if framed[at] and (at == len(blocks) - 1 or not framed[at + 1]):
                 parts.append("</div>")
