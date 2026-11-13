@@ -342,6 +342,7 @@ def _ask_note(parent, note):
     return text if ok else None
 
 
+MAX_PATH = 260  # caracteres de ruta desde los que Windows y casi todos los programas ya no abren un archivo
 NO_VOICE = ("Windows no tiene ninguna voz en español instalada.\n\nInstálala en Configuración → Hora e idioma → "
             "Voz → Agregar voces, elige Español y vuelve a pulsar «Leer».")
 # Voz de Windows (System.Speech): lee una línea de la entrada, la dice y responde «ok». Sin voz en español, «novoice»
@@ -2948,15 +2949,26 @@ class App:
         self.open_external(out, win, folder=True)
 
     def open_external(self, path, win=None, folder=False):
+        # Making Magic: Windows y los visores (Foxit) no abren una ruta de MAX_PATH o más; daban «no se encuentra»
+        target, long_path = Path(path), len(str(path)) >= MAX_PATH
         try:
             if folder:
-                target = Path(path)
-                args = ["explorer", f"/select,{target}"] if target.is_file() else ["explorer", str(target)]
+                # con ruta larga, «/select» tampoco encuentra el archivo: la carpeta a secas
+                args = (["explorer", str(target.parent)] if long_path and target.is_file()
+                        else ["explorer", f"/select,{target}"] if target.is_file() else ["explorer", str(target)])
                 subprocess.Popen(args)
             else:
                 os.startfile(path)
         except OSError as e:
-            messagebox.showerror("Error", f"No se pudo abrir:\n{path}\n\n{e}")
+            if long_path and target.exists():
+                if messagebox.askyesno(
+                        "No se pudo abrir",
+                        f"El archivo se guardó bien, pero su ruta tiene {len(str(path))} caracteres y Windows no "
+                        f"abre archivos con rutas de {MAX_PATH} o más: los lectores de PDF y EPUB tampoco lo abren ahí.\n\n"
+                        f"{path}\n\nMuévelo a una carpeta más corta o acorta su nombre. ¿Abrir su carpeta?"):
+                    subprocess.Popen(["explorer", str(target.parent)])
+            else:
+                messagebox.showerror("Error", f"No se pudo abrir:\n{path}\n\n{e}")
         if win is not None:
             win.close()
 
