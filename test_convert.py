@@ -957,6 +957,23 @@ def test_chapter_label_joins_the_name_below():
     assert not any(plain(b.html) == "¡El regreso!" for b in book.blocks if b.kind == "p")
 
 
+def test_small_label_joins_a_bigger_one_line_name():
+    """Making Magic (EPUB de la propia app, reabierto): «Chapter 3» en 11 pt y el nombre debajo en una línea de
+    16,5 pt, 27 pt más abajo. Con el nombre en dos líneas (13,8 pt, 23,5 pt) se unían; en una, no, y salían
+    «Chapter 3» y el nombre como subtítulo: el hueco entre líneas base crece con la letra de la línea de abajo."""
+    doc = pymupdf.open()
+    chapter_page(doc, 1, [(172, 130, "Chapter 2", 11, "helv"), (116, 157.2, "A Strange Fruit a Day", 16.5, "hebo")])
+    chapter_page(doc, 2, [(172, 130, "Chapter 3", 11, "helv"), (54, 153.5, "One Day, About Five Hundred", 13.8, "hebo"),
+                          (166, 174.1, "Years into My Life", 13.8, "hebo")])
+    doc.set_toc([[1, "Chapter 2: A Strange Fruit a Day", 1], [1, "Chapter 3: One Day, About Five Hundred Years into My Life", 2]])
+    path = TMP / "etiqueta-nombre-mayor.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = [(plain(b.html), k in book.candidates) for k, b in enumerate(book.blocks) if b.kind == "heading"]
+    assert heads == [("Chapter 2: A Strange Fruit a Day", True),
+                     ("Chapter 3: One Day, About Five Hundred Years into My Life", True)], heads
+
+
 def test_front_matter_before_first_chapter_is_not_a_chapter():
     """Sin marcadores, la portadilla ("Mi Serie", "- Volumen 5 -") no cuenta como capítulo."""
     doc = pymupdf.open()
@@ -2208,6 +2225,26 @@ def test_write_pdf_bookmarks_numbers_and_metadata():
     numbered = [n for n in range(1, pages) if n not in image_pages and feet[n]]
     assert numbered and all(feet[n] == str(n + 1) for n in numbered), feet
     assert not list(TMP.glob("libro.pdf.tmp")), "queda el .tmp"
+
+
+def test_write_pdf_small_caps_keep_their_letters():
+    """Making Magic: en el PDF del estilo «Novela ligera», sin tipografía elegida, «Chapter 3» (versalitas) se
+    leía «CƒĵǙǵŧǡ 3»: las versalitas de la letra por defecto de MuPDF no guardan sus letras. Al reabrir el PDF
+    no había etiqueta y el capítulo perdía su número; copiar o buscar en el PDF tampoco iba. Se leen las letras, y
+    el PDF reabierto da «Chapter 3: Nombre»."""
+    B = convert.Block
+    text = "Ella abrió la puerta y miró el pasillo vacío antes de seguir. " * 12
+    blocks = ([B("heading", 1, "Chapter 3: Becoming a Witch")]
+              + [B("p", 1, 'Dijo <small class="sc">versalitas</small> en voz baja. ' + text) for _ in range(6)])
+    book = convert.Book("Mi novela", "Autora X", jpeg(400, 600), blocks, [0])
+    out = TMP / "versalitas.pdf"
+    convert.write_pdf(book, [(0, "Chapter 3: Becoming a Witch")], out, size="A5", style="Novela ligera")
+    with pymupdf.open(out) as pdf:
+        text = " ".join(page.get_text() for page in pdf)
+    again = convert.analyze(out)
+    titles = [html.unescape(again.blocks[k].html) for k in again.candidates]
+    assert "CHAPTER 3" in text.upper() and "VERSALITAS" in text.upper(), text[:300]
+    assert titles == ["Chapter 3: Becoming a Witch"], titles
 
 
 def test_write_pdf_whole_words_never_splits_a_word():
