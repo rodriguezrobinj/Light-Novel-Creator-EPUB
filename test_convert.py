@@ -5834,6 +5834,15 @@ def test_quality_report_leaves_narration_after_aside():
                       "—Ven —dijo él.", "—Ven —dijo él—. Vamos ya."])
 
 
+def test_quality_report_moves_dash_after_exclamation():
+    """Making Magic traducido por DeepSeek: «—¡Por favor… Creación!— Y aquello…»: tras ! o ? acaba lo que se dice y
+    la narración que sigue abre con su raya pegada: «…Creación! —Y aquello…». Con minúscula es un inciso: no."""
+    check_typo_cases("dialog", [("—¡Por favor, Creación!— Y aquello fue una fruta.",
+                                 "—¡Por favor, Creación! —Y aquello fue una fruta."),
+                                ("—¿Vienes?—Ella no respondió.", "—¿Vienes? —Ella no respondió.")],
+                     ["—¡Ven! —dijo él.", "—¡Ven! —Y se fue.", "Gritó: ¡Fuego!—"])
+
+
 def test_quality_report_finds_calques():
     """Calcos del inglés de frase fija: «en base a», «tomar lugar», «hacer sentido», «en orden de» + infinitivo."""
     check_typo_cases("calque", [
@@ -7808,7 +7817,7 @@ def test_translate_ai_batches_split_and_marks():
         url, headers, body = fake.calls[0]
         assert out == ["ES:" + t for t in texts], out
         assert len(fake.calls) == 3 and url == "https://api.deepseek.com/chat/completions", fake.calls
-        assert headers["Authorization"] == "Bearer k" and body["model"] == "deepseek-chat", (headers, body)
+        assert headers["Authorization"] == "Bearer k" and body["model"] == "deepseek-flash", (headers, body)
         system = body["messages"][0]["content"]
         assert "Subaru = Subaru" in system and "em dash" in system and "Before\n→ Antes" in body["messages"][1]["content"]
         assert "Line 1\n→ ES:Line 1" in fake.calls[2][2]["messages"][1]["content"], "la segunda mitad ve la primera"
@@ -7956,6 +7965,10 @@ def test_translate_doubts_and_second_pass():
     assert doubts("Where are you going?", "—¿Adónde vas?", "es") == []
     assert "apertura" in doubts("Where are you going?", "—Adónde vas?", "es")[0]
     assert "raya" in doubts('"Hello," she said.', '"Hola", dijo ella.', "es")[0]
+    # Making Magic con DeepSeek: el original marca el diálogo con «» (la tipografía de la app) y un capítulo entero
+    # salió con comillas mientras los demás iban con raya
+    assert "raya" in doubts("«Hello,» she said.", "«Hola», dijo ella.", "es")[0]
+    assert "even when" in translate.instructions("en", "es")
     assert doubts('"Hello," she said.', '"Hello," she said in English.', "en") == []
     assert "sin traducir" in doubts("He walked to the door.", "He walked to the door.", "es")[0]
     assert doubts("Subaru.", "Subaru.", "es") == []  # un nombre solo queda igual
@@ -8188,6 +8201,8 @@ def test_translate_google_lines_retry_after_and_propose():
                                           names=["Emilia", "Roswaal"], text="Her dress. Elmina came. Dress: G")
         assert terms == [["Witch Cult", "Culto de la Bruja"], ["Elmina", "Elmina"]] and people == ["Emilia: chica, formal; trata de usted a todos"]
         assert "Emilia, Roswaal" in posts[0]["messages"][1]["content"] and "JSON" in posts[0]["messages"][0]["content"]
+        # Making Magic: «Lady Witch» salía «Dama Bruja»; los tratamientos, como los dice un lector en español
+        assert "Señorita" in posts[0]["messages"][0]["content"], posts[0]["messages"][0]["content"]
         try:
             translate.propose("DeepL", "x", "en", "es", api_key="k")
             raise AssertionError("debía fallar")
@@ -8606,6 +8621,61 @@ def test_window_translate_series_memory():
         window.close()
 
 
+def test_window_translate_accept_all_review_fixes():
+    """Making Magic con DeepSeek: la revisión marcó 9 de 117 párrafos y 8 de sus correcciones eran buenas; en un tomo
+    entero son cientos, una a una. «Aceptar todas» pregunta con cuántas son y pone todas las correcciones; con «No»,
+    nada cambia."""
+    import json
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    original, saved_ask = translate._post, app.messagebox.askyesno
+    translate._post = FakeAI()
+    asked, answer, flagged = [], [False], []
+
+    def reviewer(url, headers, body):
+        user = body["messages"][-1]["content"]
+        data = json.loads(user[user.index("Paragraphs:") + len("Paragraphs:"):])
+        out = {n: {"problem": "Calco.", "fix": "ARREGLADO " + v["translation"]} for n, v in data.items()
+               if v["source"] in flagged}
+        return {"choices": [{"message": {"content": json.dumps(out)}}]}
+
+    app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or answer[0]
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        table = parts["table"]
+        parts["src"].setCurrentIndex(parts["src"].findData("es"))
+        parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
+        parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        parts["key"].setText("k")
+        parts["run"]()
+        wait_translation(root, win)
+        bad = [i for i in table.get_children() if len(table.set(i, "orig")) > 20][:2]
+        flagged += [table.set(i, "orig") for i in bad]
+        translate._post = reviewer
+        parts["review"]()
+        wait_translation(root, win)
+        table.selection_set(bad[0])
+        root.update()
+        shown = not parts["accept_all_btn"].isHidden()
+        before = [table.set(i, "trans") for i in bad]
+        parts["accept_all"]()  # «No»: nada cambia
+        kept = [table.set(i, "trans") for i in bad] == before
+        answer[0] = True
+        parts["accept_all"]()
+        after = [(table.set(i, "trans")[:10], table.set(i, "state")) for i in bad]
+        hidden = parts["accept_all_btn"].isHidden()
+    finally:
+        translate._post, app.messagebox.askyesno = original, saved_ask
+        root.destroy()
+    assert shown and kept and len(asked) == 2 and "2 párrafos" in asked[0], (shown, kept, asked)
+    assert after == [("ARREGLADO ", "Revisado")] * 2 and hidden, after
+
+
 def test_window_translate_review():
     """«Revisar con IA»: lo traducido que la IA marca queda «Con fallos» con su problema y su corrección, y lo demás
     «Revisado». «Aceptar corrección» la pone; «Descartar» deja lo que había; las dos lo dan por revisado. Una
@@ -8846,7 +8916,7 @@ def test_window_translate_models_and_book_language():
 
     root, window = versioned_window()
     original = translate._get
-    translate._get = lambda url, headers=None: {"data": [{"id": "deepseek-reasoner"}, {"id": "deepseek-chat"}]}
+    translate._get = lambda url, headers=None: {"data": [{"id": "deepseek-v4-pro"}, {"id": "deepseek-flash"}]}
     try:
         tr = window.translate_book().parts
         parts = window.open_options("Traducción").parts
@@ -8858,9 +8928,9 @@ def test_window_translate_models_and_book_language():
         while parts["model"].count() < 2 and time.time() < end:
             root.update()
             time.sleep(0.02)
-        assert [parts["model"].itemText(n) for n in range(parts["model"].count())] == ["deepseek-chat",
-                                                                                     "deepseek-reasoner"]
-        assert parts["model"].currentText() == "deepseek-chat" and "2 modelos" in parts["status"].text()
+        assert [parts["model"].itemText(n) for n in range(parts["model"].count())] == ["deepseek-flash",
+                                                                                     "deepseek-v4-pro"]
+        assert parts["model"].currentText() == "deepseek-flash" and "2 modelos" in parts["status"].text()
         parts["engine"].setCurrentIndex(parts["engine"].findText("Google Cloud (clave)"))
         parts["engine"].activated.emit(parts["engine"].currentIndex())
         assert parts["key"].isVisible() and not parts["model"].isVisible()
