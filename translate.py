@@ -20,7 +20,8 @@ ENGINES = {
     "Google Cloud (clave)": {"kind": "gcloud", "key": True},  # la API oficial: no bloquea, 500.000 caracteres gratis
     "DeepL": {"kind": "deepl", "key": True},
     "OpenAI (ChatGPT)": {"kind": "openai", "base": "https://api.openai.com/v1", "model": "gpt-4.1-mini", "key": True},
-    "DeepSeek": {"kind": "openai", "base": "https://api.deepseek.com", "model": "deepseek-chat", "key": True},
+    # «deepseek-chat» ya no sale en la lista de modelos de DeepSeek (noviembre de 2026): flash y v4-pro
+    "DeepSeek": {"kind": "openai", "base": "https://api.deepseek.com", "model": "deepseek-flash", "key": True},
     "Claude": {"kind": "anthropic", "base": "https://api.anthropic.com/v1", "model": "claude-sonnet-5-5", "key": True},
     "Gemini": {"kind": "openai", "base": "https://generativelanguage.googleapis.com/v1beta/openai",
                "model": "gemini-2.5-flash", "key": True},
@@ -179,7 +180,7 @@ def doubts(source, text, dst, glossary=()):
     if source.count("[Nota: ") != text.count("[Nota: "):
         out.append("las marcas [Nota: …] no coinciden con las del original")
     if dst == "es":
-        if plain[:1] in ('"', "“"):
+        if plain[:1] in ('"', "“", "«"):  # Making Magic: con el original en «», un capítulo entero salió con comillas
             out.append("el diálogo va con comillas en vez de raya (—)")
         if ("?" in plain and "¿" not in plain) or ("!" in plain and "¡" not in plain):
             out.append("falta el signo de apertura (¿ o ¡)")
@@ -444,8 +445,10 @@ def instructions(src, dst, glossary=(), style=None):
         f"- Use the punctuation and typographic conventions of {target}.",
     ]
     if dst == "es":
-        rules.append("- In Spanish, dialogue lines use the em dash (—) instead of quotation marks, with "
-                     "dialogue tags also set off by em dashes, and opening ¿ and ¡ marks.")
+        rules.append("- In Spanish, dialogue lines use the em dash (—) instead of quotation marks, even when the "
+                     "source marks them with «», \"\" or “”, with dialogue tags also set off by em dashes, and opening "
+                     "¿ and ¡ marks. After ! or ? the narration that follows opens with its own dash: «—¡Ven! —Y "
+                     "se fue.».")
         if style.get("variant") == "es-ES":
             rules.append("- Write in European Spanish (Spain): «vosotros» for the informal plural and the vocabulary "
                          "used in Spain.")
@@ -679,7 +682,11 @@ def propose(name, sample, src, dst, api_key="", model="", base="", names=(), tex
               f"sample and reply only with a JSON object with two keys:\n"
               f"\"glossary\": an object that maps each recurring term of this story in the original (character "
               f"names, places, organizations, skills, spells, items, ranks, titles, invented words; 60 at most) to "
-              f"the translation to use always in {target}. Names keep their usual romanization. Never include common "
+              f"the translation to use always in {target}. Names keep their usual romanization. Forms of address and "
+              f"titles (Lady, Lord, Sir, Miss, Mistress, Master) become what a reader of fantasy novels in {target} "
+              f"expects, never a word-for-word calque"
+              + (" (in Spanish: Lady Teto → Señorita Teto, a maid's Mistress → Ama, Sir → Señor; never «Dama»)"
+                 if dst == "es" else "") + f". Never include common "
               f"words that only appear capitalized in a heading or a game status screen (Chapter, Dress, Twelve, "
               f"Killer), nor the names of the author, illustrator or translators.\n"
               f"\"characters\": an object that maps each character's name to a short note written in Spanish: "

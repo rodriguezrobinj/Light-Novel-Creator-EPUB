@@ -2001,7 +2001,9 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
     ("dialog", "Puntuación del inciso del narrador", _subs(
         # Mitsuha: «—Sí, — respondió el soldado, —un buque…» -> «—Sí —respondió el soldado—, un buque…»
         (r",\s*[—―─–]\s*([a-záéíóúñ][^—―─–.!?]*?),\s*[—―─–]\s*", r" —\1—, ", DASHES),
-        (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", _inciso, DASHES)),
+        (r"([^\W\d_])[.,]\s*[—―─–]\s*(?=[a-záéíóúñ])", _inciso, DASHES),
+        # Making Magic (DeepSeek): «Creación!— Y aquello» -> «Creación! —Y aquello»: la narración abre con su raya
+        (r"([!?…])[—―─–]\s*(?=[A-ZÁÉÍÓÚÑ¿¡])", r"\1 —", DASHES)),
      "En un diálogo, el punto o la coma no van antes del inciso del narrador sino tras su raya de cierre: "
      "«—Sí —respondió—, vamos.»", "Corregirlo."),
     ("calque", "Calco del inglés", _subs(

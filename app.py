@@ -4917,10 +4917,13 @@ class App:
         accept_btn = _button("Aceptar corrección", lambda: settle(True), "primary")
         discard_btn = _button("Descartar", lambda: settle(False))
         discard_btn.setToolTip("La traducción se queda como está y cuenta como revisada")
+        accept_all_btn = _button("Aceptar todas", lambda: settle_all())
+        accept_all_btn.setToolTip("Pone la corrección de la IA en todos los párrafos «Con fallos» de una vez")
         accept_btn.hide()
         discard_btn.hide()
+        accept_all_btn.hide()
         lower.addLayout(_row(prev_btn, next_btn, 1, lang_filter), 2, 0)
-        fixes = _row(doubt, accept_btn, discard_btn)
+        fixes = _row(doubt, accept_btn, accept_all_btn, discard_btn)
         fixes.setStretch(0, 1)
         lower.addLayout(fixes, 2, 1)
         # Un párrafo pendiente que se parece a uno ya traducido en otro tomo de la serie
@@ -5306,6 +5309,7 @@ class App:
             lines, state = [], table.set(iid, "state") if iid in rows else ""
             for widget in (accept_btn, discard_btn, fix_box):
                 widget.setVisible(state == "Con fallos")
+            accept_all_btn.setVisible(state == "Con fallos" and len(faulty()) > 1)
             if state == "Con fallos":
                 found = reviewed(rows[iid][0])
                 lines.append("Revisión de la IA: " + found["problem"] + " Su corrección está bajo la traducción.")
@@ -5318,6 +5322,17 @@ class App:
             doubt.setText("\n".join("⚠ " + line for line in lines))
             return lines
 
+        def faulty():
+            """Claves de los párrafos con una corrección de la IA pendiente («Con fallos»)."""
+            return [k for k in done if (reviewed(k) or {}).get("problem")]
+
+        def settle_one(k, accept):
+            entry, found = done[k], reviewed(k)
+            if accept:
+                entry["text"] = found["fix"]
+                entry.pop("memory", None)  # ya no es la del otro tomo
+            entry["review"] = {"for": translate.key(entry["text"]), "ok": True}
+
         def settle(accept):
             """Cierra la revisión de la IA del párrafo elegido: con accept, su corrección pasa a ser la traducción; si
             no, vale la que hay. De las dos formas queda «Revisado»."""
@@ -5325,12 +5340,26 @@ class App:
             found = reviewed(rows[iid][0]) if iid in rows else None
             if not (found and found.get("problem")):
                 return
-            entry = done[rows[iid][0]]
-            if accept:
-                entry["text"] = found["fix"]
-                entry.pop("memory", None)  # ya no es la del otro tomo
-            entry["review"] = {"for": translate.key(entry["text"]), "ok": True}
+            settle_one(rows[iid][0], accept)
             refresh({rows[iid][0]})
+            save()
+            notes()
+            check()
+
+        def settle_all():
+            """Todas las correcciones de la IA de una vez: en un tomo entero son cientos (Making Magic: 9 de 117
+            párrafos, 8 de ellas buenas), una a una no se acaba. Pregunta antes, con cuántas son."""
+            keys = faulty()
+            if not keys or not messagebox.askyesno(
+                    "Aceptar correcciones",
+                    f"¿Poner la corrección de la IA en {convert.counted(len(keys), 'párrafo')} «Con fallos»?\n\n"
+                    "La IA revisora también se equivoca a veces: si puedes, míralas antes con el filtro «Con fallos». "
+                    "Quedan como revisados; las que no te convenzan, corrígelas después a mano.",
+                    parent=win):
+                return
+            for k in keys:
+                settle_one(k, True)
+            refresh(set(keys))
             save()
             notes()
             check()
@@ -6003,7 +6032,7 @@ class App:
                      "warnings": warnings, "check": check, "look": look, "spell": spell, "add_word": add_word,
                      "similar": similar_label, "similar_row": similar_row, "use_similar": use_similar,
                      "review": review, "accept": lambda: settle(True), "discard": lambda: settle(False),
-                     "accept_btn": accept_btn, "fix": fix_box}
+                     "accept_btn": accept_btn, "fix": fix_box, "accept_all": settle_all, "accept_all_btn": accept_all_btn}
         win.show()
         return win
 
