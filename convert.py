@@ -408,9 +408,12 @@ def _join_labels(rows):
             nxt, last = rows[j], (names[-1] if names else row)
             # Un marcador abre un título nuevo, salvo en la primera línea bajo la etiqueta: hay PDF que
             # marcan "Capitulo 1" y, en el nivel 2, su nombre (Re Zero 3). "Parte 1" no es un nombre.
+            # El hueco se mide con la letra mayor: entre líneas base crece con la de abajo (Making Magic: «Chapter 3»
+            # en 11 pt y el nombre en 16,5, 27 pt más abajo)
             if (len(nxt.text) > 120 or not (nxt.bold or nxt.heading) or (nxt.starts and names)
                     or SUBPART.fullmatch(nxt.text.strip())
-                    or nxt.y - last.y >= 2.2 * last.size or (names and abs(nxt.size - names[0].size) >= 0.5)):
+                    or nxt.y - last.y >= 2.2 * max(last.size, nxt.size)
+                    or (names and abs(nxt.size - names[0].size) >= 0.5)):
                 break
             names.append(nxt)
             j += 1
@@ -2986,7 +2989,7 @@ def _fit_style(data, page):
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
                breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
-               progress=None, fit=None, whole_words=False):
+               progress=None, fit=None, whole_words=False, css_extra=""):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -3009,7 +3012,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número.
     progress(hechos, total): avanza por sección e ilustración escritas (reducir las imágenes es lo lento).
     fit: (ancho, alto) de la página de la vista previa: cada ilustración lleva un tamaño que cabe en ella
-    (_fit_style). Solo para MuPDF; el EPUB de verdad no lo lleva."""
+    (_fit_style). Solo para MuPDF; el EPUB de verdad no lo lleva. css_extra: reglas al final de la hoja (write_pdf)."""
     rules = _rules(replacements)
     hyphenate = hyphenate and not whole_words and lang.split("-")[0].lower() == "es"
     typo = (lambda s, dashes=False: _typography(s, dashes)) if typography else (lambda s, dashes=False: s)
@@ -3183,6 +3186,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         src, family = f"fonts/propia{Path(font).suffix.lower()}", re.sub(r'["\\]', "", Path(font).stem)
         fonts[src] = Path(font)  # nombre fijo: el del usuario puede llevar espacios o tildes, que rompen el href
         css += f'@font-face {{ font-family: "{family}"; src: url("{src}"); }}\nbody {{ font-family: "{family}", serif; }}\n'
+    css += css_extra
     manifest += [f'<item id="f{k}" href="{src}" media-type="application/vnd.ms-opentype"/>' for k, src in enumerate(fonts)]
     spine = ['<itemref idref="cover"/>'] + [f'<itemref idref="s{k}"/>' for k in range(len(files))]
     toc_page = "contents.xhtml" if contents else "nav.xhtml"
@@ -3377,6 +3381,11 @@ def _full_page_images(pdf):
     return moved
 
 
+# Making Magic: con la letra por defecto de MuPDF (Charis SIL) las versalitas quedan en el PDF como «CƒĵǙǵŧǡ 3»;
+# releído, «Chapter 3» no era etiqueta, y copiar o buscar fallaba. Mayúsculas algo menores: se ven casi igual
+PDF_CSS = "h1 .num, small.sc { font-variant: normal; text-transform: uppercase; }\nsmall.sc { font-size: 0.8em; }\n"
+
+
 def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     """PDF maquetado: el mismo libro que write_epub (con sus opciones), compuesto por MuPDF al tamaño de
     PDF_SIZES, con el índice como marcadores, título y autor en las propiedades y número de página al pie
@@ -3387,7 +3396,7 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     width, height, fontsize = PDF_SIZES[size]
     with tempfile.TemporaryDirectory(prefix="lnepub-pdf-") as tmp:
         epub = Path(tmp) / "libro.epub"
-        write_epub(book, chapters, epub, **{**options, "kepub": False, "epub2": False},
+        write_epub(book, chapters, epub, **{**options, "kepub": False, "epub2": False, "css_extra": PDF_CSS},
                    progress=lambda done, total: step(done * 40 // total, 100))
         with pymupdf.open(epub) as source:
             source.layout(width=width, height=height, fontsize=fontsize)
