@@ -554,6 +554,67 @@ def test_inline_image_in_a_text_line_is_not_a_scene_break():
     assert [b.kind for b in blocks if b.page == 2] == ["p", "break", "p"], [b.kind for b in blocks]
 
 
+def test_unknown_inline_icon_is_kept_as_image():
+    """Un icono en imagen dentro de la línea que no se parece a ningún símbolo de GLYPHS (dos puntos, como unos
+    ojos) se perdía sin aviso. Va en el párrafo como imagen pequeña, sobrevive al editor, a edit_section y a los
+    reemplazos, sale en el EPUB como archivo y el informe de calidad lo avisa."""
+    import qtk
+    from PySide6.QtGui import QTextDocument
+
+    import editor
+
+    icon = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40), False)
+    icon.set_rect(icon.irect, (255, 255, 255))
+    for cell in ((4, 16, 12, 24), (28, 16, 36, 24)):
+        icon.set_rect(pymupdf.IRect(*cell), (20, 20, 20))
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 110, "Capitulo 1: Inicio", 20, "helv"),
+                      (92, 150, line("Primer parrafo de la escena", 57), 11, "cour"), (72, 164, "fin uno.", 11, "cour"),
+                      (92, 200, "Me miro asi", 11, "cour"), (184, 200, "y se fue.", 11, "cour")])
+    doc[0].insert_image(pymupdf.Rect(169, 191, 179, 201), pixmap=icon)  # entre «asi» y «y se fue.»
+    path = TMP / "icono-desconocido.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    k, b = next((k, b) for k, b in enumerate(book.blocks) if "Me miro" in b.html)
+    assert convert.ICON.search(b.html), b.html
+    assert convert._plain(b) == "Me miro asi y se fue.", convert._plain(b)
+    # Editor de texto: el icono es un objeto de la hoja y vuelve a la misma línea
+    qtk.app()
+    line_text = convert._line(b, k)
+    sheet = QTextDocument()
+    editor.load(sheet, [(k, line_text)], {})
+    block = sheet.firstBlock()
+    assert "￼" in block.text(), block.text()
+    assert editor._lines(block) == [line_text], editor._lines(block)
+    assert editor.plain_line(line_text) == "Me miro asi ￼ y se fue.", editor.plain_line(line_text)
+    # Editado a mano y con un reemplazo que nombra la clase: el icono sigue
+    convert.edit_section(book, k, k + 1, line_text.replace("asi", "así"))
+    assert convert.ICON.search(book.blocks[k].html) and "así" in book.blocks[k].html, book.blocks[k].html
+    for edit in convert.replace_text(book, "icono", "x"):
+        convert.edit_section(book, *edit)
+    assert convert.ICON.search(book.blocks[k].html), book.blocks[k].html
+    issues = [i for i in convert.quality_report(book) if i.kind == "icon"]
+    assert [i.block for i in issues] == [k], issues
+    out = TMP / "icono-desconocido.epub"
+    convert.write_epub(book, [(c, "Capítulo 1") for c in book.candidates], out)
+    assert convert.check_epub(out) == [], convert.check_epub(out)
+    with zipfile.ZipFile(out) as z:
+        names = [n for n in z.namelist() if "/img/icono-" in n]
+        text = "".join(z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml"))
+    assert len(names) == 1 and names[0].endswith(".png"), names
+    assert f'src="{names[0].removeprefix("OEBPS/")}"' in text and "data:" not in text, names
+    # Nageki 1, pág. 9: el adorno-separador (unas huellas) queda dentro del bbox, muy alto, de la línea de debajo;
+    # está dos letras por encima de su línea base: es el separador, no un icono del párrafo. Cambria da ese bbox;
+    # aquí, el span medido
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_image(pymupdf.Rect(223.4, 451.7, 230.1, 462.9), pixmap=icon)
+    spans = [{"text": "Me desperté con el peor de los humores.", "bbox": (110.0, 449.3, 318.6, 516.3),
+              "origin": (110.0, 486.7), "size": 12.0, "flags": 0, "font": "Cambria"}]
+    convert._inline_glyphs(page, spans)
+    assert len(spans) == 1, spans[1:]
+
+
 def test_ornament_at_page_top_opens_a_scene():
     """Un adorno arriba del todo, sin texto encima (la escena cambia con la página: The World's Strongest Witch
     86 y 144), es un separador. Con un título debajo es la decoración del capítulo, y la misma imagen en el mismo
