@@ -8079,6 +8079,9 @@ def test_translate_review():
         assert out == [None, {"problem": "Omite la segunda frase.", "fix": "Ella se cayó. Luego lloró."}, None], out
         system, user = calls[0][0]["content"], calls[0][1]["content"]
         assert "Witch = Bruja" in system and "Emilia: chica, formal" in system and "editor" in system
+        # Making Magic: «los larguísimos anales de este mundo alterno» no se entiende; la revisión lo marca y la
+        # traducción pide palabras de todos los días
+        assert "bookish" in system and "everyday words" in translate.instructions("en", "es")
         sent = json.loads(user[user.index("Paragraphs:") + len("Paragraphs:"):])
         assert sent["2"] == {"source": "She fell. Then she cried.", "translation": "Ella se cayó."}, sent
         # Lo que no sirve se ignora: número que no existe, sin corrección, corrección igual a lo que hay

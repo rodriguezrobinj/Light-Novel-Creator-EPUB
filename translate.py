@@ -435,6 +435,12 @@ def instructions(src, dst, glossary=(), style=None):
         f"You are a professional literary translator of light novels. Translate each paragraph from "
         f"{LANG_NAMES.get(src, src)} into {target}.",
         f"- Translate meaning, tone and intent, not word by word: it must read like a novel written in {target}.",
+        # Making Magic con DeepSeek: «los larguísimos anales de este mundo alterno» no lo entiende quien lee novelas ligeras
+        f"- Use the everyday words a young reader of light novels in {target} knows. Avoid rare, bookish or archaic "
+        f"words: annals, alternate, verdant become history, other, green"
+        + (" («la larga, larguísima historia de este otro mundo», not «los larguísimos anales de este mundo alterno»)"
+           if dst == "es" else "")
+        + ". Keep a formal word only where the original is deliberately formal (a goddess, a king, an old text).",
         "- Dialogue must sound natural and spoken, fitting each character's personality, age and relationships. "
         "Use the colloquial expressions a native speaker would use; avoid stiff or calqued phrasing.",
         "- Work out who is speaking and each character's gender from the context and the character notes. Keep "
@@ -628,7 +634,9 @@ def review(name, pairs, src, dst, api_key="", model="", base="", glossary=(), st
         "- wrong speaker, gender or number, or a form of address (formal or informal) that does not fit the "
         "characters;",
         "- a glossary term that was not used;",
-        f"- a literal calque or a phrase that does not sound natural in {target}.",
+        f"- a literal calque or a phrase that does not sound natural in {target};",
+        f"- a rare, bookish or archaic word where a young reader of light novels would expect an everyday one "
+        f"(«anales», «alterno»): this is an error, not a style preference.",
         "Do not report style preferences, and do not rewrite a correct translation just to word it differently.",
         "Reply only with a JSON object with the paragraphs that have errors: map each one's number to an object with "
         f"\"problem\" (one short sentence in Spanish saying what is wrong) and \"fix\" (the whole corrected paragraph "
