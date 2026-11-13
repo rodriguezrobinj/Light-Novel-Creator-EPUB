@@ -7700,6 +7700,30 @@ def test_translate_units_and_section():
     assert book.blocks[3].align == "center" and book.blocks[1].html.endswith('<span class="nota">A greeting</span>')
 
 
+def test_translate_hides_inline_icons():
+    """Un icono sin reconocer (convert.ICON) no va a la traducción como su PNG en base64: miles de letras que se
+    pagan y que la IA puede romper. Va como «⟦1⟧», que la IA deja en su sitio, y al aplicar vuelve el icono; si el
+    motor quitó la marca, el icono queda al final del párrafo en vez de perderse."""
+    import translate
+
+    tag = '<img class="icono" src="data:image/png;base64,iVBORw0KGgo=" alt=""/>'
+    other = tag.replace("iVBORw0KGgo=", "QUJD")
+    book = small_book()
+    book.blocks[3].html = f"He looked {tag} at me {other} and left."
+    units = translate.units(book, 0, len(book.blocks))
+    text = units[2][2]
+    assert text == "He looked ⟦1⟧ at me ⟦2⟧ and left.", units
+    assert "⟦" in translate.instructions("en", "es")
+    done = {translate.key(text): "Me miró ⟦2⟧ y ⟦1⟧ se fue."}
+    lines = translate.translated_section(book, 0, len(book.blocks), done).split("\n\n")
+    assert lines[3] == f"{convert.CENTER}Me miró {other} y {tag} se fue.", lines[3]
+    done = {translate.key(text): "Me miró y se fue ⟦1⟧."}
+    lines = translate.translated_section(book, 0, len(book.blocks), done).split("\n\n")
+    assert lines[3] == f"{convert.CENTER}Me miró y se fue {tag}. {other}", lines[3]
+    convert.edit_section(book, 0, len(book.blocks), "\n\n".join(lines))
+    assert len(convert.ICON.findall(book.blocks[3].html)) == 2, book.blocks[3].html
+
+
 def test_translate_ai_batches_split_and_marks():
     """La IA recibe lotes numerados con contexto y glosario; si devuelve un párrafo de menos, el lote se parte en dos
     y no se pierde ni se corre ninguno. Las marcas estropeadas («< i>», «[Note: ») se arreglan."""

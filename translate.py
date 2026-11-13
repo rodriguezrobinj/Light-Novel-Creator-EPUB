@@ -47,6 +47,8 @@ VARIANTS = {"": "Sin preferencia", "es-419": "Latinoamérica (neutro)", "es-ES":
 LETTER = re.compile(r"[^\W\d_]")
 TAG = re.compile(r"<\s*(/?)\s*([ibIB])\s*>")  # Google a veces devuelve "< i>" o "</ I>"
 NOTE_WORD = re.compile(r"\[[^\W\d_]{2,12}:\s*")  # "[Note: " de vuelta a "[Nota: ", la marca del editor
+# Icono del texto (convert.ICON) mientras se traduce: su PNG en base64 son miles de letras que se pagan y la IA rompe
+ICON_MARK = re.compile(r"⟦(\d+)⟧")
 
 
 class TranslateError(Exception):
@@ -95,6 +97,28 @@ def _split(line, kind):
     return "", line
 
 
+def _hide_icons(text):
+    """Los iconos del texto como «⟦1⟧», «⟦2⟧»… en su orden: es lo que se traduce y lo que da la clave."""
+    n = iter(range(1, 1000))
+    return convert.ICON_TAG.sub(lambda _: f"⟦{next(n)}⟧", text) if "icono" in text else text
+
+
+def _show_icons(source, text):
+    """La traducción text con los iconos de source donde quedaron sus marcas; los que el motor quitó, al final
+    del párrafo: mejor fuera de sitio que perdidos."""
+    icons, used = convert.ICON_TAG.findall(source), set()
+
+    def put(m):
+        i = int(m[1]) - 1
+        if i < len(icons) and i not in used:
+            used.add(i)
+            return icons[i]
+        return ""
+
+    text = ICON_MARK.sub(put, text)
+    return " ".join([text] + [icon for i, icon in enumerate(icons) if i not in used])
+
+
 def units(book, start, end):
     """Párrafos y títulos de los bloques start..end-1 que tienen letras: [(bloque, prefijo, texto)]."""
     out = []
@@ -103,7 +127,7 @@ def units(book, start, end):
         if b.kind in ("p", "heading"):
             prefix, text = _split(convert._line(b, k), b.kind)
             if LETTER.search(text):
-                out.append((k, prefix, text))
+                out.append((k, prefix, _hide_icons(text)))
     return out
 
 
@@ -114,9 +138,9 @@ def translated_section(book, start, end, done):
         b, line = book.blocks[k], convert._line(book.blocks[k], k)
         if b.kind in ("p", "heading"):
             prefix, text = _split(line, b.kind)
-            new = " ".join(str(done.get(key(text)) or "").split())  # un salto de línea partiría el párrafo
+            new = " ".join(str(done.get(key(_hide_icons(text))) or "").split())  # un salto de línea partiría el párrafo
             if new:
-                line = prefix + new
+                line = prefix + _show_icons(text, new)
         lines.append(line)
     return "\n\n".join(lines)
 
@@ -429,7 +453,8 @@ def instructions(src, dst, glossary=(), style=None):
             rules.append("- Write in neutral Latin American Spanish: «ustedes», never «vosotros», and vocabulary "
                          "understood across Latin America; avoid words used only in Spain or in a single country.")
     rules.append("- Keep <i> and <b> tags around the equivalent words. Keep every \"[Nota: ...]\" mark with the word "
-                 "\"Nota\" unchanged, translating only the text inside.")
+                 "\"Nota\" unchanged, translating only the text inside. Keep every ⟦1⟧, ⟦2⟧... mark (a small "
+                 "picture inside the sentence) unchanged, next to the words it goes with.")
     if style.get("honorifics", True):
         rules.append("- Keep Japanese honorifics (-san, -sama, -kun, -chan, senpai...) and character names as they "
                      "are, unless the glossary says otherwise.")
