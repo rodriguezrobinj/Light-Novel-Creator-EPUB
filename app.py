@@ -63,6 +63,7 @@ STYLE_LEVELS = [None, "Capítulo", "Subtítulo"]
 FRONT = "Inicio del libro"                           # lo que va antes del primer capítulo, en el editor
 CHAPTER_WIDTHS = (300, 180, 170, 140)  # botón de capítulo del editor en cada nivel de la cinta (fit_ribbon)
 GLYPH = 24                                           # px del glifo de un botón grande de la cinta, como en Word
+SMALL_GLYPH = 16                                     # px del glifo de un botón pequeño de la cinta
 NEXT = {ON: OFF, OFF: SEP, SEP: CUT, CUT: ON}       # cada clic pasa al siguiente
 IMG, DROPPED = "Ilustración", "Descartada"           # tipo de las filas de imagen
 IMAGE_NEXT = {IMG: CUT, CUT: IMG, DROPPED: IMG}      # clic en una imagen: se quita o se recupera
@@ -1603,11 +1604,11 @@ def _label(text="", name=None):
     return label
 
 
-def _glyph_icon(glyph, color):
-    """Glifo de theme.ICONS dibujado como icono grande y monocromo, con el color del texto del tema. Se escala
+def _glyph_icon(glyph, color, size=GLYPH):
+    """Glifo de theme.ICONS dibujado como icono monocromo de size px, con el color del texto del tema. Se escala
     a la caja: a tamaño de letra, «±» salía diminuto y «▲» enorme al lado."""
     ratio = QApplication.primaryScreen().devicePixelRatio()
-    pixmap = QPixmap(round(GLYPH * ratio), round(GLYPH * ratio))
+    pixmap = QPixmap(round(size * ratio), round(size * ratio))
     pixmap.setDevicePixelRatio(ratio)
     pixmap.fill(Qt.GlobalColor.transparent)
     path = QPainterPath()
@@ -1615,10 +1616,10 @@ def _glyph_icon(glyph, color):
     box = path.boundingRect()
     if box.isEmpty():  # sin fuentes (pruebas sin pantalla): icono vacío
         return QIcon(pixmap)
-    scale = min(GLYPH * 0.85 / box.width(), GLYPH * 0.8 / box.height())
+    scale = min(size * 0.85 / box.width(), size * 0.8 / box.height())
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.translate(GLYPH / 2, GLYPH / 2)
+    painter.translate(size / 2, size / 2)
     painter.scale(scale, scale)
     painter.translate(-box.center())
     painter.fillPath(path, QColor(color))
@@ -6445,7 +6446,8 @@ class TextEditor:
         tabs.setDrawBase(False)
         tabs.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # la hoja se queda con el foco al cambiar de pestaña
         tabs.currentChanged.connect(pages.setCurrentIndex)
-        # Botones que se quedan en su icono si la cinta no cabe (fit_ribbon): (botón, texto, icono, nivel)
+        # Botones que se quedan en su icono si la cinta no cabe (compact_to): (botón, texto, texto corto o None
+        # si se queda en su glifo, nivel)
         self.compact, self.ribbon_level, self.ribbon_rows = [], 0, []
         ink = self.colors["ink"]
 
@@ -6455,14 +6457,21 @@ class TextEditor:
             button.setIconSize(QSize(GLYPH, GLYPH))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
 
-        def tool(text, tip, action, checkable=False, font=None, short=None, level=1, icon=None):
+        def tool(text, tip, action, checkable=False, font=None, short=None, level=1, icon=None, glyph=None):
+            """Botón de la cinta: icon (clave de theme.ICONS) lo hace grande; glyph pone el glifo pequeño al lado
+            del texto, dibujado como icono: como letra, «≡» o «⇥» apenas se veían."""
             button = QToolButton(objectName="tool")
             button.setText(text)
             button.setToolTip(tip)
-            if short:
+            if short or (glyph and text):
                 self.compact.append((button, text, short, level))
             if icon:
                 big(button, icon)
+            if glyph:
+                button.setIcon(_glyph_icon(theme.ICONS[glyph], ink, SMALL_GLYPH))
+                button.setIconSize(QSize(SMALL_GLYPH, SMALL_GLYPH))
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if text
+                                          else Qt.ToolButtonStyle.ToolButtonIconOnly)
             button.setCheckable(checkable)
             if font:
                 button.setFont(font)
@@ -6518,8 +6527,8 @@ class TextEditor:
         italic_font.setItalic(True)
 
         page("Inicio")
-        self.undo_btn = tool("↶ Deshacer", "Deshacer (Ctrl+Z)", sheet.undo, short="↶")
-        self.redo_btn = tool("↷ Rehacer", "Rehacer (Ctrl+Y)", sheet.redo, short="↷")
+        self.undo_btn = tool("Deshacer", "Deshacer (Ctrl+Z)", sheet.undo, glyph="undo")
+        self.redo_btn = tool("Rehacer", "Rehacer (Ctrl+Y)", sheet.redo, glyph="redo")
         self.undo_btn.setEnabled(False)
         self.redo_btn.setEnabled(False)
         group("Deshacer", [self.undo_btn], [self.redo_btn])
@@ -6537,15 +6546,15 @@ class TextEditor:
         self.style.setMinimumWidth(110)
         self.style.activated.connect(lambda n: (sheet.set_heading(STYLE_LEVELS[n]), sheet.setFocus(),
                                                 self.update_tools()))
-        self.center_btn = tool("≡ Centrar", "Centrar el párrafo: cartas, carteles (Ctrl+E)", sheet.toggle_center, True,
-                               short="≡", level=2)
-        self.frame_btn = tool("▭ Recuadro", "Meter los párrafos elegidos en un recuadro, como las ventanas de estado, "
-                              "o sacarlos de él", sheet.toggle_frame, True, short="▭", level=2)
-        self.right_btn = tool("⇥ Derecha", "Alinear el párrafo a la derecha: firmas y fechas de cartas (Ctrl+D)",
-                              sheet.toggle_right, True, short="⇥", level=2)
+        self.center_btn = tool("Centrar", "Centrar el párrafo: cartas, carteles (Ctrl+E)", sheet.toggle_center, True,
+                               level=2, glyph="center")
+        self.frame_btn = tool("Recuadro", "Meter los párrafos elegidos en un recuadro, como las ventanas de estado, "
+                              "o sacarlos de él", sheet.toggle_frame, True, level=2, glyph="frame")
+        self.right_btn = tool("Derecha", "Alinear el párrafo a la derecha: firmas y fechas de cartas (Ctrl+D)",
+                              sheet.toggle_right, True, level=2, glyph="right")
         group("Párrafo", [self.style, self.center_btn, self.right_btn], [self.frame_btn,
-              tool("⤒ Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
-                   sheet.join_next, short="Unir", level=2)])  # «⤒» solo se veía poco
+              tool("Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
+                   sheet.join_next, level=2, glyph="join")])
         group("Edición", [tool("Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
                                lambda: self.show_find_bar(False), icon="search")])
 
@@ -6600,8 +6609,8 @@ class TextEditor:
             row.addStretch(1)
 
         # A la derecha de las pestañas, como «Compartir» en Word: dónde estás y a dónde ir, en cualquier pestaña
-        self.prev_chapter = tool("◀", "Capítulo anterior", lambda: self.step_section(-1))
-        self.next_chapter = tool("▶", "Capítulo siguiente", lambda: self.step_section(1))
+        self.prev_chapter = tool("", "Capítulo anterior", lambda: self.step_section(-1), glyph="prev")
+        self.next_chapter = tool("", "Capítulo siguiente", lambda: self.step_section(1), glyph="next")
         self.chapter_btn = QToolButton(objectName="tool")
         self.chapter_btn.setToolTip("Ir a otro capítulo")
         self.chapter_btn.clicked.connect(self.show_chapters)
@@ -6629,8 +6638,7 @@ class TextEditor:
                 self.ribbon_level = level
                 for row in self.ribbon_rows:  # grupos más juntos si no cabe
                     row.setSpacing({0: 10, 1: 6, 2: 6}.get(level, 4))
-                for button, text, short, needs in self.compact:
-                    button.setText(short if level >= needs else text)
+                self.compact_to(level)
                 self.show_chapter(next((n for n, s in enumerate(self.sections) if s[1:3] == self.current), None))
                 self.show_counts()
                 # Los botones piden su tamaño nuevo más tarde (LayoutRequest): sin esto se medía el de antes
@@ -6639,6 +6647,15 @@ class TextEditor:
                     break
         finally:
             column.setSizeConstraint(QLayout.SizeConstraint.SetDefaultConstraint)
+
+    def compact_to(self, level):
+        """Botones de la cinta en su forma corta desde su nivel: el texto corto, o solo el glifo."""
+        for button, text, short, needs in self.compact:
+            if short:
+                button.setText(short if level >= needs else text)
+            else:
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly if level >= needs
+                                          else Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
 
     def chapters_popup(self):
         """Lista de capítulos bajo el botón: pequeña, con scroll y un filtro. Un QMenu con 34 capítulos
