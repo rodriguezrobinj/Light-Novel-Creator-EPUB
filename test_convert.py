@@ -2826,6 +2826,45 @@ def test_window_new_volume_inherits_series_data():
     assert "otro tomo" in status, status
 
 
+def test_window_series_translation_glossary_reaches_every_volume():
+    """Making Magic: el glosario de traducción y los personajes se hicieron en el EPUB «(LNC)» del tomo 1, pero en la
+    carpeta está también la revisión del EPUB original del tomo 1, sin glosario y guardada después: el tomo 2
+    heredaba de esa, vacía. Cada dato sale del tomo más reciente que lo tiene. Un tomo que ya tenía revisión (se
+    convirtió la serie antes de traducir) toma el glosario y los personajes si los suyos están vacíos; si tiene los
+    suyos, se quedan."""
+    import json
+    import app
+
+    folder = series_folder()
+    terms, notes = [["Lady Teto", "Señorita Teto"]], "Teto: chica alegre, trata de tú"
+    for n, (name, glossary, people) in enumerate((("Mi Serie - Volumen 01 (LNC)", terms, notes),
+                                                  ("Mi Serie - Volumen 01", [], ""))):
+        path = folder / f"{name}.lnepub.json"
+        path.write_text(json.dumps({"series": "Mi Serie", "tr_glossary": glossary, "tr_notes": people}), encoding="utf-8")
+        os.utime(path, (1_700_000_000 + n, 1_700_000_000 + n))  # la del EPUB original, más reciente
+    got = []
+    for opened_before in (False, True):
+        root, window = visible_window()
+        window.pdf = folder / "Mi Serie - Volumen 02.pdf"
+        window.show_book(convert.analyze(window.pdf))
+        got.append((window.tr_glossary, window.tr_notes))
+        if not opened_before:  # deja el tomo 2 con revisión y sin glosario, como al convertir la serie primero
+            window.tr_glossary, window.tr_notes = [], ""
+        window.close()
+    root, window = visible_window()
+    window.pdf = folder / "Mi Serie - Volumen 02.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    window.tr_glossary = [["Lady Teto", "Dama Teto"]]  # el suyo propio
+    window.close()
+    root, window = visible_window()
+    window.pdf = folder / "Mi Serie - Volumen 02.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    own = window.tr_glossary
+    window.close()
+    assert got == [(terms, notes), (terms, notes)], got
+    assert own == [["Lady Teto", "Dama Teto"]], own
+
+
 def test_batch_converts_with_review_and_inherited_data():
     import app
 
