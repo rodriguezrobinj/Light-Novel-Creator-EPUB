@@ -5,6 +5,17 @@ from PySide6.QtGui import QColor, QFont, QPalette
 
 CHOICES = ("Sistema", "Claro", "Oscuro")
 
+# Formato fijo de la interfaz (docs/ui-style-guide.md). El código nuevo usa estos valores, no números sueltos
+SPACE = {"tight": 4, "gap": 6, "pad": 8, "section": 12}  # px: entre iconos y texto, entre controles, margen, entre bloques
+FONT = {"body": 9, "title": 11, "big": 13}                # pt, los de QSS (cuerpo, QLabel#title, QLabel#big)
+DIALOG = {"s": (560, 260), "m": (780, 440), "l": (980, 600)}  # tamaño mínimo de un cuadro: corto, mediano, de trabajo
+# Un icono es un glifo de texto monocromo que toma el color del tema. Nunca un emoji: Windows 10 y 11 lo dibujan
+# distinto y sale a color (Qt ignora U+FE0E). Un glifo = una acción en toda la app
+ICONS = {"warn": "▲", "ok": "✓", "close": "✕", "menu": "▾", "menu_open": "▴", "prev": "◀", "next": "▶",
+         "first": "◀◀", "last": "▶▶", "undo": "↶", "redo": "↷", "note": "✎", "split": "✂", "center": "≡",
+         "frame": "▭", "right": "⇥", "join": "⤒", "scene": "❖", "nav": "☰", "search": "⌕", "read": "♪",
+         "link": "↗", "doc": "🗎", "dot": "●", "minus": "−"}
+
 LIGHT = {"bg": "#f3f3f3", "card": "#ffffff", "base": "#ffffff", "line": "#e1e1e1", "ink": "#1b1b1b",
          "muted": "#6b6b6b", "acc": "#2a62c8", "acc_hover": "#2353ab", "acc_ink": "#ffffff", "sel": "#dce8fc",
          "hover": "#ececec", "press": "#e2e2e2", "warn": "#c62828", "ok": "#2e7d32", "drop": "#f5f8fe",

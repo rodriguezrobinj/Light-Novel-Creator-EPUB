@@ -1591,7 +1591,7 @@ class _Cards(QStyledItemDelegate):
                 painter.setPen(QColor(tones["warn"]))
                 painter.drawText(QRect(box.left() + 14, below, box.width() - 14, step),
                                  Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                                 "⚠ " + convert.counted(warned, "aviso"))
+                                 "▲ " + convert.counted(warned, "aviso"))
         painter.restore()
 
 
@@ -1928,7 +1928,7 @@ class App:
         drop = QFrame(objectName="drop")
         inner = QVBoxLayout(drop)
         inner.addStretch(1)
-        icon = _label("📄")
+        icon = _label("🗎")
         icon.setStyleSheet("font-size: 40pt;")
         for widget in (icon, _label("Suelta aquí un PDF de novela ligera", "big"), _label("o", "muted"),
                        _button("Abrir PDF o EPUB…", self.open_pdf, "primary"),
@@ -3121,7 +3121,7 @@ class App:
         thumb.setFixedSize(44, 62)
         pixmap = QPixmap(str(_thumb_path(path))) if _thumb_path(path).is_file() else QPixmap()
         if pixmap.isNull():
-            thumb.setText("📄")
+            thumb.setText("🗎")
             thumb.setStyleSheet(f"font-size: 20pt; background: {colors['base']}; border: 1px solid {colors['line']};")
         else:
             thumb.setPixmap(pixmap.scaled(44, 62, Qt.AspectRatioMode.KeepAspectRatio,
@@ -4255,10 +4255,10 @@ class App:
         graves = sum(i.level == "Grave" for i in report)
         rest = _quality_summary([i for i in report if i.level != "Grave"])
         if graves:
-            text = ("⚠ 1 aviso grave: revísalo antes de generar" if graves == 1
-                    else f"⚠ {graves} avisos graves: revísalos antes de generar") + (f" · {rest}" if rest else "")
+            text = ("▲ 1 aviso grave: revísalo antes de generar" if graves == 1
+                    else f"▲ {graves} avisos graves: revísalos antes de generar") + (f" · {rest}" if rest else "")
         else:
-            text = f"⚠ {rest}" if rest else "✓ Sin avisos" if self.book else "Calidad"
+            text = f"▲ {rest}" if rest else "✓ Sin avisos" if self.book else "Calidad"
         self.quality_btn.setText(text)
         self.quality_btn.setObjectName("warn" if graves else "" if report or not self.book else "ok")
         self.quality_btn.style().unpolish(self.quality_btn)
@@ -5334,7 +5334,7 @@ class App:
                     rows[iid][2], done[rows[iid][0]]["text"], dst.currentData(), self.tr_glossary)) + ".")
             if iid in rows:
                 lines += warnings.get(rows[iid][0], ())
-            doubt.setText("\n".join("⚠ " + line for line in lines))
+            doubt.setText("\n".join("▲ " + line for line in lines))
             return lines
 
         def faulty():
@@ -6330,7 +6330,7 @@ class TextEditor:
         side_column.setContentsMargins(8, 8, 8, 0)
         side_column.addWidget(self.scroll, 1)
         # Fuera, de capítulo en capítulo (hojear página a página era lento para cruzar el libro); dentro, de página
-        # ◀◀ y no ⏮: Windows dibuja ⏮ ⏭ como emoji azules
+        # ◀◀ y no los de saltar pista: Windows los dibuja como emoji azules
         prev_btn, next_btn = _button("◀◀", lambda: self.step_section(-1)), _button("▶▶", lambda: self.step_section(1))
         prev_btn.setToolTip("Capítulo anterior")
         next_btn.setToolTip("Capítulo siguiente")
@@ -6502,13 +6502,13 @@ class TextEditor:
             ("Corregir tipografía del capítulo", self.fix_typography)], short="Ω ▾")
         group("Insertar", [self.symbols_btn,
               tool("❖ Separador", "Separador de escena tras el párrafo", sheet.insert_break, short="❖")],
-              [tool("🔗 Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)", self.show_link_bar,
-                    short="🔗"),
+              [tool("↗ Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)", self.show_link_bar,
+                    short="Enlace"),
                tool("✎ Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note, short="✎")])
         self.nav_btn = tool("☰ Navegación", "Panel con los títulos, avisos, comentarios y cambios del capítulo (F9)",
                             self.toggle_nav, True, short="☰", level=2)
-        group("Buscar", [tool("🔍 Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
-                              lambda: self.show_find_bar(False), short="🔍")], [self.nav_btn])
+        group("Buscar", [tool("⌕ Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
+                              lambda: self.show_find_bar(False), short="Buscar")], [self.nav_btn])
         self.changes_btn, self.changes_menu = menu_tool("Cambios ▾", "Párrafos que editaste en este capítulo", [
             ("Cambio siguiente   (F7)", self.next_change), ("Volver al original", self.restore_current)])
         self.issues_btn, self.issues_menu = menu_tool("Avisos ▾", "Avisos del informe de calidad en este capítulo", [
@@ -6522,8 +6522,8 @@ class TextEditor:
         self.show_changes_action = self.changes_menu.addAction("Mostrar cambios")
         self.show_changes_action.setCheckable(True)
         self.show_changes_action.toggled.connect(self.set_show_changes)
-        self.read_btn = tool("🔊 Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
-                             "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, short="🔊", level=2)
+        self.read_btn = tool("♪ Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
+                             "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, short="♪", level=2)
         group("Revisar", [self.changes_btn, self.issues_btn],
               [tool("Σ Cifras", "Cifras: palabras, párrafos, minutos de lectura y diálogo del capítulo y del libro",
                     self.show_stats, short="Σ", level=2), self.read_btn])
@@ -7032,8 +7032,8 @@ class TextEditor:
         short = self.ribbon_level >= 2
         self.changes_btn.setText((f"± {changed} ▾" if short else f"Cambios ({changed}) ▾") if changed
                                  else "± ▾" if short else "Cambios ▾")
-        self.issues_btn.setText((f"⚠ {issues} ▾" if short else f"Avisos ({issues}) ▾") if issues
-                                else "⚠ ▾" if short else "Avisos ▾")
+        self.issues_btn.setText((f"▲ {issues} ▾" if short else f"Avisos ({issues}) ▾") if issues
+                                else "▲ ▾" if short else "Avisos ▾")
 
     def goto_block(self, block):
         cursor = self.sheet.textCursor()

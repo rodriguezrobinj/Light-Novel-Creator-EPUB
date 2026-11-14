@@ -4276,7 +4276,7 @@ def test_text_editor_ribbon_fits_the_screen():
         for button, text, short, needs in editor.compact:
             button.setText(short if level >= needs else text)
         editor.show_chapter(0)
-        editor.refresh_marks()  # «Avisos (1) ▾» o «⚠ 1 ▾» según el nivel
+        editor.refresh_marks()  # «Avisos (1) ▾» o «▲ 1 ▾» según el nivel
         QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest.value)
         widths.append(editor.ribbon_bar.sizeHint().width())
     editor.fit_ribbon()
@@ -6119,8 +6119,8 @@ def test_window_ignore_warning():
     root.update()
     after = (window.quality_btn.text(), window.ignored)
     window.close()
-    assert before == "⚠ 1 por revisar" and ignored == ("✓ Sin avisos", [["number", "12"]], ()), (before, ignored)
-    assert listed == (("0",), "No ignorar") and after == ("⚠ 1 por revisar", []), (listed, after)
+    assert before == "▲ 1 por revisar" and ignored == ("✓ Sin avisos", [["number", "12"]], ()), (before, ignored)
+    assert listed == (("0",), "No ignorar") and after == ("▲ 1 por revisar", []), (listed, after)
 
 
 def test_window_find_and_replace():
@@ -6623,13 +6623,13 @@ def test_window_quality_report_previews_fixes_and_undo():
     window.undo()
     undone = [b.html for b in window.book.blocks]
     window.close()
-    assert button == "⚠ 3 por revisar", button
+    assert button == "▲ 3 por revisar", button
     assert listed == ["Párrafo partido", "Número suelto", "Número suelto"], listed
     assert shown == ("Ella abrió la puerta y dijo que ¶\nnadie vendría.",
                      "Ella abrió la puerta y dijo que nadie vendría.", ["¶\n"]), shown
     assert label == "Arreglar todos los de este tipo (2)", label
     assert "12" not in fixed[0] and "13" not in fixed[0] and fixed[1] == ["Párrafo partido"], fixed
-    assert fixed[2] == "⚠ 1 por revisar", fixed
+    assert fixed[2] == "▲ 1 por revisar", fixed
     assert undone == [b.html for b in blocks], undone
 
 
@@ -7647,7 +7647,7 @@ def test_window_guide_names_serious_warnings_and_colors_follow_theme():
     theme.apply(__import__("qtk").app(), "Claro")
     one = app._quality_summary([SimpleNamespace(level="Grave")])
     two = app._quality_summary([SimpleNamespace(level="Grave")] * 2 + [SimpleNamespace(level="Menor")])
-    assert guide.startswith("⚠ 1 aviso grave: revísalo antes de generar"), guide
+    assert guide.startswith("▲ 1 aviso grave: revísalo antes de generar"), guide
     assert (light, dark) == (theme.kind_colors(False)["subtitle"], theme.kind_colors(True)["subtitle"]), (light, dark)
     assert one == "1 grave" and two == "2 graves · 1 menor", (one, two)
 
@@ -8498,7 +8498,7 @@ def test_window_translate_chapters_style_and_doubts():
         table.selection_set(other)
         root.update()
         assert "Dudoso: el glosario pide «Zzyzx»" in parts["status"].text(), parts["status"].text()
-        assert parts["doubt"].text().startswith("⚠ Dudoso: el glosario pide «Zzyzx»"), parts["doubt"].text()
+        assert parts["doubt"].text().startswith("▲ Dudoso: el glosario pide «Zzyzx»"), parts["doubt"].text()
 
         # Filtros con su cuenta, buscador y «Anterior/Siguiente» entre lo que se ve
         chips, total = parts["chips"], len(table.get_children())
@@ -8603,7 +8603,7 @@ def test_window_translate_spanish_warnings():
         chips["all"].click()
         table.selection_set(bad)
         root.update()
-        assert "⚠ Signo sin pareja" in parts["doubt"].text(), parts["doubt"].text()
+        assert "▲ Signo sin pareja" in parts["doubt"].text(), parts["doubt"].text()
         # Lo que dice el proceso de ortografía: la palabra se subraya y la fila avisa
         parts["spell"]["unknown"].add("palbra")
         parts["check"](later=False)
@@ -9095,6 +9095,27 @@ def no_modal_dialogs():
         print("aviso no previsto:", title, "·", (message or "").splitlines()[:1])
 
     qtk._MessageBox._show = staticmethod(show)
+
+
+def test_style_guide_tokens_icons_and_no_loose_colors():
+    """docs/ui-style-guide.md: los tokens existen, ningún icono es un emoji (Windows 10 y 11 lo dibujan distinto y
+    no sigue el tema) y los colores salen de theme.py. Se mira el código fuente: sin pantalla no hay fuentes."""
+    import re
+    import theme
+
+    assert set(theme.SPACE) == {"tight", "gap", "pad", "section"} and set(theme.FONT) == {"body", "title", "big"}
+    assert set(theme.DIALOG) == {"s", "m", "l"} and all(w > 0 and h > 0 for w, h in theme.DIALOG.values())
+    # Qt ignora U+FE0E: un glifo que Windows trata como emoji sale a color aunque se pida como texto.
+    # Excepción: U+1F5CE (documento) sale monocromo, comprobado dibujándolo con la fuente de Windows
+    emoji = re.compile("[🀀-🗍🗏-🫿⚠⏮⏭⚙⛓❗⚓]")
+    assert not [k for k, v in theme.ICONS.items() if emoji.search(v)], theme.ICONS
+    allowed = {"app.py": {"#1f6fd1", "#2e9d4a", "#f08c00"}, "qtk.py": {"#f08c00"},
+               "editor.py": {"#2a62c8", "#888888", "#2e9d4a"}}  # marcas que no cambian con el tema
+    for name, colors in allowed.items():
+        text = (Path(__file__).parent / name).read_text(encoding="utf-8")
+        assert not emoji.findall(text), (name, emoji.findall(text))
+        loose = set(re.findall(r"#[0-9a-fA-F]{6}\b", text)) - colors
+        assert not loose, (name, loose)
 
 
 if __name__ == "__main__":
