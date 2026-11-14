@@ -37,7 +37,7 @@ import pymupdf
 import segno
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
+from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPainterPath,
                            QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QInputDialog, QTreeWidget, QTreeWidgetItem,
@@ -62,6 +62,7 @@ STYLES = ["Normal", "Capítulo", "Subtítulo"]          # estilos de párrafo en
 STYLE_LEVELS = [None, "Capítulo", "Subtítulo"]
 FRONT = "Inicio del libro"                           # lo que va antes del primer capítulo, en el editor
 CHAPTER_WIDTHS = (300, 180, 170, 140)  # botón de capítulo del editor en cada nivel de la cinta (fit_ribbon)
+GLYPH = 24                                           # px del glifo de un botón grande de la cinta, como en Word
 NEXT = {ON: OFF, OFF: SEP, SEP: CUT, CUT: ON}       # cada clic pasa al siguiente
 IMG, DROPPED = "Ilustración", "Descartada"           # tipo de las filas de imagen
 IMAGE_NEXT = {IMG: CUT, CUT: IMG, DROPPED: IMG}      # clic en una imagen: se quita o se recupera
@@ -1600,6 +1601,29 @@ def _label(text="", name=None):
     if name:
         label.setObjectName(name)
     return label
+
+
+def _glyph_icon(glyph, color):
+    """Glifo de theme.ICONS dibujado como icono grande y monocromo, con el color del texto del tema. Se escala
+    a la caja: a tamaño de letra, «±» salía diminuto y «▲» enorme al lado."""
+    ratio = QApplication.primaryScreen().devicePixelRatio()
+    pixmap = QPixmap(round(GLYPH * ratio), round(GLYPH * ratio))
+    pixmap.setDevicePixelRatio(ratio)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    path = QPainterPath()
+    path.addText(0, 0, QFont("Segoe UI", 40), glyph)
+    box = path.boundingRect()
+    if box.isEmpty():  # sin fuentes (pruebas sin pantalla): icono vacío
+        return QIcon(pixmap)
+    scale = min(GLYPH * 0.85 / box.width(), GLYPH * 0.8 / box.height())
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.translate(GLYPH / 2, GLYPH / 2)
+    painter.scale(scale, scale)
+    painter.translate(-box.center())
+    painter.fillPath(path, QColor(color))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _button(text, command, name=None):
@@ -6365,7 +6389,7 @@ class TextEditor:
         column.addLayout(status_row)
         self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
         self.drawn = None  # source_key() del dibujo actual del panel
-        self.pending = {}  # trabajo diferido: nombre -> temporizador
+        self.pending, self.closed = {}, False  # trabajo diferido: nombre -> temporizador
         self.set_text_zoom(100)
         self.open_section(start, end, int(item))
         self.recover_draft()
@@ -6410,29 +6434,75 @@ class TextEditor:
         sheet.setFocus()
 
     def ribbon(self):
-        """Cinta «Inicio» con los grupos de Word: deshacer, fuente, párrafo e insertar."""
+        """Cinta como la de Word: pestañas Inicio, Insertar, Revisar y Vista con sus grupos separados por una
+        línea, botones grandes para lo principal y, a la derecha de las pestañas, siempre a la vista, en qué
+        capítulo se está y a cuál ir. Repartida en pestañas cabe en 1366 px con el nombre de cada botón."""
         bar = self.ribbon_bar = QFrame(objectName="ribbon")
-        row = self.ribbon_row = QHBoxLayout(bar)
-        row.setContentsMargins(10, 6, 10, 4)
-        row.setSpacing(10)
+        column = QVBoxLayout(bar)
+        column.setContentsMargins(10, 2, 10, 4)
+        column.setSpacing(2)
+        tabs, pages = self.ribbon_tabs, self.ribbon_pages = QTabBar(), QStackedWidget()
+        tabs.setDrawBase(False)
+        tabs.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # la hoja se queda con el foco al cambiar de pestaña
+        tabs.currentChanged.connect(pages.setCurrentIndex)
         # Botones que se quedan en su icono si la cinta no cabe (fit_ribbon): (botón, texto, icono, nivel)
-        self.compact, self.ribbon_level = [], 0
+        self.compact, self.ribbon_level, self.ribbon_rows = [], 0, []
+        ink = self.colors["ink"]
 
-        def tool(text, tip, action, checkable=False, font=None, short=None, level=1):
+        def big(button, icon):
+            """Botón grande de Word: glifo arriba y nombre debajo."""
+            button.setIcon(_glyph_icon(theme.ICONS[icon], ink))
+            button.setIconSize(QSize(GLYPH, GLYPH))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+
+        def tool(text, tip, action, checkable=False, font=None, short=None, level=1, icon=None):
             button = QToolButton(objectName="tool")
             button.setText(text)
             button.setToolTip(tip)
             if short:
                 self.compact.append((button, text, short, level))
+            if icon:
+                big(button, icon)
             button.setCheckable(checkable)
             if font:
                 button.setFont(font)
             button.clicked.connect(lambda: (action(), self.sheet.setFocus(), self.update_tools()))
             return button
 
+        def menu_tool(text, tip, items, icon=None):
+            """Botón con menú («Símbolos ▾»): items [(texto, acción)] y None para una línea separadora."""
+            button = QToolButton(objectName="tool")
+            button.setText(text)
+            button.setToolTip(tip)
+            button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            if icon:
+                big(button, icon)
+            menu = QMenu(button)
+            for item in items:
+                if item is None:
+                    menu.addSeparator()
+                else:
+                    menu.addAction(item[0], lambda fn=item[1]: (fn(), self.sheet.setFocus(), self.update_tools()))
+            button.setMenu(menu)
+            return button, menu
+
+        def page(name):
+            widget = QWidget()
+            row = QHBoxLayout(widget)
+            row.setContentsMargins(0, 2, 0, 0)
+            row.setSpacing(10)
+            self.ribbon_rows.append(row)
+            pages.addWidget(widget)
+            tabs.addTab(name)
+
         def group(caption, *rows):
-            """Grupo de la cinta con sus botones en dos filas, como Office: así caben con su nombre en
-            1366 px, y no solo con el icono, que no decía qué era cada herramienta."""
+            """Grupo de la pestaña: botones pequeños en dos filas, como Office, o una fila de botones grandes;
+            el nombre abajo y una línea que lo separa del anterior."""
+            row = self.ribbon_rows[-1]
+            if row.count():
+                line = QFrame(objectName="sep")
+                line.setFixedWidth(1)
+                row.addWidget(line)
             box = QVBoxLayout()
             box.setSpacing(2)
             for widgets in rows:
@@ -6446,6 +6516,8 @@ class TextEditor:
         sheet = self.sheet
         bold_font, italic_font = QFont("Segoe UI", 11, QFont.Weight.Bold), QFont("Segoe UI", 11)
         italic_font.setItalic(True)
+
+        page("Inicio")
         self.undo_btn = tool("↶ Deshacer", "Deshacer (Ctrl+Z)", sheet.undo, short="↶")
         self.redo_btn = tool("↷ Rehacer", "Rehacer (Ctrl+Y)", sheet.redo, short="↷")
         self.undo_btn.setEnabled(False)
@@ -6473,46 +6545,32 @@ class TextEditor:
                               sheet.toggle_right, True, short="⇥", level=2)
         group("Párrafo", [self.style, self.center_btn, self.right_btn], [self.frame_btn,
               tool("⤒ Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
-                   sheet.join_next, short="Unir", level=2),  # «⤒» solo se veía poco
-              tool("✂ Dividir", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo que el PDF unió "
-                   "con el anterior", self.show_split_bar, short="✂", level=2)])
+                   sheet.join_next, short="Unir", level=2)])  # «⤒» solo se veía poco
+        group("Edición", [tool("Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
+                               lambda: self.show_find_bar(False), icon="search")])
 
-        def menu_tool(text, tip, items, short=None, level=1):
-            """Botón con menú («Símbolos ▾»): items [(texto, acción)] y None para una línea separadora."""
-            button = QToolButton(objectName="tool")
-            button.setText(text)
-            button.setToolTip(tip)
-            button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-            if short:
-                self.compact.append((button, text, short, level))
-            menu = QMenu(button)
-            for item in items:
-                if item is None:
-                    menu.addSeparator()
-                else:
-                    menu.addAction(item[0], lambda fn=item[1]: (fn(), self.sheet.setFocus(), self.update_tools()))
-            button.setMenu(menu)
-            return button, menu
-
-        self.symbols_btn, _ = menu_tool("Ω Símbolos ▾", "Raya, comillas, signos de apertura y tipografía española", [
+        page("Insertar")
+        self.symbols_btn, _ = menu_tool("Símbolos ▾", "Raya, comillas, signos de apertura y tipografía española", [
             ("— Raya   (Ctrl+Alt+-)", lambda: sheet.insert_symbol("—")),
             ("… Puntos suspensivos   (Ctrl+Alt+.)", lambda: sheet.insert_symbol("…")),
             ("« » Comillas   (Ctrl+Alt+Q)", lambda: sheet.wrap("«", "»")),
             ("¿ ? Pregunta", lambda: sheet.wrap("¿", "?")), ("¡ ! Exclamación", lambda: sheet.wrap("¡", "!")), None,
-            ("Corregir tipografía del capítulo", self.fix_typography)], short="Ω ▾")
-        group("Insertar", [self.symbols_btn,
-              tool("❖ Separador", "Separador de escena tras el párrafo", sheet.insert_break, short="❖")],
-              [tool("↗ Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)", self.show_link_bar,
-                    short="Enlace"),
-               tool("✎ Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note, short="✎")])
-        self.nav_btn = tool("☰ Navegación", "Panel con los títulos, avisos, comentarios y cambios del capítulo (F9)",
-                            self.toggle_nav, True, short="☰", level=2)
-        group("Buscar", [tool("⌕ Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
-                              lambda: self.show_find_bar(False), short="Buscar")], [self.nav_btn])
+            ("Corregir tipografía del capítulo", self.fix_typography)], icon="symbols")
+        group("Símbolos", [self.symbols_btn])
+        group("Texto", [tool("Separador", "Separador de escena tras el párrafo", sheet.insert_break, icon="scene"),
+                        tool("Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note,
+                             icon="note")])
+        group("Vínculos", [tool("Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)",
+                                self.show_link_bar, icon="link")])
+        group("Capítulo", [tool("Dividir\ncapítulo", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo "
+                                "que el PDF unió con el anterior", self.show_split_bar, icon="split")])
+
+        page("Revisar")
         self.changes_btn, self.changes_menu = menu_tool("Cambios ▾", "Párrafos que editaste en este capítulo", [
-            ("Cambio siguiente   (F7)", self.next_change), ("Volver al original", self.restore_current)])
+            ("Cambio siguiente   (F7)", self.next_change), ("Volver al original", self.restore_current)],
+            icon="changes")
         self.issues_btn, self.issues_menu = menu_tool("Avisos ▾", "Avisos del informe de calidad en este capítulo", [
-            ("Aviso siguiente   (F8)", self.next_issue)])
+            ("Aviso siguiente   (F8)", self.next_issue)], icon="warn")
         for menu in (self.changes_menu, self.issues_menu):  # primera línea: el recuento, que no se pulsa
             info = QAction("", menu)
             info.setEnabled(False)
@@ -6522,13 +6580,26 @@ class TextEditor:
         self.show_changes_action = self.changes_menu.addAction("Mostrar cambios")
         self.show_changes_action.setCheckable(True)
         self.show_changes_action.toggled.connect(self.set_show_changes)
-        self.read_btn = tool("♪ Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
-                             "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, short="♪", level=2)
-        group("Revisar", [self.changes_btn, self.issues_btn],
-              [tool("Σ Cifras", "Cifras: palabras, párrafos, minutos de lectura y diálogo del capítulo y del libro",
-                    self.show_stats, short="Σ", level=2), self.read_btn])
-        row.addStretch(1)
-        # A la derecha, como el panel de navegación de Word pero sin quitar sitio: dónde estás y a dónde ir
+        group("Revisión", [self.changes_btn, self.issues_btn])
+        group("Corrección", [tool("Cifras", "Cifras: palabras, párrafos, minutos de lectura y diálogo del capítulo y "
+                                  "del libro", self.show_stats, icon="stats")])
+        self.read_btn = tool("Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
+                             "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, icon="read")
+        group("Voz", [self.read_btn])
+
+        page("Vista")
+        self.nav_btn = tool("Navegación", "Panel con los títulos, avisos, comentarios y cambios del capítulo (F9)",
+                            self.toggle_nav, True, icon="nav")
+        # Casilla como las de «Mostrar» de Word; va a la par que «Mostrar cambios» del menú Cambios
+        self.show_changes_box = QCheckBox("Mostrar cambios")
+        self.show_changes_box.setToolTip("Marca en la hoja los párrafos que editaste")
+        self.show_changes_box.toggled.connect(self.show_changes_action.setChecked)
+        self.show_changes_action.toggled.connect(self.show_changes_box.setChecked)
+        group("Mostrar", [self.nav_btn, self.show_changes_box])
+        for row in self.ribbon_rows:
+            row.addStretch(1)
+
+        # A la derecha de las pestañas, como «Compartir» en Word: dónde estás y a dónde ir, en cualquier pestaña
         self.prev_chapter = tool("◀", "Capítulo anterior", lambda: self.step_section(-1))
         self.next_chapter = tool("▶", "Capítulo siguiente", lambda: self.step_section(1))
         self.chapter_btn = QToolButton(objectName="tool")
@@ -6536,7 +6607,9 @@ class TextEditor:
         self.chapter_btn.clicked.connect(self.show_chapters)
         self.review_btn = tool("✓", "Marca el capítulo como revisado y pasa al siguiente sin revisar (Ctrl+Intro)",
                                self.toggle_reviewed, True)
-        group("Capítulo", [self.prev_chapter, self.chapter_btn, self.next_chapter], [self.review_btn])
+        column.addLayout(_row(tabs, 1, self.prev_chapter, self.chapter_btn, self.next_chapter, self.review_btn,
+                              spacing=2))
+        column.addWidget(pages)
         self.chapters_popup()
         return bar
 
@@ -6554,7 +6627,8 @@ class TextEditor:
         try:
             for level in range(len(CHAPTER_WIDTHS)):
                 self.ribbon_level = level
-                self.ribbon_row.setSpacing({0: 10, 1: 6, 2: 6}.get(level, 4))  # grupos más juntos si no cabe
+                for row in self.ribbon_rows:  # grupos más juntos si no cabe
+                    row.setSpacing({0: 10, 1: 6, 2: 6}.get(level, 4))
                 for button, text, short, needs in self.compact:
                     button.setText(short if level >= needs else text)
                 self.show_chapter(next((n for n, s in enumerate(self.sections) if s[1:3] == self.current), None))
@@ -7025,15 +7099,12 @@ class TextEditor:
             self.sheet.setFocus()
 
     def show_counts(self):
-        """Recuentos de Cambios y Avisos en la cinta (más cortos si no cabe) y en la primera línea de su menú."""
+        """Recuentos de Cambios y Avisos en la cinta y en la primera línea de su menú."""
         changed, issues = getattr(self, "counts", (0, 0))
         self.changes_menu.actions()[0].setText(convert.counted(changed, "párrafo cambiado", "párrafos cambiados"))
         self.issues_menu.actions()[0].setText(convert.counted(issues, "aviso", "avisos") + " en este capítulo")
-        short = self.ribbon_level >= 2
-        self.changes_btn.setText((f"± {changed} ▾" if short else f"Cambios ({changed}) ▾") if changed
-                                 else "± ▾" if short else "Cambios ▾")
-        self.issues_btn.setText((f"▲ {issues} ▾" if short else f"Avisos ({issues}) ▾") if issues
-                                else "▲ ▾" if short else "Avisos ▾")
+        self.changes_btn.setText(f"Cambios ({changed}) ▾" if changed else "Cambios ▾")
+        self.issues_btn.setText(f"Avisos ({issues}) ▾" if issues else "Avisos ▾")
 
     def goto_block(self, block):
         cursor = self.sheet.textCursor()
@@ -7799,6 +7870,8 @@ class TextEditor:
 
     def later(self, name, ms, fn):
         """Ejecuta fn tras ms milisegundos sin otro aviso del mismo nombre: no repinta en cada tecla."""
+        if self.closed:  # al cerrarse, el panel aún avisa de su tamaño: repintaba sobre la ventana ya cerrada
+            return
         if name in self.pending:
             qtk.cancel(self.pending[name])
         self.pending[name] = qtk.after(ms, lambda: (self.pending.pop(name, None), fn()))
@@ -7811,6 +7884,7 @@ class TextEditor:
         for job in self.pending.values():
             qtk.cancel(job)
         self.pending.clear()
+        self.closed = True
         self.drop_draft()  # se aceptó o se descartó: el borrador ya no hace falta
         # shortcut: tras aceptar, un párrafo añadido antes desplaza el bloque; se queda cerca, que basta para volver
         _log_work(self.app.work, datetime.now().date().isoformat(), paragraphs=self.saved_paragraphs,

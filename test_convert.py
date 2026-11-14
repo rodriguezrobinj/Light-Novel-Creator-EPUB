@@ -4261,7 +4261,8 @@ def test_text_editor_escape_closes_bars_not_the_editor():
 
 def test_text_editor_ribbon_fits_the_screen():
     """Con las herramientas nuevas la cinta pedía ~1800 px: en 1366 (y 1093 con el zoom al 125 %) los botones
-    se montaban. Cada nivel de fit_ribbon la estrecha (iconos, botón de capítulo más corto) y se elige el
+    se montaban. Las pestañas la dejan en menos de 1366 px con todos los nombres; con el zoom de Windows al
+    125 %, cada nivel de fit_ribbon la estrecha (iconos, botón de capítulo más corto) y se elige el
     primero que cabe; el texto queda en la ayuda. (Sin pantalla las letras miden más que en Windows: el
     ancho real se mira con /verificar-ventana.)"""
     from PySide6.QtCore import QEvent
@@ -4285,9 +4286,55 @@ def test_text_editor_ribbon_fits_the_screen():
     editor.win.done(0)
     window.close()
     assert widths == sorted(widths, reverse=True) and len(set(widths)) == len(widths), widths
-    assert widths[-1] < 0.6 * widths[0], widths
+    assert widths[0] <= 1366, widths  # repartida en pestañas cabe con el nombre de cada botón
     assert level == next((n for n, w in enumerate(widths) if w <= room), len(widths) - 1), (level, widths, room)
     assert undo == "↶" and "Deshacer" in tip, (undo, tip)
+
+
+def test_text_editor_ribbon_tabs_like_word():
+    """La cinta va en pestañas como Word (Inicio, Insertar, Revisar, Vista): cada botón está en una sola, el
+    capítulo y ◀ ▶ se ven en todas, y «Mostrar cambios» de Vista va a la par con el del menú Cambios."""
+    from PySide6.QtWidgets import QAbstractButton
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Texto.")], [0])
+    tabs, pages = editor.ribbon_tabs, editor.ribbon_pages
+    names = [tabs.tabText(n) for n in range(tabs.count())]
+    buttons = [pages.widget(n).findChildren(QAbstractButton) for n in range(pages.count())]
+    owners = {b: [n for n, page in enumerate(buttons) if b in page] for page in buttons for b in page}
+    where = {b.text().split("\n")[0]: names[n[0]] for b, n in owners.items()}
+    visible = []
+    for n in range(tabs.count()):
+        tabs.setCurrentIndex(n)
+        visible.append((pages.currentIndex(), editor.chapter_btn.isVisibleTo(editor.win),
+                        editor.next_chapter.isVisibleTo(editor.win), editor.review_btn.isVisibleTo(editor.win)))
+    editor.show_changes_box.setChecked(True)
+    from_box = editor.show_changes_action.isChecked()
+    editor.show_changes_action.setChecked(False)
+    from_menu = editor.show_changes_box.isChecked()
+    big = editor.read_btn.toolButtonStyle(), editor.read_btn.icon().isNull()
+    editor.win.done(0)
+    window.close()
+    assert names == ["Inicio", "Insertar", "Revisar", "Vista"], names
+    assert all(len(n) == 1 for n in owners.values()), owners
+    assert (where["N"], where["Símbolos ▾"], where["Leer"], where["Navegación"]) == tuple(names), where
+    assert visible == [(n, True, True, True) for n in range(4)], visible
+    assert from_box and not from_menu, (from_box, from_menu)
+    from PySide6.QtCore import Qt
+    assert big == (Qt.ToolButtonStyle.ToolButtonTextUnderIcon, False), big
+
+
+def test_text_editor_closed_schedules_nothing():
+    """Al cerrar el editor, el panel del PDF aún avisaba de su nuevo tamaño y se repintaba sobre la ventana
+    cerrada: «Algo falló · 'NoneType' object is not subscriptable» con el libro ya cerrado."""
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Texto.")], [0])
+    editor.win.done(0)
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QResizeEvent
+    editor.on_panel_event(QResizeEvent(QSize(400, 300), QSize(300, 300)))
+    pending = dict(editor.pending)
+    window.close()
+    assert not pending, pending
 
 
 class FakeSpellProcess:
