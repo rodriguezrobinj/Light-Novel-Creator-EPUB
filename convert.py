@@ -2299,7 +2299,7 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                                 "El PDF dibuja aquí un símbolo como imagen y no se parece a ningún carácter conocido: "
                                 "va en el libro como una imagen pequeña dentro del texto.",
                                 "Si es un símbolo de texto (♡, ★, ♪…), bórralo y escribe el carácter con «Editar "
-                                "texto…» (tecla E), en «Ω Símbolos». Si se ve bien, ignora el aviso.",
+                                "texto…» (tecla E), en «Insertar › Símbolos». Si se ve bien, ignora el aviso.",
                                 _cut(_unhtml(ICON.sub("[icono]", b.html)).strip()), text=text))
         for t, fixed in _typos(line) if spanish and not link else ():
             kind, title, _, why, solution = TYPOS[t]

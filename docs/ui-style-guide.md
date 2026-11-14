@@ -89,7 +89,8 @@ Se eligen por nombre de objeto (`_button(texto, acción, nombre)`, `_label(texto
 | `ok` | Texto verde | Confirmación pequeña |
 | `chip` | Botón-etiqueta redondo, marcable | Filtros que se activan y desactivan |
 | `link` | Texto `acc` subrayado, sin borde | Acción secundaria dentro de un texto: «¿Muchos tomos? …» |
-| `tool` | Botón de la cinta del editor, sin borde | Solo en `ribbon`; marcado = `sel` con borde `acc` |
+| `tool` | Botón de la cinta del editor, sin borde | Solo en `ribbon`; marcado = `sel` con borde `acc`. Grande (`icon=`): glifo de `GLYPH` px arriba y nombre abajo, para lo principal de un grupo |
+| `sep` | Línea vertical de 1 px, color `line` | Entre grupos de una pestaña de la cinta |
 | `card` | Tarjeta: `card`, borde `line`, radio 8 | Agrupar contenido relacionado |
 | `bar` | Barra sin borde, fondo `card` | Barras de arriba y de abajo de la ventana |
 | `ribbon` | Cinta con línea inferior | Barras del editor (buscar, enlace, comparar) |
@@ -130,7 +131,8 @@ Un icono es un **glifo de texto monocromo** que toma el color del tema. Los glif
 | `prev` / `next` | ◀ / ▶ | | `join` | ⤒ | | `dot` | ● |
 | `first` / `last` | ◀◀ / ▶▶ | | `center` | ≡ | | `minus` | − |
 | `nav` | ☰ | | `frame` | ▭ | | `right` | ⇥ |
-| `scene` | ❖ | | | | | | |
+| `scene` | ❖ | | `symbols` | Ω | | `changes` | ± |
+| `stats` | Σ | | | | | | |
 
 Reglas:
 
@@ -144,6 +146,10 @@ Reglas:
 - **Glifo fino, palabra:** `⌕`, `↗` y `⤒` se ven pálidos y pequeños solos (el aviso de contraste del
   guion de `/verificar-ventana` marcó 1,0:1 y 3,8:1). Su variante corta es la palabra: «Buscar»,
   «Enlace», «Unir». Un glifo nuevo en la variante corta se mira en la cinta antes de aceptarlo.
+- **Cinta del editor:** pestañas como Word (Inicio, Insertar, Revisar, Vista), grupos separados por `sep` y con
+  su nombre abajo. Lo pequeño va en dos filas con `«<glifo> Texto»`; lo principal, en botón grande con el glifo
+  dibujado por `_glyph_icon` (color `ink`) y el nombre sin glifo. El capítulo y ◀ ▶ van a la derecha de las
+  pestañas, a la vista en todas.
 - **Flechas de menú:** `▾` al final del texto de un botón que abre un menú (`_menu_button`); `▴` al
   abrirse un panel.
 - **Tamaño:** el del texto. Solo la pantalla de inicio (`doc`, 40 pt) y la miniatura que falta (20 pt) lo
