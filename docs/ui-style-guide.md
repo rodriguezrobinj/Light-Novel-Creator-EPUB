@@ -141,19 +141,20 @@ Reglas:
   cambia de glifo. Ya salieron a color `⚠ ⏮ ⏭ ⚙ ⛓ ❗ ⚓` y todo lo de `U+1F000` en adelante, salvo `🗎`.
 - **Glifo nuevo:** se dibuja con la fuente de Windows sobre fondo transparente con tinta negra; si algún
   píxel sale con color, es emoji y no vale. En pruebas sin pantalla no hay fuentes: el test mira códigos.
-- **Con texto:** `«<glifo> Texto»` en la cinta; la variante corta (`short=`) lleva solo el glifo y el
+- **Con texto:** fuera de la cinta, `«<glifo> Texto»`. En la cinta el glifo no va en el texto: lo dibuja
+  `_glyph_icon` como icono escalado a su caja (`glyph=`, 16 px al lado del nombre; `icon=`, 24 px encima),
+  porque como letra `≡`, `⇥` o `⤒` apenas se veían. Su forma corta (`compact_to`) deja solo el glifo y el
   nombre pasa a la ayuda emergente.
-- **Glifo fino, palabra:** `⌕`, `↗` y `⤒` se ven pálidos y pequeños solos (el aviso de contraste del
-  guion de `/verificar-ventana` marcó 1,0:1 y 3,8:1). Su variante corta es la palabra: «Buscar»,
-  «Enlace», «Unir». Un glifo nuevo en la variante corta se mira en la cinta antes de aceptarlo.
+- **Glifo fino, palabra:** `⌕` y `↗` como letra se ven pálidos y pequeños (el aviso de contraste del guion de
+  `/verificar-ventana` marcó 1,0:1 y 3,8:1): fuera de la cinta, su variante corta es la palabra. Un glifo
+  nuevo se mira en la cinta antes de aceptarlo.
 - **Cinta del editor:** pestañas como Word (Inicio, Insertar, Revisar, Vista), grupos separados por `sep` y con
-  su nombre abajo. Lo pequeño va en dos filas con `«<glifo> Texto»`; lo principal, en botón grande con el glifo
-  dibujado por `_glyph_icon` (color `ink`) y el nombre sin glifo. El capítulo y ◀ ▶ van a la derecha de las
-  pestañas, a la vista en todas.
+  su nombre abajo. Lo pequeño va en dos filas; lo principal, en botón grande. El capítulo y ◀ ▶ van a la
+  derecha de las pestañas, a la vista en todas.
 - **Flechas de menú:** `▾` al final del texto de un botón que abre un menú (`_menu_button`); `▴` al
   abrirse un panel.
-- **Tamaño:** el del texto. Solo la pantalla de inicio (`doc`, 40 pt) y la miniatura que falta (20 pt) lo
-  agrandan.
+- **Tamaño:** el del texto. Solo la cinta del editor (16 y 24 px), la pantalla de inicio (`doc`, 40 pt) y la
+  miniatura que falta (20 pt) lo agrandan.
 - **Color:** el del texto del botón. Un icono de estado toma `warn`, `ok` o `muted` según el rol.
 - No hay iconos de imagen salvo `icon.ico` (ventana y .exe) y las miniaturas de páginas.
 

@@ -4274,21 +4274,22 @@ def test_text_editor_ribbon_fits_the_screen():
     widths = []
     for level in range(len(app.CHAPTER_WIDTHS)):
         editor.ribbon_level = level
-        for button, text, short, needs in editor.compact:
-            button.setText(short if level >= needs else text)
+        editor.compact_to(level)
         editor.show_chapter(0)
         editor.refresh_marks()  # «Avisos (1) ▾» o «▲ 1 ▾» según el nivel
         QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest.value)
         widths.append(editor.ribbon_bar.sizeHint().width())
     editor.fit_ribbon()
     room = min(editor.win.width(), editor.win.screen().availableGeometry().width())
-    level, undo, tip = editor.ribbon_level, editor.undo_btn.text(), editor.undo_btn.toolTip()
+    level, undo, tip = editor.ribbon_level, editor.undo_btn.toolButtonStyle(), editor.undo_btn.toolTip()
     editor.win.done(0)
     window.close()
     assert widths == sorted(widths, reverse=True) and len(set(widths)) == len(widths), widths
     assert widths[0] <= 1366, widths  # repartida en pestañas cabe con el nombre de cada botón
     assert level == next((n for n, w in enumerate(widths) if w <= room), len(widths) - 1), (level, widths, room)
-    assert undo == "↶" and "Deshacer" in tip, (undo, tip)
+    from PySide6.QtCore import Qt
+    assert level == 0 or undo == Qt.ToolButtonStyle.ToolButtonIconOnly, (level, undo)  # solo el glifo ↶
+    assert "Deshacer" in tip, tip
 
 
 def test_text_editor_ribbon_tabs_like_word():
