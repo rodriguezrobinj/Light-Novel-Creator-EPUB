@@ -3392,6 +3392,40 @@ def test_text_editor_navigates_chapters_and_saves_only_changes():
     assert undone
 
 
+def test_text_editor_steps_pdf_pages():
+    """◀ ▶ bajo el PDF pasan de página (◀◀ ▶▶, de capítulo): la hoja va al primer párrafo de la página, cruzando
+    al capítulo siguiente si hace falta, y el panel la dibuja. En la primera y la última página se apagan."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    first = next(i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON)
+    window.tree.selection_set(first)
+    editor = window.edit_text()
+    root.update()
+    blocks, starts = window.book.blocks, editor.page_starts()
+    pages = sorted(starts)
+    editor.open_section(*next(s[1:3] for s in editor.sections if s[1] <= starts[pages[0]] < s[2]))
+    editor.sheet.goto_source(starts[pages[0]])
+    editor.draw_source()
+    at_start = not editor.prev_page.isEnabled() and editor.next_page.isEnabled()
+    seen, sections = [], set()
+    for _ in pages[1:]:
+        editor.next_page.click()
+        k = editor.sheet.current_source()
+        seen.append((blocks[k].page, editor.shown, k == starts[blocks[k].page]))
+        sections.add(editor.current)
+    at_end = editor.prev_page.isEnabled() and not editor.next_page.isEnabled()
+    editor.prev_page.click()
+    back = blocks[editor.sheet.current_source()].page
+    window.close()
+    assert len(pages) >= 3, pages
+    assert seen == [(p, ("page", p), True) for p in pages[1:]], seen
+    assert len(sections) >= 2, sections  # cruzó de capítulo
+    assert at_start and at_end and back == pages[-2], (at_start, at_end, back)
+
+
 def test_text_editor_chapter_list_is_a_small_popup():
     """Con muchos capítulos (Mitsuha 1: 34) la lista ocupaba toda la pantalla en columnas: es un desplegable
     pequeño con scroll bajo el botón, que se filtra escribiendo y se cierra al elegir."""
@@ -9066,7 +9100,8 @@ def no_modal_dialogs():
 if __name__ == "__main__":
     failed = 0
     no_modal_dialogs()
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+    # prefijo lnepub-: el hook de limpieza borra lo que quede si las pruebas se cortan
+    with tempfile.TemporaryDirectory(prefix="lnepub-test-", ignore_cleanup_errors=True) as tmp:
         TMP = Path(tmp)
         import app
         app.SETTINGS = TMP / "ajustes.json"  # nunca las preferencias reales del usuario

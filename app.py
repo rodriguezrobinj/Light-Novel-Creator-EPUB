@@ -6329,10 +6329,15 @@ class TextEditor:
         side_column = QVBoxLayout(side)
         side_column.setContentsMargins(8, 8, 8, 0)
         side_column.addWidget(self.scroll, 1)
-        prev_btn, next_btn = _button("◀", lambda: self.step_section(-1)), _button("▶", lambda: self.step_section(1))
-        prev_btn.setToolTip("Capítulo anterior")  # hojear página a página era lento para cruzar el libro
+        # Fuera, de capítulo en capítulo (hojear página a página era lento para cruzar el libro); dentro, de página
+        # ◀◀ y no ⏮: Windows dibuja ⏮ ⏭ como emoji azules
+        prev_btn, next_btn = _button("◀◀", lambda: self.step_section(-1)), _button("▶▶", lambda: self.step_section(1))
+        prev_btn.setToolTip("Capítulo anterior")
         next_btn.setToolTip("Capítulo siguiente")
-        side_column.addLayout(_row(prev_btn, self.page_label, next_btn,
+        self.prev_page, self.next_page = _button("◀", lambda: self.step_page(-1)), _button("▶", lambda: self.step_page(1))
+        self.prev_page.setToolTip("Página anterior")
+        self.next_page.setToolTip("Página siguiente")
+        side_column.addLayout(_row(prev_btn, self.prev_page, self.page_label, self.next_page, next_btn,
                                    1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
                                    _button("+", lambda: self.zoom(25))))
         self.split = QSplitter()
@@ -7733,6 +7738,29 @@ class TextEditor:
         if row is not None and 0 <= row + delta < len(self.sections):
             self.open_section(*self.sections[row + delta][1:3])
 
+    def page_starts(self):
+        """{página del PDF: primer bloque que empieza en ella}, solo de lo que sale en los capítulos."""
+        starts = {}
+        for _, start, end, _ in self.sections:
+            for k in range(start, end):
+                starts.setdefault(self.app.book.blocks[k].page, k)
+        return starts
+
+    def step_page(self, delta):
+        """◀ ▶ bajo el PDF: la hoja va al primer párrafo de la página anterior o siguiente (abriendo su capítulo si
+        es otro) y el panel la dibuja. Las páginas sin nada del libro se saltan: no hay qué mostrar en la hoja."""
+        here, starts = self.app.book.blocks[self.source_block()].page, self.page_starts()
+        pages = [p for p in starts if (p > here if delta > 0 else p < here)]
+        if not pages:
+            return
+        k = starts[min(pages) if delta > 0 else max(pages)]
+        bounds = next(s[1:3] for s in self.sections if s[1] <= k < s[2])
+        if bounds != self.current:
+            self.open_section(*bounds)
+        self.sheet.goto_source(k)
+        self.sheet.ensureCursorVisible()
+        self.draw_source()  # sin esperar a la pausa del cursor: el clic se ve al momento
+
     def mark_changed(self):
         """Lista de capítulos: el de ahora elegido y «•» junto a los que tienen cambios sin guardar."""
         if not shiboken6.isValid(self.chapter_list):
@@ -7949,6 +7977,9 @@ class TextEditor:
         count, current, words = self.sheet.paragraphs()
         where = f"párrafo {current} de {count}" if current else f"{count} párrafo{'' if count == 1 else 's'}"
         page = self.app.book.blocks[self.source_block()].page
+        starts = self.page_starts()
+        self.prev_page.setEnabled(any(p < page for p in starts))
+        self.next_page.setEnabled(any(p > page for p in starts))
         self.status.setText(f"Página {page} del PDF · {where} · "
                             f"{words:,} palabra{'' if words == 1 else 's'}".replace(",", "."))
 
