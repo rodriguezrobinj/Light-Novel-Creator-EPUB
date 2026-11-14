@@ -5942,18 +5942,23 @@ class App:
                 args = (src.currentData(), dst.currentData(), api_key.text().strip(), model.currentText().strip(),
                         base.text().strip() if info.get("custom") else "", names, whole)
                 found, started = queue.Queue(), time.time()
+                # Las notas de los tomos anteriores: la IA amplía la de un personaje si este tomo cuenta algo nuevo
+                known = [f"{a}: {b}" for a, b in cells(people) if a and b]
+                known_names = {line.split(":")[0] for line in known}
 
                 def ask():
                     got_terms, got_people = {}, {}
                     try:
                         with concurrent.futures.ThreadPoolExecutor(len(samples)) as pool:
-                            jobs = [pool.submit(translate.propose, name, sample, *args) for sample in samples]
+                            jobs = [pool.submit(translate.propose, name, sample, *args, known=known) for sample in samples]
                             for n, job in enumerate(concurrent.futures.as_completed(jobs), 1):
                                 got = job.result()
                                 for a, b in got[0]:
                                     got_terms.setdefault(a, b)
-                                for line in got[1]:  # el mismo personaje en dos trozos: vale la primera nota
-                                    got_people.setdefault(line.split(":")[0], line)
+                                for line in got[1]:  # el mismo personaje en dos trozos: la primera nota, o la más larga
+                                    who = line.split(":")[0]  # de un conocido (cada trozo amplía lo suyo)
+                                    if who not in got_people or (who in known_names and len(line) > len(got_people[who])):
+                                        got_people[who] = line
                                 found.put(("progress", n))
                         found.put(([[a, b] for a, b in got_terms.items()], list(got_people.values())))
                     except Exception as e:  # TranslateError ya viene en español
@@ -5987,11 +5992,27 @@ class App:
                     new_people = [line.partition(":")[::2] for line in result[1] if line.split(":")[0] not in known]
                     for a, b in new_terms:
                         add_term(a, b)
+                    # La nota ampliada de un conocido, en su fila: en cursiva y con la anterior en el tooltip
+                    rows_now, grown = {a: (n, b) for n, (a, b) in enumerate(cells(people))}, 0
+                    for line in result[1]:
+                        who, _, about = (part.strip() for part in line.partition(":"))
+                        if who in rows_now and about and about != rows_now[who][1] and people.item(rows_now[who][0], 1):
+                            item = people.item(rows_now[who][0], 1)
+                            item.setText(about)
+                            font = item.font()
+                            font.setItalic(True)
+                            item.setFont(font)
+                            item.setToolTip(f"Antes: {rows_now[who][1]}")
+                            grown += 1
                     for a, b in new_people:
                         add_person(a.strip(), b.strip())
-                    note.setText(f"La IA propone {convert.counted(len(new_terms), 'término nuevo', 'términos nuevos')} y "
-                                 f"{convert.counted(len(new_people), 'personaje nuevo', 'personajes nuevos')}: revísalos "
-                                 f"antes de aceptar.")
+                    found_text = [convert.counted(len(new_terms), 'término nuevo', 'términos nuevos'),
+                                  convert.counted(len(new_people), 'personaje nuevo', 'personajes nuevos')]
+                    if grown:
+                        found_text.append(convert.counted(grown, "nota ampliada", "notas ampliadas")
+                                          + " (en cursiva; la anterior, al pasar el ratón)")
+                    note.setText(f"La IA propone {', '.join(found_text[:-1])} y {found_text[-1]}: revísalos antes de "
+                                 f"aceptar.")
 
                 qtk.after(200, wait)
 

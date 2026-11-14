@@ -8319,6 +8319,52 @@ def test_window_translate_apply_and_undo():
         window.close()
 
 
+def test_window_glossary_proposal_updates_known_characters():
+    """En el tomo 2 y siguientes, «Proponer con la IA» le pasa las notas que ya hay y amplía la de un personaje cuando el
+    tomo cuenta algo nuevo de él (antes se saltaba a los conocidos). La nota ampliada sale en cursiva con la anterior
+    en el tooltip; una igual a la que hay no cuenta; nada se guarda sin «Aceptar»."""
+    import json
+    import time
+    import app
+    import translate
+
+    root, window = versioned_window()
+    app._translation_path(window.pdf).unlink(missing_ok=True)
+    original, asked = translate._post, []
+    reply = {"glossary": {}, "characters": {"Teto": "chica alegre; en este tomo se vuelve la escolta de la bruja",
+                                            "Beretta": "sirvienta, formal", "Liriel": "diosa, de tú"}}
+    translate._post = lambda url, headers, body: asked.append(body) or {
+        "choices": [{"message": {"content": json.dumps(reply)}}]}
+    try:
+        win = window.translate_book()
+        parts = win.parts
+        parts["engine"].setCurrentIndex(parts["engine"].findText("DeepSeek"))
+        parts["engine"].activated.emit(parts["engine"].currentIndex())
+        parts["key"].setText("k")
+        parts["glossary"]()
+        box = win.glossary_box
+        box["add_person"]("Teto", "chica alegre")
+        box["add_person"]("Liriel", "diosa, de tú")
+        box["suggest"]()
+        end = time.time() + 5
+        while "Beretta" not in box["notes"]() and time.time() < end:
+            root.update()
+            time.sleep(0.02)
+        item, same = box["people"].item(0, 1), box["people"].item(1, 1)
+        got = (item.text(), item.font().italic(), item.toolTip(), same.font().italic(), box["note"].text())
+        saved = window.tr_notes
+        box["accept"]()
+        accepted = window.tr_notes
+    finally:
+        translate._post = original
+        root.destroy()
+    sent = asked[0]["messages"][1]["content"]
+    assert "Teto: chica alegre" in sent and "Liriel: diosa, de tú" in sent, sent
+    assert got[0] == "chica alegre; en este tomo se vuelve la escolta de la bruja" and got[1] and not got[3], got
+    assert "chica alegre" in got[2] and "1 personaje nuevo" in got[4] and "1 nota ampliada" in got[4], got
+    assert "escolta" not in saved and "Teto: chica alegre; en este tomo se vuelve la escolta" in accepted, accepted
+
+
 def test_window_translate_chapters_style_and_doubts():
     """Cada capítulo se traduce por su cuenta, viendo su capítulo entero y no el de otro; «Glosario y estilo…» guarda
     la ficha de personajes con la serie y la variante en las preferencias, y «Proponer con la IA» rellena las dos
