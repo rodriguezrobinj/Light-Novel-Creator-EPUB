@@ -678,10 +678,12 @@ def review(name, pairs, src, dst, api_key="", model="", base="", glossary=(), st
     return run(list(pairs))
 
 
-def propose(name, sample, src, dst, api_key="", model="", base="", names=(), text=""):
+def propose(name, sample, src, dst, api_key="", model="", base="", names=(), text="", known=()):
     """Glosario y ficha de personajes que la IA saca de una muestra del libro, para que el usuario los revise:
     ([[original, traducción]], ["Nombre: género, cómo habla…"]). names: nombres propios frecuentes del tomo. text: el
-    libro entero, para quitar las palabras comunes que la IA propone con mayúscula («Dress», «Twelve»)."""
+    libro entero, para quitar las palabras comunes que la IA propone con mayúscula («Dress», «Twelve»). known: las
+    notas que ya hay («Nombre: nota», de tomos anteriores); la IA devuelve la de uno de ellos, entera y ampliada, solo
+    si la muestra cuenta algo que le falta."""
     engine = ENGINES[name]
     if engine["kind"] not in AI:
         raise TranslateError("El glosario y los personajes solo los puede proponer una IA: elige una en «Motor».")
@@ -699,8 +701,15 @@ def propose(name, sample, src, dst, api_key="", model="", base="", names=(), tex
               f"Killer), nor the names of the author, illustrator or translators.\n"
               f"\"characters\": an object that maps each character's name to a short note written in Spanish: "
               f"gender, approximate age or role, how they speak (formal, rough, childish...) and how they address "
-              f"the others (de tú, de usted). Only what the sample shows; do not invent.")
-    user = ("Frequent names in the book: " + ", ".join(names) + "\n\n" if names else "") + "Sample:\n" + sample
+              f"the others (de tú, de usted). Only what the sample shows; do not invent. Only what helps to translate "
+              f"them: never plot events, fights, skills or numbers.")
+    if known:
+        system += ("\nSome characters already have a note from earlier volumes (given below). Include one of them in "
+                   "\"characters\" only if the sample shows something important its note lacks (a new role, "
+                   "relationship, way of speaking or of addressing someone); then write the whole note again, keeping "
+                   "everything it already says and adding the new part.")
+    user = (("Frequent names in the book: " + ", ".join(names) + "\n\n" if names else "")
+            + ("Character notes already written:\n" + "\n".join(known) + "\n\n" if known else "") + "Sample:\n" + sample)
     try:
         data = _json(_chat(name, engine, system, user, api_key, model or engine.get("model", ""),
                            base or engine["base"]))
