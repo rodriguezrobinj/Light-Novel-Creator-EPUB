@@ -77,6 +77,8 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
              "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes")
+# De INHERITED, lo que es de toda la serie aunque el tomo ya tenga revisión: glosarios, diccionario y personajes
+SERIES_VOCAB = ("words", "glossary", "tr_glossary", "tr_notes")
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
 RECENT = 8  # PDF recientes que recuerda el menú
@@ -969,8 +971,9 @@ def _date_text(iso):
 
 
 def _inherited(pdf, series):
-    """Datos de la serie (INHERITED) de la revisión más reciente de otro tomo de la misma serie,
-    en la misma carpeta. {} si no hay."""
+    """Datos de la serie (INHERITED) de otros tomos de la misma serie en la misma carpeta: cada uno, del más reciente
+    que lo tiene (Making Magic: la revisión del EPUB original, sin glosario y más reciente que la del traducido, dejaba
+    el tomo 2 sin glosario). Sin ninguno ahí, lo guardado al revisar otro tomo (_remember_series). {} si no hay."""
     found = []
     for path in Path(pdf).parent.glob("*.lnepub.json") if series else ():
         try:
@@ -979,11 +982,16 @@ def _inherited(pdf, series):
                 found.append((path.stat().st_mtime, path.name, state))
         except (OSError, ValueError, AttributeError):
             continue
-    if found:
-        state = max(found, key=lambda f: f[:2])[2]
-    else:  # tomo en otra carpeta: lo guardado al revisar otro tomo de la serie (_remember_series)
+    if not found:  # tomo en otra carpeta
         state = _series_store().get(series.strip().lower(), {}) if series else {}
-    return {name: state[name] for name in INHERITED if name in state}
+        return {name: state[name] for name in INHERITED if name in state}
+    found.sort(key=lambda f: f[:2], reverse=True)
+    out = {}
+    for name in INHERITED:
+        have = [state[name] for _, _, state in found if name in state]
+        if have:
+            out[name] = next((v for v in have if v not in ("", [], {})), have[0])
+    return out
 
 
 def _series_path():
@@ -2581,6 +2589,13 @@ class App:
         text += f" · {convert.counted(scenes, 'separador', 'separadores')}" if scenes else ""  # al final: si no cabe, se corta esto
         if self.load_review():
             text = "Revisión anterior recuperada"
+            # Serie convertida antes de traducir: este tomo ya tenía revisión, pero sin glosario ni personajes; los de
+            # otro tomo valen. Lo que el tomo tenga suyo no se toca
+            shared = {name: value for name, value in _inherited(self.pdf, book.series).items()
+                      if name in SERIES_VOCAB and value and not getattr(self, name)}
+            if shared:
+                self.apply_state(shared)
+                text += " · glosario y personajes de la serie tomados de otro tomo"
         elif self.pdf:
             # Del mismo PDF pero de otro análisis (otra versión del programa): los cambios de texto van por número
             # de bloque y ya no encajan, pero los datos del libro (título, serie, glosarios, portada…) sí valen
