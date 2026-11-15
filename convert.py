@@ -3533,7 +3533,8 @@ def _contents_numbers(pdf, toc, font):
     # NFKC: MuPDF une «fi» en una ligadura (Mitsuha 1: «Signiﬁca») y el título ya no casaba
     norm = lambda s: " ".join(unicodedata.normalize("NFKC", s.replace("\xad", "")).split())
     entries = iter([(norm(title), page) for _, title, page, *_ in toc])
-    current, rects = next(entries, None), []
+    widest = str(max(page for _, _, page, *_ in toc))  # los puntos guía acaban todos antes del número más ancho
+    current, rects, grid = next(entries, None), [], None
     for n in range(start, first):
         page = pdf[n]
         for link in page.get_links():  # MuPDF deja solo los de los subtítulos, y a otra página
@@ -3554,6 +3555,18 @@ def _contents_numbers(pdf, toc, font):
             span = line["spans"][-1]
             right = page.rect.width - left
             _write_number(page, font, str(target), right, span["origin"][1], span["size"], right=True)
+            # Puntos guía del título a su número: sin ellos la vista se perdía en el hueco. En una rejilla fija desde
+            # el margen, para que los de todas las líneas queden alineados
+            size = span["size"]
+            if grid is None:  # de la letra del primer título: un subtítulo, más pequeño, sigue la misma rejilla
+                grid = (right - font.text_length(widest, size) - size * 0.4, size * 0.55)
+            end, gap = grid
+            dots = pymupdf.TextWriter(page.rect, color=PAGE_GRAY)
+            x = end - gap
+            while x > line["bbox"][2] + size * 0.4:
+                dots.append((x, span["origin"][1]), ".", font=font, fontsize=size)
+                x -= gap
+            dots.write_text(page)
             for at, part in rects:  # el enlace, en cada línea del título, hasta el número
                 box = pymupdf.Rect(part["bbox"])
                 box.x1 = right
