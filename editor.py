@@ -6,12 +6,13 @@ import difflib
 import html
 import re
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat)
 from PySide6.QtWidgets import QApplication, QTextEdit
 
 import convert
+from qtk import u16
 
 _USER = QTextFormat.Property.UserProperty.value
 SOURCE = _USER + 1    # párrafo: índice del bloque del libro del que viene (el PDF sigue al cursor)
@@ -26,10 +27,11 @@ RIGHTED = _USER + 9   # párrafo a la derecha (firma de una carta): vuelve con <
 FRAME_PAD = 16        # píxeles entre el recuadro y su texto
 SUB = 18              # sangría de una línea sin viñeta en un recuadro con viñetas («HP: 10/10» bajo «■ Lorna»)
 MIME = "application/x-lnc-hoja"  # copiar y pegar dentro de la hoja conserva formato e ilustraciones
+WHOLE = MIME + "-parrafos"  # lo copiado acaba en un salto de párrafo: se pegan párrafos enteros
 ICON = _USER + 10     # imagen: la etiqueta <img> de un icono del texto (convert.ICON), que vuelve a section_text
 MARKS = re.compile(r'(</?(?:i|b|sup|sc)>|<a href="[^"]*">|</a>|<img class="icono" [^>]*>)')
 LINK = re.compile(r'<a href="([^"]*)">')
-LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; app.py pone el del tema
+LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; TextEditor pone el azul del tema
 NOTE = re.compile(r"\[Nota: [^\]]*\]")
 THUMB = 160  # alto de las miniaturas de ilustración en la hoja, en píxeles
 SPACE = 10  # píxeles entre párrafos, como el espaciado de Word (no se guarda)
@@ -344,6 +346,12 @@ def objects_of(block):
     return found
 
 
+def original_of(block):
+    """Línea con que se cargó el párrafo, o None si es nuevo. PySide da [] por una propiedad "" (párrafo vacío)."""
+    value = block.blockFormat().property(ORIGINAL)
+    return "" if value == [] else value
+
+
 def source_of(block):
     """Bloque del libro del que viene el párrafo: el de su objeto, o el que recuerda su formato."""
     objects = objects_of(block)
@@ -504,6 +512,11 @@ class Look(QSyntaxHighlighter):
 
     def highlightBlock(self, text):
         block = self.currentBlock()
+        # setFormat cuenta en UTF-16 y text en caracteres: tras un emoji (dos posiciones) se subrayaba otra cosa
+        wide = any(ord(c) > 0xFFFF for c in text)
+
+        def at(i):
+            return u16(text, i) if wide else i
         if block.blockFormat().property(HEADING):
             f = QTextCharFormat()
             f.setFontWeight(QFont.Weight.Bold)
@@ -511,35 +524,37 @@ class Look(QSyntaxHighlighter):
             subtitle = block.blockFormat().property(LEVEL) not in (None, "Capítulo")
             f.setProperty(QTextFormat.Property.FontSizeAdjustment, 1 if subtitle else 2)
             f.setForeground(self.color("heading"))
-            self.setFormat(0, len(text), f)
+            self.setFormat(0, at(len(text)), f)
         elif text.strip() and convert.SCENE_BREAK.fullmatch(text.strip()):
             f = QTextCharFormat()
             f.setForeground(self.color("scene"))
-            self.setFormat(0, len(text), f)
+            self.setFormat(0, at(len(text)), f)
         for m in NOTE.finditer(text):
             f = QTextCharFormat()
             f.setForeground(self.color("mark"))
-            self.setFormat(m.start(), m.end() - m.start(), f)
+            self.setFormat(at(m.start()), at(m.end()) - at(m.start()), f)
+        broken = self.color("broken")  # fuera del bucle: se pinta letra a letra
         for m in self.matches(text):
-            for c in range(m.start(), m.end()):  # encima de lo que ya tenga (título, nota)
+            for c in range(at(m.start()), at(m.end())):  # encima de lo que ya tenga (título, nota)
                 f = QTextCharFormat(self.format(c))
                 f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
-                f.setUnderlineColor(self.color("broken"))
+                f.setUnderlineColor(broken)
                 self.setFormat(c, 1, f)
         if self.changes and text.strip() and not objects_of(block):
-            original = block.blockFormat().property(ORIGINAL)
+            original = original_of(block)
             if original is None:
                 spans = [(0, len(text))]  # párrafo nuevo: todo es lo puesto
             elif block_lines(block) == [original]:
                 spans = []
             else:
                 spans = added_spans(plain_line(original), text)
+            changes = QColor(self.changes)
             for start, size in spans:
-                for c in range(start, start + size):
+                for c in range(at(start), at(start + size)):
                     f = QTextCharFormat(self.format(c))
                     f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
-                    f.setUnderlineColor(QColor(self.changes))
-                    f.setForeground(QColor(self.changes))
+                    f.setUnderlineColor(changes)
+                    f.setForeground(changes)
                     self.setFormat(c, 1, f)
 
 
@@ -570,6 +585,7 @@ class Sheet(QTextEdit):
         self.pictures, self.color = {}, "#888888"
         self.bars, self.bar_color = [], QColor("#2e9d4a")  # párrafos cambiados: barrita en el margen
         self.origins = {}  # documento -> [(bloque, línea)] tal como se cargó
+        self.known = {}  # documento -> {párrafo: (revisión, ¿cambiado?)} de changed_blocks, hasta que cambie
         self.set_zoom(100)
 
     def set_content(self, lines, pictures, color="#888888", levels=None):
@@ -586,10 +602,14 @@ class Sheet(QTextEdit):
             if k is not None and not convert.TOKEN.fullmatch(line.strip()):
                 loaded.setdefault(_canonical(line), []).append((k, line))
         document.contentsChange.connect(lambda pos, removed, added: self.relink(document, loaded, pos, added))
-        look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
+        self.known[document] = {}
+        document.contentsChange.connect(lambda pos, removed, added: self.forget(document, pos, added))
+        # Letra y hoja antes del aspecto: con él puesto, cambiarlas volvía a colorear todo (3 veces al abrir)
+        self.setDocument(document)
+        document.setDefaultFont(self.font())
+        look = self.look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
         look.tags = self.tags
         look.set_unknown(self.unknown)
-        self.use(document, look)
         self.moveCursor(QTextCursor.MoveOperation.Start)
         return document, look
 
@@ -645,6 +665,15 @@ class Sheet(QTextEdit):
         document.clearUndoRedoStacks()
         return document, look
 
+    def forget(self, document, pos, added):
+        """Los párrafos tocados (texto, formato o deshacer) se vuelven a comparar en changed_blocks."""
+        known, block, last = self.known[document], document.findBlock(pos), document.findBlock(pos + added)
+        while block.isValid():
+            known.pop(block.fragmentIndex(), None)
+            if block == last:
+                break
+            block = block.next()
+
     def relink(self, document, loaded, pos, added):
         """Al partir un párrafo, el nuevo copia el formato del de arriba y con él su origen. Si el trozo nuevo
         vuelve a ser un párrafo cargado cuyo bloque ya no tiene párrafo (se unió y se vuelve a separar),
@@ -652,17 +681,21 @@ class Sheet(QTextEdit):
         if getattr(self, "relinking", False):
             return
         block, last = document.findBlock(pos), document.findBlock(pos + added)
+        before = source_of(block.previous()) if block.previous().isValid() else None
+        used = None  # orígenes en la hoja: se miran una vez por cambio, no por párrafo (pegar 300 tardaba 86 s)
         while block.isValid():
-            prev = block.previous()
             k = source_of(block)
-            if prev.isValid() and k is not None and k == source_of(prev) and not objects_of(block):
-                used, other = set(), document.firstBlock()
-                while other.isValid():
-                    used.add(source_of(other))
-                    other = other.next()
+            # el del de arriba de antes de recuperar el suyo: si no, solo se recuperaba un párrafo de cada dos
+            if before is not None and k == before and not objects_of(block):
+                if used is None:
+                    used, other = set(), document.firstBlock()
+                    while other.isValid():
+                        used.add(source_of(other))
+                        other = other.next()
                 text = "\n\n".join(_lines(block))
                 match = next(((j, line) for j, line in loaded.get(text, ()) if j not in used), None)
                 if match:
+                    used.add(match[0])
                     f = block.blockFormat()
                     f.setProperty(SOURCE, match[0])
                     f.setProperty(ORIGINAL, match[1])
@@ -675,6 +708,7 @@ class Sheet(QTextEdit):
                         cursor.endEditBlock()
                     finally:
                         self.relinking = False
+            before = k
             if block == last:
                 break
             block = block.next()
@@ -781,9 +815,10 @@ class Sheet(QTextEdit):
                 found.append(j)
         return found
 
-    def current_source(self):
-        """Bloque del libro del párrafo del cursor o, en uno nuevo sin origen, el del anterior que lo tenga."""
-        block = self.textCursor().block()
+    def current_source(self, block=None):
+        """Bloque del libro del párrafo del cursor (o de block) o, en uno nuevo sin origen, el del anterior que lo
+        tenga."""
+        block = self.textCursor().block() if block is None else block
         while block.isValid():
             k = source_of(block)
             if k is not None:
@@ -1009,22 +1044,30 @@ class Sheet(QTextEdit):
         if not text.strip():
             return
         if text == text.lower():
-            new = re.sub(r"(?<![\w'’])(\w)", lambda m: m.group(1).upper(), text)
+            starts = {m.start() for m in re.finditer(r"(?<![\w'’])\w", text)}
+            mapped = (c.upper() if n in starts else c for n, c in enumerate(text))
         elif text == text.upper():
-            new = text.lower()
+            mapped = (c.lower() for c in text)
         else:
-            new = text.upper()
-        start, doc = cursor.selectionStart(), self.document()
+            mapped = (c.upper() for c in text)
+        start, end, doc = cursor.selectionStart(), cursor.selectionEnd(), self.document()
+        at = start  # posición de Qt: un emoji ocupa dos
         cursor.beginEditBlock()
-        for n, c in enumerate(new):
-            if c != text[n] and doc.characterAt(start + n) not in (" ", "￼"):
-                one = QTextCursor(doc)
-                one.setPosition(start + n)
-                one.setPosition(start + n + 1, QTextCursor.MoveMode.KeepAnchor)
-                one.insertText(c, one.charFormat())
-        cursor.endEditBlock()
+        try:
+            for c, new in zip(text, mapped):
+                size = 2 if ord(c) > 0xFFFF else 1
+                # «ß» → «SS» o «ﬁ» → «FI» cambiarían el largo: esas letras se quedan como están
+                if (new != c and len(new) == 1 and (ord(new) > 0xFFFF) == (size == 2)
+                        and doc.characterAt(at) not in (" ", "￼")):
+                    one = QTextCursor(doc)
+                    one.setPosition(at)
+                    one.setPosition(at + size, QTextCursor.MoveMode.KeepAnchor)
+                    one.insertText(new, one.charFormat())
+                at += size
+        finally:
+            cursor.endEditBlock()
         cursor.setPosition(start)
-        cursor.setPosition(start + len(new), QTextCursor.MoveMode.KeepAnchor)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
         self.setTextCursor(cursor)
 
     @staticmethod
@@ -1185,16 +1228,22 @@ class Sheet(QTextEdit):
         cursor.setPosition(block.position())
         cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
         cursor.removeSelectedText()
-        _insert_marked(cursor, line)
+        _insert_marked(cursor, line, self.color)  # los iconos, del color de los de la hoja
 
     # Cambios frente a lo cargado
     def changed_blocks(self):
-        """Párrafos con texto distinto del cargado, o nuevos (sin línea original)."""
+        """Párrafos con texto distinto del cargado, o nuevos (sin línea original). Cada párrafo recuerda la
+        respuesta hasta que se toca: compararlos todos en cada pausa al escribir tardaba medio segundo."""
+        known = self.known.get(self.document(), {})
         found, block = [], self.document().firstBlock()
         while block.isValid():
-            lines = [line for line in block_lines(block) if line.strip()]
-            original = block.blockFormat().property(ORIGINAL)
-            if lines and (original is None or lines != [original]):
+            seen = known.get(block.fragmentIndex())
+            if seen is None or seen[0] != block.revision():
+                lines = [line for line in block_lines(block) if line.strip()]
+                original = original_of(block)
+                seen = known[block.fragmentIndex()] = (block.revision(),
+                                                       bool(lines and (original is None or lines != [original])))
+            if seen[1]:
                 found.append(block)
             block = block.next()
         return found
@@ -1217,7 +1266,7 @@ class Sheet(QTextEdit):
 
     def restore(self, block):
         """Devuelve el párrafo a su línea original (título, centrado y texto): un paso de deshacer."""
-        original = block.blockFormat().property(ORIGINAL)
+        original = original_of(block)
         heading, centered = original.startswith("# "), original.startswith(convert.CENTER)
         framed, right = original.startswith(convert.FRAME), original.startswith(convert.RIGHT)
         cursor = QTextCursor(self.document())
@@ -1363,6 +1412,8 @@ class Sheet(QTextEdit):
         mime = QMimeData()
         mime.setText(cursor.selection().toPlainText().replace("￼", "").replace(" ", "\n"))
         mime.setData(MIME, dump(copy).encode("utf-8"))
+        if cursor.selectedText().endswith("\u2029"):  # dump no guarda el último salto
+            mime.setData(WHOLE, b"1")
         return mime
 
     def canInsertFromMimeData(self, source):
@@ -1372,7 +1423,6 @@ class Sheet(QTextEdit):
         """De la hoja: con su formato, sin repetir una ilustración que ya está. De Word, Google Docs o la web
         (HTML): con cursiva, negrita, superíndice, versalitas y enlaces, sin colores ni tamaños. Si no, solo el
         texto."""
-        k = self.current_source()
         raw, objects = False, True
         if source.hasFormat(MIME):
             present = self.objects()
@@ -1389,7 +1439,17 @@ class Sheet(QTextEdit):
         cursor = self.textCursor()
         cursor.beginEditBlock()
         cursor.removeSelectedText()
+        whole = source.hasFormat(WHOLE)
+        before = whole and cursor.atBlockStart() and cursor.block().previous().isValid()
+        if before:  # párrafos enteros al principio de uno: tras el de arriba, y este queda como estaba
+            cursor.movePosition(QTextCursor.MoveOperation.PreviousCharacter)
+            lines = [""] + lines  # el primero, en un párrafo nuevo
+        k = self.current_source(cursor.block())
         insert_lines(cursor, [(k, line) for line in lines], self.pictures, raw=raw, color=self.color,
                      objects=objects)
+        if before:
+            cursor.movePosition(QTextCursor.MoveOperation.NextBlock)
+        elif whole:  # en medio de un párrafo: lo que sigue va en el suyo, no pegado al último
+            cursor.insertBlock()
         cursor.endEditBlock()
         self.setTextCursor(cursor)

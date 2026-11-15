@@ -6548,6 +6548,7 @@ class TextEditor:
         QShortcut(QKeySequence("F11"), win, self.toggle_focus)  # también con el foco fuera de la hoja
         self.reading, self.speaker = None, None  # párrafo que se lee en voz alta (QTextBlock) y la voz (Speaker)
         self.colors = theme.colors(app.dark)
+        editor.LINK_COLOR = self.colors["acc"]  # el azul fijo apenas se leía sobre la hoja oscura (3:1)
         self.sheet = sheet = editor.Sheet()
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
         self.pages = {}  # (inicio, fin) -> {"doc", "look", "lines"} de cada sección visitada
@@ -7060,7 +7061,7 @@ class TextEditor:
         if not shiboken6.isValid(self.diff_frame):
             return
         block = self.sheet.textCursor().block()
-        original = block.blockFormat().property(editor.ORIGINAL)
+        original = editor.original_of(block)
         if (not self.show_changes_action.isChecked() or editor.objects_of(block) or not block.text().strip()
                 or (original is not None and editor.block_lines(block) == [original])):
             self.diff_frame.hide()
@@ -7249,7 +7250,7 @@ class TextEditor:
         k = block.blockFormat().property(editor.SOURCE)
         if k is None or k not in self.issues or editor.objects_of(block):
             return []
-        original = block.blockFormat().property(editor.ORIGINAL)
+        original = editor.original_of(block)
         return list(self.issues[k]) if original is not None and editor.block_lines(block) == [original] else []
 
     def block_issue(self, block):
@@ -7258,11 +7259,14 @@ class TextEditor:
 
     @staticmethod
     def issue_range(block, issue):
-        """(inicio, fin) del problema dentro del párrafo de la hoja; sin posición, todo el párrafo."""
-        size = max(block.length() - 1, 0)
+        """(inicio, fin) del problema dentro del párrafo de la hoja, en posiciones de Qt (un emoji ocupa dos); sin
+        posición, todo el párrafo."""
+        text = block.text()
+        size = len(text)
         start, end = issue.span or (0, size)
         start, end = min(start, size), min(end, size)
-        return (start, end) if end > start else (0, size)
+        start, end = (start, end) if end > start else (0, size)
+        return qtk.u16(text, start), qtk.u16(text, end)
 
     def refresh_marks(self):
         """Marcas de la hoja, como Word: ondulado bajo el trozo exacto de cada aviso, del color de su gravedad, y
@@ -7654,6 +7658,8 @@ class TextEditor:
             self.find_info.setText("Sin resultados")
             QApplication.beep()
             return
+        if getattr(self, "matches_popup", None) is not None and shiboken6.isValid(self.matches_popup):
+            self.matches_popup.deleteLater()  # la lista anterior (hasta 500 filas) no se queda viva
         pop = QFrame(self.win, Qt.WindowType.Popup)
         pop.setObjectName("card")
         column = QVBoxLayout(pop)
@@ -7799,6 +7805,8 @@ class TextEditor:
         current = sheet.textCursor()
         if not (current.hasSelection() and current.selectionStart() <= here.position() <= current.selectionEnd()):
             sheet.setTextCursor(here)  # como Word: el clic fuera de la selección pone ahí el cursor
+        if getattr(self, "context", None) is not None and shiboken6.isValid(self.context):
+            self.context.deleteLater()  # el del clic anterior, ya cerrado: si no, quedaba uno vivo por clic
         self.context = self.mark_menu(pos)
         self.context.popup(sheet.viewport().mapToGlobal(pos))
 
@@ -7987,8 +7995,11 @@ class TextEditor:
         if not self.app.pdf or not shiboken6.isValid(self.win):
             return
         path = _draft_path(self.app.pdf)
-        pages = [{"start": start, "end": end, "lines": [line for _, line in page["lines"]],
-                  "text": editor.dump(page["doc"])} for (start, end), page in self.pages.items() if self.page_dirty(page)]
+        pages = []
+        for (start, end), page in self.pages.items():
+            text = editor.dump(page["doc"])  # una vez: page_dirty la volcaba otra
+            if self.page_dirty(page, text):
+                pages.append({"start": start, "end": end, "lines": [line for _, line in page["lines"]], "text": text})
         try:
             if pages:
                 _write_json(path, {"saved": datetime.now().isoformat(timespec="minutes"), "pages": pages})
@@ -8311,11 +8322,13 @@ class TextEditor:
                             f"{words:,} palabra{'' if words == 1 else 's'}".replace(",", "."))
 
     @staticmethod
-    def page_dirty(page):
-        """¿Cambió algo que edit_section lea en esa sección? Líneas en blanco y espacios sobrantes no cuentan."""
+    def page_dirty(page, text=None):
+        """¿Cambió algo que edit_section lea en esa sección? Líneas en blanco y espacios sobrantes no cuentan.
+        text: su dump, si ya se tiene."""
         def lines(text):
             return [line.strip() for line in text.splitlines() if line.strip()]
-        return lines(editor.dump(page["doc"])) != lines("\n\n".join(line for _, line in page["lines"]))
+        text = editor.dump(page["doc"]) if text is None else text
+        return lines(text) != lines("\n\n".join(line for _, line in page["lines"]))
 
     def dirty(self):
         return any(self.page_dirty(page) for page in self.pages.values())

@@ -3275,6 +3275,49 @@ def test_editor_sheet_actions_paste_and_undo():
                     ["Dijo", "hola, y se fue."], 2, "<b>Pegado</b> de fuera", 1, 1], seen
 
 
+def test_editor_sheet_moves_whole_paragraphs_with_their_pages():
+    """Cortar párrafos enteros (del principio del 2 al del 6) y pegarlos al principio de otro: cada uno queda en
+    su párrafo, sin pegarse al de destino, y todos conservan su bloque (su página del PDF) y su línea original,
+    también el de destino. Mover 300 de 800 no tarda: antes recorría la hoja entera por cada párrafo."""
+    import time
+
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+
+    def move(count, first, last, to):
+        sheet = editor.Sheet()
+        sheet.set_content([(k, f"Párrafo {k}.") for k in range(count)], {})
+        doc = sheet.document()
+        c = sheet.textCursor()
+        c.setPosition(doc.findBlockByNumber(first).position())
+        c.setPosition(doc.findBlockByNumber(last).position(), QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+        cut = sheet.createMimeDataFromSelection()  # Ctrl+X sin el portapapeles del sistema
+        sheet.textCursor().removeSelectedText()
+        c.setPosition(doc.findBlockByNumber(to - (last - first)).position())
+        sheet.setTextCursor(c)
+        start = time.perf_counter()
+        sheet.insertFromMimeData(cut)
+        took = time.perf_counter() - start
+        blocks = [doc.findBlockByNumber(n) for n in range(doc.blockCount())]
+        return sheet, [(b.text(), editor.source_of(b)) for b in blocks], took
+
+    sheet, small, _ = move(12, 2, 6, 10)
+    texts, changed = [t for t, _ in small], len(sheet.changed_blocks())
+    sheet.undo()
+    undone = sheet.content()
+    _, big, moved = move(800, 100, 400, 700)
+    assert texts == [f"Párrafo {k}." for k in (0, 1, 6, 7, 8, 9, 2, 3, 4, 5, 10, 11)], texts
+    assert all(t == f"Párrafo {k}." for t, k in small) and changed == 0, (small, changed)
+    assert undone == "\n\n".join(f"Párrafo {k}." for k in (0, 1, 6, 7, 8, 9, 10, 11)), undone
+    assert all(t == f"Párrafo {k}." for t, k in big), [x for x in big if x[0] != f"Párrafo {x[1]}."][:5]
+    assert moved < 3, moved
+
+
 def test_editor_sheet_superscript_small_caps_right():
     """Superíndice, versalitas y párrafo a la derecha se cargan y vuelven igual; los botones de la hoja los ponen
     en lo elegido; derecha y centrado se excluyen; Ctrl+D pone a la derecha y Ctrl+Mayús+= el superíndice."""
@@ -3392,6 +3435,40 @@ def test_editor_sheet_links_center_levels_case_and_search():
                     "hola mundo, Hola otra vez.", "[Nota: aclaración]"], seen
 
 
+def test_editor_sheet_change_case_with_emoji_and_long_letters():
+    """Mayús+F3 con un emoji (dos posiciones en Qt) o con letras que al cambiar se alargan («ß» → «SS», «ﬁ» →
+    «FI»): cambia lo demás sin descolocarse, deja esas como están y un Ctrl+Z lo deshace todo, sin llevarse
+    lo que se escriba después."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "😀 hola mundo"), (2, "straße ﬁn")], {})
+
+    def run(n):
+        block = sheet.document().findBlockByNumber(n)
+        c = sheet.textCursor()
+        c.setPosition(block.position())
+        c.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+        sheet.change_case()
+        return sheet.document().findBlockByNumber(n).text()
+
+    seen = [run(0), run(0), run(1)]
+    sheet.undo()
+    sheet.undo()
+    sheet.undo()
+    back = sheet.content()
+    sheet.textCursor().insertText("Ya ")
+    sheet.undo()
+    after = sheet.content()
+    assert seen == ["😀 Hola Mundo", "😀 HOLA MUNDO", "Straße ﬁn"], seen
+    assert back == after == "😀 hola mundo\n\nstraße ﬁn", (back, after)
+
+
 def test_editor_sheet_looks_and_spelling():
     """Los títulos se ven grandes y en negrita sin guardar negrita; las palabras desconocidas salen subrayadas."""
     import qtk
@@ -3407,6 +3484,79 @@ def test_editor_sheet_looks_and_spelling():
     bold = any(f.format.fontWeight() >= 600 for f in heading)
     assert bold and sheet.content() == "# Título" + chr(10) * 2 + "Ella dijó que sí.", (bold, sheet.content())
     assert sheet.misspelled() == ["dijó"], sheet.misspelled()
+
+
+def test_editor_sheet_marks_the_right_word_after_emoji():
+    """Tras un emoji (dos posiciones en Qt, un carácter en Python) se subraya la palabra mal escrita, el trozo
+    puesto con «Mostrar cambios» y el trozo de un aviso del informe, no lo de al lado."""
+    import types
+
+    import app
+    import qtk
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "😀😀 hola palabrx"), (2, "😀 el gato")], {})
+    sheet.look.set_unknown({"palabrx"})
+    block = sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.setPosition(block.position() + 6)  # tras «😀 el »
+    c.setPosition(block.position() + 10, QTextCursor.MoveMode.KeepAnchor)
+    c.insertText("perro")
+    sheet.look.show_changes("#2e9d4a")
+    qtk.pump()
+
+    def spans(n, style):
+        return sorted((r.start, r.start + r.length) for r in sheet.document().findBlockByNumber(n).layout().formats()
+                      if r.format.underlineStyle() == style)
+
+    spell = spans(0, QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
+    added = spans(1, QTextCharFormat.UnderlineStyle.SingleUnderline)
+    start, end = app.TextEditor.issue_range(sheet.document().findBlockByNumber(0), types.SimpleNamespace(span=(3, 7)))
+    c.setPosition(sheet.document().findBlockByNumber(0).position() + start)
+    c.setPosition(sheet.document().findBlockByNumber(0).position() + end, QTextCursor.MoveMode.KeepAnchor)
+    assert spell == [(10, 17)] and added == [(6, 11)], (spell, added)
+    assert c.selectedText() == "hola", c.selectedText()
+
+
+def test_editor_sheet_colors_once_when_opening():
+    """Abrir un capítulo colorea cada párrafo una vez, y la primera tecla solo el suyo: antes se coloreaba tres
+    veces y la primera tecla congelaba la hoja más de un segundo en un capítulo largo."""
+    import qtk
+
+    import editor
+
+    qtk.app()
+    calls = []
+
+    class Counted(editor.Look):
+        def highlightBlock(self, text):
+            calls.append(text)
+            super().highlightBlock(text)
+
+    real, editor.Look = editor.Look, Counted
+    try:
+        sheet = editor.Sheet()
+        sheet.resize(600, 400)
+        sheet.show()
+        sheet.unknown = {"dijó"}
+        sheet.set_content([(k, f"Ella dijó que sí, párrafo {k}.") for k in range(60)], {})
+        qtk.pump()
+        opened = len(calls)
+        calls.clear()
+        cursor = sheet.textCursor()
+        cursor.insertText("x")
+        qtk.pump()
+        typed = len(calls)
+        underlined = len(sheet.misspelled())
+        sheet.close()
+    finally:
+        editor.Look = real
+    assert opened == 60 and typed == 1, (opened, typed)
+    assert underlined == 60, underlined
 
 
 def test_text_editor_opens_section_and_saves_only_changes():
@@ -3648,6 +3798,27 @@ def test_text_editor_styles_links_and_find_reach_the_book():
     assert replaced.endswith("reemplazos") and "linea" not in text.lower() and "fila" in text, (replaced, text[:200])
 
 
+def test_text_editor_links_take_the_theme_blue():
+    """Los enlaces de la hoja salen en el azul del tema: con el oscuro, el claro fijo apenas se leía (3:1)."""
+    import editor as ed
+    import theme
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, 'Ver <a href="https://example.com">la web</a>.')]
+    root, window, editor = editor_on(blocks, [0], dark=True)
+    block = editor.sheet.document().findBlockByNumber(1)
+    it, colors = block.begin(), []
+    while not it.atEnd():
+        f = it.fragment().charFormat()
+        if f.isAnchor():
+            colors.append(f.foreground().color().name())
+        it += 1
+    editor.win.done(0)
+    window.close()
+    ed.LINK_COLOR = theme.colors(False)["acc"]  # las hojas sueltas de otras pruebas, como antes
+    assert colors == [theme.colors(True)["acc"]], colors
+
+
 def sheet_with(lines):
     """Hoja suelta con lines de section_text; el párrafo n viene del bloque n."""
     import editor
@@ -3870,6 +4041,35 @@ def test_sheet_changes_and_restore():
     assert split == [False, False] and joined is False, (split, joined)
 
 
+def test_sheet_changed_paragraphs_follow_format_and_undo_quickly():
+    """Los párrafos cambiados se recuerdan entre pausas al escribir, pero una cursiva puesta o quitada, un
+    deshacer o un rehacer se notan igual; mirar 800 párrafos otra vez no cuesta casi nada."""
+    import time
+
+    from PySide6.QtGui import QTextCursor
+    sheet = sheet_with([f"Párrafo {k} con texto." for k in range(800)])
+    doc = sheet.document()
+    first = sheet.changed_blocks()
+    start = time.perf_counter()
+    again = sheet.changed_blocks()
+    took = time.perf_counter() - start
+    cursor = doc.find("texto")
+    sheet.setTextCursor(cursor)
+    sheet.toggle_italic()
+    italic = [b.text() for b in sheet.changed_blocks()]
+    sheet.undo()
+    undone = sheet.changed_blocks()
+    sheet.redo()
+    redone = [b.text() for b in sheet.changed_blocks()]
+    QTextCursor(doc.findBlockByNumber(5)).insertBlock()  # un párrafo nuevo y vacío no cuenta
+    QTextCursor(doc.findBlockByNumber(5)).insertText("Nuevo.")
+    added = [b.text() for b in sheet.changed_blocks()]
+    assert first == again == [] and undone == [], (first, again, undone)
+    assert italic == redone == ["Párrafo 0 con texto."], (italic, redone)
+    assert added == ["Párrafo 0 con texto.", "Nuevo."], added
+    assert took < 0.05, took
+
+
 def test_sheet_replace_sources_and_split_chapter():
     """El arreglo de «Párrafo partido» une dos párrafos con una ilustración en medio y la ilustración sigue;
     un arreglo vacío quita el párrafo. «Dividir capítulo» pone un título de capítulo en el cursor."""
@@ -3892,10 +4092,14 @@ def test_sheet_replace_sources_and_split_chapter():
     assert refused
 
 
-def editor_on(blocks, candidates):
-    """Ventana con un libro hecho a mano (y un PDF de una página por bloque) y su editor en la primera sección."""
+def editor_on(blocks, candidates, dark=False):
+    """Ventana con un libro hecho a mano (y un PDF de una página por bloque) y su editor en la primera sección;
+    dark: con el tema oscuro."""
     import app
     root, window = visible_window()
+    if dark:
+        window.theme_var.set("Oscuro")
+        window.apply_theme()
     doc = pymupdf.open()
     for n in range(max(b.page for b in blocks)):
         add_page(doc, n + 1, [(72, 100, f"Pagina {n}", 11, "helv")])
@@ -4079,6 +4283,31 @@ def test_editor_shows_changes():
     assert marked and shown, (marked, shown, bar)
     assert ">gato</s>" in bar and ">perro</u>" in bar and "negro" in bar and "<i>" not in bar, bar
     assert hidden_clean and gone, (hidden_clean, gone)
+
+
+def test_editor_sheet_changes_in_a_loaded_empty_paragraph():
+    """Un párrafo que se cargó vacío: con «Mostrar cambios», lo escrito en él se subraya como puesto (antes el
+    coloreado fallaba: PySide devuelve [] por la línea original vacía), cuenta como cambio y vuelve a vacío."""
+    import qtk
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Uno."), (2, ""), (3, "Tres.")], {})
+    sheet.look.show_changes("#2e9d4a")
+    block = sheet.document().findBlockByNumber(1)
+    QTextCursor(block).insertText("Nuevo")
+    qtk.pump()
+    block = sheet.document().findBlockByNumber(1)
+    marked = any(r.format.underlineStyle() == QTextCharFormat.UnderlineStyle.SingleUnderline
+                 for r in block.layout().formats())
+    changed = [b.text() for b in sheet.changed_blocks()]
+    original = editor.original_of(block)
+    sheet.restore(block)
+    assert marked and changed == ["Nuevo"] and original == "", (marked, changed, original)
+    assert sheet.content() == "Uno.\n\nTres.", sheet.content()
 
 
 def test_editor_focus_mode():
@@ -4666,6 +4895,36 @@ def test_text_editor_review_split_find_and_stats():
     assert loose == 4 and whole == 3 and len(exact) == 1 and "de él y" in exact[0], (loose, whole, exact)
     assert listed and grid[3:6] == ["Palabras", "12", "15"] and "42 %" in grid, grid  # 5 de 12 en diálogo
     assert ("Capítulo 1.5: Interludio", app.ON) in rows, rows
+
+
+def test_text_editor_menus_do_not_pile_up():
+    """Cada clic derecho y cada «Todos» abren su menú o su lista; el anterior, ya cerrado, se borra: antes
+    quedaban todos vivos mientras el editor estuviera abierto (500 filas por «Todos»)."""
+    import shiboken6
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Él dijo algo, y él calló.")], [0])
+    pos = editor.sheet.cursorRect(editor.sheet.document().find("dijo")).center()
+    editor.context_menu(pos)
+    first = editor.context
+    first.close()
+    editor.context_menu(pos)
+    second = editor.context
+    second.close()
+    editor.find_entry.setText("él")
+    editor.show_all_matches()
+    old = editor.matches_popup
+    old.hide()
+    editor.show_all_matches()
+    new = editor.matches_popup
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    alive = [shiboken6.isValid(w) for w in (first, second, old, new)]
+    new.hide()
+    editor.win.done(0)
+    window.close()
+    assert alive == [False, True, False, True], alive
 
 
 def test_text_editor_ribbon_follows_the_cursor():
@@ -7719,6 +7978,45 @@ def test_qtk_textbox_understands_tk_indices():
                     "uno dos", ("1.0", "1.3", ("1.0", "1.3")), True, ("src4",)], seen
 
 
+def test_qtk_textbox_counts_an_emoji_as_one_character():
+    """Como en Tk, un emoji es un carácter en los índices («1.0+1c», «1.2»), aunque Qt le dé dos posiciones: las
+    vistas previas subrayan lo que toca."""
+    import qtk
+
+    qtk.app()
+    text = qtk.TextBox()
+    text.insert("end", "😀ab\n😀😀c")
+    text.tag_add("new", "1.0+1c", "1.0+2c")
+    text.tag_add("sel", "2.2", "2.3")
+    seen = [text.get("1.0+1c", "1.0+2c"), text.get("1.0"), text.index("1.end"), text.search("c", "1.0"),
+            text.tag_ranges("new"), text.textCursor().selectedText(), text.index("sel.first"), text.get("2.1", "2.end")]
+    text.delete("2.0")
+    seen.append(text.get("2.0", "2.end"))
+    assert seen == ["a", "😀", "1.3", "2.2", ("1.1", "1.2"), "c", "2.2", "😀c", "😀c"], seen
+
+
+def test_qtk_textbox_closed_before_painting_its_tags():
+    """Una vista previa que se cierra justo tras marcar sus tags (cambiar de aviso deprisa) no da error al
+    pintarlos: el pintado pendiente se va con ella."""
+    import shiboken6
+
+    import qtk
+
+    qtk.app()
+    errors, hook = [], sys.excepthook
+    sys.excepthook = lambda *exc: errors.append(exc[1])
+    try:
+        text = qtk.TextBox()
+        text.insert("end", "uno dos")
+        text.tag_configure("new", foreground="red")
+        text.tag_add("new", "1.0", "1.3")
+        shiboken6.delete(text)
+        qtk.pump()
+    finally:
+        sys.excepthook = hook
+    assert errors == [], errors
+
+
 def test_theme_text_is_readable():
     """Cada color de texto contra su fondo llega a 4,5:1 (WCAG AA) en los dos temas: el botón azul del
     tema oscuro (3,8:1), las filas «Quitar» y «Descartada», y los avisos «Revisar» y «Menor» no llegaban.
@@ -9539,7 +9837,7 @@ def test_style_guide_tokens_icons_and_no_loose_colors():
     # Excepción: U+1F5CE (documento) sale monocromo, comprobado dibujándolo con la fuente de Windows
     emoji = re.compile("[🀀-🗍🗏-🫿⚠⏮⏭⚙⛓❗⚓]")
     assert not [k for k, v in theme.ICONS.items() if emoji.search(v)], theme.ICONS
-    allowed = {"app.py": {"#1f6fd1", "#2e9d4a", "#f08c00"}, "qtk.py": {"#f08c00"},
+    allowed = {"app.py": {"#1f6fd1", "#2e9d4a", "#f08c00"}, "qtk.py": {"#f08c00"}, "options.py": set(),
                "editor.py": {"#2a62c8", "#888888", "#2e9d4a"}}  # marcas que no cambian con el tema
     for name, colors in allowed.items():
         text = (Path(__file__).parent / name).read_text(encoding="utf-8")
