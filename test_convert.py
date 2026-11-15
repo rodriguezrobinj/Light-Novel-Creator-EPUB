@@ -8024,14 +8024,19 @@ def test_window_versions_compare_and_restore():
 
 
 def test_window_version_after_each_new_epub():
-    """Generar el EPUB deja una versión automática (la publicada); generar otra vez sin cambios no la repite."""
+    """Generar el EPUB deja una versión automática (la publicada); generar otra vez sin cambios no la repite. Cada
+    una se añade al zip sin reescribir las anteriores."""
     import app
 
     root, window = versioned_window()
-    window.saved(str(TMP / "publicado.epub"), [])
-    window.saved(str(TMP / "publicado.epub"), ["un aviso"])  # solo cambian los avisos: no es otra versión
-    window.publisher_var.set("Grupo Y")
-    window.saved(str(TMP / "publicado.epub"), [])
+    rewrite, app._write_versions = app._write_versions, None  # añadir una no debe rehacer el zip entero
+    try:
+        window.saved(str(TMP / "publicado.epub"), [])
+        window.saved(str(TMP / "publicado.epub"), ["un aviso"])  # solo cambian los avisos: no es otra versión
+        window.publisher_var.set("Grupo Y")
+        window.saved(str(TMP / "publicado.epub"), [])
+    finally:
+        app._write_versions = rewrite
     versions = app._load_versions(window.pdf)[0]
     changes = app._version_changes(versions[0]["state"], versions[1]["state"])
     window.close()

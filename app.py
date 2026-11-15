@@ -936,6 +936,17 @@ def _write_versions(pdf, versions):
         raise
 
 
+def _append_version(pdf, version):
+    """Añade una versión al final del zip sin reescribir las de antes: con muchas, rehacerlo entero en cada EPUB
+    generado tardaba más y más. Borrar y renombrar sí lo reescriben entero (_write_versions)."""
+    with zipfile.ZipFile(_versions_path(pdf), "a", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        names = set(z.namelist())
+        n = len(names)
+        while f"{n:04}.json" in names:  # nombres por orden: _load_versions las lee así
+            n += 1
+        z.writestr(f"{n:04}.json", json.dumps(version, ensure_ascii=False))
+
+
 def _shown(key, value):
     """Valor de un dato al comparar versiones, como lo entiende quien lo eligió en la ventana."""
     if key == "cover":
@@ -4921,9 +4932,8 @@ class App:
                 if versions else None
             if auto and same and same[0] == same[1]:
                 return True
-            versions.append({"name": name, "date": datetime.now().isoformat(timespec="seconds"), "auto": auto,
-                             "state": state})
-            _write_versions(self.pdf, versions)
+            _append_version(self.pdf, {"name": name, "date": datetime.now().isoformat(timespec="seconds"),
+                                        "auto": auto, "state": state})
         except OSError as e:
             self.status.setText(f"No se pudo guardar la versión: {e.strerror or e}")
             return False
