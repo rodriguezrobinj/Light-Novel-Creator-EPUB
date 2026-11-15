@@ -3166,11 +3166,12 @@ def test_editor_sheet_moves_whole_paragraphs_with_their_pages():
         c.setPosition(doc.findBlockByNumber(first).position())
         c.setPosition(doc.findBlockByNumber(last).position(), QTextCursor.MoveMode.KeepAnchor)
         sheet.setTextCursor(c)
-        sheet.cut()
+        cut = sheet.createMimeDataFromSelection()  # Ctrl+X sin el portapapeles del sistema
+        sheet.textCursor().removeSelectedText()
         c.setPosition(doc.findBlockByNumber(to - (last - first)).position())
         sheet.setTextCursor(c)
         start = time.perf_counter()
-        sheet.paste()
+        sheet.insertFromMimeData(cut)
         took = time.perf_counter() - start
         blocks = [doc.findBlockByNumber(n) for n in range(doc.blockCount())]
         return sheet, [(b.text(), editor.source_of(b)) for b in blocks], took
