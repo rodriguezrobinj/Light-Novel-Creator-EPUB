@@ -3250,6 +3250,43 @@ def test_link_sections_takes_handles_and_empty_titles_before_the_ads():
     assert convert.link_sections(book) == [2, 3, 4, 6, 7], convert.link_sections(book)
 
 
+def test_link_sections_takes_empty_titles_after_the_ads_at_the_end():
+    """Easygoing 3-6 (Bell T): tras «@Dierch @Dierch90», «Ilustraciones por RicMo90» y el logo, sin texto, cierran el
+    libro. Salía como capítulo vacío. Un capítulo con texto tras la publicidad se queda."""
+    blocks = [("heading", "Capítulo 1"), ("p", "Texto largo. " * 200), ("heading", "@Dierch @Dierch90"),
+              ("heading", "Ilustraciones por RicMo90"), ("image", "")]
+    book = convert.Book("Libro", "", b"", [convert.Block(k, 1, h) for k, h in blocks], [0, 2, 3])
+    assert convert.link_sections(book) == [2, 3], convert.link_sections(book)
+    book.blocks.append(convert.Block("p", 1, "Un epílogo con texto. " * 20))
+    assert convert.link_sections(book) == [2], convert.link_sections(book)
+
+
+def test_point_of_view_names_are_subtitles_and_underscores_a_scene_break():
+    """Easygoing Territory Defense (Bell T): «Capítulo 2: …» en 36 pt y, dentro, el nombre de quien narra («Van»,
+    «Arte») en 20 pt negrita, tras una línea de guiones bajos que cambia de escena. Sin marcadores en el PDF, cada
+    nombre salía como capítulo (hasta 41 en un tomo) y la línea «____» como párrafo, sin ningún separador."""
+    doc = pymupdf.open()
+    body = lambda y, n: [(106, y, line(f"Texto de la escena {n} que sigue", 50), 13, "cour"),
+                         (78, y + 15, line(f"y continua la escena {n} hasta", 54), 13, "cour"),
+                         (78, y + 30, f"el final {n}.", 13, "cour")]
+    add_page(doc, 1, [(121, 90, "Capitulo 1: Inicio", 36, "helv"), (64, 205, "Panamera", 20, "hebo")]
+             + body(260, 1) + body(320, 2) + [(71, 380, "_" * 50, 14, "cour"), (64, 420, "Van", 20, "hebo")]
+             + body(460, 3) + body(520, 4))
+    add_page(doc, 2, body(100, 5) + body(160, 6) + [(71, 220, "_" * 50, 14, "cour")] + body(260, 7) + body(320, 8))
+    add_page(doc, 3, [(121, 90, "Capitulo 2: Final", 36, "helv"), (64, 205, "Arte", 20, "hebo")]
+             + body(260, 9) + body(320, 10) + [(71, 380, "_" * 50, 14, "cour"), (64, 420, "Panamera", 20, "hebo")]
+             + body(460, 11))
+    path = TMP / "punto-de-vista.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = [convert._plain(b) for b in book.blocks if b.kind == "heading"]
+    chapters = [convert._plain(book.blocks[k]) for k in book.candidates]
+    breaks = [b.page for b in book.blocks if b.kind == "break"]
+    assert chapters == ["Capitulo 1: Inicio", "Capitulo 2: Final"], chapters
+    assert heads == ["Capitulo 1: Inicio", "Panamera", "Van", "Capitulo 2: Final", "Arte", "Panamera"], heads
+    assert breaks == [1, 2, 3] and not any("___" in b.html for b in book.blocks if b.kind == "p"), breaks
+
+
 def test_blank_line_scene_break_in_short_dialogue_book():
     """Kage 7 (World Project): diálogos de una línea, así que el paso entre párrafos (25 pt) sale más que el de línea
     (17 pt), y la escena cambia con una línea en blanco (50 pt). Se tomaba 25 por interlínea y no había separadores."""

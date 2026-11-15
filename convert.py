@@ -55,7 +55,7 @@ KEYWORDS = re.compile(
 TOC_TITLE = re.compile(r"(contenidos?|[ií]ndice|tabla de contenidos?|contents|table of contents):?", re.I)
 DOT_LEADER = re.compile(r"[.\-_·…]{4,}\s*(?:p[áa]g\.?\s*)?(\d+)\s*\|?$", re.I)  # "..... 12", "---- Pág. 54"
 TOC_SKIPPED = "se omitió como índice del PDF"  # motivo en Book.skipped de una página de índice
-SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈•·#~◎◯♠♣♥♤♧♡◊]+")
+SCENE_BREAK = re.compile(r"[\s☆★*＊◆◇●○■□♦♢※✦✧❖◈•·#~◎◯♠♣♥♤♧♡◊_]+")  # «_____» (Easygoing, Bell T)
 # Fuente Symbol sin tabla Unicode: PyMuPDF da el código de la fuente (Mitsuha 6 [Bell T]: 0xAA es ♠, sale «ª»)
 SYMBOL_FONT = str.maketrans({"\xa7": "♣", "\xa8": "♦", "\xa9": "♥", "\xaa": "♠", "\xb7": "•", "\xe0": "◊",
                              "\xb4": "×", "\xa5": "∞", "\xae": "→", "\xac": "←"})
@@ -1523,6 +1523,11 @@ def link_sections(book):
         k, nxt = heads[at], heads[at + 1]
         if nxt in found and k not in found and all(b.kind == "heading" for b in book.blocks[k:nxt]):
             found.append(k)
+    # Y lo que la sigue sin texto hasta el final del libro («Ilustraciones por RicMo90» y el logo, Easygoing 3)
+    if found:
+        last = max(found)
+        if all(b.kind != "p" for b in book.blocks[last:]):
+            found += [k for k in heads if k > last]
     return sorted(found)
 
 
@@ -2639,6 +2644,7 @@ def analyze(pdf_path, progress=None):
         first_chapter = next((i for i, rows in enumerate(pages) if rows and not _is_toc(rows) and any(
             r.heading and KEYWORDS.match(r.text.strip(LABEL_DECOR)) for r in rows)), 0)  # sin capítulos: nada
         blocks, skipped = [], []
+        heading_size = {}  # id del bloque de título -> tamaño de su letra: los subtítulos van menores
         para, short, last_text = None, False, ""
         toc = False  # la página anterior era el índice
         contents = []  # títulos del índice impreso
@@ -2778,6 +2784,7 @@ def analyze(pdf_path, progress=None):
                         # Psychology of Harem 2: «◆Capítulo 1: El Discurso»; el rombo es adorno, no título
                         blocks.append(Block("heading", num, html.escape(r.text.strip(HEADING_DECOR) or r.text),
                                             rect=_rect([r])))
+                        heading_size[id(blocks[-1])] = r.size
                     para = None
                 else:
                     framed = id(r) in inside
@@ -2880,6 +2887,12 @@ def analyze(pdf_path, progress=None):
             under = {lead(k) for k in candidates if k - 1 in candidates and KEYWORDS.match(text(k - 1))
                      and not KEYWORDS.match(text(k))}
             candidates = [k for k in candidates if KEYWORDS.match(text(k)) or lead(k) not in under]
+            # Easygoing (Bell T): quien narra («Van», «Arte») en 20 pt bajo capítulos de 36 pt. Un título sin palabra
+            # clave bastante menor que todos los que la llevan es un apartado del capítulo, no otro capítulo
+            labeled = [heading_size.get(id(blocks[k]), 0) for k in candidates if KEYWORDS.match(text(k))]
+            if labeled and min(labeled):
+                candidates = [k for k in candidates if KEYWORDS.match(text(k))
+                              or heading_size.get(id(blocks[k]), min(labeled)) > min(labeled) * 0.75]
         # Un título que el índice impreso nombra es un capítulo, aunque no lleve palabra clave ("Un caballero
         # al lado de Ischea"); los subtítulos ("El lado de…") no salen en el índice.
         keys = [_key(title) for title, _ in contents]
