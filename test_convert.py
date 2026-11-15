@@ -2403,11 +2403,19 @@ def test_write_pdf_contents_page_numbers_links_and_body_font():
         words = index.get_text("words")
         links = {link["page"] + 1 for link in index.get_links() if link["kind"] == pymupdf.LINK_GOTO}
         right = max(w[2] for w in words)
-        numbers = [w[4] for w in words if w[4].isdigit() and w[2] > right - 1]
+        numbers = [w for w in words if w[4].isdigit() and w[2] > right - 1]
         fonts = {f[3] for page in pdf for f in page.get_fonts()}
-    assert len(toc) == 3 and numbers == [str(p) for p in toc.values()], (toc, numbers)
+    assert len(toc) == 3 and [w[4] for w in numbers] == [str(p) for p in toc.values()], (toc, numbers)
     assert links == set(toc.values()), (links, toc)
     assert not any("Times" in f or "Tiro" in f for f in fonts), fonts
+    # Con el título lejos de su número, la vista se perdía: puntos guía de uno a otro, alineados entre líneas
+    for number in numbers:
+        same = sorted((w for w in words if abs(w[3] - number[3]) < 2 and w[0] < number[0]), key=lambda w: w[0])
+        dots = "".join(w[4] for w in same[-5:])
+        assert set(dots) == {"."}, (number[4], [w[4] for w in same])
+        assert number[0] - same[-1][2] < 12, (number, same[-1])
+    ends = {round(max(w[2] for w in words if abs(w[3] - n[3]) < 2 and set(w[4]) == {"."}), 1) for n in numbers}
+    assert max(ends) - min(ends) < 0.6, ends
 
 
 def test_write_pdf_small_caps_keep_their_letters():
