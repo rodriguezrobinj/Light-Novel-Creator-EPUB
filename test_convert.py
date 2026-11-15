@@ -4954,6 +4954,23 @@ def test_spell_server_answers_checks_before_suggestions():
     assert not worker.is_alive()
 
 
+def test_app_ends_after_stopping_spell_server_with_words_pending():
+    """Cerrar el editor detiene el proceso de ortografía con palabras aún por enviar: el programa debe terminar igual
+    (se quedaba colgado al salir, esperando a mandar lo que ya nadie iba a leer)."""
+    import subprocess
+
+    code = ("import multiprocessing, sys\nsys.path.insert(0, %r)\nimport app\n"
+            "if __name__ == '__main__':\n"
+            "    requests, replies, proc = app._start_spell_process()\n"
+            "    proc.terminate(); proc.join()\n"
+            "    requests.put(('check', ['palabra'] * 400000))\n") % str(Path(__file__).parent)
+    script = TMP / "ortografia_al_salir.py"
+    script.write_text(code, encoding="utf-8")
+    run = subprocess.run([sys.executable, str(script)], capture_output=True, timeout=120,
+                         env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+    assert run.returncode == 0, run.stderr.decode(errors="replace")[-500:]
+
+
 def test_text_editor_review_split_find_and_stats():
     """Ctrl+Intro marca el capítulo como revisado y abre el siguiente sin revisar; «Dividir» parte el
     capítulo y al aceptar la lista tiene la fila nueva; buscar con palabra completa y mayúsculas, y «Todos»

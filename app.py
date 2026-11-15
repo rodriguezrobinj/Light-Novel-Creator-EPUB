@@ -488,6 +488,8 @@ def _start_spell_process():
     """(peticiones, respuestas, proceso) de _spell_server, o None si no arranca: el editor sigue sin él."""
     try:
         requests, replies = multiprocessing.Queue(), multiprocessing.Queue()
+        # al cerrar, el servidor se detiene y nadie lee lo que quedó por enviar: sin esto, la app no termina
+        requests.cancel_join_thread()
         proc = multiprocessing.Process(target=_spell_server, args=(requests, replies), daemon=True)
         proc.start()
         return requests, replies, proc
