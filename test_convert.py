@@ -4766,6 +4766,36 @@ def test_text_editor_review_split_find_and_stats():
     assert ("Capítulo 1.5: Interludio", app.ON) in rows, rows
 
 
+def test_text_editor_menus_do_not_pile_up():
+    """Cada clic derecho y cada «Todos» abren su menú o su lista; el anterior, ya cerrado, se borra: antes
+    quedaban todos vivos mientras el editor estuviera abierto (500 filas por «Todos»)."""
+    import shiboken6
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Él dijo algo, y él calló.")], [0])
+    pos = editor.sheet.cursorRect(editor.sheet.document().find("dijo")).center()
+    editor.context_menu(pos)
+    first = editor.context
+    first.close()
+    editor.context_menu(pos)
+    second = editor.context
+    second.close()
+    editor.find_entry.setText("él")
+    editor.show_all_matches()
+    old = editor.matches_popup
+    old.hide()
+    editor.show_all_matches()
+    new = editor.matches_popup
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    alive = [shiboken6.isValid(w) for w in (first, second, old, new)]
+    new.hide()
+    editor.win.done(0)
+    window.close()
+    assert alive == [False, True, False, True], alive
+
+
 def test_text_editor_ribbon_follows_the_cursor():
     """Como en Word: la cinta marca N y K donde el texto lo es, el estilo dice Título en un título, y sus
     botones cambian la hoja. Cerrar la ventana principal con cambios sin guardar en el editor pregunta."""

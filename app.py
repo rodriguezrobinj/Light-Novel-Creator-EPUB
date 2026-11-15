@@ -7422,6 +7422,8 @@ class TextEditor:
             self.find_info.setText("Sin resultados")
             QApplication.beep()
             return
+        if getattr(self, "matches_popup", None) is not None and shiboken6.isValid(self.matches_popup):
+            self.matches_popup.deleteLater()  # la lista anterior (hasta 500 filas) no se queda viva
         pop = QFrame(self.win, Qt.WindowType.Popup)
         pop.setObjectName("card")
         column = QVBoxLayout(pop)
@@ -7567,6 +7569,8 @@ class TextEditor:
         current = sheet.textCursor()
         if not (current.hasSelection() and current.selectionStart() <= here.position() <= current.selectionEnd()):
             sheet.setTextCursor(here)  # como Word: el clic fuera de la selección pone ahí el cursor
+        if getattr(self, "context", None) is not None and shiboken6.isValid(self.context):
+            self.context.deleteLater()  # el del clic anterior, ya cerrado: si no, quedaba uno vivo por clic
         self.context = self.mark_menu(pos)
         self.context.popup(sheet.viewport().mapToGlobal(pos))
 
