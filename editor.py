@@ -1013,22 +1013,30 @@ class Sheet(QTextEdit):
         if not text.strip():
             return
         if text == text.lower():
-            new = re.sub(r"(?<![\w'’])(\w)", lambda m: m.group(1).upper(), text)
+            starts = {m.start() for m in re.finditer(r"(?<![\w'’])\w", text)}
+            mapped = (c.upper() if n in starts else c for n, c in enumerate(text))
         elif text == text.upper():
-            new = text.lower()
+            mapped = (c.lower() for c in text)
         else:
-            new = text.upper()
-        start, doc = cursor.selectionStart(), self.document()
+            mapped = (c.upper() for c in text)
+        start, end, doc = cursor.selectionStart(), cursor.selectionEnd(), self.document()
+        at = start  # posición de Qt: un emoji ocupa dos
         cursor.beginEditBlock()
-        for n, c in enumerate(new):
-            if c != text[n] and doc.characterAt(start + n) not in (" ", "￼"):
-                one = QTextCursor(doc)
-                one.setPosition(start + n)
-                one.setPosition(start + n + 1, QTextCursor.MoveMode.KeepAnchor)
-                one.insertText(c, one.charFormat())
-        cursor.endEditBlock()
+        try:
+            for c, new in zip(text, mapped):
+                size = 2 if ord(c) > 0xFFFF else 1
+                # «ß» → «SS» o «ﬁ» → «FI» cambiarían el largo: esas letras se quedan como están
+                if (new != c and len(new) == 1 and (ord(new) > 0xFFFF) == (size == 2)
+                        and doc.characterAt(at) not in (" ", "￼")):
+                    one = QTextCursor(doc)
+                    one.setPosition(at)
+                    one.setPosition(at + size, QTextCursor.MoveMode.KeepAnchor)
+                    one.insertText(new, one.charFormat())
+                at += size
+        finally:
+            cursor.endEditBlock()
         cursor.setPosition(start)
-        cursor.setPosition(start + len(new), QTextCursor.MoveMode.KeepAnchor)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
         self.setTextCursor(cursor)
 
     @staticmethod

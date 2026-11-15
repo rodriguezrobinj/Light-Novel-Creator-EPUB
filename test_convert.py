@@ -3262,6 +3262,40 @@ def test_editor_sheet_links_center_levels_case_and_search():
                     "hola mundo, Hola otra vez.", "[Nota: aclaración]"], seen
 
 
+def test_editor_sheet_change_case_with_emoji_and_long_letters():
+    """Mayús+F3 con un emoji (dos posiciones en Qt) o con letras que al cambiar se alargan («ß» → «SS», «ﬁ» →
+    «FI»): cambia lo demás sin descolocarse, deja esas como están y un Ctrl+Z lo deshace todo, sin llevarse
+    lo que se escriba después."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "😀 hola mundo"), (2, "straße ﬁn")], {})
+
+    def run(n):
+        block = sheet.document().findBlockByNumber(n)
+        c = sheet.textCursor()
+        c.setPosition(block.position())
+        c.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+        sheet.change_case()
+        return sheet.document().findBlockByNumber(n).text()
+
+    seen = [run(0), run(0), run(1)]
+    sheet.undo()
+    sheet.undo()
+    sheet.undo()
+    back = sheet.content()
+    sheet.textCursor().insertText("Ya ")
+    sheet.undo()
+    after = sheet.content()
+    assert seen == ["😀 Hola Mundo", "😀 HOLA MUNDO", "Straße ﬁn"], seen
+    assert back == after == "😀 hola mundo\n\nstraße ﬁn", (back, after)
+
+
 def test_editor_sheet_looks_and_spelling():
     """Los títulos se ven grandes y en negrita sin guardar negrita; las palabras desconocidas salen subrayadas."""
     import qtk
