@@ -9,6 +9,11 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+# pymupdf 2.0 importa pymupdf.layout y pymupdf4llm (onnxruntime y numpy, unos 3 s más) y el motor no los usa; el
+# .exe los excluye. Aquí arriba también vale para los procesos de trabajo, que reimportan este módulo
+for _unused in ("pymupdf.layout", "pymupdf4llm"):
+    sys.modules.setdefault(_unused, None)
+
 import pymupdf
 
 import convert
