@@ -56,6 +56,13 @@ import theme
 import translate
 from qtk import filedialog, messagebox
 
+# Programas de Windows por su ruta, y sin buscar en la carpeta actual: un explorer.exe o un java.exe puesto en la
+# carpeta del PDF (una descarga) se ejecutaría en vez del de Windows
+os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+WINDOWS = Path(os.environ.get("SystemRoot") or "C:/Windows")
+EXPLORER = str(WINDOWS / "explorer.exe")
+POWERSHELL = str(WINDOWS / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
 SEP = "Separador"                                   # título que se escribe como separador de escena
 STYLES = ["Normal", "Capítulo", "Subtítulo"]          # estilos de párrafo en la cinta del editor de texto
@@ -263,7 +270,10 @@ def _epubcheck(jar, epub):
     """EPUBCheck sobre epub con sus mensajes en español (proceso de trabajo: tarda de 5 a 30 s)."""
     with tempfile.TemporaryDirectory(prefix="lnepub-epubcheck-") as tmp:
         report = Path(tmp) / "informe.json"
-        run = subprocess.run(["java", "-jar", jar, str(epub), "--json", str(report), "--locale", "es"],
+        java = shutil.which("java")
+        if not java:
+            raise RuntimeError("EPUBCheck necesita Java, que no está instalado en este equipo.")
+        run = subprocess.run([java, "-jar", jar, str(epub), "--json", str(report), "--locale", "es"],
                              capture_output=True, timeout=600,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # sin consola negra
         if not report.is_file():
@@ -400,7 +410,7 @@ class Speaker(QObject):
             self.proc.readyReadStandardOutput.connect(self._read)
             self.proc.errorOccurred.connect(lambda _: self._fail("No se pudo abrir la voz de Windows (PowerShell)."))
             script = SPEECH_SCRIPT.encode("utf-16-le")  # -EncodedCommand: sin líos de comillas
-            self.proc.start("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            self.proc.start(POWERSHELL, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                                            "-EncodedCommand", base64.b64encode(script).decode()])
         self.proc.write((" ".join(text.split()) + "\n").encode("utf-8"))
 
@@ -1370,7 +1380,7 @@ def _install(source):
         shutil.copy2(source, exe)
     script = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({_ps_quote(link)});"
               f"$s.TargetPath={_ps_quote(exe)};$s.IconLocation={_ps_quote(f'{exe},0')};$s.Save()")
-    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True,
+    subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script], check=True,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     for open_with in OPEN_WITHS:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, open_with) as key:
@@ -3057,8 +3067,8 @@ class App:
         try:
             if folder:
                 # con ruta larga, «/select» tampoco encuentra el archivo: la carpeta a secas
-                args = (["explorer", str(target.parent)] if long_path and target.is_file()
-                        else ["explorer", f"/select,{target}"] if target.is_file() else ["explorer", str(target)])
+                args = ([EXPLORER, str(target.parent)] if long_path and target.is_file()
+                        else [EXPLORER, f"/select,{target}"] if target.is_file() else [EXPLORER, str(target)])
                 subprocess.Popen(args)
             else:
                 os.startfile(path)
@@ -3069,7 +3079,7 @@ class App:
                         f"El archivo se guardó bien, pero su ruta tiene {len(str(path))} caracteres y Windows no "
                         f"abre archivos con rutas de {MAX_PATH} o más: los lectores de PDF y EPUB tampoco lo abren ahí.\n\n"
                         f"{path}\n\nMuévelo a una carpeta más corta o acorta su nombre. ¿Abrir su carpeta?"):
-                    subprocess.Popen(["explorer", str(target.parent)])
+                    subprocess.Popen([EXPLORER, str(target.parent)])
             else:
                 messagebox.showerror("Error", f"No se pudo abrir:\n{path}\n\n{e}")
         if win is not None:

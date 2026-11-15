@@ -1906,7 +1906,9 @@ def test_window_open_file_with_too_long_path():
         root.destroy()
     assert len(str(path)) >= 260, len(str(path))
     assert len(asked) == 1 and "260" in asked[0] and "caracteres" in asked[0], asked
-    assert launched == [["explorer", str(folder)], ["explorer", str(folder)]], launched
+    assert launched == [[app.EXPLORER, str(folder)], [app.EXPLORER, str(folder)]], launched
+    assert Path(app.EXPLORER).is_absolute() and Path(app.POWERSHELL).is_file(), (app.EXPLORER, app.POWERSHELL)
+    assert os.environ["NoDefaultCurrentDirectoryInExePath"] == "1"  # ni java ni calibre salen de la carpeta actual
 
 
 def test_window_reports_worker_crash():
