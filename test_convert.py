@@ -6954,6 +6954,29 @@ def test_omnibus_joins_volumes():
     assert "Mi Serie - Volúmenes 1-2" in epub_file(out, "OEBPS/content.opf")
 
 
+def test_window_omnibus_result_stays_out_of_the_open_book():
+    """El recopilatorio no es el libro abierto: sus avisos y su versión automática no se apuntan en él (el panel
+    de serie mostraba los avisos del recopilatorio en el tomo abierto)."""
+    import app
+
+    root, window = versioned_window()
+    out = str(TMP / "Recopilatorio.epub")
+    saved = app.filedialog.askopenfilenames, app.filedialog.asksaveasfilename, window.run
+    app.filedialog.askopenfilenames = lambda **_: (str(TMP / "a.pdf"), str(TMP / "b.pdf"))
+    app.filedialog.asksaveasfilename = lambda **_: out
+    window.run = lambda work, args, done, **_: done(["un aviso"]) or True
+    try:
+        window.omnibus()
+        root.update()
+    finally:
+        app.filedialog.askopenfilenames, app.filedialog.asksaveasfilename, window.run = saved
+    result = [d.windowTitle() for d in root.dialogs()]
+    kept = window.last_problems, app._load_versions(window.pdf)[0], window.status.text()
+    window.close()
+    assert kept[:2] == (None, []) and "Recopilatorio.epub" in kept[2], kept
+    assert result, "sin el diálogo del EPUB generado"
+
+
 def test_worker_error_is_logged():
     import app
 

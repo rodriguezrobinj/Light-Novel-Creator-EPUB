@@ -3037,9 +3037,14 @@ class App:
         state["replacements"], state["alts"] = self.replacements, self.alts
         return _write_options(state, breaks)
 
-    def saved(self, out, problems=()):
+    def saved(self, out, problems=(), of_book=True):
+        """El EPUB o PDF out está escrito. of_book=False (el recopilatorio): no es el libro abierto, y sus avisos y
+        su versión automática no van en él."""
         self.progress.setValue(0)  # la barra llena se quedaba tras el aviso de guardado
         self.status.setText(f"Guardado: {Path(out).name}" + (" (con avisos)" if problems else ""))
+        if not of_book:
+            self.result_dialog(out, problems)
+            return
         self.last_problems = list(problems)
         self.save_review()  # el panel de serie muestra los avisos del último EPUB
         kind = "PDF" if str(out).lower().endswith(".pdf") else "EPUB"
@@ -4721,7 +4726,7 @@ class App:
         self.save_review()  # el tomo abierto entra con lo revisado hasta ahora
         options = self.new_book_options()
         options["replacements"] = self.replacements
-        self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems), report=True,
+        self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems, of_book=False), report=True,
                  busy="Preparando el recopilatorio…", partial=[f"{out}.tmp"])
 
     def install(self):
