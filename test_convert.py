@@ -7292,6 +7292,39 @@ def test_window_quality_report_says_where_and_opens_the_editor_on_the_problem():
     assert bar == (True, "● Menor · Mayúscula innecesaria"), bar
     assert title.startswith("Texto · Capítulo 0"), title
 
+
+def test_window_quality_report_editor_in_a_book_without_rows():
+    """Libro sin ningún título ni ilustración: la lista está vacía y el editor se abre por filas. «Abrir en el
+    editor» del informe daba «tuple index out of range»; ahora explica qué hacer."""
+    import app
+
+    B = convert.Block
+    blocks = [B("p", 1, "Primero llegó la carta."), B("p", 1, html.escape("“¿Viene alguien, Señora Bruja?”, dijo."))]
+    doc = pymupdf.open()
+    add_page(doc, 1, [])
+    doc.save(TMP / "sin-filas.pdf")
+    root, window = visible_window()
+    window.pdf = TMP / "sin-filas.pdf"
+    window.show_book(convert.Book("Libro", "", b"", blocks, []))
+    shown, saved = [], app.messagebox.showinfo
+    app.messagebox.showinfo = lambda title, message, **_: shown.append(message)
+    try:
+        assert not window.tree.get_children()
+        window.quality()
+        root.update()
+        parts = root.dialogs()[-1].parts
+        table = parts["table"]
+        table.selection_set(table.get_children()[0])
+        root.update()
+        parts["edit"].click()
+        root.update()
+    finally:
+        app.messagebox.showinfo = saved
+    editor = window.text_editor
+    window.close()
+    assert editor is None, editor
+    assert shown and "Añadir página" in shown[0], shown
+
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
     página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""

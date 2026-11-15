@@ -3611,9 +3611,13 @@ class App:
             return self.edit_text()  # texto que no entró en el libro: la sección elegida en la lista
         editor = self.text_editor
         if editor is None or not shiboken6.isValid(editor.win):
+            rows = self.tree.get_children()
+            if not rows:  # libro sin títulos ni ilustraciones: el editor se abre siempre desde una fila
+                messagebox.showinfo("Abrir en el editor", "El libro no tiene ninguna fila en la lista, y el editor se "
+                                    "abre por secciones. Añade un capítulo con «Añadir página…» y vuelve a intentarlo.")
+                return None
             start, end = self.section_bounds(issue.block)
-            item = next((str(j) for j in range(issue.block, -1, -1) if self.tree.exists(str(j))),
-                        self.tree.get_children()[0])
+            item = next((str(j) for j in range(issue.block, -1, -1) if self.tree.exists(str(j))), rows[0])
             editor = TextEditor(self, item, start, end)
         editor.win.raise_()
         editor.goto_issue(issue)
