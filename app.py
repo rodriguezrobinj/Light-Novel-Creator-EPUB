@@ -454,7 +454,14 @@ def _write_json(path, data):
     tmp = path.with_name(path.name + ".tmp")
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, path)
+        for attempt in range(5):  # OneDrive o el antivirus tienen el archivo abierto un momento al sincronizarlo
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.2)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
@@ -2177,6 +2184,10 @@ class App:
                 "Cerrar", "Hay una traducción en curso: si sales ahora se pierde el lote que se está traduciendo (hasta "
                           "30 párrafos; lo anterior ya está guardado). ¿Salir igual?"):
             return False
+        if not self.save_review() and not messagebox.askyesno(
+                "Cerrar", f"{self.status.text()}.\n\n¿Cerrar igual? Se pierde lo revisado desde la última vez que se "
+                          "guardó."):
+            return False
         if editor:
             editor.win.done(0)
         self.poller.stop()
@@ -2553,7 +2564,10 @@ class App:
         if not Path(path).is_file():
             messagebox.showerror("Error", f"No se encuentra el archivo:\n{path}")
             return
-        self.save_review()
+        if not self.save_review() and not messagebox.askyesno(
+                "Abrir", f"{self.status.text()}.\n\n¿Abrir el otro libro igual? Se pierde lo revisado en este desde la "
+                         "última vez que se guardó."):
+            return
         self.close_tools(BLOCK_TOOLS + BOOK_TOOLS)  # sin cerrar, cambiarían el libro nuevo con datos del anterior
         path = str(Path(path).resolve())
         self.settings["folder"] = str(Path(path).parent)
@@ -4646,8 +4660,9 @@ class App:
         return state
 
     def save_review(self):
+        """Guarda la revisión del libro abierto. False si no se pudo (el motivo queda en la línea de estado)."""
         if not (self.book and self.pdf):
-            return
+            return True
         state = self.review_state()
         try:
             state["pdf"] = _fingerprint(self.pdf)
@@ -4656,6 +4671,8 @@ class App:
             self.save_thumb()  # la portada elegida, para la tarjeta de recientes
         except OSError as e:  # PDF borrado, carpeta de solo lectura, OneDrive bloqueándolo: el trabajo en curso sigue
             self.status.setText(f"No se pudo guardar la revisión: {e.strerror or e}")
+            return False
+        return True
 
     def apply_state(self, state):
         """Pone en la ventana los campos y reemplazos de una revisión guardada (o heredada)."""

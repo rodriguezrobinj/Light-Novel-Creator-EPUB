@@ -6469,7 +6469,7 @@ def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
     window.done = None
     window.spelling_dialog([("dijó", 1, ["dijo"])])
     window.add_page()
-    window.pdf = TMP / "Libro.pdf"
+    window.pdf = pdf  # Versiones pide un PDF
     window.versions()
     window.quality()
     window.images_dialog()
@@ -7241,7 +7241,8 @@ def test_window_does_not_decode_illustrations_again():
 
 def test_window_warns_when_the_review_cannot_be_saved():
     """Si la revisión no se puede escribir (OneDrive la bloquea, carpeta de solo lectura), se avisa y no
-    queda un temporal; la revisión anterior sigue entera."""
+    queda un temporal; la revisión anterior sigue entera. Cerrar o abrir otro libro preguntan antes de perderla, y
+    un bloqueo breve (OneDrive sincronizando) se reintenta."""
     import app
 
     root, window = visible_window()
@@ -7250,14 +7251,36 @@ def test_window_warns_when_the_review_cannot_be_saved():
     review = app._review_path(window.pdf)
     review.unlink(missing_ok=True)
     review.mkdir()  # en su sitio, una carpeta: el reemplazo falla
+    asked, original = [], app.messagebox.askyesno
+    app.messagebox.askyesno = lambda title, message, **kwargs: asked.append((title, message)) or False
     try:
-        window.save_review()
+        saved = window.save_review()
         status = window.status.text()
+        window.open_path(str(window.pdf))  # «No»: sigue con este libro, sin analizar otro
+        opened = window.done is None and window.book is not None
+        closed = window.close()  # «No»: la ventana sigue abierta
     finally:
+        app.messagebox.askyesno = original
         review.rmdir()
+    replace, tries = app.os.replace, []
+
+    def busy(src, dst):  # OneDrive bloquea el archivo un momento
+        tries.append(dst)
+        if len(tries) < 3:
+            raise PermissionError(13, "El proceso no tiene acceso al archivo")
+        replace(src, dst)
+
+    app.os.replace = busy
+    try:
+        retried = window.save_review()
+    finally:
+        app.os.replace = replace
     window.close()
-    assert "No se pudo guardar la revisión" in status, status
+    assert saved is False and "No se pudo guardar la revisión" in status, status
     assert not list(TMP.glob("*.json.tmp")), "quedó un temporal"
+    assert [t for t, _ in asked] == ["Abrir", "Cerrar"] and status in asked[1][1], asked
+    assert opened and closed is False, (opened, closed)
+    assert retried and len(tries) == 3 and review.is_file(), tries
 
 
 def test_kepub_option_profiles_and_names():
