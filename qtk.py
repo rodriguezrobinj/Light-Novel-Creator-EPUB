@@ -1,4 +1,5 @@
 """Adaptadores Qt con la API de Tk que usa app.py: la lógica de la ventana se portó a Qt sin reescribirla."""
+import bisect
 import os
 import re
 from contextlib import contextmanager
@@ -15,6 +16,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHB
 IID = Qt.ItemDataRole.UserRole       # fila -> su iid (el índice del bloque, como texto)
 TAGS = Qt.ItemDataRole.UserRole + 1  # fila -> sus tags de aspecto
 SRC = QTextFormat.Property.UserProperty + 1  # carácter -> tag src<k> (bloque del que viene)
+
+
+def u16(text, i):
+    """Posición de Qt del carácter i (de Python) de text: Qt cuenta en UTF-16 y un emoji ocupa dos."""
+    return len(text[:i].encode("utf-16-le")) // 2
 
 
 def app():
@@ -608,6 +614,7 @@ class Box(QWidget):
 
 
 BASE = re.compile(r"(\d+)\.(\d+|end)|insert|end|sel\.first|sel\.last")
+ASTRAL = re.compile("[\U00010000-\U0010ffff]")  # un carácter de Python, dos posiciones de Qt (un emoji)
 STEP = re.compile(r"\s*([+-])\s*(\d+)\s*c|\s*(linestart|lineend)")
 
 
@@ -621,9 +628,28 @@ class TextBox(QPlainTextEdit):
         self.ranges = {}  # tag -> [QTextCursor]
         self.styles = {}  # tag -> QTextCharFormat, en orden de prioridad (el último manda)
         self.painting = None
+        self.astral = None  # (índices de Python, posiciones de Qt) de los emojis del texto; None: hay que mirarlo
+        self.document().contentsChanged.connect(lambda: setattr(self, "astral", None))
 
     def _end(self):
         return self.document().characterCount() - 1  # sin el separador final de Qt
+
+    def _py(self, pos):
+        """Posición de Qt -> índice en el texto de Python, que es como cuenta Tk: un emoji es un carácter."""
+        if self.astral is None:
+            found = [m.start() for m in ASTRAL.finditer(self.toPlainText())]
+            self.astral = found, [i + n for n, i in enumerate(found)]
+        return pos - bisect.bisect_left(self.astral[1], pos)
+
+    def _qt(self, i):
+        """Índice en el texto de Python -> posición de Qt."""
+        self._py(0)
+        return i + bisect.bisect_left(self.astral[0], i)
+
+    def _span(self, first, last):
+        """Posiciones de Qt de first a last; sin last, el carácter de first (dos posiciones si es un emoji)."""
+        a = self._pos(first)
+        return a, self._qt(self._py(a) + 1) if last is None else self._pos(last)
 
     def _pos(self, index):
         doc, end = self.document(), self._end()
@@ -636,7 +662,8 @@ class TextBox(QPlainTextEdit):
                 pos = end + 1
             else:
                 room = block.length() - 1
-                pos = block.position() + (room if m.group(2) == "end" else min(int(m.group(2)), room))
+                column = room if m.group(2) == "end" else u16(block.text(), int(m.group(2)))
+                pos = block.position() + min(column, room)
         elif m.group(0) == "insert":
             pos = self.textCursor().position()
         elif m.group(0) == "end":
@@ -655,7 +682,7 @@ class TextBox(QPlainTextEdit):
                 block = doc.findBlock(min(pos, end))
                 pos = block.position() + (0 if s.group(3) == "linestart" else block.length() - 1)
             else:
-                pos += int(s.group(2)) * (1 if s.group(1) == "+" else -1)
+                pos = self._qt(self._py(pos) + int(s.group(2)) * (1 if s.group(1) == "+" else -1))
             pos = max(0, min(pos, end + 1))
             rest = rest[s.end():]
         return pos
@@ -665,12 +692,11 @@ class TextBox(QPlainTextEdit):
         if pos > self._end():
             return f"{self.document().blockCount() + 1}.0"
         block = self.document().findBlock(pos)
-        return f"{block.blockNumber() + 1}.{pos - block.position()}"
+        return f"{block.blockNumber() + 1}.{self._py(pos) - self._py(block.position())}"
 
     def get(self, first, last=None):
         text = self.toPlainText() + "\n"
-        a = self._pos(first)
-        b = a + 1 if last is None else self._pos(last)
+        a, b = map(self._py, self._span(first, last))
         return text[a:b] if b > a else ""
 
     def _cursor(self, a, b=None):
@@ -692,8 +718,7 @@ class TextBox(QPlainTextEdit):
             cursor.insertText(text)
 
     def delete(self, first, last=None):
-        a = self._pos(first)
-        b = a + 1 if last is None else self._pos(last)
+        a, b = self._span(first, last)
         if b > a:
             self._cursor(a, b).removeSelectedText()
 
@@ -704,7 +729,7 @@ class TextBox(QPlainTextEdit):
 
     def search(self, needle, start):
         text = self.toPlainText()
-        pos = text.find(needle, self._pos(start))
+        pos = text.find(needle, self._py(self._pos(start)))
         if pos < 0:
             pos = text.find(needle)  # Tk da la vuelta al principio
         return self.index(f"1.0+{pos}c") if pos >= 0 else ""
@@ -747,8 +772,7 @@ class TextBox(QPlainTextEdit):
         self._repaint()
 
     def tag_add(self, tag, first, last=None):
-        a = self._pos(first)
-        b = a + 1 if last is None else self._pos(last)
+        a, b = self._span(first, last)
         if tag == "sel":
             self.setTextCursor(self._cursor(a, b))
         elif tag.startswith("src"):
@@ -765,8 +789,7 @@ class TextBox(QPlainTextEdit):
             cursor.clearSelection()
             self.setTextCursor(cursor)
             return
-        a = self._pos(first)
-        b = a + 1 if last is None else self._pos(last)
+        a, b = self._span(first, last)
         # shortcut: quita solo los tramos enteros dentro de [a, b]; app.py siempre quita de "1.0" a "end"
         self.ranges[tag] = [c for c in self.ranges.get(tag, []) if not (a <= c.selectionStart() and c.selectionEnd() <= b)]
         self._repaint()
@@ -798,8 +821,8 @@ class TextBox(QPlainTextEdit):
             cursor = self.textCursor()
             if not cursor.hasSelection():
                 return ()
-            return self.index(f"1.0+{cursor.selectionStart()}c"), self.index(f"1.0+{cursor.selectionEnd()}c")
-        return tuple(self.index(f"1.0+{p}c") for c in self.ranges.get(tag, [])
+            return tuple(self.index(f"1.0+{self._py(p)}c") for p in (cursor.selectionStart(), cursor.selectionEnd()))
+        return tuple(self.index(f"1.0+{self._py(p)}c") for c in self.ranges.get(tag, [])
                      for p in (c.selectionStart(), c.selectionEnd()))
 
     def _repaint(self):

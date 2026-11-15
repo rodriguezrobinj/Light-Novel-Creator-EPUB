@@ -3355,6 +3355,42 @@ def test_editor_sheet_looks_and_spelling():
     assert sheet.misspelled() == ["dijó"], sheet.misspelled()
 
 
+def test_editor_sheet_marks_the_right_word_after_emoji():
+    """Tras un emoji (dos posiciones en Qt, un carácter en Python) se subraya la palabra mal escrita, el trozo
+    puesto con «Mostrar cambios» y el trozo de un aviso del informe, no lo de al lado."""
+    import types
+
+    import app
+    import qtk
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "😀😀 hola palabrx"), (2, "😀 el gato")], {})
+    sheet.look.set_unknown({"palabrx"})
+    block = sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.setPosition(block.position() + 6)  # tras «😀 el »
+    c.setPosition(block.position() + 10, QTextCursor.MoveMode.KeepAnchor)
+    c.insertText("perro")
+    sheet.look.show_changes("#2e9d4a")
+    qtk.pump()
+
+    def spans(n, style):
+        return sorted((r.start, r.start + r.length) for r in sheet.document().findBlockByNumber(n).layout().formats()
+                      if r.format.underlineStyle() == style)
+
+    spell = spans(0, QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
+    added = spans(1, QTextCharFormat.UnderlineStyle.SingleUnderline)
+    start, end = app.TextEditor.issue_range(sheet.document().findBlockByNumber(0), types.SimpleNamespace(span=(3, 7)))
+    c.setPosition(sheet.document().findBlockByNumber(0).position() + start)
+    c.setPosition(sheet.document().findBlockByNumber(0).position() + end, QTextCursor.MoveMode.KeepAnchor)
+    assert spell == [(10, 17)] and added == [(6, 11)], (spell, added)
+    assert c.selectedText() == "hola", c.selectedText()
+
+
 def test_editor_sheet_colors_once_when_opening():
     """Abrir un capítulo colorea cada párrafo una vez, y la primera tecla solo el suyo: antes se coloreaba tres
     veces y la primera tecla congelaba la hoja más de un segundo en un capítulo largo."""
@@ -7492,6 +7528,23 @@ def test_qtk_textbox_understands_tk_indices():
     seen.append(text.tag_names("1.6"))
     assert seen == ["uno dos\n\ntres", "3.2", "tres", "dos", "3.4", True, "1.4", "uno dos\n\ntres\n", "3.2",
                     "uno dos", ("1.0", "1.3", ("1.0", "1.3")), True, ("src4",)], seen
+
+
+def test_qtk_textbox_counts_an_emoji_as_one_character():
+    """Como en Tk, un emoji es un carácter en los índices («1.0+1c», «1.2»), aunque Qt le dé dos posiciones: las
+    vistas previas subrayan lo que toca."""
+    import qtk
+
+    qtk.app()
+    text = qtk.TextBox()
+    text.insert("end", "😀ab\n😀😀c")
+    text.tag_add("new", "1.0+1c", "1.0+2c")
+    text.tag_add("sel", "2.2", "2.3")
+    seen = [text.get("1.0+1c", "1.0+2c"), text.get("1.0"), text.index("1.end"), text.search("c", "1.0"),
+            text.tag_ranges("new"), text.textCursor().selectedText(), text.index("sel.first"), text.get("2.1", "2.end")]
+    text.delete("2.0")
+    seen.append(text.get("2.0", "2.end"))
+    assert seen == ["a", "😀", "1.3", "2.2", ("1.1", "1.2"), "c", "2.2", "😀c", "😀c"], seen
 
 
 def test_theme_text_is_readable():

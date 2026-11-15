@@ -7022,11 +7022,14 @@ class TextEditor:
 
     @staticmethod
     def issue_range(block, issue):
-        """(inicio, fin) del problema dentro del párrafo de la hoja; sin posición, todo el párrafo."""
-        size = max(block.length() - 1, 0)
+        """(inicio, fin) del problema dentro del párrafo de la hoja, en posiciones de Qt (un emoji ocupa dos); sin
+        posición, todo el párrafo."""
+        text = block.text()
+        size = len(text)
         start, end = issue.span or (0, size)
         start, end = min(start, size), min(end, size)
-        return (start, end) if end > start else (0, size)
+        start, end = (start, end) if end > start else (0, size)
+        return qtk.u16(text, start), qtk.u16(text, end)
 
     def refresh_marks(self):
         """Marcas de la hoja, como Word: ondulado bajo el trozo exacto de cada aviso, del color de su gravedad, y

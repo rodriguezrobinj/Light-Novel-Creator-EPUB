@@ -12,6 +12,7 @@ from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QSynta
 from PySide6.QtWidgets import QApplication, QTextEdit
 
 import convert
+from qtk import u16
 
 _USER = QTextFormat.Property.UserProperty.value
 SOURCE = _USER + 1    # párrafo: índice del bloque del libro del que viene (el PDF sigue al cursor)
@@ -511,6 +512,11 @@ class Look(QSyntaxHighlighter):
 
     def highlightBlock(self, text):
         block = self.currentBlock()
+        # setFormat cuenta en UTF-16 y text en caracteres: tras un emoji (dos posiciones) se subrayaba otra cosa
+        wide = any(ord(c) > 0xFFFF for c in text)
+
+        def at(i):
+            return u16(text, i) if wide else i
         if block.blockFormat().property(HEADING):
             f = QTextCharFormat()
             f.setFontWeight(QFont.Weight.Bold)
@@ -518,18 +524,18 @@ class Look(QSyntaxHighlighter):
             subtitle = block.blockFormat().property(LEVEL) not in (None, "Capítulo")
             f.setProperty(QTextFormat.Property.FontSizeAdjustment, 1 if subtitle else 2)
             f.setForeground(self.color("heading"))
-            self.setFormat(0, len(text), f)
+            self.setFormat(0, at(len(text)), f)
         elif text.strip() and convert.SCENE_BREAK.fullmatch(text.strip()):
             f = QTextCharFormat()
             f.setForeground(self.color("scene"))
-            self.setFormat(0, len(text), f)
+            self.setFormat(0, at(len(text)), f)
         for m in NOTE.finditer(text):
             f = QTextCharFormat()
             f.setForeground(self.color("mark"))
-            self.setFormat(m.start(), m.end() - m.start(), f)
+            self.setFormat(at(m.start()), at(m.end()) - at(m.start()), f)
         broken = self.color("broken")  # fuera del bucle: se pinta letra a letra
         for m in self.matches(text):
-            for c in range(m.start(), m.end()):  # encima de lo que ya tenga (título, nota)
+            for c in range(at(m.start()), at(m.end())):  # encima de lo que ya tenga (título, nota)
                 f = QTextCharFormat(self.format(c))
                 f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
                 f.setUnderlineColor(broken)
@@ -544,7 +550,7 @@ class Look(QSyntaxHighlighter):
                 spans = added_spans(plain_line(original), text)
             changes = QColor(self.changes)
             for start, size in spans:
-                for c in range(start, start + size):
+                for c in range(at(start), at(start + size)):
                     f = QTextCharFormat(self.format(c))
                     f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
                     f.setUnderlineColor(changes)
