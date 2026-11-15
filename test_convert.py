@@ -3319,6 +3319,14 @@ def test_sheet_repaints_when_height_changes_and_underlines_by_word():
     cursor.insertBlock()
     cursor.insertText("Otro párrafo al final.")
     app.processEvents()
+    assert any(r.height() >= sheet.viewport().height() for r in paints.rects), paints.rects
+    # La hoja está maquetada entera desde que se carga (Qt lo hace a trozos y pintaba con ella a medias: tras saltar
+    # a un párrafo lejano salían solo algunos párrafos), y al desplazarse se pinta entera, no solo la franja nueva
+    last = sheet.document().lastBlock()
+    assert sheet.document().documentLayout().blockBoundingRect(last).top() > 3000 and last.layout().lineCount() > 0
+    del paints.rects[:]
+    sheet.verticalScrollBar().setValue(sheet.verticalScrollBar().value() + 40)
+    app.processEvents()
     sheet.close()
     assert any(r.height() >= sheet.viewport().height() for r in paints.rects), paints.rects
 
