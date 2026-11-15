@@ -1399,6 +1399,8 @@ def _lan_ip():
             return "127.0.0.1"
 
 
+AUTOSAVE_MS = 2000  # la revisión se guarda sola este tiempo después del último cambio
+DRAFT_MS = 5000  # el editor escribe su borrador este tiempo después del primer cambio sin guardar
 SEND_MINUTES = 10  # «Enviar al móvil» deja de enviar solo, por si la ventana se queda abierta
 
 
@@ -2622,7 +2624,7 @@ class App:
         Administrador de tareas) ya no pierde lo revisado, y varios cambios seguidos son una sola escritura."""
         if self.autosave_timer:
             qtk.cancel(self.autosave_timer)
-        self.autosave_timer = qtk.after(2000, self.autosaved)
+        self.autosave_timer = qtk.after(AUTOSAVE_MS, self.autosaved)
 
     def autosaved(self):
         self.autosave_timer = None
@@ -6649,7 +6651,7 @@ class TextEditor:
         self.opened, self.saved_paragraphs = time.monotonic(), 0  # para «Tu trabajo» de «Cifras»
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         # Sin reiniciar la cuenta en cada aviso (la ortografía repinta y avisa sin parar): como mucho 5 s de trabajo perdido
-        sheet.textChanged.connect(lambda: "draft" in self.pending or self.later("draft", 5000, self.write_draft))
+        sheet.textChanged.connect(lambda: "draft" in self.pending or self.later("draft", DRAFT_MS, self.write_draft))
         sheet.textChanged.connect(lambda: self.later("diff", 150, self.update_diff))
         sheet.cursorPositionChanged.connect(lambda: self.later("diff", 150, self.update_diff))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))

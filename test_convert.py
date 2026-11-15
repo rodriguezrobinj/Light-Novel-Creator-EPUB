@@ -2720,6 +2720,7 @@ def test_window_autosaves_the_review():
     root.update()
     review = app._review_path(window.pdf)
     review.unlink(missing_ok=True)
+    autosave_ms, app.AUTOSAVE_MS = app.AUTOSAVE_MS, 200  # la espera real (2 s) no cambia lo que se prueba
     saves, save = [], window.save_review
     window.save_review = lambda: saves.append(1) or save()
     item = first_title(window)
@@ -2730,6 +2731,7 @@ def test_window_autosaves_the_review():
     while not saves and time.time() < deadline:
         root.update()
         time.sleep(0.05)
+    app.AUTOSAVE_MS = autosave_ms
     state = json.loads(review.read_text(encoding="utf-8")) if review.is_file() else {}
     autosaved = len(saves)
     window.close()
@@ -4266,10 +4268,14 @@ def test_editor_draft_written_while_spelling_repaints():
 
     B = convert.Block
     root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
-    QTest.keyClicks(editor.sheet, "hola ")
-    for _ in range(30):  # 6 s de repintados, uno cada 200 ms
-        editor.sheet.textChanged.emit()
-        QTest.qWait(200)
+    draft_ms, app.DRAFT_MS = app.DRAFT_MS, 500  # con la espera real (5 s) la prueba tardaba 6 s
+    try:
+        QTest.keyClicks(editor.sheet, "hola ")
+        for _ in range(15):  # 1,5 s de repintados, uno cada 100 ms: más que la espera del borrador
+            editor.sheet.textChanged.emit()
+            QTest.qWait(100)
+    finally:
+        app.DRAFT_MS = draft_ms
     written = app._draft_path(window.pdf).exists()
     editor.win.done(0)
     window.close()
@@ -7769,7 +7775,7 @@ def test_serve_gives_the_epub_over_http():
     win.close()
     root.update()
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=2)
+        urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=0.5)  # cerrado: no contesta
         stopped = False
     except (urllib.error.URLError, OSError):
         stopped = True
@@ -10100,7 +10106,9 @@ def test_style_guide_tokens_icons_and_no_loose_colors():
         assert not loose, (name, loose)
 
 
-if __name__ == "__main__":
+def _run_tests(part, parts):
+    """Ejecuta las pruebas part, part+parts, part+2·parts… en este proceso. Devuelve cuántas fallaron."""
+    global TMP
     failed = 0
     no_modal_dialogs()
     # prefijo lnepub-: el hook de limpieza borra lo que quede si las pruebas se cortan
@@ -10111,13 +10119,62 @@ if __name__ == "__main__":
             os.environ[var] = str(TMP / var.lower())
         import app
         app.SETTINGS = TMP / "ajustes.json"  # nunca las preferencias reales del usuario
-        for name, fn in list(globals().items()):
-            if name.startswith("test_"):
-                try:
-                    fn()
-                    print("ok", name)
-                except Exception:
-                    failed += 1
-                    print("FAIL", name)
-                    traceback.print_exc()
-    sys.exit(1 if failed else 0)
+        tests = [(name, fn) for name, fn in list(globals().items()) if name.startswith("test_")]
+        for name, fn in tests[part::parts]:
+            try:
+                fn()
+                print("ok", name, flush=True)
+            except Exception:
+                failed += 1
+                print("FAIL", name)
+                traceback.print_exc()
+                sys.stdout.flush()
+    return failed
+
+
+def _run_parallel(parts):
+    """Reparte la suite en parts procesos, cada uno con su propia carpeta temporal (TEMP): dos pruebas a la vez no
+    ven los archivos de la otra. Muestra la salida de cada parte al acabar. Devuelve el código de salida."""
+    import subprocess
+    import time
+
+    start = time.time()
+    with tempfile.TemporaryDirectory(prefix="lnepub-test-", ignore_cleanup_errors=True) as root:
+        runs = []
+        for part in range(parts):
+            temp = Path(root) / f"parte{part}"
+            temp.mkdir()
+            log = open(temp.with_suffix(".log"), "w+", encoding="utf-8", errors="replace")
+            env = {**os.environ, "TEMP": str(temp), "TMP": str(temp), "TMPDIR": str(temp), "PYTHONIOENCODING": "utf-8"}
+            proc = subprocess.Popen([sys.executable, __file__, "--parte", f"{part}/{parts}"], stdout=log,
+                                    stderr=subprocess.STDOUT, env=env)
+            runs.append((proc, log))
+        ok = failed = 0
+        for part, (proc, log) in enumerate(runs):
+            code = proc.wait()
+            log.seek(0)
+            output = log.read()
+            log.close()
+            print(output, end="")
+            lines = output.splitlines()
+            ok += sum(line.startswith("ok ") for line in lines)
+            failed_here = sum(line.startswith("FAIL ") for line in lines)
+            failed += failed_here
+            if code and not failed_here:
+                failed += 1  # se cayó sin decir qué prueba: que no pase por buena
+                print(f"FAIL la parte {part + 1} de {parts} terminó con el código {code}")
+    print(f"\n{ok} correctas, {failed} con FAIL en {time.time() - start:.0f} s ({parts} procesos)")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    # Por defecto, un proceso por núcleo (hasta 4): de una en una la suite tardaba unos 2 minutos.
+    # --paralelo 1 la ejecuta aquí, de una en una; --parte k/n es lo que ejecuta cada proceso hijo.
+    args = sys.argv[1:]
+    if "--parte" in args:
+        part, parts = map(int, args[args.index("--parte") + 1].split("/"))
+        sys.exit(1 if _run_tests(part, parts) else 0)
+    parts = int(args[args.index("--paralelo") + 1]) if "--paralelo" in args else min(4, os.cpu_count() or 1)
+    if parts > 1:
+        sys.exit(_run_parallel(parts))
+    sys.exit(1 if _run_tests(0, 1) else 0)
