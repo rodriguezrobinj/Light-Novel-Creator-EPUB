@@ -2459,7 +2459,7 @@ def test_shrink_makes_big_images_lighter():
         assert max(pix.width, pix.height) == convert.SHRINK, (pix.width, pix.height)
         assert len(data) < len(big) and data[:3] == b"\xff\xd8\xff"
     small = jpeg(300, 400)
-    assert convert._shrink(small) == small or len(convert._shrink(small)) < len(small)
+    assert convert._shrink(small) == small  # bajo el límite y sin nada que ganar: la original tal cual
 
 
 def test_load_cover_converts_png_to_jpeg():
