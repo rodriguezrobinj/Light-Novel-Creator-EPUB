@@ -6280,6 +6280,8 @@ def test_blank_gap_between_paragraphs_is_a_scene_break():
     # 3: ficha de estado tras un hueco (Maryoku) y la firma del autor al final del epílogo (Eminence 7): no
     add_page(doc, 3, para(150, "Mire mi pantalla de estado") + [(72, 250, "NOMBRE: Chise (Reencarnador)", 11, "cour")]
              + para(350, "Ultimo parrafo del epilogo") + [(300, 450, "Autor Ejemplo", 11, "cour")])
+    for n in range(4, 9):  # texto corrido: un libro de verdad no tiene un hueco por página
+        add_page(doc, n, [row for y in range(150, 700, 44) for row in para(y, "Texto corrido sin huecos")])
     path = TMP / "hueco-escena.pdf"
     doc.save(path)
     blocks = convert.analyze(path).blocks
@@ -6294,6 +6296,16 @@ def test_blank_gap_between_paragraphs_is_a_scene_break():
                  + [row for y in range(150, 700, 90) for row in para(y, "Parrafo con hueco despues")])
     doc.save(TMP / "huecos-estilo.pdf")
     styled = [b.kind for b in convert.analyze(TMP / "huecos-estilo.pdf").blocks]
+    assert "break" not in styled, styled
+    # Farming Life 1: uno o dos por página (1,5 de media) agrupan párrafos de la misma escena. Mitsuha 3, el libro con
+    # más escenas, llega a 0,9 por página
+    doc = pymupdf.open()
+    for n in range(1, 5):
+        ys = (150, 194, 284, 328, 418, 462) if n % 2 else (150, 194, 284, 328, 372, 416)
+        add_page(doc, n, [(72, 100, f"Capitulo {n}: Otro", 20, "helv")]
+                 + [row for y in ys for row in para(y, "Parrafo de la misma escena")])
+    doc.save(TMP / "huecos-estilo-2.pdf")
+    styled = [b.kind for b in convert.analyze(TMP / "huecos-estilo-2.pdf").blocks]
     assert "break" not in styled, styled
 
 

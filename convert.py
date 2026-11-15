@@ -2707,7 +2707,8 @@ def analyze(pdf_path, progress=None):
             spaced.update(round(b.y - a.y) for a, b in zip(normal, normal[1:]) if b.y - a.y > step * 1.15)
         paragraph_gap = max((g for g in spaced if g < 3 * step), key=spaced.get, default=step)
         scene_gap = max(SCENE_GAP * step, 1.8 * paragraph_gap)
-        if sum(count for gap, count in spaced.items() if gap > scene_gap) > 2 * n:  # Megami 4: 4 por página
+        # Megami 4: 4 por página; Farming Life 1 y 2: 1,7, agrupan párrafos. Mitsuha 3 (GambaTrans), escenas: 0,9
+        if sum(count for gap, count in spaced.items() if gap > scene_gap) > 1.25 * n:
             scene_gap = None
 
         # Título por tamaño o negrita, o porque el PDF lo marca: hay subtítulos del tamaño del texto
