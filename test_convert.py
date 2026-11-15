@@ -7265,6 +7265,37 @@ def test_kepub_option_profiles_and_names():
     assert "kepub" in app.INHERITED and "kepub" in __import__("options").BOOK_KEYS
 
 
+def test_review_field_lists_agree():
+    """Las listas de campos de la revisión van a mano: un campo que falta en una se pierde sin aviso (no se
+    hereda, no sale al comparar versiones, la opción no llega a la ventana o al libro)."""
+    import dataclasses
+    import types
+
+    import app
+    import options
+
+    class Window:  # sin ventana: cada atributo es un Var que devuelve su propio nombre
+        fields = app.App.fields
+
+        def __getattr__(self, name):
+            return types.SimpleNamespace(get=lambda: name)
+
+        def rows(self):
+            return {}
+
+    fields = Window().fields()
+    state = set(app.App.review_state(Window()))
+    assert all(var.get() == f"{key}_var" for key, var in fields.items())  # BOOK_FIELDS se leen como <campo>_var
+    assert set(options.BOOK_KEYS) <= set(fields), set(options.BOOK_KEYS) - set(fields)
+    assert set(app.BOOK_FIELDS) - {"description"} <= set(fields) and "description" in state
+    assert set(app.BOOK_FIELDS) <= {f.name for f in dataclasses.fields(convert.Book)}
+    assert set(app.INHERITED) <= state, set(app.INHERITED) - state
+    assert set(app.SERIES_VOCAB) <= set(app.INHERITED)
+    shown_apart = {"blocks", "edits", "rows"}  # análisis, ediciones y filas: no son datos ni opciones del libro
+    unlabeled = state - shown_apart - set(app.VERSION_NOISE) - set(app.FIELD_LABELS)
+    assert not unlabeled, unlabeled
+
+
 def test_batch_with_kobo_writes_kepub():
     import app
 
