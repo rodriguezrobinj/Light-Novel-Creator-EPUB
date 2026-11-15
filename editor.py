@@ -532,11 +532,18 @@ class Look(QSyntaxHighlighter):
             self.setFormat(at(m.start()), at(m.end()) - at(m.start()), f)
         broken = self.color("broken")  # fuera del bucle: se pinta letra a letra
         for m in self.matches(text):
-            for c in range(at(m.start()), at(m.end())):  # encima de lo que ya tenga (título, nota)
-                f = QTextCharFormat(self.format(c))
+            # Encima de lo que ya tenga (título, nota), por tramos del mismo formato: letra a letra se perdía el
+            # ajuste entre letras, la palabra se ensanchaba y el párrafo ganaba una línea al llegar el corrector
+            c, end = at(m.start()), at(m.end())
+            while c < end:
+                base, stop = self.format(c), c + 1
+                while stop < end and self.format(stop) == base:
+                    stop += 1
+                f = QTextCharFormat(base)
                 f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
                 f.setUnderlineColor(broken)
-                self.setFormat(c, 1, f)
+                self.setFormat(c, stop - c, f)
+                c = stop
         if self.changes and text.strip() and not objects_of(block):
             original = original_of(block)
             if original is None:
@@ -604,6 +611,10 @@ class Sheet(QTextEdit):
         # Letra y hoja antes del aspecto: con él puesto, cambiarlas volvía a colorear todo (3 veces al abrir)
         self.setDocument(document)
         document.setDefaultFont(self.font())
+        # Strange Grief 1 (432 párrafos): al llegar las palabras del corrector un párrafo de arriba cambiaba de alto,
+        # los de abajo se movían y Qt no volvía a pintar lo visible: huecos con el texto «debajo» hasta mover el
+        # divisor. Con cada cambio de alto se pinta la hoja entera
+        document.documentLayout().documentSizeChanged.connect(lambda size: self.viewport().update())
         look = self.look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
         look.tags = self.tags
         look.set_unknown(self.unknown)
