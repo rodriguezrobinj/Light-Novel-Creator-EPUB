@@ -1854,10 +1854,9 @@ def test_window_close_stops_work_and_removes_partial_epub():
     import time
 
     root, window = visible_window()
-    window.run(time.sleep, (30,), lambda _: None)
     partial = TMP / "cerrar.epub.tmp"
     partial.write_bytes(b"a medio escribir")
-    window.partial = str(partial)
+    window.run(time.sleep, (30,), lambda _: None, partial=[partial])
     window.close()
     assert not partial.exists()
     assert not window.proc.is_alive()
@@ -1909,7 +1908,9 @@ def test_window_open_file_with_too_long_path():
         root.destroy()
     assert len(str(path)) >= 260, len(str(path))
     assert len(asked) == 1 and "260" in asked[0] and "caracteres" in asked[0], asked
-    assert launched == [["explorer", str(folder)], ["explorer", str(folder)]], launched
+    assert launched == [[app.EXPLORER, str(folder)], [app.EXPLORER, str(folder)]], launched
+    assert Path(app.EXPLORER).is_absolute() and Path(app.POWERSHELL).is_file(), (app.EXPLORER, app.POWERSHELL)
+    assert os.environ["NoDefaultCurrentDirectoryInExePath"] == "1"  # ni java ni calibre salen de la carpeta actual
 
 
 def test_window_reports_worker_crash():
@@ -1953,6 +1954,58 @@ def test_window_starts_work_with_big_data_without_freezing():
     root.destroy()
     assert results == [3_000_000], results
     assert took < 0.5, took
+
+
+def test_window_cancels_work_and_cleans_up():
+    """«Cancelar» junto a la barra detiene el trabajo y borra lo que dejó a medias; un trabajo que no llega a
+    empezar (datos que no se pueden pasar al proceso) avisa y no deja la ventana ocupada; cerrar a mitad borra los
+    datos del trabajo, y al arrancar se barren los de más de un día que dejó una ventana cerrada de golpe."""
+    import tempfile
+    import time
+
+    import app
+
+    root, window = visible_window()
+    shown, original = [], app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message, **_: shown.append(message)
+    try:
+        started = window.run(len, (lambda: None,), lambda _: None)  # una lambda no se puede pasar al proceso
+        window.poll()
+        failed = started, window.done, window.open_btn.isEnabled()
+    finally:
+        app.messagebox.showerror = original
+    partial = TMP / "a medias.epub.tmp"
+    partial.write_bytes(b"PK")
+    window.run(time.sleep, (30,), lambda _: None, partial=[partial])
+    root.update()
+    visible = window.cancel_btn.isVisible()
+    proc, args_file = window.proc, window.args_file
+    window.cancel_btn.click()
+    root.update()
+    window.poll()
+    cancelled = (proc.is_alive(), partial.exists(), Path(args_file).exists(), window.done, window.cancel_btn.isVisible(),
+                 window.status.text(), window.open_btn.isEnabled())
+    window.run(time.sleep, (30,), lambda _: None)
+    args_file = window.args_file
+    window.close()
+    closed = Path(args_file).exists()
+    saved, tempfile.tempdir = tempfile.tempdir, str(TMP)  # el barrido mira en %TEMP%: aquí, la carpeta de la prueba
+    try:
+        old, new, other = TMP / "lnepub-trabajo-viejo.pickle", TMP / "lnepub-vista-1.epub", TMP / "lnepub-otro.epub"
+        for path in (old, new, other):
+            path.write_bytes(b"x")
+        os.utime(old, (time.time() - 2 * 86400,) * 2)
+        os.utime(other, (time.time() - 2 * 86400,) * 2)
+        app._sweep_temp()
+        swept = old.exists(), new.exists(), other.exists()
+    finally:
+        tempfile.tempdir = saved
+    assert failed == (False, None, True) and shown and "No se pudo empezar" in shown[0], (failed, shown)
+    assert visible, "sin botón Cancelar durante el trabajo"
+    assert cancelled == (False, False, False, None, False, "Cancelado", True), cancelled
+    assert not closed, "quedó el archivo de datos del trabajo"
+    assert swept == (False, True, True), swept
+    assert app._batch_partials([TMP / "Libro.pdf"]) == [f"{TMP / 'Libro.epub'}.tmp", f"{TMP / 'Libro.kepub.epub'}.tmp"]
 
 
 def test_window_quality_report_not_repeated_for_the_same_text():
@@ -2196,6 +2249,39 @@ def test_window_epubcheck_asks_before_downloading():
     assert "Java" in told[0] and "33 MB" in asked[0] and ran == [], (told, asked, ran)
     assert clean == "Sin errores ni advertencias: el EPUB cumple el estándar.", clean
     assert status == "EPUBCheck: 1 error, 1 advertencia", status
+
+
+def test_epubcheck_download_is_checked_and_replaced_whole():
+    """La descarga de EPUBCheck se compara con el resumen del oficial antes de descomprimirla (Java ejecutaría lo
+    que traiga), y se pone en su sitio de una vez: un corte a mitad dejaba el .jar sin sus bibliotecas."""
+    import io
+
+    import app
+
+    inside = f"epubcheck-{app.EPUBCHECK_VERSION}/"
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as z:
+        z.writestr(inside + "epubcheck.jar", b"jar")
+        z.writestr(inside + "lib/otra.jar", b"lib")
+    folder = TMP / "epubcheck-descarga"
+    (folder / inside).mkdir(parents=True, exist_ok=True)
+    (folder / inside / "epubcheck.jar").write_bytes(b"a medias")  # un corte anterior: sin lib/
+    saved = app.urllib.request.urlopen, app.EPUBCHECK_SHA256
+    app.urllib.request.urlopen = lambda url, timeout: io.BytesIO(data.getvalue())
+    try:
+        try:
+            app._download_epubcheck(folder)
+            refused = ""
+        except RuntimeError as e:
+            refused = str(e)
+        kept = (folder / inside / "epubcheck.jar").read_bytes()
+        app.EPUBCHECK_SHA256 = app._epubcheck_digest(zipfile.ZipFile(io.BytesIO(data.getvalue())))
+        jar = app._download_epubcheck(folder)
+    finally:
+        app.urllib.request.urlopen, app.EPUBCHECK_SHA256 = saved
+    assert "no coincide" in refused and kept == b"a medias", (refused, kept)
+    assert Path(jar).read_bytes() == b"jar" and (folder / inside / "lib" / "otra.jar").is_file(), jar
+    assert sorted(p.name for p in folder.iterdir()) == [inside.rstrip("/")], list(folder.iterdir())  # sin restos
 
 
 def test_write_pdf_bookmarks_numbers_and_metadata():
@@ -2501,7 +2587,8 @@ def test_window_keyboard_shortcuts_change_type():
 
 
 def test_window_review_is_restored_when_reopening_the_pdf():
-    """La revisión se guarda al cerrar y vuelve al abrir el mismo PDF; si el PDF cambia, no."""
+    """La revisión se guarda al cerrar y vuelve al abrir el mismo PDF, aunque OneDrive le cambie la fecha al
+    sincronizar; si el PDF cambia, no."""
     import app
 
     root, window = visible_window()
@@ -2516,6 +2603,7 @@ def test_window_review_is_restored_when_reopening_the_pdf():
     window.pdf_page = 2
     window.cover_from_page()
     window.close()
+    os.utime(window.pdf, ns=(1_000_000_000, 1_000_000_000))  # OneDrive al sincronizar: otra fecha, mismo PDF
 
     root, window = visible_window()
     window.pdf = TMP / "novela.pdf"
@@ -2527,11 +2615,42 @@ def test_window_review_is_restored_when_reopening_the_pdf():
                         "Revisión anterior recuperada"), restored
 
     root, window = visible_window()
-    window.pdf = make_novel()  # PDF nuevo en la misma ruta: la revisión guardada ya no vale
+    window.pdf = make_novel()  # PDF nuevo en la misma ruta y del mismo tamaño (otro /ID): la revisión ya no vale
     window.show_book(convert.analyze(window.pdf))
     fresh = (window.tree.set(item, "inc"), window.style_var.get(), window.cover_choice)
     window.close()
     assert fresh == (app.ON, "Clásico", None), fresh
+
+
+def test_window_autosaves_the_review():
+    """La revisión se guarda sola poco después de cada cambio (tipo de una fila, título, un dato del libro), una
+    vez por tanda: una ventana cerrada de golpe ya no pierde lo revisado."""
+    import json
+    import time
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    root.update()
+    review = app._review_path(window.pdf)
+    review.unlink(missing_ok=True)
+    saves, save = [], window.save_review
+    window.save_review = lambda: saves.append(1) or save()
+    item = first_title(window)
+    window.set_kind(item, app.OFF)
+    window.tree.set(item, "title", "Capítulo uno")
+    window.publisher_var.set("Grupo Autoguardado")
+    deadline = time.time() + 10
+    while not saves and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    state = json.loads(review.read_text(encoding="utf-8")) if review.is_file() else {}
+    autosaved = len(saves)
+    window.close()
+    assert autosaved == 1, saves
+    assert state.get("publisher") == "Grupo Autoguardado" and state["rows"][item][:2] == [app.OFF, "Capítulo uno"], state
 
 
 def test_window_metadata_cover_and_shrink_reach_the_epub():
@@ -6459,21 +6578,28 @@ def test_window_dialogs_fit_the_screen():
 
 
 def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
-    """Ortografía y «Añadir página» se cierran al abrir otro PDF (si no, cambiarían el libro nuevo); con un
-    trabajo en curso, «Ortografía…» lo dice en vez de no hacer nada."""
+    """Ortografía, «Añadir página», Versiones, el informe de calidad, Ilustraciones y la portada se cierran al abrir
+    otro PDF (si no, cambiarían el libro nuevo: «Borrar» de Versiones escribía las del libro anterior en el nuevo);
+    con un trabajo en curso, «Ortografía…» lo dice en vez de no hacer nada."""
     import time
 
     pdf = TMP / "Otra - Volumen 1.pdf"
     make_novel().replace(pdf)
     root, window = visible_window()
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
-                                                     convert.Block("p", 1, "Ella dijó que sí.")], [0]))
+                                                     convert.Block("p", 1, "Ella dijó que sí."),
+                                                     convert.Block("image", 1, image=jpeg(40, 60))], [0]))
     window.done = lambda result: None  # un trabajo en curso
     window.spelling()
     busy = window.status.text()
     window.done = None
     window.spelling_dialog([("dijó", 1, ["dijo"])])
     window.add_page()
+    window.pdf = pdf  # Versiones pide un PDF
+    window.versions()
+    window.quality()
+    window.images_dialog()
+    window.choose_cover()
     root.update()
     opened = len(root.dialogs())
     window.open_path(str(pdf))
@@ -6485,7 +6611,48 @@ def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
         time.sleep(0.05)
     window.close()
     assert busy == "Espera a que termine el trabajo en curso", busy
-    assert (opened, left) == (2, 0), (opened, left)
+    assert (opened, left) == (6, 0), (opened, left)
+
+
+def test_window_refuses_a_book_open_in_another_window():
+    """Dos ventanas con el mismo libro guardarían su revisión una encima de la otra: la segunda no lo abre y lo
+    dice; al cerrar la primera, ya se puede. Volver a abrirlo en su misma ventana sí vale."""
+    import time
+
+    import app
+
+    def wait(window):
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            window.root.repaint()
+            app.qtk.pump()
+            time.sleep(0.05)
+
+    pdf = TMP / "Candado - Volumen 1.pdf"
+    make_novel().replace(pdf)
+    settings = TMP / f"ajustes-candado-{time.time_ns()}.json"  # las dos ventanas, con la misma carpeta de ajustes
+    root, first = visible_window(settings)
+    first.open_path(str(pdf))
+    wait(first)
+    first.open_path(str(pdf))  # el mismo libro en su ventana: se vuelve a abrir
+    reopened = first.done is not None
+    wait(first)
+    shown, original = [], app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message, **_: shown.append(message)
+    try:
+        root2, second = visible_window(settings)
+        second.open_path(str(pdf))
+        refused = second.done is None and second.book is None
+        first.close()
+        second.open_path(str(pdf))
+        accepted = second.done is not None
+        wait(second)
+    finally:
+        app.messagebox.showerror = original
+    second.close()
+    assert reopened, "no se pudo volver a abrir el libro en su ventana"
+    assert refused and len(shown) == 1 and "ya está abierto en otra ventana" in shown[0], (refused, shown)
+    assert accepted, "tras cerrar la primera ventana el libro seguía bloqueado"
 
 
 def test_editor_page_buttons_below_the_page():
@@ -6516,12 +6683,61 @@ def test_replay_image_and_page_at_start():
     blocks = [convert.Block("heading", 1, "Capítulo 1"), convert.Block("image", 1, image=JPEG),
               convert.Block("image", 2, image=JPEG)]
     book = convert.Book("Libro", "", b"", blocks, [0])
-    state = {"edits": [["image", 1, str(picture)], ["image", 2, str(TMP / "no-existe.png")], [0, 0, "# Créditos\n\nGracias."]]}
+    stored = app._store_image(picture)  # la ventana guarda así cada ilustración cambiada
+    state = {"edits": [["image", 1, stored], ["image", 2, str(TMP / "no-existe.png")], [0, 0, "# Créditos\n\nGracias."]]}
     done = app._replay(book, state)
     assert done == state["edits"], done
     assert [b.kind for b in book.blocks] == ["heading", "p", "heading", "image", "image"], book.blocks
     assert pymupdf.Pixmap(book.blocks[3].image).width == 20 and book.blocks[4].image == JPEG, book.blocks
     assert book.candidates == [2], book.candidates
+
+
+def test_plan_skips_rows_of_edits_not_replayed():
+    """Si _replay se para a mitad (la ilustración cambiada ya no es una imagen), las filas de los bloques que añadía
+    la edición siguiente no existen: la conversión de carpeta fallaba con IndexError en vez de convertir el tomo."""
+    import app
+
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
+                                           convert.Block("p", 1, "Dos.")], [0])
+    state = {"edits": [["image", 1, "x.png"], [3, 3, "# Cap 2\n\nMás."]],
+             "rows": {"0": [app.ON, "Cap 1"], "3": [app.ON, "Cap 2"]}}
+    done = app._replay(book, state)
+    chapters, removed, breaks = app._plan(book, state["rows"])
+    assert done == [] and len(book.blocks) == 3, (done, book.blocks)
+    assert chapters == [(0, "Cap 1")] and removed == breaks == [], (chapters, removed, breaks)
+
+
+def test_reviews_of_others_do_not_open_network_paths():
+    """Un .lnepub.json ajeno junto al PDF (heredado de otro tomo de la serie) puede traer rutas de red: con solo
+    mirarlas, Windows se conecta y entrega el hash de la contraseña. La fuente propia solo vale local, absoluta y
+    .ttf/.otf, y una ilustración cambiada solo desde la carpeta de ilustraciones del programa; ni se mira el disco."""
+    import pathlib
+
+    import app
+
+    unc, looked = r"\\192.168.1.50\s\x.ttf", []
+    assert app._font_file(r"C:\Fuentes\Mia.TTF") and app._font_file("C:/Fuentes/mia.otf")
+    assert not [p for p in (unc, "//192.168.1.50/s/x.ttf", r"\\?\UNC\srv\s\x.ttf", "mia.ttf", r"C:\x\mia.exe", "")
+                if app._font_file(p)]
+    assert app._stored_image(app.SETTINGS.parent / "ilustraciones" / "a.png")
+    assert not app._stored_image(app.SETTINGS.parent / "ilustraciones" / ".." / "a.png")
+    assert not app._stored_image(r"\\192.168.1.50\s\x.png") and not app._stored_image(TMP / "a.png")
+    is_file, read_bytes = pathlib.Path.is_file, pathlib.Path.read_bytes
+    pathlib.Path.is_file = lambda self: looked.append(str(self)) or is_file(self)
+    pathlib.Path.read_bytes = lambda self: looked.append(str(self)) or read_bytes(self)
+    try:
+        written = app._write_options({"font": "x.ttf", "font_file": unc})
+        book = convert.Book("Libro", "", b"", [convert.Block("image", 1, image=JPEG)], [])
+        done = app._replay(book, {"edits": [["image", 0, r"\\192.168.1.50\s\x.png"]]})
+        root, window = visible_window()
+        window.apply_state({"font": "x.ttf", "font_file": unc})
+        kept = window.font_file_var.get(), window.font_var.get()
+        window.close()
+    finally:
+        pathlib.Path.is_file, pathlib.Path.read_bytes = is_file, read_bytes
+    assert written["font"] == "" and book.blocks[0].image == JPEG and done, (written["font"], done)
+    assert kept == ("", "Del lector"), kept
+    assert not [p for p in looked if "192.168" in p], looked
 
 
 
@@ -6744,6 +6960,29 @@ def test_omnibus_joins_volumes():
     assert titles[0] == "Mi Serie - Volumen 1" and "Mi Serie - Volumen 2" in titles, titles
     assert titles.count("Capitulo 1: Inicio") == 2, titles
     assert "Mi Serie - Volúmenes 1-2" in epub_file(out, "OEBPS/content.opf")
+
+
+def test_window_omnibus_result_stays_out_of_the_open_book():
+    """El recopilatorio no es el libro abierto: sus avisos y su versión automática no se apuntan en él (el panel
+    de serie mostraba los avisos del recopilatorio en el tomo abierto)."""
+    import app
+
+    root, window = versioned_window()
+    out = str(TMP / "Recopilatorio.epub")
+    saved = app.filedialog.askopenfilenames, app.filedialog.asksaveasfilename, window.run
+    app.filedialog.askopenfilenames = lambda **_: (str(TMP / "a.pdf"), str(TMP / "b.pdf"))
+    app.filedialog.asksaveasfilename = lambda **_: out
+    window.run = lambda work, args, done, **_: done(["un aviso"]) or True
+    try:
+        window.omnibus()
+        root.update()
+    finally:
+        app.filedialog.askopenfilenames, app.filedialog.asksaveasfilename, window.run = saved
+    result = [d.windowTitle() for d in root.dialogs()]
+    kept = window.last_problems, app._load_versions(window.pdf)[0], window.status.text()
+    window.close()
+    assert kept[:2] == (None, []) and "Recopilatorio.epub" in kept[2], kept
+    assert result, "sin el diálogo del EPUB generado"
 
 
 def test_worker_error_is_logged():
@@ -6995,7 +7234,8 @@ def test_custom_font_is_embedded():
 
 
 def test_serve_gives_the_epub_over_http():
-    """El servidor de «Enviar al móvil» da el EPUB en cualquier ruta y deja de hacerlo al cerrar la ventana."""
+    """El servidor de «Enviar al móvil» da el EPUB solo en su ruta con clave al azar (otra da 404 y no cuenta como
+    enviado), deja de hacerlo al cerrar la ventana y la ventana se cierra sola a los SEND_MINUTES."""
     import urllib.error
     import urllib.request
 
@@ -7005,14 +7245,24 @@ def test_serve_gives_the_epub_over_http():
     epub = TMP / "Mi novela.epub"
     epub.write_bytes(b"PK" + os.urandom(5000))
     server = app._serve(epub, "127.0.0.1")
+    other = app._serve(epub, "127.0.0.1")
     port = server.server_port
-    got = []
-    for path in ("x", "otra/ruta"):
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/{path}", timeout=5) as r:
-            got.append((r.read() == epub.read_bytes(), r.headers["Content-Type"], r.headers["Content-Disposition"]))
-    server.shutdown()
-    server.server_close()
-    assert got == [(True, "application/epub+zip", "attachment; filename*=UTF-8''Mi%20novela.epub")] * 2, got
+    missing = []
+    for path in ("/x", "/Mi%20novela.epub", other.path):  # sin la clave de este servidor, nada
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+            missing.append(200)
+        except urllib.error.HTTPError as e:
+            missing.append(e.code)
+    guessed = server.downloaded
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{server.path}", timeout=5) as r:
+        got = (r.read() == epub.read_bytes(), r.headers["Content-Type"], r.headers["Content-Disposition"])
+    for s in (server, other):
+        s.shutdown()
+        s.server_close()
+    assert missing == [404] * 3 and not guessed, (missing, guessed)
+    assert got == (True, "application/epub+zip", "attachment; filename*=UTF-8''Mi%20novela.epub"), got
+    assert server.path.endswith("/Mi%20novela.epub") and len(server.path) > 20 and server.downloaded, server.path
     root, window = visible_window()
     shown = []
     original, lan = app.messagebox.showerror, app._lan_ip
@@ -7026,7 +7276,7 @@ def test_serve_gives_the_epub_over_http():
     win, server = window.phone_window
     qr = [label for label in win.findChildren(QLabel) if label.pixmap() and not label.pixmap().isNull()]
     texts = " ".join(label.text() for label in win.findChildren(QLabel))
-    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=5) as r:
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}{server.path}", timeout=5) as r:
         served = r.read() == epub.read_bytes()
     win.close()
     root.update()
@@ -7036,11 +7286,21 @@ def test_serve_gives_the_epub_over_http():
     except (urllib.error.URLError, OSError):
         stopped = True
     sent = app._sent_text(epub)  # el móvil lo descargó: el panel de serie lo cuenta como enviado
+    app.SEND_MINUTES = 0  # a los SEND_MINUTES la ventana se cierra sola
+    try:
+        window.send_to_phone(epub, ip="127.0.0.1")
+        expiring = window.phone_window[0]
+        for _ in range(20):
+            root.update()
+        expired = not app.shiboken6.isValid(expiring) or not expiring.isVisible()  # cerrada, o ya borrada
+    finally:
+        app.SEND_MINUTES = 10
     window.close()
+    assert expired, "la ventana de «Enviar al móvil» no se cerró sola"
     assert sent.startswith("Wi-Fi · "), sent
     assert shown == ["No hay red local: conecta el equipo a la Wi-Fi."], shown
     assert len(qr) == 1 and served and stopped, (len(qr), served, stopped)
-    assert f"http://127.0.0.1:{server.server_port}/Mi%20novela.epub" in texts and "Firewall" in texts, texts
+    assert f"http://127.0.0.1:{server.server_port}{server.path}" in texts and "Firewall" in texts, texts
 
 
 def test_text_cover():
@@ -7166,6 +7426,8 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
 
     root, window = visible_window()
     window.pdf = make_novel()
+    for old in TMP.glob(app._review_path(window.pdf).name + "*"):  # de otras pruebas con la misma novela
+        old.unlink()
     window.show_book(convert.analyze(window.pdf))
     window.set_kind(first_title(window), app.OFF)
     window.title_var.set("Mi título")
@@ -7187,6 +7449,13 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
     assert backup.is_file() and json.loads(backup.read_text(encoding="utf-8")) == state, "se perdió la revisión vieja"
     assert status.startswith("La revisión guardada no coincide") and backup.name in status, status  # delante: no se corta
     assert kept[:2] == ("Mi título", [["Witch", "Bruja"]]) and kept[2] != app.OFF, kept
+    review.write_text(json.dumps(state), encoding="utf-8")  # otra revisión que no vale: la copia anterior no se pisa
+    root, window = visible_window()
+    window.pdf = TMP / "novela.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    window.close()
+    second = review.with_name(review.name + ".2.bak")
+    assert json.loads(backup.read_text(encoding="utf-8")) == state and second.is_file(), "se pisó la copia anterior"
 
 
 def test_window_does_not_start_a_second_job():
@@ -7232,7 +7501,8 @@ def test_window_does_not_decode_illustrations_again():
 
 def test_window_warns_when_the_review_cannot_be_saved():
     """Si la revisión no se puede escribir (OneDrive la bloquea, carpeta de solo lectura), se avisa y no
-    queda un temporal; la revisión anterior sigue entera."""
+    queda un temporal; la revisión anterior sigue entera. Cerrar o abrir otro libro preguntan antes de perderla, y
+    un bloqueo breve (OneDrive sincronizando) se reintenta."""
     import app
 
     root, window = visible_window()
@@ -7241,14 +7511,36 @@ def test_window_warns_when_the_review_cannot_be_saved():
     review = app._review_path(window.pdf)
     review.unlink(missing_ok=True)
     review.mkdir()  # en su sitio, una carpeta: el reemplazo falla
+    asked, original = [], app.messagebox.askyesno
+    app.messagebox.askyesno = lambda title, message, **kwargs: asked.append((title, message)) or False
     try:
-        window.save_review()
+        saved = window.save_review()
         status = window.status.text()
+        window.open_path(str(window.pdf))  # «No»: sigue con este libro, sin analizar otro
+        opened = window.done is None and window.book is not None
+        closed = window.close()  # «No»: la ventana sigue abierta
     finally:
+        app.messagebox.askyesno = original
         review.rmdir()
+    replace, tries = app.os.replace, []
+
+    def busy(src, dst):  # OneDrive bloquea el archivo un momento
+        tries.append(dst)
+        if len(tries) < 3:
+            raise PermissionError(13, "El proceso no tiene acceso al archivo")
+        replace(src, dst)
+
+    app.os.replace = busy
+    try:
+        retried = window.save_review()
+    finally:
+        app.os.replace = replace
     window.close()
-    assert "No se pudo guardar la revisión" in status, status
+    assert saved is False and "No se pudo guardar la revisión" in status, status
     assert not list(TMP.glob("*.json.tmp")), "quedó un temporal"
+    assert [t for t, _ in asked] == ["Abrir", "Cerrar"] and status in asked[1][1], asked
+    assert opened and closed is False, (opened, closed)
+    assert retried and len(tries) == 3 and review.is_file(), tries
 
 
 def test_kepub_option_profiles_and_names():
@@ -7296,6 +7588,35 @@ def test_review_field_lists_agree():
     assert not unlabeled, unlabeled
 
 
+def test_window_asks_before_overwriting_the_final_name():
+    """El diálogo de guardar solo pregunta por el nombre elegido: «Libro.epub» con el formato Kobo se escribe como
+    «Libro.kepub.epub», y «Libro» sin extensión como «Libro.pdf»; si ese archivo ya existe, se pregunta antes de
+    pisarlo, y con «No» no se genera nada."""
+    import app
+
+    root, window = versioned_window()
+    for name in ("Pisar.kepub.epub", "Pisar.pdf"):
+        (TMP / name).write_bytes(b"de antes")
+    asked, ran, answers = [], [], [False, True, False]
+    saved = app.filedialog.asksaveasfilename, app.messagebox.askyesno, window.run
+    app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or answers.pop(0)
+    window.run = lambda work, args, done, **_: ran.append(args[2]) or True
+    try:
+        window.kepub_var.set(True)
+        app.filedialog.asksaveasfilename = lambda **_: str(TMP / "Pisar.epub")
+        window.generate()  # «No»: nada
+        window.generate()  # «Sí»: el .kepub.epub
+        app.filedialog.asksaveasfilename = lambda **_: str(TMP / "Pisar")
+        window.generate_pdf("A5")  # «No»
+        app.filedialog.asksaveasfilename = lambda **_: str(TMP / "Nuevo")
+        window.generate_pdf("A5")  # no existe: sin preguntar
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.askyesno, window.run = saved
+    window.close()
+    assert len(asked) == 3 and "Pisar.kepub.epub" in asked[0] and "Pisar.pdf" in asked[2], asked
+    assert ran == [str(TMP / "Pisar.kepub.epub"), str(TMP / "Nuevo.pdf")], ran
+
+
 def test_batch_with_kobo_writes_kepub():
     import app
 
@@ -7329,6 +7650,8 @@ def test_install_quotes_paths_with_apostrophes_for_powershell():
     out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Write-Output {app._ps_quote(path)}"],
                          capture_output=True, text=True, check=True).stdout.strip()
     assert out == path, out
+    # PowerShell toma también ‘ ’ ‚ ‛ por comillas simples: sin doblarlos, el resto de la ruta se ejecutaba
+    assert app._ps_quote("O’Neil‘s ‚x‛") == "'O’’Neil‘‘s ‚‚x‛‛'", app._ps_quote("O’Neil‘s ‚x‛")
 
 
 def test_qtk_rowlist_works_like_treeview():
@@ -7567,7 +7890,19 @@ def test_window_start_screen_shows_only_what_needs_no_book():
     broken.write_bytes(b"no es un pdf")
     app._render_thumbs([(str(never), str(app._thumb_path(never))), (str(broken), str(app._thumb_path(broken)))])
     first_page = app.QPixmap(str(app._thumb_path(never)))
+    # Con miniaturas de páginas en la tira (otro atributo que el proceso de recientes), un reciente nuevo pide la suya
+    window.thumbs = {0: (40, 60)}
+    later = TMP / "sin-miniatura.pdf"
+    later.write_bytes(make_novel().read_bytes())
+    started, start = [], app._start_thumbs
+    app._start_thumbs = lambda jobs: started.append(jobs)  # None: como si no arrancara
+    try:
+        window.settings["recent"] = [str(later)]
+        window.fill_recent()
+    finally:
+        app._start_thumbs = start
     window.close()
+    assert started and started[0][0][0] == str(later), started
     assert hidden == [False] * 7 and not any(tools_off), (hidden, tools_off)
     assert shown == [True] * 7 and all(tools_on), (shown, tools_on)
     assert "inicio" in cards[0] and "PDF" in cards[0] and "Sin revisar" in cards[0], cards[0]
@@ -7801,14 +8136,19 @@ def test_window_versions_compare_and_restore():
 
 
 def test_window_version_after_each_new_epub():
-    """Generar el EPUB deja una versión automática (la publicada); generar otra vez sin cambios no la repite."""
+    """Generar el EPUB deja una versión automática (la publicada); generar otra vez sin cambios no la repite. Cada
+    una se añade al zip sin reescribir las anteriores."""
     import app
 
     root, window = versioned_window()
-    window.saved(str(TMP / "publicado.epub"), [])
-    window.saved(str(TMP / "publicado.epub"), ["un aviso"])  # solo cambian los avisos: no es otra versión
-    window.publisher_var.set("Grupo Y")
-    window.saved(str(TMP / "publicado.epub"), [])
+    rewrite, app._write_versions = app._write_versions, None  # añadir una no debe rehacer el zip entero
+    try:
+        window.saved(str(TMP / "publicado.epub"), [])
+        window.saved(str(TMP / "publicado.epub"), ["un aviso"])  # solo cambian los avisos: no es otra versión
+        window.publisher_var.set("Grupo Y")
+        window.saved(str(TMP / "publicado.epub"), [])
+    finally:
+        app._write_versions = rewrite
     versions = app._load_versions(window.pdf)[0]
     changes = app._version_changes(versions[0]["state"], versions[1]["state"])
     window.close()
@@ -7862,6 +8202,8 @@ def test_damaged_versions_file_is_set_aside():
     backup = path.with_name(path.name + ".bak")
     assert backup.read_bytes() == b"no es un zip" and backup.name in status, status
     assert [v["name"] for v in versions] == ["Nueva"], versions
+    path.write_bytes(b"otro roto")  # el segundo .bak no pisa el primero
+    assert app._load_versions(window.pdf)[1].name == path.name + ".2.bak" and backup.read_bytes() == b"no es un zip"
 
 
 def test_version_of_another_analysis_is_not_restored():

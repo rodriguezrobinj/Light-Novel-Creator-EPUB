@@ -17,6 +17,7 @@ import os
 import pickle
 import queue
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -36,7 +37,7 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QLockFile, QObject, QProcess, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPainterPath,
                            QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -55,6 +56,13 @@ import qtk
 import theme
 import translate
 from qtk import filedialog, messagebox
+
+# Programas de Windows por su ruta, y sin buscar en la carpeta actual: un explorer.exe o un java.exe puesto en la
+# carpeta del PDF (una descarga) se ejecutaría en vez del de Windows
+os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+WINDOWS = Path(os.environ.get("SystemRoot") or "C:/Windows")
+EXPLORER = str(WINDOWS / "explorer.exe")
+POWERSHELL = str(WINDOWS / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
 
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
 SEP = "Separador"                                   # título que se escribe como separador de escena
@@ -107,11 +115,13 @@ THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe cong
 SUGGEST_AHEAD = 40        # sugerencias de ortografía pedidas por adelantado en cada capítulo
 MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
-# Aspecto de las marcas en el editor de texto (theme.editor_tags); "broken" es lo que edit_section quitaría
-LEVEL_COLOR = theme.level_colors(False)  # avisos del informe de calidad; en oscuro, theme.level_colors(True)
 LEVEL_NAMES = {"Grave": ("grave", "graves"), "Revisar": ("por revisar", "por revisar"),
                "Menor": ("menor", "menores")}  # singular y plural: «1 grave», «2 graves»
 LEVEL_PLURAL = {level: names[1] for level, names in LEVEL_NAMES.items()}
+# Herramientas con índices de bloques del libro: se cierran al restaurar una versión y al abrir otro libro
+BLOCK_TOOLS = ("spelling_window", "page_window", "quality_window", "images_window", "cover_window")
+# Las que guardan en el libro abierto lo que leyeron del anterior: se cierran al abrir otro libro
+BOOK_TOOLS = ("translate_window", "versions_window", "replacements_window", "glossary_window", "online_window")
 SHORTCUTS = ("Clic en Tipo, o teclas C (capítulo), S (subtítulo), X (separador), Q (quitar), I (ilustración),"
              " D/G (doble: dividir o girar)\nDoble clic o F2: editar título · E: editar texto · R: revisado\n"
              "Arrastrar o Alt+↑/↓: mover · Ctrl+F: buscar · Ctrl+Z: deshacer · Ctrl+,: opciones")
@@ -215,12 +225,23 @@ def _spell_server(requests, replies):
 EPUBCHECK_VERSION = "5.4.0"
 EPUBCHECK_URL = (f"https://github.com/w3c/epubcheck/releases/download/v{EPUBCHECK_VERSION}/"
                  f"epubcheck-{EPUBCHECK_VERSION}.zip")
+# Resumen de lo que trae el zip oficial (_epubcheck_digest), sacado de la copia de 5.4.0 descargada de GitHub: el zip
+# no se guarda y así vale sea cual sea su compresión. Con otra versión hay que sacarlo de nuevo; vacío, no se comprueba
+EPUBCHECK_SHA256 = "2f6c560858b770a2278c4c319f3a4f657f1e580e91ca0a0f948975a259281886"
 EPUBCHECK_LEVELS = {"FATAL": "Error grave", "ERROR": "Error", "WARNING": "Advertencia", "USAGE": "Sugerencia",
                     "INFO": "Información"}
 
 
 def _epubcheck_jar():
     return SETTINGS.parent / f"epubcheck-{EPUBCHECK_VERSION}" / "epubcheck.jar"
+
+
+def _epubcheck_digest(z):
+    """sha256 de los nombres y el sha256 de cada archivo del zip, en orden."""
+    digest = hashlib.sha256()
+    for name in sorted(n for n in z.namelist() if not n.endswith("/")):
+        digest.update(name.encode() + b"\0" + hashlib.sha256(z.read(name)).digest())
+    return digest.hexdigest()
 
 
 def _download_epubcheck(folder):
@@ -234,13 +255,27 @@ def _download_epubcheck(folder):
     except OSError as e:
         part.unlink(missing_ok=True)
         raise RuntimeError("No se pudo descargar EPUBCheck: comprueba la conexión a internet.") from e
-    with zipfile.ZipFile(part) as z:
-        names = z.namelist()
-        # Solo su carpeta: un nombre con «..» o fuera de ella escribiría donde no debe
-        if not names or any(not n.startswith(inside) or ".." in Path(n).parts for n in names):
-            raise RuntimeError("El archivo descargado de EPUBCheck no es el esperado.")
-        z.extractall(folder)
-    part.unlink()
+    try:
+        with zipfile.ZipFile(part) as z:
+            names = z.namelist()
+            # Solo su carpeta: un nombre con «..» o fuera de ella escribiría donde no debe
+            if not names or any(not n.startswith(inside) or ".." in Path(n).parts for n in names):
+                raise RuntimeError("El archivo descargado de EPUBCheck no es el esperado.")
+            if EPUBCHECK_SHA256 and _epubcheck_digest(z) != EPUBCHECK_SHA256:  # Java ejecutaría lo que traiga
+                raise RuntimeError("El EPUBCheck descargado no coincide con el oficial: no se usa.")
+            # Se descomprime aparte y se pone en su sitio de una vez: un corte a mitad dejaba el .jar sin sus
+            # bibliotecas y la ventana ya no lo volvía a descargar
+            tmp = Path(tempfile.mkdtemp(prefix="lnepub-epubcheck-", dir=folder))
+            try:
+                z.extractall(tmp)
+                shutil.rmtree(folder / inside, ignore_errors=True)
+                os.replace(tmp / inside, folder / inside)
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+    except zipfile.BadZipFile as e:
+        raise RuntimeError("El archivo descargado de EPUBCheck no es el esperado.") from e
+    finally:
+        part.unlink(missing_ok=True)
     return str(folder / inside / "epubcheck.jar")
 
 
@@ -259,7 +294,10 @@ def _epubcheck(jar, epub):
     """EPUBCheck sobre epub con sus mensajes en español (proceso de trabajo: tarda de 5 a 30 s)."""
     with tempfile.TemporaryDirectory(prefix="lnepub-epubcheck-") as tmp:
         report = Path(tmp) / "informe.json"
-        run = subprocess.run(["java", "-jar", jar, str(epub), "--json", str(report), "--locale", "es"],
+        java = shutil.which("java")
+        if not java:
+            raise RuntimeError("EPUBCheck necesita Java, que no está instalado en este equipo.")
+        run = subprocess.run([java, "-jar", jar, str(epub), "--json", str(report), "--locale", "es"],
                              capture_output=True, timeout=600,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # sin consola negra
         if not report.is_file():
@@ -312,6 +350,25 @@ def _store_image(path):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
     return str(dest)
+
+
+def _network_path(path):
+    """Ruta de red (\\\\servidor\\…): con solo mirarla, Windows se conecta y entrega el hash de la contraseña. Una
+    revisión de otro (el .json junto al PDF) puede traerla, así que se mira el texto antes de tocar el disco."""
+    return re.match(r"[\\/]{2}", str(path)) is not None
+
+
+def _font_file(path):
+    """Fuente propia de una revisión o de los ajustes si es una ruta local absoluta a un .ttf/.otf; si no, ""."""
+    path = str(path or "")
+    return path if Path(path).is_absolute() and not _network_path(path) and path.lower().endswith((".ttf", ".otf")) \
+        else ""
+
+
+def _stored_image(path):
+    """La ruta es de la carpeta de ilustraciones del programa (_store_image), la única que escribe la ventana."""
+    folder = os.path.normcase(str(SETTINGS.parent / "ilustraciones")) + os.sep
+    return not _network_path(path) and os.path.normcase(os.path.normpath(str(path))).startswith(folder)
 
 
 def _thumb_path(path):
@@ -377,7 +434,7 @@ class Speaker(QObject):
             self.proc.readyReadStandardOutput.connect(self._read)
             self.proc.errorOccurred.connect(lambda _: self._fail("No se pudo abrir la voz de Windows (PowerShell)."))
             script = SPEECH_SCRIPT.encode("utf-16-le")  # -EncodedCommand: sin líos de comillas
-            self.proc.start("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            self.proc.start(POWERSHELL, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                                            "-EncodedCommand", base64.b64encode(script).decode()])
         self.proc.write((" ".join(text.split()) + "\n").encode("utf-8"))
 
@@ -445,20 +502,38 @@ def _analyze(pdf, progress=None):
     return book, convert.duplicate_images(book), convert.quality_report(book), convert.report_memos()
 
 
+def _sweep_temp(age=86400):
+    """Borra de %TEMP% los datos de trabajos y las vistas previas de más de un día: los deja una ventana que se
+    cerró de golpe (corte de luz, Administrador de tareas)."""
+    for path in Path(tempfile.gettempdir()).glob("lnepub-*"):
+        if path.name.startswith(("lnepub-trabajo-", "lnepub-vista-")) and path.suffix in (".pickle", ".epub"):
+            with contextlib.suppress(OSError):  # otra ventana lo tiene abierto
+                if time.time() - path.stat().st_mtime > age:
+                    path.unlink()
+
+
 def _write_json(path, data):
     """Escribe el .json entero o nada: un corte a mitad dejaba el archivo roto y la revisión se ignoraba."""
     tmp = path.with_name(path.name + ".tmp")
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, path)
+        for attempt in range(5):  # OneDrive o el antivirus tienen el archivo abierto un momento al sincronizarlo
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.2)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
 
 
 def _ps_quote(text):
-    """Texto entre comillas simples de PowerShell: un apóstrofo (O'Neil) se escribe doble."""
-    return "'" + str(text).replace("'", "''") + "'"
+    """Texto entre comillas simples de PowerShell: un apóstrofo (O'Neil) se escribe doble, también los tipográficos
+    (‘ ’ ‚ ‛), que PowerShell toma por comillas."""
+    return "'" + re.sub(r"(['‘’‚‛])", r"\1\1", str(text)) + "'"
 
 
 def _same_type(value, like):
@@ -470,7 +545,7 @@ def _same_type(value, like):
 def _write_options(state, breaks=()):
     """Opciones de write_epub a partir de una revisión, de los campos de la ventana o de lo heredado."""
     lang, style = str(state.get("lang", "es")).strip(), state.get("style")
-    font, path = state.get("font"), str(state.get("font_file") or "")
+    font, path = state.get("font"), _font_file(state.get("font_file"))
     return {"lang": lang if LANG.fullmatch(lang) else "es",
             "typography": bool(state.get("typography", True)),
             "style": style if style in convert.STYLES else "Clásico",
@@ -500,6 +575,13 @@ def _write_checked(book, chapters, out, removed, options, progress=None):
 def _epub_name(path, kepub):
     """Nombre del EPUB: el Kobo solo usa su motor KEPUB si el archivo acaba en .kepub.epub."""
     return re.sub(r"(\.kepub)?\.epub$", "", str(path), flags=re.I) + (".kepub.epub" if kepub else ".epub")
+
+
+def _confirm_name(chosen, final, parent=None):
+    """El diálogo de guardar solo pregunta antes de pisar el nombre elegido; si luego cambia (la extensión o el
+    .kepub.epub del Kobo se añaden después), un archivo con el nombre final se reemplaza solo si el usuario quiere."""
+    return (os.path.normcase(chosen) == os.path.normcase(final) or not Path(final).exists()
+            or messagebox.askyesno("Reemplazar", f"Ya existe «{Path(final).name}».\n\n¿Reemplazarlo?", parent=parent))
 
 
 def _out(source):
@@ -750,29 +832,48 @@ def _translate_thread(job, out, stop):
 
 
 def _fingerprint(pdf):
-    """Tamaño y fecha del PDF: si cambian, la revisión guardada es de otro PDF y no se usa."""
-    stat = Path(pdf).stat()
-    return [stat.st_size, stat.st_mtime_ns]
+    """Tamaño, fecha y resumen del final del PDF (su índice y su /ID): si cambian el tamaño o el resumen, la
+    revisión guardada es de otro PDF y no se usa. La fecha no cuenta: OneDrive la cambia al sincronizar."""
+    with open(pdf, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        f.seek(max(0, size - 65536))
+        return [size, os.fstat(f.fileno()).st_mtime_ns, hashlib.sha1(f.read()).hexdigest()]
+
+
+def _same_pdf(saved, pdf):
+    """saved (el "pdf" de una revisión) es de este PDF. Las revisiones de antes no traen resumen: basta el tamaño."""
+    now = _fingerprint(pdf)
+    return saved[0] == now[0] and list(saved[2:]) in ([], now[2:])
 
 
 def _read_review(pdf, blocks=None):
     """Revisión guardada de este PDF, o None si no hay o si el PDF cambió desde entonces. Sin blocks
-    (el panel de serie, que no analiza) solo se compara el PDF."""
+    (el panel de serie, que no analiza) solo se compara el PDF (_same_pdf: sin la fecha, que OneDrive cambia y
+    apartaba la revisión aunque el PDF fuera el mismo)."""
     try:
         state = json.loads(_review_path(pdf).read_text(encoding="utf-8"))
-        if (state["pdf"] == _fingerprint(pdf) and blocks in (None, state["blocks"])
+        if (_same_pdf(state["pdf"], pdf) and blocks in (None, state["blocks"])
                 and isinstance(state["rows"], dict)):
             return state
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
     return None
+
+
+def _backup_path(path):
+    """.bak libre para apartar path: uno anterior no se pisa (.bak, .2.bak, .3.bak…)."""
+    backup, n = path.with_name(path.name + ".bak"), 1
+    while backup.exists():
+        n += 1
+        backup = path.with_name(f"{path.name}.{n}.bak")
+    return backup
 
 
 def _set_aside(pdf):
     """Revisión guardada que ya no vale (otro análisis u otro PDF), apartada en .bak antes de que la ventana
     escriba la nueva encima. Devuelve la copia, o None si no había revisión."""
     review = _review_path(pdf)
-    backup = review.with_name(review.name + ".bak")
+    backup = _backup_path(review)
     try:
         os.replace(review, backup)
     except OSError:
@@ -819,7 +920,7 @@ def _load_versions(pdf):
         return [], None
     except (zipfile.BadZipFile, zlib.error, ValueError, KeyError):
         pass
-    backup = path.with_name(path.name + ".bak")
+    backup = _backup_path(path)
     os.replace(path, backup)
     return [], backup
 
@@ -839,6 +940,17 @@ def _write_versions(pdf, versions):
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _append_version(pdf, version):
+    """Añade una versión al final del zip sin reescribir las de antes: con muchas, rehacerlo entero en cada EPUB
+    generado tardaba más y más. Borrar y renombrar sí lo reescriben entero (_write_versions)."""
+    with zipfile.ZipFile(_versions_path(pdf), "a", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        names = set(z.namelist())
+        n = len(names)
+        while f"{n:04}.json" in names:  # nombres por orden: _load_versions las lee así
+            n += 1
+        z.writestr(f"{n:04}.json", json.dumps(version, ensure_ascii=False))
 
 
 def _shown(key, value):
@@ -1036,7 +1148,8 @@ def _replay(book, state):
                 if not (0 <= k < len(book.blocks) and book.blocks[k].kind == "image"):
                     break
                 try:
-                    _swap_image(book, k, convert.load_cover(path))
+                    if _stored_image(path):  # otra ruta (de red, de una revisión ajena) no se abre
+                        _swap_image(book, k, convert.load_cover(path))
                 except ValueError:
                     pass  # la imagen ya no está: se queda la del PDF, y el cambio se recuerda por si vuelve
                 done.append(["image", k, path])
@@ -1064,6 +1177,8 @@ def _plan(book, rows):
     chapters, removed, breaks = [], [], []
     for item, (kind, title, *_) in rows.items():  # el tercer valor, si está, es la marca de revisado
         k = int(item)
+        if not 0 <= k < len(book.blocks):  # fila de una edición que _replay ya no pudo aplicar
+            continue
         if book.blocks[k].kind == "break":  # ya es un separador: su fila solo lo muestra
             continue
         if book.blocks[k].kind == "image":
@@ -1088,6 +1203,8 @@ def _cover_image(doc, choice, book=None):
         return convert._render(doc[value], crop=True)
     if kind == "image":
         return book.blocks[int(value)].image
+    if _network_path(value):
+        raise ValueError("La imagen está en una carpeta de red: cópiala al equipo y elígela desde ahí.")
     return convert.load_cover(value)
 
 
@@ -1141,6 +1258,11 @@ def _prepare(pdf, options):
             pass  # la imagen de portada ya no existe: se queda la del PDF
     state["_breaks"] = breaks
     return book, chapters, removed, state
+
+
+def _batch_partials(pdfs):
+    """Los EPUB a medio escribir que _batch puede dejar junto a cada PDF (normal o KEPUB, según su revisión)."""
+    return [f"{_epub_name(_out(pdf), kepub)}.tmp" for pdf in pdfs for kepub in (False, True)]
 
 
 def _batch(pdfs, options, progress=None):
@@ -1265,25 +1387,33 @@ def _lan_ip():
             return "127.0.0.1"
 
 
+SEND_MINUTES = 10  # «Enviar al móvil» deja de enviar solo, por si la ventana se queda abierta
+
+
 def _serve(path, host):
-    """Sirve el EPUB por HTTP (cualquier ruta lo devuelve) en un puerto libre, desde un hilo: solo lee un
-    archivo, no usa PyMuPDF. server.shutdown() lo para."""
+    """Sirve el EPUB por HTTP en un puerto libre, desde un hilo: solo lee un archivo, no usa PyMuPDF. Solo en
+    server.path, con una clave al azar: cualquiera en la misma Wi-Fi (un café, una residencia) podía bajarlo
+    probando puertos. server.shutdown() lo para."""
     data, name = Path(path).read_bytes(), Path(path).name
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.path != self.server.path:
+                self.send_error(404)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/epub+zip")
             self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{urllib.parse.quote(name)}")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            self.wfile.write(data)  # si el móvil corta a mitad, falla aquí y no cuenta como enviado
             self.server.downloaded = True  # el panel de serie lo cuenta como enviado al cerrar la ventana
 
         def log_message(self, *args):
             pass  # el .exe no tiene consola: escribir en stderr (None) fallaría
 
     server = http.server.ThreadingHTTPServer((host, 0), Handler)
+    server.path, server.downloaded = f"/{secrets.token_urlsafe(8)}/{urllib.parse.quote(name)}", False
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -1318,7 +1448,7 @@ def _install(source):
         shutil.copy2(source, exe)
     script = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({_ps_quote(link)});"
               f"$s.TargetPath={_ps_quote(exe)};$s.IconLocation={_ps_quote(f'{exe},0')};$s.Save()")
-    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True,
+    subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script], check=True,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     for open_with in OPEN_WITHS:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, open_with) as key:
@@ -1641,13 +1771,14 @@ class App:
         self.events = multiprocessing.Queue()  # el proceso de trabajo envía aquí progreso y resultado
         self.done = None                       # qué hacer con el resultado del trabajo en curso
         self.latest = None                     # último progreso (hecho, total) pendiente de pintar
-        self.partial = None                    # EPUB a medio escribir del trabajo en curso
+        self.partial = None                    # archivos a medio escribir del trabajo en curso (ver run)
         self.args_file = ""                    # datos del trabajo en curso, para el proceso (ver run)
         self.reports = {}                      # informes de calidad ya calculados (ver quality_report)
         self.editor_save = None                # guarda y cierra el cuadro de edición abierto
         self.view = None                       # última posición del scroll de la lista
         self.pdf_doc = None                    # PDF abierto para la vista previa
         self.preview_path = os.path.join(tempfile.gettempdir(), f"lnepub-vista-{os.getpid()}.epub")
+        _sweep_temp()
         # Lo que se escribió en preview_path y ese EPUB ya maquetado ((ancho, alto), documento, páginas): un
         # cambio pedía la vista previa hasta 4 veces y maquetarla cada vez paraba la ventana medio segundo
         self.preview_key, self.preview_doc = None, None
@@ -1672,6 +1803,7 @@ class App:
         self.matches = []                      # resultados de la búsqueda: (bloque, página, texto)
         self.dark = False                      # tema oscuro activo
         self.proc = None
+        self.book_lock = self.lock_key = None  # candado del libro abierto (ver lock_book)
         self.closed = False                    # ventana cerrada: lo diferido (miniaturas, repintar) ya no se hace
         self._description = ""                 # sinopsis (propiedad description)
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
@@ -1683,7 +1815,8 @@ class App:
         self.editor_at = None                  # bloque del cursor al cerrar el editor: «Lo dejaste en…»
         self.work = {}                         # trabajo en el editor por día: {"AAAA-MM-DD": {"minutes", …}}
         self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
-        self.thumbs, self.thumbs_tried = None, set()  # proceso de miniaturas de recientes y archivos ya probados
+        # Proceso de las miniaturas de recientes y archivos ya probados (self.thumbs es la tira de páginas)
+        self.recent_thumbs, self.thumbs_tried = None, set()
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
         self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
@@ -1795,6 +1928,9 @@ class App:
             var.listeners.append(self.update_header)
         self.lang_timer = None
         self.lang_var.listeners.append(self.lang_changed)
+        self.autosave_timer = None
+        for var in self.fields().values():  # los datos del libro y sus opciones van en la revisión
+            var.listeners.append(self.autosave)
 
         # Lista a la izquierda, vistas previas a la derecha, con divisor
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -1885,7 +2021,9 @@ class App:
         self.status = StatusLabel(objectName="muted")
         # Un estado largo se recorta en vez de ensanchar la ventana más allá de la pantalla
         self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        status_row = _row(self.progress, self.status, self.quality_btn)
+        self.cancel_btn = _button("Cancelar", self.cancel_work)  # solo con un trabajo en curso (update_chrome)
+        self.cancel_btn.setToolTip("Detiene el trabajo en curso; lo que estaba a medio escribir se borra")
+        status_row = _row(self.progress, self.cancel_btn, self.status, self.quality_btn)
         status_row.setStretchFactor(self.status, 1)  # con un hueco elástico al lado, Ignored se quedaba en 0 px
         rows.addLayout(status_row)
         outer.addWidget(bottom)
@@ -2057,27 +2195,54 @@ class App:
         self.views_size = None
         self.redraw()
 
-    def run(self, work, args, done, report=False, busy="Analizando…"):
+    def run(self, work, args, done, report=False, busy="Analizando…", partial=()):
         """Ejecuta work(*args) en otro proceso y llama a done(resultado) en la ventana.
-        Con report=True, work recibe progress=... y la barra avanza junto al texto busy. False si ya había
-        un trabajo en curso: su resultado llegaría a este done."""
+        Con report=True, work recibe progress=... y la barra avanza junto al texto busy. partial: archivos a medio
+        escribir que se borran si el trabajo se cancela o se cierra la ventana. False si ya había un trabajo en
+        curso (su resultado llegaría a este done) o si no se pudo empezar."""
         if self.done:
+            self.status.setText("Espera a que termine el trabajo en curso")  # el menú no se desactiva como los botones
             return False
         self.open_btn.setEnabled(False)
         self.batch_btn.setEnabled(False)
         self.gen_btn.setEnabled(False)
         self.pdf_btn.setEnabled(False)
-        self.done, self.busy = done, busy
+        self.done, self.busy, self.partial = done, busy, list(partial)
         self.update_chrome()  # sin libro, la barra de abajo aparece para el progreso
         # Los datos van en un archivo: por la tubería del proceso nuevo, la ventana esperaba a que arrancara
         # para leerlos (unos 3 s con un libro con ilustraciones). Así start() vuelve enseguida.
-        fd, path = tempfile.mkstemp(prefix="lnepub-trabajo-", suffix=".pickle")
-        with os.fdopen(fd, "wb") as f:
-            pickle.dump(args, f, protocol=pickle.HIGHEST_PROTOCOL)
-        self.args_file = path
-        self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, path, report), daemon=True)
-        self.proc.start()
+        try:
+            fd, self.args_file = tempfile.mkstemp(prefix="lnepub-trabajo-", suffix=".pickle")
+            with os.fdopen(fd, "wb") as f:
+                pickle.dump(args, f, protocol=pickle.HIGHEST_PROTOCOL)
+            self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, self.args_file, report),
+                                                daemon=True)
+            self.proc.start()
+        except Exception as e:  # disco lleno, sin permisos en %TEMP%: sin esto la ventana se quedaba ocupada
+            _log(traceback.format_exc())
+            self.proc = None
+            self.finish(("error", f"No se pudo empezar el trabajo: {e or type(e).__name__}"))
+            return False
         return True
+
+    def stop_work(self):
+        """Detiene el proceso de trabajo y borra lo que dejó a medias: el EPUB o PDF y el archivo de sus datos."""
+        if self.proc is not None and self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join()
+        for path in self.partial or ():
+            Path(path).unlink(missing_ok=True)
+        if self.args_file:
+            with contextlib.suppress(OSError):  # el proceso lo borra al leerlo
+                os.remove(self.args_file)
+
+    def cancel_work(self):
+        """«Cancelar», junto a la barra de progreso."""
+        if not self.done:
+            return
+        self.stop_work()
+        self.events = multiprocessing.Queue()  # la del proceso detenido puede quedar a medias o con su último aviso
+        self.finish(("cancel",))
 
     def update_chrome(self):
         """Sin libro abierto, solo lo que sirve para empezar: abrir, convertir una carpeta, las herramientas que no
@@ -2087,6 +2252,7 @@ class App:
         for widget in (self.options_row, self.quality_btn, self.recent_btn, self.file_label, self.find_btn):
             widget.setVisible(has)
         self.bottom.setVisible(has or self.done is not None)
+        self.cancel_btn.setVisible(self.done is not None)
         for action in self.book_actions:  # ocultas: en gris, en el tema oscuro parecían activas
             action.setVisible(has)
 
@@ -2130,6 +2296,14 @@ class App:
             self.pdf_btn.setEnabled(True)
         if event[0] == "done":
             done(event[1])
+        elif event[0] == "cancel":
+            self.progress.setValue(0)
+            if not self.book:  # análisis cancelado: el libro de antes ya se cerró, se vuelve al inicio
+                self.pdf = None
+                self.lock_book(None)  # otra ventana ya lo puede abrir
+                self.stack.setCurrentIndex(0)
+                self.update_header()
+            self.status.setText("Cancelado")
         else:
             self.progress.setValue(0)
             self.status.setText("Error")
@@ -2154,19 +2328,22 @@ class App:
                 "Cerrar", "Hay una traducción en curso: si sales ahora se pierde el lote que se está traduciendo (hasta "
                           "30 párrafos; lo anterior ya está guardado). ¿Salir igual?"):
             return False
+        if not self.save_review() and not messagebox.askyesno(
+                "Cerrar", f"{self.status.text()}.\n\n¿Cerrar igual? Se pierde lo revisado desde la última vez que se "
+                          "guardó."):
+            return False
         if editor:
             editor.win.done(0)
+            self.save_review()  # con dónde quedó el editor (editor_at)
         self.poller.stop()
         self.watcher.stop()
         if self.lang_timer:  # el informe se recalcularía sobre la ventana ya cerrada
             qtk.cancel(self.lang_timer)
-        self.save_review()
+        if self.autosave_timer:  # ya se guardó arriba
+            qtk.cancel(self.autosave_timer)
         self.save_settings()
-        if self.done and self.proc.is_alive():
-            self.proc.terminate()
-            self.proc.join()
-            if self.partial:
-                Path(self.partial).unlink(missing_ok=True)
+        if self.done:
+            self.stop_work()
         self.thumb_job += 1  # cancela las miniaturas pendientes
         if self.pdf_doc:
             self.pdf_doc.close()
@@ -2174,6 +2351,7 @@ class App:
         if self.preview_doc:
             self.preview_doc[1].close()
         Path(self.preview_path).unlink(missing_ok=True)
+        self.lock_book(None)
         self.root.on_close, self.closed = None, True
         self.root.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # libera la ventana y sus diálogos
         self.root.close()
@@ -2423,11 +2601,28 @@ class App:
             self.tree.selection_set(item)
             self.tree.see(item)
 
+    def remember(self, change):
+        """Apunta un cambio para Ctrl+Z y guarda la revisión poco después (autosave)."""
+        self.history.append(change)
+        self.autosave()
+
+    def autosave(self):
+        """Guarda la revisión 2 s después del último cambio: una ventana cerrada de golpe (corte de luz, el
+        Administrador de tareas) ya no pierde lo revisado, y varios cambios seguidos son una sola escritura."""
+        if self.autosave_timer:
+            qtk.cancel(self.autosave_timer)
+        self.autosave_timer = qtk.after(2000, self.autosaved)
+
+    def autosaved(self):
+        self.autosave_timer = None
+        if not self.closed:
+            self.save_review()
+
     def row_state(self, item):
         return item, self.tree.set(item, "inc"), self.tree.set(item, "title")
 
     def set_kind(self, item, kind):
-        self.history.append([self.row_state(item)])
+        self.remember([self.row_state(item)])
         self.tree.set(item, "inc", kind)
         self.tree.item(item, tags=(KIND_TAG[kind],))
 
@@ -2465,6 +2660,7 @@ class App:
         item = selected[0]
         mark = "" if self.tree.set(item, "ok") else "✓"
         self.tree.set(item, "ok", mark)
+        self.autosave()
         done, total = self.update_reviewed()
         self.status.setText(f"Capítulos revisados: {done} de {total}")
         items = self.tree.get_children()
@@ -2480,6 +2676,7 @@ class App:
         if not self.history:
             return
         change = self.history.pop()
+        self.autosave()
         if isinstance(change, dict):
             self.book.blocks, self.book.candidates = change["blocks"], change["candidates"]
             del self.edits[change["edits"]:]
@@ -2505,6 +2702,35 @@ class App:
             return NEXT
         return WIDE_NEXT if item in self.wide else IMAGE_NEXT
 
+    def close_tools(self, names):
+        """Cierra las ventanas de herramientas abiertas (atributos names; algunas guardan (ventana, …))."""
+        for win in (getattr(self, name, None) for name in names):
+            win = win[0] if isinstance(win, tuple) else win
+            if win and shiboken6.isValid(win):
+                win.close()
+
+    def lock_book(self, path):
+        """Candado del libro path para esta ventana, en la carpeta de ajustes (None: suelta el que tenga). False si
+        otra ventana lo tiene abierto: las dos guardarían su revisión una encima de la otra."""
+        key = hashlib.sha1(str(path).lower().encode()).hexdigest()[:16] if path else None
+        if key == self.lock_key:
+            return True
+        lock = None
+        if key:
+            folder = SETTINGS.parent / "abiertos"
+            with contextlib.suppress(OSError):
+                folder.mkdir(parents=True, exist_ok=True)
+            lock = QLockFile(str(folder / f"{key}.lock"))
+            lock.setStaleLockTime(0)  # vale mientras viva la otra ventana; si murió de golpe, Qt lo quita
+            if not lock.tryLock(0):
+                if lock.error() == QLockFile.LockError.LockFailedError:
+                    return False
+                lock = key = None  # sin poder escribir el candado (carpeta de solo lectura), se abre igual
+        if self.book_lock:
+            self.book_lock.unlock()
+        self.book_lock, self.lock_key = lock, key
+        return True
+
     def open_pdf(self):
         path = filedialog.askopenfilename(filetypes=[("PDF o EPUB", "*.pdf *.epub")],
                                           initialdir=self.settings.get("folder"))
@@ -2519,15 +2745,21 @@ class App:
     def open_path(self, path):
         """Abre un PDF o un EPUB: desde el botón, el menú de recientes o arrastrado sobre el .exe."""
         if self.done:  # hay un trabajo en curso
+            self.status.setText("Espera a que termine el trabajo en curso")  # doble clic en el panel de serie
             return
         if not Path(path).is_file():
             messagebox.showerror("Error", f"No se encuentra el archivo:\n{path}")
             return
-        self.save_review()
-        for win in (getattr(self, "spelling_window", None), getattr(self, "page_window", None),
-                    getattr(self, "translate_window", None)):
-            if win and shiboken6.isValid(win):  # sin cerrar, cambiarían el libro nuevo con datos del anterior
-                win.close()
+        if not self.save_review() and not messagebox.askyesno(
+                "Abrir", f"{self.status.text()}.\n\n¿Abrir el otro libro igual? Se pierde lo revisado en este desde la "
+                         "última vez que se guardó."):
+            return
+        if not self.lock_book(Path(path).resolve()):
+            messagebox.showerror("Abrir", f"«{Path(path).name}» ya está abierto en otra ventana de {APP_NAME}.\n\n"
+                                          "Ciérralo allí para abrirlo aquí: si no, cada ventana guardaría su revisión "
+                                          "encima de la de la otra.")
+            return
+        self.close_tools(BLOCK_TOOLS + BOOK_TOOLS)  # sin cerrar, cambiarían el libro nuevo con datos del anterior
         path = str(Path(path).resolve())
         self.settings["folder"] = str(Path(path).parent)
         self.settings["recent"] = [path] + [p for p in self.settings.get("recent", []) if p != path][:RECENT - 1]
@@ -2739,7 +2971,7 @@ class App:
                 return
             text = entry.text().strip()
             if text and text != self.tree.set(item, "title"):
-                self.history.append([self.row_state(item)])
+                self.remember([self.row_state(item)])
                 self.tree.set(item, "title", text)
             close()
             self.update_preview()
@@ -2761,17 +2993,16 @@ class App:
             self.editor_save()
 
     def generate(self):
-        out = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[("EPUB", "*.epub")],
-                                           initialdir=self.pdf.parent,
-                                           initialfile=_epub_name(_out(self.pdf).name, self.kepub_var.get()))
-        if not out:
+        chosen = filedialog.asksaveasfilename(filetypes=[("EPUB", "*.epub")], initialdir=self.pdf.parent,
+                                              initialfile=_epub_name(_out(self.pdf).name, self.kepub_var.get()))
+        out = _epub_name(chosen, self.kepub_var.get())  # sin extensión, o .kepub.epub para el Kobo
+        if not chosen or not _confirm_name(chosen, out):
             return
-        out = _epub_name(out, self.kepub_var.get())
         chapters, removed, breaks = self.prepare_output()
         self.status.setText("Generando EPUB…")
-        if self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
-                    lambda problems: self.saved(out, problems), report=True, busy="Generando EPUB…"):
-            self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
+        self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
+                 lambda problems: self.saved(out, problems), report=True, busy="Generando EPUB…",
+                 partial=[f"{out}.tmp"])  # el nombre temporal que usa write_epub
 
     def fill_pdf_menu(self):
         """«PDF ▾»: el tamaño preferido (Opciones → PDF) primero."""
@@ -2786,10 +3017,10 @@ class App:
         """«PDF ▾»: el libro maquetado en PDF al tamaño elegido (convert.PDF_SIZES), con las opciones del EPUB."""
         if not self.book:
             return
-        out = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")],
-                                           initialdir=self.pdf.parent,
-                                           initialfile=f"{_out(self.pdf).name} ({size}).pdf")
-        if not out:
+        chosen = filedialog.asksaveasfilename(filetypes=[("PDF", "*.pdf")], initialdir=self.pdf.parent,
+                                              initialfile=f"{_out(self.pdf).name} ({size}).pdf")
+        out = chosen if chosen.lower().endswith(".pdf") else chosen + ".pdf"
+        if not chosen or not _confirm_name(chosen, out):
             return
         if Path(out).resolve() == Path(self.pdf).resolve():  # mismo nombre que el original: lo pisaría
             messagebox.showerror("Generar PDF", "Ese es el PDF original: elige otro nombre.")
@@ -2797,9 +3028,9 @@ class App:
         chapters, removed, breaks = self.prepare_output()
         self.status.setText(f"Generando PDF {size}…")
         options = {**self.write_options(breaks), "whole_words": self.whole_words_var.get()}  # solo el PDF
-        if self.run(_write_pdf, (self.book, chapters, out, removed, options, size),
-                    lambda problems: self.saved(out, problems), report=True, busy="Maquetando el PDF…"):
-            self.partial = f"{out}.tmp"
+        self.run(_write_pdf, (self.book, chapters, out, removed, options, size),
+                 lambda problems: self.saved(out, problems), report=True, busy="Maquetando el PDF…",
+                 partial=[f"{out}.tmp"])
 
     def prepare_output(self):
         """Los datos de la ventana al libro y la revisión guardada antes de generar: (capítulos, quitados, separadores)."""
@@ -2819,9 +3050,14 @@ class App:
         state["replacements"], state["alts"] = self.replacements, self.alts
         return _write_options(state, breaks)
 
-    def saved(self, out, problems=()):
+    def saved(self, out, problems=(), of_book=True):
+        """El EPUB o PDF out está escrito. of_book=False (el recopilatorio): no es el libro abierto, y sus avisos y
+        su versión automática no van en él."""
         self.progress.setValue(0)  # la barra llena se quedaba tras el aviso de guardado
         self.status.setText(f"Guardado: {Path(out).name}" + (" (con avisos)" if problems else ""))
+        if not of_book:
+            self.result_dialog(out, problems)
+            return
         self.last_problems = list(problems)
         self.save_review()  # el panel de serie muestra los avisos del último EPUB
         kind = "PDF" if str(out).lower().endswith(".pdf") else "EPUB"
@@ -2950,7 +3186,7 @@ class App:
         except OSError as e:
             messagebox.showerror("Enviar al móvil", f"No se pudo enviar: {e.strerror or e}")
             return
-        url = f"http://{ip}:{server.server_port}/{urllib.parse.quote(Path(out).name)}"
+        url = f"http://{ip}:{server.server_port}{server.path}"
         png = io.BytesIO()
         segno.make(url).save(png, kind="png", scale=8, border=4)
         pixmap = QPixmap()
@@ -2965,11 +3201,12 @@ class App:
         column.addWidget(link)
         column.addWidget(_label("Escanea el código con el móvil conectado a la misma Wi-Fi, o escribe la dirección\n"
                                 "en su navegador. Si Windows pregunta en el Firewall, permite el acceso.\n"
-                                "Al cerrar esta ventana deja de enviarse.", "muted"))
+                                f"Al cerrar esta ventana, o a los {SEND_MINUTES} minutos, deja de enviarse.", "muted"))
         column.addLayout(_row(1, _button("Cerrar", win.close)))
         win.finished.connect(lambda _: (server.shutdown(), server.server_close(),
-                                        getattr(server, "downloaded", False) and _record_send(out, "Wi-Fi")))
+                                        server.downloaded and _record_send(out, "Wi-Fi")))
         win.show()
+        qtk.after(SEND_MINUTES * 60_000, lambda: shiboken6.isValid(win) and win.isVisible() and win.close())
         self.phone_window = win, server
 
     def add_to_calibre(self, out):
@@ -2994,8 +3231,8 @@ class App:
         try:
             if folder:
                 # con ruta larga, «/select» tampoco encuentra el archivo: la carpeta a secas
-                args = (["explorer", str(target.parent)] if long_path and target.is_file()
-                        else ["explorer", f"/select,{target}"] if target.is_file() else ["explorer", str(target)])
+                args = ([EXPLORER, str(target.parent)] if long_path and target.is_file()
+                        else [EXPLORER, f"/select,{target}"] if target.is_file() else [EXPLORER, str(target)])
                 subprocess.Popen(args)
             else:
                 os.startfile(path)
@@ -3006,7 +3243,7 @@ class App:
                         f"El archivo se guardó bien, pero su ruta tiene {len(str(path))} caracteres y Windows no "
                         f"abre archivos con rutas de {MAX_PATH} o más: los lectores de PDF y EPUB tampoco lo abren ahí.\n\n"
                         f"{path}\n\nMuévelo a una carpeta más corta o acorta su nombre. ¿Abrir su carpeta?"):
-                    subprocess.Popen(["explorer", str(target.parent)])
+                    subprocess.Popen([EXPLORER, str(target.parent)])
             else:
                 messagebox.showerror("Error", f"No se pudo abrir:\n{path}\n\n{e}")
         if win is not None:
@@ -3122,10 +3359,10 @@ class App:
             self.recent_list.setItemWidget(item, card)
         missing = [(p, str(_thumb_path(p))) for p in recent if p not in self.thumbs_tried and Path(p).is_file()
                    and not _thumb_path(p).is_file()]
-        if missing and self.thumbs is None:
+        if missing and self.recent_thumbs is None:
             self.thumbs_tried.update(p for p, _ in missing)  # un archivo que no da miniatura no se reintenta
-            self.thumbs = _start_thumbs(missing)
-            if self.thumbs:
+            self.recent_thumbs = _start_thumbs(missing)
+            if self.recent_thumbs:
                 qtk.after(300, self.wait_thumbs)
         if not recent:
             self.recent_menu.addAction("(ninguno)").setEnabled(False)
@@ -3173,12 +3410,12 @@ class App:
 
     def wait_thumbs(self):
         """Al acabar las miniaturas, las tarjetas las muestran (si sigue la pantalla de inicio)."""
-        if self.closed or self.thumbs is None:
+        if self.closed or self.recent_thumbs is None:
             return
-        if self.thumbs.is_alive():
+        if self.recent_thumbs.is_alive():
             qtk.after(300, self.wait_thumbs)
             return
-        self.thumbs = None
+        self.recent_thumbs = None
         if self.book is None:
             self.fill_recent()
 
@@ -3384,7 +3621,7 @@ class App:
         la fila de antes de los cambios y se vuelve a elegir donde quede. kinds: por cada edición, el tipo
         (Capítulo/Subtítulo) de sus títulos, en orden. retype: {fila: tipo} de títulos que solo cambian de tipo."""
         rows = self.rows()
-        self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
+        self.remember({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})  # edit_section crea listas nuevas
         rows = {k: [v[0], titles[k], *v[2:]] if titles and k in titles else v for k, v in rows.items()}
         rows = {k: [retype[k], *v[1:]] if retype and k in retype else v for k, v in rows.items()}
@@ -3676,7 +3913,7 @@ class App:
         revisión como ["image", bloque, archivo]."""
         rows = self.rows()
         item = self.tree.selection()[0] if self.tree.selection() else None
-        self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
+        self.remember({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})
         for k, data, path in changes:
             _swap_image(self.book, k, data)
@@ -3842,9 +4079,10 @@ class App:
         def export_one():
             row = listing.currentRow()
             name = self.image_name(row + 1, order[row])
-            path = filedialog.asksaveasfilename(defaultextension=Path(name).suffix, initialfile=name,
-                                                initialdir=folder_of_book(), filetypes=IMAGE_TYPES, parent=win)
-            if path:
+            chosen = filedialog.asksaveasfilename(initialfile=name, initialdir=folder_of_book(), filetypes=IMAGE_TYPES,
+                                                  parent=win)
+            path = chosen if Path(chosen).suffix else chosen + Path(name).suffix
+            if chosen and _confirm_name(chosen, path, win):
                 Path(path).write_bytes(self.book.blocks[order[row]].image)
                 note.setText(f"Exportada en {path}")
 
@@ -3939,7 +4177,7 @@ class App:
             return
         options = self.new_book_options()
         self.run(_batch, ([str(p) for p in pdfs], options), lambda results: self.batch_done(results, folder),
-                 report=True, busy="Convirtiendo…")
+                 report=True, busy="Convirtiendo…", partial=_batch_partials(pdfs))
 
     def batch_done(self, results, folder=None):
         self.progress.setValue(0)
@@ -3971,7 +4209,8 @@ class App:
         if ready:
             self.watch_skip.update(ready)  # un PDF que falla no se reintenta en cada vuelta
             options = self.new_book_options()
-            self.run(_batch, (ready, options), self.watch_done, report=True, busy="Carpeta vigilada:")
+            self.run(_batch, (ready, options), self.watch_done, report=True, busy="Carpeta vigilada:",
+                     partial=_batch_partials(ready))
 
     def watch_done(self, results):
         """Sin ventanas emergentes: la conversión pasa sola, quizá con el usuario en otra cosa."""
@@ -3990,6 +4229,7 @@ class App:
         kind, value = choice
         self.book.cover = _cover_image(self.pdf_doc, choice, self.book)
         self.cover_choice = [kind, value]
+        self.autosave()
         labels = {"page": lambda: f"Portada: página {value + 1}", "image": lambda: f"Portada: ilustración de la "
                   f"página {self.book.blocks[int(value)].page}", "file": lambda: f"Portada: {Path(value).name}",
                   "text": lambda: "Portada: con título"}
@@ -4043,11 +4283,6 @@ class App:
                               _button("Portada con título", lambda: (self.set_cover(("text", "")), win.close())), 1))
         win.show()
         self.cover_window = win, grid
-
-    def edit_more(self):
-        """Los datos que no van en la tarjeta del libro: están en el panel «Editar datos»."""
-        if not self.data_panel.isVisible():
-            self.toggle_data()
 
     def search_online(self, then=None):
         """Busca la serie en AniList; la elegida va a then (por defecto, apply_online)."""
@@ -4120,7 +4355,7 @@ class App:
                     changed.append(self.row_state(item))
                     self.tree.set(item, "title", title)
         if changed:
-            self.history.append(changed)
+            self.remember(changed)
             self.update_preview()
         self.status.setText(f"{done} en {convert.counted(len(changed), 'título')}")
 
@@ -4146,7 +4381,7 @@ class App:
                 self.tree.set(item, "inc", SEP)
                 self.tree.item(item, tags=(KIND_TAG[SEP],))
         if changed:
-            self.history.append(changed)
+            self.remember(changed)
             self.update_reviewed()
             self.update_preview()
         self.status.setText(f"{convert.counted(len(changed), 'apartado')} como separador")
@@ -4253,11 +4488,12 @@ class App:
     def export_report(self, report, score, parent):
         """«Exportar…» del informe de calidad: .html para leerlo sin la app o .csv para Excel."""
         name = f"{self.pdf.stem if self.pdf else self.book.title} - informe de calidad.html"
-        path = filedialog.asksaveasfilename(defaultextension=".html", initialfile=name, parent=parent,
-                                            initialdir=str(self.pdf.parent) if self.pdf else None,
-                                            filetypes=[("Página web", "*.html"), ("Tabla para Excel", "*.csv")],
-                                            title="Exportar el informe de calidad")
-        if not path:
+        chosen = filedialog.asksaveasfilename(initialfile=name, parent=parent,
+                                              initialdir=str(self.pdf.parent) if self.pdf else None,
+                                              filetypes=[("Página web", "*.html"), ("Tabla para Excel", "*.csv")],
+                                              title="Exportar el informe de calidad")
+        path = chosen if Path(chosen).suffix else chosen + ".html"
+        if not chosen or not _confirm_name(chosen, path, parent):
             return
         try:
             convert.export_report(report, path, self.title_var.get() or self.book.title, score)
@@ -4492,18 +4728,16 @@ class App:
                 messagebox.showinfo("Volumen recopilatorio", "Elige al menos dos tomos.")
             return
         pdfs = sorted(paths)
-        out = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[("EPUB", "*.epub")],
-                                           initialdir=Path(pdfs[0]).parent,
-                                           initialfile=_epub_name("Recopilatorio", self.kepub_var.get()))
-        if not out:
+        chosen = filedialog.asksaveasfilename(filetypes=[("EPUB", "*.epub")], initialdir=Path(pdfs[0]).parent,
+                                              initialfile=_epub_name("Recopilatorio", self.kepub_var.get()))
+        out = _epub_name(chosen, self.kepub_var.get())
+        if not chosen or not _confirm_name(chosen, out):
             return
-        out = _epub_name(out, self.kepub_var.get())
         self.save_review()  # el tomo abierto entra con lo revisado hasta ahora
         options = self.new_book_options()
         options["replacements"] = self.replacements
-        if self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems), report=True,
-                    busy="Preparando el recopilatorio…"):
-            self.partial = f"{out}.tmp"
+        self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems, of_book=False), report=True,
+                 busy="Preparando el recopilatorio…", partial=[f"{out}.tmp"])
 
     def install(self):
         """Instala el .exe para este usuario (ver _install). Desde Python no hay .exe que instalar."""
@@ -4555,7 +4789,7 @@ class App:
         if start <= dest <= end:  # ya está ahí
             return
         rows = self.rows()
-        self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
+        self.remember({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})
         mapping = convert.move_section(self.book, start, end, dest)
         self.edits.append(["move", start, end, dest])
@@ -4619,8 +4853,9 @@ class App:
         return state
 
     def save_review(self):
+        """Guarda la revisión del libro abierto. False si no se pudo (el motivo queda en la línea de estado)."""
         if not (self.book and self.pdf):
-            return
+            return True
         state = self.review_state()
         try:
             state["pdf"] = _fingerprint(self.pdf)
@@ -4629,6 +4864,8 @@ class App:
             self.save_thumb()  # la portada elegida, para la tarjeta de recientes
         except OSError as e:  # PDF borrado, carpeta de solo lectura, OneDrive bloqueándolo: el trabajo en curso sigue
             self.status.setText(f"No se pudo guardar la revisión: {e.strerror or e}")
+            return False
+        return True
 
     def apply_state(self, state):
         """Pone en la ventana los campos y reemplazos de una revisión guardada (o heredada)."""
@@ -4640,6 +4877,8 @@ class App:
                     pass  # valor mal escrito a mano en el .json
         if self.style_var.get() not in convert.STYLES:  # el .json se puede editar a mano
             self.style_var.set("Clásico")
+        if not _font_file(self.font_file_var.get()):  # ruta de red o que no es una fuente: ni se mira
+            self.font_file_var.set("")
         font, path = self.font_var.get(), Path(self.font_file_var.get())
         if font not in FONT_CHOICES or font == "Otra…":
             if not (self.font_file_var.get() and path.name == font and path.is_file()):
@@ -4708,20 +4947,19 @@ class App:
                 if versions else None
             if auto and same and same[0] == same[1]:
                 return True
-            versions.append({"name": name, "date": datetime.now().isoformat(timespec="seconds"), "auto": auto,
-                             "state": state})
-            _write_versions(self.pdf, versions)
+            _append_version(self.pdf, {"name": name, "date": datetime.now().isoformat(timespec="seconds"),
+                                        "auto": auto, "state": state})
         except OSError as e:
             self.status.setText(f"No se pudo guardar la versión: {e.strerror or e}")
             return False
         return True
 
     def restorable(self, state):
-        """Una versión vale para este libro si es del mismo análisis: mismos bloques y mismo tamaño de PDF (la
+        """Una versión vale para este libro si es del mismo análisis: mismos bloques y el mismo PDF (_same_pdf: la
         fecha no: OneDrive la cambia al sincronizar)."""
         try:
             return (state.get("blocks") == self.analyzed and isinstance(state.get("rows"), dict)
-                    and state["pdf"][0] == _fingerprint(self.pdf)[0])
+                    and _same_pdf(state["pdf"], self.pdf))
         except (OSError, KeyError, TypeError, IndexError):
             return False
 
@@ -4755,9 +4993,7 @@ class App:
         # Sin el nombre de la restaurada: restaurar una de estas daría «Antes de restaurar «Antes de restaurar…»»
         if not self.add_version("Antes de restaurar otra versión", auto=True):
             return False  # sin esa copia, lo de ahora se perdería
-        for win in (getattr(self, name, None) for name in ("spelling_window", "page_window", "quality_window")):
-            if win and shiboken6.isValid(win):  # tienen índices de bloques del libro de antes
-                win.close()
+        self.close_tools(BLOCK_TOOLS)
         self.book.blocks, self.book.candidates, self.book.cover = list(self.pristine[0]), list(self.pristine[1]), \
             self.pristine[2]
         self.cover_choice = None  # la versión pone la suya, si eligió otra
