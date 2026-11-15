@@ -389,11 +389,14 @@ def _ocr(page, clip):
 def _image_lines(page, rows, infos, body):
     """Dónde puede haber un título hecho imagen (Oukoku e Tsuzuku Michi 3 y 4: texto rojo pasado a imagen, en
     trozos de una franja sobre el texto, sin texto ni marcador): la línea de imágenes de alto de un renglón
-    grande, ancha, centrada y por encima del texto. No ilustraciones ni adornos."""
+    grande, ancha, centrada y por encima del texto; o a media página pegada al margen izquierdo del texto, como
+    un párrafo más (Farming Life 2). No ilustraciones ni adornos, que van centrados."""
     width = page.rect.width
-    first = min((r.y for r in rows if abs(r.size - body) < 0.5), default=None)
-    if first is None:
+    text = [r for r in rows if abs(r.size - body) < 0.5]
+    if not text:
         return []
+    first = min(r.y for r in text)
+    left = min(r.x0 for r in text)
     lines = []
     for b in sorted((pymupdf.Rect(i["bbox"]) for i in infos), key=lambda b: b.y0):
         # Mismo alto y misma altura: la misma línea. La barra de la cabecera de Oukoku 4 cruza el título y no es él
@@ -403,10 +406,11 @@ def _image_lines(page, rows, infos, body):
             lines.append(pymupdf.Rect(b))
     found = []
     for b in lines:
-        if (b.y1 < first and body <= b.height <= 3 * body and b.width >= 3 * b.height
-                and abs((b.x0 + b.x1) / 2 - width / 2) < 0.15 * width
+        if (body <= b.height <= 3 * body and b.width >= 3 * b.height
+                and (b.y1 < first and abs((b.x0 + b.x1) / 2 - width / 2) < 0.15 * width or abs(b.x0 - left) < 0.5 * body)
                 and not any(b.y0 - r.size < r.y < b.y1 + r.size for r in rows)):  # el texto no la pisa
-            if found and b.y0 - found[-1].y1 < 0.6 * b.height:  # Mitsuha 5: título de dos o tres líneas
+            # Mitsuha 5: título de dos o tres líneas; Farming Life 2 deja un renglón vacío entre ellas
+            if found and b.y0 - found[-1].y1 < 1.1 * b.height:
                 found[-1] |= b
             else:
                 found.append(b)
@@ -2678,6 +2682,9 @@ def analyze(pdf_path, progress=None):
         for (i, b, _), text in zip(found, _renumber([text for *_, text in found])):
             pages[i] = sorted(pages[i] + [Row(text, html.escape(text), b.x0, b.x1, b.y1, round(body * 1.5, 1), True)],
                               key=lambda r: r.y)
+            # Sus trozos ya son texto: el guion centrado del título de dos líneas de Farming Life 2 (pág. 199) pasaba
+            # por adorno de escena
+            page_infos[i] = [info for info in page_infos[i] if not b.contains(pymupdf.Rect(info["bbox"]))]
         gaps = collections.Counter()
         indents = total = 0
         for rows in pages:

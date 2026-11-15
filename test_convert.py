@@ -737,6 +737,29 @@ def test_title_made_of_images_is_read_with_ocr():
     assert "Palabras del autor" not in [book.blocks[k].html for k in book.candidates]
 
 
+def test_title_made_of_images_at_left_margin_mid_page():
+    """Farming Life 2: el título hecho imagen va pegado al margen izquierdo, a media página entre párrafos, y el de
+    dos líneas deja un renglón vacío entre ellas. El guion suelto del título cae centrado y no es un adorno."""
+    doc = pymupdf.open()
+    para = [(92, 0, line("Un parrafo cualquiera de la escena", 57), 11, "cour"), (72, 14, "fin uno.", 11, "cour")]
+    add_page(doc, 1, [(x, 90 + y, t, s, f) for x, y, t, s, f in para] + [(x, 250 + y, t, s, f) for x, y, t, s, f in para])
+    for row, parts in enumerate([["1 - El largo viaje del viejo rey", "-", "otra vez"], ["y su vuelta"]]):
+        x, y = 72, 150 + row * 34
+        for t in parts:
+            pix, w, h = text_image(t)
+            if t == "-":
+                assert abs(x + w / 2 - 595 / 2) < 50, x  # el guion, centrado como en la pág. 199
+            doc[-1].insert_image(pymupdf.Rect(x, y, x + w, y + h), pixmap=pix)
+            x += w - 2
+    add_page(doc, 2, [(x, 90 + y, t, s, f) for x, y, t, s, f in para])
+    path = TMP / "titulo-imagen-izquierda.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [(book.blocks[k].page, book.blocks[k].html) for k in book.candidates]
+    assert titles == [(1, "1 - El largo viaje del viejo rey - otra vez y su vuelta")], titles
+    assert not any(b.kind == "break" for b in book.blocks), [b.page for b in book.blocks if b.kind == "break"]
+
+
 def test_renumber_fixes_ocr_chapter_numbers():
     """Mitsuha 4 a 6: en la letra dorada el OCR lee «3)» por 31 y 49 por 40; la secuencia los delata."""
     assert convert._renumber(["Capítulo 3) - A", "Capítulo 32 - B", "Capítulo 39 - C", "Capítulo 49 - D",
