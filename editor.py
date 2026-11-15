@@ -108,9 +108,12 @@ def _insert_marked(cursor, text, color="#888888"):
         cursor.insertImage(f)
 
 
-def _symbol(text, color, height=28):
+def _symbol(text, color, height=28, width=420):
     """Imagen con el texto de un separador ("* * *", "☆"): en la hoja va como un objeto que no se edita."""
     font = QFont("Segoe UI", 14)
+    # «◇» × 42 (Oukoku 4): letra menor hasta caber; la imagen encogida perdía los trazos finos
+    while QFontMetrics(font).horizontalAdvance(text) + 8 > width and font.pointSizeF() > 4:
+        font.setPointSizeF(font.pointSizeF() - 0.5)
     metrics = QFontMetrics(font)
     image = QImage(max(metrics.horizontalAdvance(text) + 8, 16), height, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.GlobalColor.transparent)
