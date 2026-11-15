@@ -497,8 +497,9 @@ def _write_json(path, data):
 
 
 def _ps_quote(text):
-    """Texto entre comillas simples de PowerShell: un apóstrofo (O'Neil) se escribe doble."""
-    return "'" + str(text).replace("'", "''") + "'"
+    """Texto entre comillas simples de PowerShell: un apóstrofo (O'Neil) se escribe doble, también los tipográficos
+    (‘ ’ ‚ ‛), que PowerShell toma por comillas."""
+    return "'" + re.sub(r"(['‘’‚‛])", r"\1\1", str(text)) + "'"
 
 
 def _same_type(value, like):

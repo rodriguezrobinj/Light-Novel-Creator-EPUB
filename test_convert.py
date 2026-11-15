@@ -7366,6 +7366,8 @@ def test_install_quotes_paths_with_apostrophes_for_powershell():
     out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Write-Output {app._ps_quote(path)}"],
                          capture_output=True, text=True, check=True).stdout.strip()
     assert out == path, out
+    # PowerShell toma también ‘ ’ ‚ ‛ por comillas simples: sin doblarlos, el resto de la ruta se ejecutaba
+    assert app._ps_quote("O’Neil‘s ‚x‛") == "'O’’Neil‘‘s ‚‚x‛‛'", app._ps_quote("O’Neil‘s ‚x‛")
 
 
 def test_qtk_rowlist_works_like_treeview():
