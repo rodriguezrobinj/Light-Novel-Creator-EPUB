@@ -2763,7 +2763,8 @@ def analyze(pdf_path, progress=None):
                 while ornaments and ornaments[0][0] < r.y:  # el adorno queda por encima de esta línea
                     info = ornaments.pop(0)[1]
                     if blocks and blocks[-1].kind != "break":  # guarda el adorno, por si se quiere el original
-                        blocks.append(Block("break", num, image=_ornament_image(doc, page, info)))
+                        blocks.append(Block("break", num, image=_ornament_image(doc, page, info),
+                                            rect=tuple(info["bbox"])))  # rect: el editor lo recuadra en la página
                     para = None
                 # Mitsuha (GambaTrans): la escena cambia con un hueco de unas tres líneas en blanco, sin símbolo ni
                 # adorno. Solo entre dos líneas del texto, sin nada en medio (ilustración, recuadro, título); no
@@ -2778,10 +2779,11 @@ def analyze(pdf_path, progress=None):
                         and max(prev.x0, r.x0) < left + (right - left) / 4  # la sangría de Re Zero 7 es de 35 pt
                         and not LABEL.match(r.text.strip()) and not LABEL.match(_plain(blocks[-1]))
                         and not r.text.rstrip().endswith(":")):  # «Protector de la Tierra:» presenta una ficha
-                    blocks.append(Block("break", num))  # sin imagen ni texto: en el EPUB, el del estilo
+                    # sin imagen ni texto: en el EPUB, el del estilo. Su rect, el hueco entre las dos líneas
+                    blocks.append(Block("break", num, rect=(left, prev.y + prev.size * 0.3, right, r.y - r.size)))
                     para = None
                 if SCENE_BREAK.fullmatch(r.text):  # solo símbolos: separador aunque vaya en letra de título (Mitsuha 6)
-                    blocks.append(Block("break", num, r.html))  # guarda el texto original ("☆", "* * *")
+                    blocks.append(Block("break", num, r.html, rect=_rect([r])))  # guarda el texto original ("☆", "* * *")
                     para = None
                 elif r.heading:
                     # Se une a la línea anterior si es el mismo título partido: mismo tamaño y pegada
@@ -2832,7 +2834,8 @@ def analyze(pdf_path, progress=None):
                     last_text = r.text
                 prev = r
             if ornaments and blocks and blocks[-1].kind != "break":  # adorno al pie: la escena sigue en la siguiente
-                blocks.append(Block("break", num, image=_ornament_image(doc, page, ornaments[0][1])))
+                blocks.append(Block("break", num, image=_ornament_image(doc, page, ornaments[0][1]),
+                                    rect=tuple(ornaments[0][1]["bbox"])))
                 para = None
             # Desde el párrafo que venía abierto de la página anterior: también puede llevar llamadas de esta
             lost = _attach_notes(blocks[max(start - 1, 0):], notes)

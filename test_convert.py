@@ -3282,6 +3282,47 @@ def test_strange_grief_titles_bookmarks_and_patreon_page():
     assert convert._typography("Uhm...Esta bien, y …Ya.") == "Uhm… Esta bien, y …Ya."  # 76 veces en el tomo 2
 
 
+def test_sheet_repaints_when_height_changes_and_underlines_by_word():
+    """Strange Grief 1, prólogo de 432 párrafos: en la hoja salían huecos con el texto «debajo» (el clic lo
+    encontraba), hasta mover el divisor. Al llegar las palabras del corrector, el subrayado letra a letra ensanchaba
+    la palabra, un párrafo de arriba ganaba una línea, los de abajo se movían y lo visible no se volvía a pintar.
+    Se subraya la palabra de una vez y, si el alto de la hoja cambia, se pinta entera."""
+    import qtk
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    app = qtk.app()
+    sheet = editor.Sheet()
+    sheet.resize(500, 400)
+    sheet.set_content([(k, f"Párrafo {k} con la palabra mitril dentro del texto.") for k in range(200)], {})
+    sheet.show()
+    app.processEvents()
+    sheet.look.set_unknown({"mitril"})
+    app.processEvents()
+    formats = sheet.document().firstBlock().layout().formats()
+    assert [f.length for f in formats] == [len("mitril")], [(f.start, f.length) for f in formats]
+
+    class Paints(QObject):
+        rects = []
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Type.Paint:
+                self.rects.append(event.rect())
+            return False
+
+    paints = Paints()
+    sheet.viewport().installEventFilter(paints)
+    cursor = QTextCursor(sheet.document())  # el alto cambia lejos de lo que se ve, al final de la hoja
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    cursor.insertBlock()
+    cursor.insertText("Otro párrafo al final.")
+    app.processEvents()
+    sheet.close()
+    assert any(r.height() >= sheet.viewport().height() for r in paints.rects), paints.rects
+
+
 def test_group_credits_page_becomes_an_illustration():
     """Easygoing 1 (Bell T): la última página («¡Gracias por Leer!», Patreon, redes, «@Dierch», logos) salía como
     cuatro secciones de texto en «Quitar». La página entera de publicidad del grupo es una ilustración, que se
@@ -3402,6 +3443,9 @@ def test_point_of_view_names_are_subtitles_and_underscores_a_scene_break():
     assert chapters == ["Capitulo 1: Inicio", "Capitulo 2: Final"], chapters
     assert heads == ["Capitulo 1: Inicio", "Panamera", "Van", "Capitulo 2: Final", "Arte", "Panamera"], heads
     assert breaks == [1, 2, 3] and not any("___" in b.html for b in book.blocks if b.kind == "p"), breaks
+    # cada separador recuerda dónde está en su página: el editor lo recuadra en la vista del original (antes, nada)
+    rects = [b.rect for b in book.blocks if b.kind == "break"]
+    assert all(len(r) == 4 and 60 < r[0] < r[2] and 200 < r[1] < r[3] < 400 for r in rects), rects
 
 
 def test_blank_line_scene_break_in_short_dialogue_book():
@@ -3426,6 +3470,8 @@ def test_blank_line_scene_break_in_short_dialogue_book():
     book = convert.analyze(path)
     breaks = [(k, b.page) for k, b in enumerate(book.blocks) if b.kind == "break"]
     assert [page for _, page in breaks] == [2], breaks
+    gap = book.blocks[breaks[0][0]].rect  # el hueco en blanco, para recuadrarlo en la vista del original
+    assert len(gap) == 4 and gap[1] < gap[3] and gap[0] < gap[2], gap
     k = breaks[0][0]
     assert "se marcho 24." in book.blocks[k - 1].html and "Sí, ya voy 25" in book.blocks[k + 1].html, (
         book.blocks[k - 1].html, book.blocks[k + 1].html)
