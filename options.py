@@ -342,7 +342,7 @@ class OptionsDialog:
         base.setMinimumWidth(260)
         key.setEchoMode(QLineEdit.EchoMode.Password)
         key.setMinimumWidth(260)
-        eye = QPushButton("👁")
+        eye = QPushButton(theme.ICONS["show"])
         eye.setToolTip("Mostrar u ocultar la clave")
         eye.clicked.connect(lambda: key.setEchoMode(QLineEdit.EchoMode.Normal if key.echoMode()
                                                     == QLineEdit.EchoMode.Password else QLineEdit.EchoMode.Password))

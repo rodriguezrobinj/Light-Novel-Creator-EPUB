@@ -14,7 +14,8 @@ DIALOG = {"s": (560, 260), "m": (780, 440), "l": (980, 600)}  # tamaño mínimo 
 ICONS = {"warn": "▲", "ok": "✓", "close": "✕", "menu": "▾", "menu_open": "▴", "prev": "◀", "next": "▶",
          "first": "◀◀", "last": "▶▶", "undo": "↶", "redo": "↷", "note": "✎", "split": "✂", "center": "≡",
          "frame": "▭", "right": "⇥", "join": "⤒", "scene": "❖", "nav": "☰", "search": "⌕", "read": "♪",
-         "link": "↗", "doc": "🗎", "dot": "●", "minus": "−", "symbols": "Ω", "changes": "±", "stats": "Σ"}
+         "link": "↗", "doc": "🗎", "dot": "●", "minus": "−", "symbols": "Ω", "changes": "±", "stats": "Σ",
+         "show": "◉"}
 
 LIGHT = {"bg": "#f3f3f3", "card": "#ffffff", "base": "#ffffff", "line": "#e1e1e1", "ink": "#1b1b1b",
          "muted": "#6b6b6b", "acc": "#2a62c8", "acc_hover": "#2353ab", "acc_ink": "#ffffff", "sel": "#dce8fc",

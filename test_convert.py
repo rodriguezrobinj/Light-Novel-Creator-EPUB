@@ -9402,7 +9402,7 @@ def test_style_guide_tokens_icons_and_no_loose_colors():
     # Excepción: U+1F5CE (documento) sale monocromo, comprobado dibujándolo con la fuente de Windows
     emoji = re.compile("[🀀-🗍🗏-🫿⚠⏮⏭⚙⛓❗⚓]")
     assert not [k for k, v in theme.ICONS.items() if emoji.search(v)], theme.ICONS
-    allowed = {"app.py": {"#1f6fd1", "#2e9d4a", "#f08c00"}, "qtk.py": {"#f08c00"},
+    allowed = {"app.py": {"#1f6fd1", "#2e9d4a", "#f08c00"}, "qtk.py": {"#f08c00"}, "options.py": set(),
                "editor.py": {"#2a62c8", "#888888", "#2e9d4a"}}  # marcas que no cambian con el tema
     for name, colors in allowed.items():
         text = (Path(__file__).parent / name).read_text(encoding="utf-8")

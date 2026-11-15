@@ -132,7 +132,7 @@ Un icono es un **glifo de texto monocromo** que toma el color del tema. Los glif
 | `first` / `last` | ◀◀ / ▶▶ | | `center` | ≡ | | `minus` | − |
 | `nav` | ☰ | | `frame` | ▭ | | `right` | ⇥ |
 | `scene` | ❖ | | `symbols` | Ω | | `changes` | ± |
-| `stats` | Σ | | | | | | |
+| `stats` | Σ | | `show` | ◉ | | | |
 
 Reglas:
 
