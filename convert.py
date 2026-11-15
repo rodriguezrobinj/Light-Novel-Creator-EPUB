@@ -318,7 +318,8 @@ def _footnotes(rows, body, height):
 def _attach_notes(blocks, notes):
     """Cambia cada llamada de los bloques por su nota (dentro del párrafo, así sobrevive a editar y
     mover secciones). Una llamada sin nota vuelve a ser texto («m²»); una nota sin llamada va al final
-    del último párrafo, para no perderla."""
+    del último párrafo, para no perderla. Sin párrafo (página de título), devuelve esas notas para
+    que vayan en uno propio."""
     used = set()
 
     def note(m):
@@ -329,9 +330,12 @@ def _attach_notes(blocks, notes):
 
     for b in blocks:
         b.html = REF_MARK.sub(note, b.html)
+    rest = "".join(f'<span class="nota">{text}</span>' for num, text in notes.items() if num not in used)
     last = next((b for b in reversed(blocks) if b.kind == "p"), None)
-    if last is not None:
-        last.html += "".join(f'<span class="nota">{text}</span>' for num, text in notes.items() if num not in used)
+    if last is None:
+        return rest
+    last.html += rest
+    return ""
 
 
 def _norm(text):
@@ -1084,7 +1088,8 @@ def replace_text(book, find, new, word=False, blocks=None):
 
 TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
 INLINE = re.compile(r"&lt;(/?)(i|b|sup|sc)&gt;")
-NOTE_MARK = re.compile(r"\[Nota: (.+?)\]")  # nota al pie en el editor de texto
+# nota al pie en el editor de texto; puede llevar corchetes dentro («[Nota: ver [Arco 2].]»)
+NOTE_MARK = re.compile(r"\[Nota: ((?:[^\[\]]|\[[^\[\]]*\])+)\]")
 # Enlace escrito en el editor, ya escapado: solo direcciones web (un javascript: no sirve en un libro)
 LINK_MARK = re.compile(r'&lt;a href="(https?://[^"\s<>]+)"&gt;(.*?)&lt;/a&gt;')
 CENTER = "<center>"  # al principio de una línea del editor: párrafo centrado (carta, cartel)
@@ -1471,6 +1476,8 @@ def _join(a, b):
     """Une dos líneas de un párrafo; una palabra partida con guion se junta aunque haya etiquetas.
     Un honorífico tras el guion ("Gilbert-" / "kun") no es una palabra partida: conserva el guion."""
     if re.search(r"\w-$", TAGS.sub("", a)) and TAGS.sub("", b)[:1].islower():
+        if re.search(r"(?:^|\s)-[^\s-][^-]*\w-$", TAGS.sub("", a)):  # cierra un inciso: «-dijo Subaru-»
+            return f"{a} {b}"
         if re.match(r"[^\W\d_]*", TAGS.sub("", b)).group().lower() in HONORIFICS:
             return a + b
         i = a.rindex("-")  # el guion final; detrás solo puede haber etiquetas de cierre
@@ -2751,7 +2758,9 @@ def analyze(pdf_path, progress=None):
                 blocks.append(Block("break", num, image=_ornament_image(doc, page, ornaments[0][1])))
                 para = None
             # Desde el párrafo que venía abierto de la página anterior: también puede llevar llamadas de esta
-            _attach_notes(blocks[max(start - 1, 0):], notes)
+            lost = _attach_notes(blocks[max(start - 1, 0):], notes)
+            if lost:
+                blocks.append(Block("p", num, lost))
             if art:
                 blocks.append(Block("image", num, image=_extract(doc, art)))
             # Imágenes que no entran solas, apuntadas como descartadas para poder recuperarlas en la

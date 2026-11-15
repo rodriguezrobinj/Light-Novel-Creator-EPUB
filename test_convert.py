@@ -3003,6 +3003,12 @@ def test_line_break_before_honorific_keeps_hyphen():
     assert convert._join("una pala-", "bra partida") == "una palabra partida"
 
 
+def test_line_break_after_closing_inciso_hyphen_keeps_it():
+    """El guion que cierra un inciso abierto en la misma línea no es una palabra partida."""
+    assert convert._join("—No lo sé -dijo Subaru-", "y se marchó.") == "—No lo sé -dijo Subaru- y se marchó."
+    assert convert._join("y la contra-", "seña era") == "y la contraseña era"
+
+
 def test_edit_section_moves_images_and_adds_titles():
     blocks = [("heading", "Cap 1"), ("p", "Uno &amp; <i>dos</i>."), ("image", ""), ("break", "* * *"), ("p", "Tres."),
               ("heading", "Cap 2"), ("p", "Cuatro.")]
@@ -5117,6 +5123,26 @@ def test_footnotes_leave_body_and_keep_reference_place():
     assert any(b.html == 'Un tic<span class="nota">Un gesto involuntario.</span> raro.' for b in book.blocks), \
         [b.html for b in book.blocks]
     assert not any("permanecia" in b.html for b in book.blocks if b is not note), [b.html for b in book.blocks]
+
+
+def test_footnote_on_page_without_paragraph_is_kept():
+    """Una nota al pie en una página con solo el título del capítulo se perdía: no había párrafo donde ponerla."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"), (72, 737, "1", 7, "cour"),
+                      (72 + 7 * 0.6 + 0.8, 740, "Una nota del titulo.", 9, "cour")])
+    for number in (2, 3):
+        add_page(doc, number, [(92, 140, line("Otra pagina con texto normal de la novela", 57), 11, "cour"),
+                               (72, 154, "y su final.", 11, "cour")])
+    path = TMP / "nota-sin-parrafo.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    assert any("Una nota del titulo." in b.html for b in book.blocks), [b.html for b in book.blocks]
+
+
+def test_note_mark_with_brackets_inside():
+    """«[Nota: …]» del editor con corchetes dentro sigue siendo una sola nota."""
+    out = convert._inline("Hola[Nota: Pasa en [Arco 2] luego.] y fin.")
+    assert out == 'Hola<span class="nota">Pasa en [Arco 2] luego.</span> y fin.', out
 
 
 def test_footnotes_become_popup_notes():
