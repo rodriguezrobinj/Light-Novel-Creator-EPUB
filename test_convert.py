@@ -6452,21 +6452,28 @@ def test_window_dialogs_fit_the_screen():
 
 
 def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
-    """Ortografía y «Añadir página» se cierran al abrir otro PDF (si no, cambiarían el libro nuevo); con un
-    trabajo en curso, «Ortografía…» lo dice en vez de no hacer nada."""
+    """Ortografía, «Añadir página», Versiones, el informe de calidad, Ilustraciones y la portada se cierran al abrir
+    otro PDF (si no, cambiarían el libro nuevo: «Borrar» de Versiones escribía las del libro anterior en el nuevo);
+    con un trabajo en curso, «Ortografía…» lo dice en vez de no hacer nada."""
     import time
 
     pdf = TMP / "Otra - Volumen 1.pdf"
     make_novel().replace(pdf)
     root, window = visible_window()
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
-                                                     convert.Block("p", 1, "Ella dijó que sí.")], [0]))
+                                                     convert.Block("p", 1, "Ella dijó que sí."),
+                                                     convert.Block("image", 1, image=jpeg(40, 60))], [0]))
     window.done = lambda result: None  # un trabajo en curso
     window.spelling()
     busy = window.status.text()
     window.done = None
     window.spelling_dialog([("dijó", 1, ["dijo"])])
     window.add_page()
+    window.pdf = TMP / "Libro.pdf"
+    window.versions()
+    window.quality()
+    window.images_dialog()
+    window.choose_cover()
     root.update()
     opened = len(root.dialogs())
     window.open_path(str(pdf))
@@ -6478,7 +6485,7 @@ def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
         time.sleep(0.05)
     window.close()
     assert busy == "Espera a que termine el trabajo en curso", busy
-    assert (opened, left) == (2, 0), (opened, left)
+    assert (opened, left) == (6, 0), (opened, left)
 
 
 def test_editor_page_buttons_below_the_page():

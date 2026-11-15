@@ -112,6 +112,10 @@ LEVEL_COLOR = theme.level_colors(False)  # avisos del informe de calidad; en osc
 LEVEL_NAMES = {"Grave": ("grave", "graves"), "Revisar": ("por revisar", "por revisar"),
                "Menor": ("menor", "menores")}  # singular y plural: «1 grave», «2 graves»
 LEVEL_PLURAL = {level: names[1] for level, names in LEVEL_NAMES.items()}
+# Herramientas con índices de bloques del libro: se cierran al restaurar una versión y al abrir otro libro
+BLOCK_TOOLS = ("spelling_window", "page_window", "quality_window", "images_window", "cover_window")
+# Las que guardan en el libro abierto lo que leyeron del anterior: se cierran al abrir otro libro
+BOOK_TOOLS = ("translate_window", "versions_window", "replacements_window", "glossary_window", "online_window")
 SHORTCUTS = ("Clic en Tipo, o teclas C (capítulo), S (subtítulo), X (separador), Q (quitar), I (ilustración),"
              " D/G (doble: dividir o girar)\nDoble clic o F2: editar título · E: editar texto · R: revisado\n"
              "Arrastrar o Alt+↑/↓: mover · Ctrl+F: buscar · Ctrl+Z: deshacer · Ctrl+,: opciones")
@@ -2524,6 +2528,13 @@ class App:
             return NEXT
         return WIDE_NEXT if item in self.wide else IMAGE_NEXT
 
+    def close_tools(self, names):
+        """Cierra las ventanas de herramientas abiertas (atributos names; algunas guardan (ventana, …))."""
+        for win in (getattr(self, name, None) for name in names):
+            win = win[0] if isinstance(win, tuple) else win
+            if win and shiboken6.isValid(win):
+                win.close()
+
     def open_pdf(self):
         path = filedialog.askopenfilename(filetypes=[("PDF o EPUB", "*.pdf *.epub")],
                                           initialdir=self.settings.get("folder"))
@@ -2543,10 +2554,7 @@ class App:
             messagebox.showerror("Error", f"No se encuentra el archivo:\n{path}")
             return
         self.save_review()
-        for win in (getattr(self, "spelling_window", None), getattr(self, "page_window", None),
-                    getattr(self, "translate_window", None)):
-            if win and shiboken6.isValid(win):  # sin cerrar, cambiarían el libro nuevo con datos del anterior
-                win.close()
+        self.close_tools(BLOCK_TOOLS + BOOK_TOOLS)  # sin cerrar, cambiarían el libro nuevo con datos del anterior
         path = str(Path(path).resolve())
         self.settings["folder"] = str(Path(path).parent)
         self.settings["recent"] = [path] + [p for p in self.settings.get("recent", []) if p != path][:RECENT - 1]
@@ -4774,9 +4782,7 @@ class App:
         # Sin el nombre de la restaurada: restaurar una de estas daría «Antes de restaurar «Antes de restaurar…»»
         if not self.add_version("Antes de restaurar otra versión", auto=True):
             return False  # sin esa copia, lo de ahora se perdería
-        for win in (getattr(self, name, None) for name in ("spelling_window", "page_window", "quality_window")):
-            if win and shiboken6.isValid(win):  # tienen índices de bloques del libro de antes
-                win.close()
+        self.close_tools(BLOCK_TOOLS)
         self.book.blocks, self.book.candidates, self.book.cover = list(self.pristine[0]), list(self.pristine[1]), \
             self.pristine[2]
         self.cover_choice = None  # la versión pone la suya, si eligió otra
