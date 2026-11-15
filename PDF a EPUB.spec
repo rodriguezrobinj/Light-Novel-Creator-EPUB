@@ -23,6 +23,8 @@ a.binaries = [b for b in a.binaries if not any(name.lower() in b[0].lower().repl
 # pyphen trae patrones de unos 70 idiomas (6 MB): la partición de palabras solo usa el español
 a.datas = [d for d in a.datas if not d[0].replace('\\', '/').startswith('pyphen/dictionaries/')
            or d[0].endswith('hyph_es.dic')]
+# Lo trae hook-pyphen de pyinstaller-hooks-contrib (fijado en requirements.txt): sin él no se parten palabras
+assert any(d[0].endswith('hyph_es.dic') for d in a.datas), 'Falta hyph_es.dic de pyphen: el .exe no partiría palabras'
 pyz = PYZ(a.pure)
 
 exe = EXE(
