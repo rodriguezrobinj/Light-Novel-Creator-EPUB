@@ -828,7 +828,8 @@ class TextBox(QPlainTextEdit):
     def _repaint(self):
         """Pinta los tags una vez al volver al bucle: highlight añade cientos seguidos."""
         if self.painting is None:
-            self.painting = after(0, self._paint)
+            self.painting = True
+            QTimer.singleShot(0, self, self._paint)  # con dueño: si la caja se cierra antes, no corre
 
     def _paint(self):
         self.painting = None

@@ -7601,6 +7601,28 @@ def test_qtk_textbox_counts_an_emoji_as_one_character():
     assert seen == ["a", "😀", "1.3", "2.2", ("1.1", "1.2"), "c", "2.2", "😀c", "😀c"], seen
 
 
+def test_qtk_textbox_closed_before_painting_its_tags():
+    """Una vista previa que se cierra justo tras marcar sus tags (cambiar de aviso deprisa) no da error al
+    pintarlos: el pintado pendiente se va con ella."""
+    import shiboken6
+
+    import qtk
+
+    qtk.app()
+    errors, hook = [], sys.excepthook
+    sys.excepthook = lambda *exc: errors.append(exc[1])
+    try:
+        text = qtk.TextBox()
+        text.insert("end", "uno dos")
+        text.tag_configure("new", foreground="red")
+        text.tag_add("new", "1.0", "1.3")
+        shiboken6.delete(text)
+        qtk.pump()
+    finally:
+        sys.excepthook = hook
+    assert errors == [], errors
+
+
 def test_theme_text_is_readable():
     """Cada color de texto contra su fondo llega a 4,5:1 (WCAG AA) en los dos temas: el botón azul del
     tema oscuro (3,8:1), las filas «Quitar» y «Descartada», y los avisos «Revisar» y «Menor» no llegaban.
