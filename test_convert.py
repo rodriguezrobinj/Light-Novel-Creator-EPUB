@@ -8186,7 +8186,7 @@ def test_translate_google_deepl_and_errors():
 
 
 def test_translate_gcloud_models_and_hints():
-    """Google Cloud: API oficial por lotes con la clave en la URL. Google gratis con una página de captcha o sin
+    """Google Cloud: API oficial por lotes con la clave en una cabecera, no en la URL. Google gratis con una página de captcha o sin
     respuesta: el aviso dice qué hacer. Un modelo que ya no existe se nombra, y «Buscar modelos» trae los de hoy."""
     import io
     import urllib.error
@@ -8194,14 +8194,15 @@ def test_translate_gcloud_models_and_hints():
 
     saved = translate._get, translate._post, translate._sleep, translate._form
     posts, gets = [], []
-    translate._post = lambda url, headers, body: posts.append((url, body)) or {
+    translate._post = lambda url, headers, body: posts.append((url, headers, body)) or {
         "data": {"translations": [{"translatedText": t.replace("Tom", "Tomás")} for t in body["q"]]}}
     translate._sleep = lambda s: None
     try:
         assert translate.translate("Google Cloud (clave)", ["Tom &amp; <i>Jerry</i>", "Hi"], "auto", "es",
                                    api_key="AIza") == ["Tomás &amp; <i>Jerry</i>", "Hi"]
-        url, body = posts[0]
-        assert url.endswith("/language/translate/v2?key=AIza") and body["format"] == "html", (url, body)
+        url, headers, body = posts[0]
+        assert url.endswith("/language/translate/v2") and body["format"] == "html", (url, body)
+        assert headers == {"X-Goog-Api-Key": "AIza"}, headers
         assert body["q"][0] == "Tom &amp;amp; <i>Jerry</i>" and "source" not in body and body["target"] == "es"
         assert translate.batches(["x"] * 150, "gcloud") == [list(range(100)), list(range(100, 150))]
 
