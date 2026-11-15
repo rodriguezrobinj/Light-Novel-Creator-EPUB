@@ -1748,7 +1748,8 @@ class App:
         self.editor_at = None                  # bloque del cursor al cerrar el editor: «Lo dejaste en…»
         self.work = {}                         # trabajo en el editor por día: {"AAAA-MM-DD": {"minutes", …}}
         self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
-        self.thumbs, self.thumbs_tried = None, set()  # proceso de miniaturas de recientes y archivos ya probados
+        # Proceso de las miniaturas de recientes y archivos ya probados (self.thumbs es la tira de páginas)
+        self.recent_thumbs, self.thumbs_tried = None, set()
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
         self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
@@ -3198,10 +3199,10 @@ class App:
             self.recent_list.setItemWidget(item, card)
         missing = [(p, str(_thumb_path(p))) for p in recent if p not in self.thumbs_tried and Path(p).is_file()
                    and not _thumb_path(p).is_file()]
-        if missing and self.thumbs is None:
+        if missing and self.recent_thumbs is None:
             self.thumbs_tried.update(p for p, _ in missing)  # un archivo que no da miniatura no se reintenta
-            self.thumbs = _start_thumbs(missing)
-            if self.thumbs:
+            self.recent_thumbs = _start_thumbs(missing)
+            if self.recent_thumbs:
                 qtk.after(300, self.wait_thumbs)
         if not recent:
             self.recent_menu.addAction("(ninguno)").setEnabled(False)
@@ -3249,12 +3250,12 @@ class App:
 
     def wait_thumbs(self):
         """Al acabar las miniaturas, las tarjetas las muestran (si sigue la pantalla de inicio)."""
-        if self.closed or self.thumbs is None:
+        if self.closed or self.recent_thumbs is None:
             return
-        if self.thumbs.is_alive():
+        if self.recent_thumbs.is_alive():
             qtk.after(300, self.wait_thumbs)
             return
-        self.thumbs = None
+        self.recent_thumbs = None
         if self.book is None:
             self.fill_recent()
 

@@ -7621,7 +7621,19 @@ def test_window_start_screen_shows_only_what_needs_no_book():
     broken.write_bytes(b"no es un pdf")
     app._render_thumbs([(str(never), str(app._thumb_path(never))), (str(broken), str(app._thumb_path(broken)))])
     first_page = app.QPixmap(str(app._thumb_path(never)))
+    # Con miniaturas de páginas en la tira (otro atributo que el proceso de recientes), un reciente nuevo pide la suya
+    window.thumbs = {0: (40, 60)}
+    later = TMP / "sin-miniatura.pdf"
+    later.write_bytes(make_novel().read_bytes())
+    started, start = [], app._start_thumbs
+    app._start_thumbs = lambda jobs: started.append(jobs)  # None: como si no arrancara
+    try:
+        window.settings["recent"] = [str(later)]
+        window.fill_recent()
+    finally:
+        app._start_thumbs = start
     window.close()
+    assert started and started[0][0][0] == str(later), started
     assert hidden == [False] * 7 and not any(tools_off), (hidden, tools_off)
     assert shown == [True] * 7 and all(tools_on), (shown, tools_on)
     assert "inicio" in cards[0] and "PDF" in cards[0] and "Sin revisar" in cards[0], cards[0]
