@@ -6516,12 +6516,46 @@ def test_replay_image_and_page_at_start():
     blocks = [convert.Block("heading", 1, "Capítulo 1"), convert.Block("image", 1, image=JPEG),
               convert.Block("image", 2, image=JPEG)]
     book = convert.Book("Libro", "", b"", blocks, [0])
-    state = {"edits": [["image", 1, str(picture)], ["image", 2, str(TMP / "no-existe.png")], [0, 0, "# Créditos\n\nGracias."]]}
+    stored = app._store_image(picture)  # la ventana guarda así cada ilustración cambiada
+    state = {"edits": [["image", 1, stored], ["image", 2, str(TMP / "no-existe.png")], [0, 0, "# Créditos\n\nGracias."]]}
     done = app._replay(book, state)
     assert done == state["edits"], done
     assert [b.kind for b in book.blocks] == ["heading", "p", "heading", "image", "image"], book.blocks
     assert pymupdf.Pixmap(book.blocks[3].image).width == 20 and book.blocks[4].image == JPEG, book.blocks
     assert book.candidates == [2], book.candidates
+
+
+def test_reviews_of_others_do_not_open_network_paths():
+    """Un .lnepub.json ajeno junto al PDF (heredado de otro tomo de la serie) puede traer rutas de red: con solo
+    mirarlas, Windows se conecta y entrega el hash de la contraseña. La fuente propia solo vale local, absoluta y
+    .ttf/.otf, y una ilustración cambiada solo desde la carpeta de ilustraciones del programa; ni se mira el disco."""
+    import pathlib
+
+    import app
+
+    unc, looked = r"\\192.168.1.50\s\x.ttf", []
+    assert app._font_file(r"C:\Fuentes\Mia.TTF") and app._font_file("C:/Fuentes/mia.otf")
+    assert not [p for p in (unc, "//192.168.1.50/s/x.ttf", r"\\?\UNC\srv\s\x.ttf", "mia.ttf", r"C:\x\mia.exe", "")
+                if app._font_file(p)]
+    assert app._stored_image(app.SETTINGS.parent / "ilustraciones" / "a.png")
+    assert not app._stored_image(app.SETTINGS.parent / "ilustraciones" / ".." / "a.png")
+    assert not app._stored_image(r"\\192.168.1.50\s\x.png") and not app._stored_image(TMP / "a.png")
+    is_file, read_bytes = pathlib.Path.is_file, pathlib.Path.read_bytes
+    pathlib.Path.is_file = lambda self: looked.append(str(self)) or is_file(self)
+    pathlib.Path.read_bytes = lambda self: looked.append(str(self)) or read_bytes(self)
+    try:
+        written = app._write_options({"font": "x.ttf", "font_file": unc})
+        book = convert.Book("Libro", "", b"", [convert.Block("image", 1, image=JPEG)], [])
+        done = app._replay(book, {"edits": [["image", 0, r"\\192.168.1.50\s\x.png"]]})
+        root, window = visible_window()
+        window.apply_state({"font": "x.ttf", "font_file": unc})
+        kept = window.font_file_var.get(), window.font_var.get()
+        window.close()
+    finally:
+        pathlib.Path.is_file, pathlib.Path.read_bytes = is_file, read_bytes
+    assert written["font"] == "" and book.blocks[0].image == JPEG and done, (written["font"], done)
+    assert kept == ("", "Del lector"), kept
+    assert not [p for p in looked if "192.168" in p], looked
 
 
 

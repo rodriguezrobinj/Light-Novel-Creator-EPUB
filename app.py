@@ -318,6 +318,25 @@ def _store_image(path):
     return str(dest)
 
 
+def _network_path(path):
+    """Ruta de red (\\\\servidor\\…): con solo mirarla, Windows se conecta y entrega el hash de la contraseña. Una
+    revisión de otro (el .json junto al PDF) puede traerla, así que se mira el texto antes de tocar el disco."""
+    return re.match(r"[\\/]{2}", str(path)) is not None
+
+
+def _font_file(path):
+    """Fuente propia de una revisión o de los ajustes si es una ruta local absoluta a un .ttf/.otf; si no, ""."""
+    path = str(path or "")
+    return path if Path(path).is_absolute() and not _network_path(path) and path.lower().endswith((".ttf", ".otf")) \
+        else ""
+
+
+def _stored_image(path):
+    """La ruta es de la carpeta de ilustraciones del programa (_store_image), la única que escribe la ventana."""
+    folder = os.path.normcase(str(SETTINGS.parent / "ilustraciones")) + os.sep
+    return not _network_path(path) and os.path.normcase(os.path.normpath(str(path))).startswith(folder)
+
+
 def _thumb_path(path):
     """Miniatura de la portada de un tomo para la pantalla de inicio, junto a las preferencias."""
     return SETTINGS.parent / "miniaturas" / (hashlib.sha1(str(Path(path).resolve()).lower().encode()).hexdigest()[:16]
@@ -481,7 +500,7 @@ def _same_type(value, like):
 def _write_options(state, breaks=()):
     """Opciones de write_epub a partir de una revisión, de los campos de la ventana o de lo heredado."""
     lang, style = str(state.get("lang", "es")).strip(), state.get("style")
-    font, path = state.get("font"), str(state.get("font_file") or "")
+    font, path = state.get("font"), _font_file(state.get("font_file"))
     return {"lang": lang if LANG.fullmatch(lang) else "es",
             "typography": bool(state.get("typography", True)),
             "style": style if style in convert.STYLES else "Clásico",
@@ -1066,7 +1085,8 @@ def _replay(book, state):
                 if not (0 <= k < len(book.blocks) and book.blocks[k].kind == "image"):
                     break
                 try:
-                    _swap_image(book, k, convert.load_cover(path))
+                    if _stored_image(path):  # otra ruta (de red, de una revisión ajena) no se abre
+                        _swap_image(book, k, convert.load_cover(path))
                 except ValueError:
                     pass  # la imagen ya no está: se queda la del PDF, y el cambio se recuerda por si vuelve
                 done.append(["image", k, path])
@@ -1118,6 +1138,8 @@ def _cover_image(doc, choice, book=None):
         return convert._render(doc[value], crop=True)
     if kind == "image":
         return book.blocks[int(value)].image
+    if _network_path(value):
+        raise ValueError("La imagen está en una carpeta de red: cópiala al equipo y elígela desde ahí.")
     return convert.load_cover(value)
 
 
@@ -4684,6 +4706,8 @@ class App:
                     pass  # valor mal escrito a mano en el .json
         if self.style_var.get() not in convert.STYLES:  # el .json se puede editar a mano
             self.style_var.set("Clásico")
+        if not _font_file(self.font_file_var.get()):  # ruta de red o que no es una fuente: ni se mira
+            self.font_file_var.set("")
         font, path = self.font_var.get(), Path(self.font_file_var.get())
         if font not in FONT_CHOICES or font == "Otra…":
             if not (self.font_file_var.get() and path.name == font and path.is_file()):
