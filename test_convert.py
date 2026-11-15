@@ -6715,6 +6715,20 @@ def test_regex_replacements_and_counts():
     assert "<p>Onii-chan y Onii-chan y Onii-chan.</p>" in text and "Capítulo 1" in text, text
 
 
+def test_regex_replacements_keep_entities_groups_and_tags_safe():
+    """Una regex con «\\g<1>» funciona; «;» no rompe «&amp;»; una plantilla «\\074script\\076» no mete
+    etiquetas; «\\2» con un solo grupo se avisa y se salta en vez de parar la conversión."""
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"),
+                                           convert.Block("p", 1, "Tom &amp; Jerry; Rem-kun.")], [0])
+    rules = [(r"re:(\w+)-kun", r"\g<1>-san"), ("re:;", ","), ("re:Jerry", r"\074script\076"), (r"re:(Tom)", r"\2")]
+    counts = convert.count_matches(book, rules)
+    assert [n for _, n in counts[:3]] == [1, 1, 1] and "no válida" in counts[3][1], counts
+    out = TMP / "regex-seguras.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, replacements=rules)
+    text = epub_file(out, "OEBPS/sec001.xhtml")
+    assert "<p>Tom &amp; &lt;script&gt;, Rem-san.</p>" in text, text
+
+
 def test_epub_extras_pages_classes_fonts_metadata():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
               convert.Block("p", 1, "Querida Ana:", align="center"), convert.Block("p", 2, "【Habilidad adquirida】"),

@@ -997,7 +997,14 @@ def _replace(html_text, rules):
     parts = re.split(r"(<[^>]+>)", html_text)
     for k in range(0, len(parts), 2):
         for pattern, new, regex in rules:
-            parts[k] = pattern.sub((lambda m: m.expand(new)) if regex else (lambda _: new), parts[k])
+            if not regex:
+                parts[k] = pattern.sub(lambda _: new, parts[k])
+                continue
+            # La regex ve el texto sin entidades («;» no rompe «&amp;») y lo que sale se escapa:
+            # una plantilla «\074script\076» no mete etiquetas en el EPUB
+            plain = html.unescape(parts[k])
+            if pattern.search(plain):
+                parts[k] = html.escape(pattern.sub(new, plain), quote=False)
     return "".join(parts)
 
 
@@ -1011,31 +1018,41 @@ def rule_pattern(find):
 
 
 def _rules(replacements):
-    """[(buscar, reemplazo)] a [(expresión, reemplazo, es_regex)]. Una expresión regular no válida
-    se salta: la ventana ya avisa al escribirla, y así una conversión por lotes no se para."""
+    """[(buscar, reemplazo)] a [(expresión, reemplazo, es_regex)]. Una expresión regular o una plantilla
+    no válida («\\2» con un solo grupo) se salta: la ventana ya avisa al escribirla, y así una conversión
+    por lotes no se para."""
     rules = []
     for find, new in replacements:
         if not find:
             continue
         try:
-            regex = find.startswith("re:")
-            rules.append((rule_pattern(find), html.escape(new, quote=False), regex))  # "\1" no cambia al escapar
-        except re.error:
+            rules.append(_rule(find, new))
+        except (re.error, IndexError):
             continue
     return rules
+
+
+def _rule(find, new):
+    """Una regla de _rules. La plantilla de una regex va sin escapar: «\\g<1>» escapado ya no sería un
+    grupo. Lanza re.error o IndexError si la expresión o su plantilla no valen."""
+    pattern, regex = rule_pattern(find), find.startswith("re:")
+    if regex:
+        pattern.sub(new, "")  # compila la plantilla aunque no haya coincidencias: avisa de grupos que no hay
+    return pattern, new if regex else html.escape(new, quote=False), regex
 
 
 def count_matches(book, replacements):
     """Cuántas veces aplica cada regla en los párrafos y títulos del libro: [(buscar, veces o error)]."""
     texts = [b.html for b in book.blocks if b.kind in ("p", "heading")]
     counts = []
-    for find, _ in replacements:
+    for find, new in replacements:
         try:
-            pattern = rule_pattern(find)
-        except re.error as e:
+            pattern, _, regex = _rule(find, new)
+        except (re.error, IndexError) as e:
             counts.append((find, f"expresión no válida: {e}"))
             continue
-        counts.append((find, sum(len(pattern.findall(part)) for t in texts for part in re.split(r"<[^>]+>", t))))
+        see = html.unescape if regex else str  # como _replace: la regex ve el texto sin entidades
+        counts.append((find, sum(len(pattern.findall(see(part))) for t in texts for part in re.split(r"<[^>]+>", t))))
     return counts
 
 
