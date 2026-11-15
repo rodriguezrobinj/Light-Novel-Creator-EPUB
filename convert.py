@@ -3460,9 +3460,13 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     step(100, 100)
 
 
+IMAGE_MAGIC = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG", "image/gif": b"GIF8"}  # primeros bytes
+
+
 def check_epub(path):
-    """Revisa un EPUB ya escrito: XML válido, ningún archivo, imagen ni enlace del índice que falte, y
-    ningún capítulo vacío (salvo portadillas como "Parte uno"). Devuelve los problemas, en español."""
+    """Revisa un EPUB ya escrito: XML válido, mimetype el primero y sin comprimir, ningún archivo, imagen
+    ni enlace (también «#ancla» del mismo archivo) que falte, imágenes del tipo declarado y ningún capítulo
+    vacío (salvo portadillas como "Parte uno"). Devuelve los problemas, en español."""
     problems = []
     with zipfile.ZipFile(path) as z:
         names = set(z.namelist())
@@ -3472,12 +3476,19 @@ def check_epub(path):
                 trees[name] = ET.fromstring(z.read(name))
             except ET.ParseError as e:
                 problems.append(f"{name}: XML no válido ({e})")
-    base = "OEBPS/"
-    opf = trees.get(base + "content.opf")
-    if opf is not None:
-        for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
-            if base + item.get("href") not in names:
-                problems.append(f"Falta {item.get('href')}, declarado en content.opf")
+        first = z.infolist()[0] if z.infolist() else None
+        if first is None or first.filename != "mimetype" or first.compress_type != zipfile.ZIP_STORED:
+            problems.append("El archivo mimetype no va el primero y sin comprimir: algunos lectores no abren el libro")
+        base = "OEBPS/"
+        opf = trees.get(base + "content.opf")
+        if opf is not None:
+            for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
+                href, kind = base + item.get("href", ""), item.get("media-type", "")
+                if href not in names:
+                    problems.append(f"Falta {item.get('href')}, declarado en content.opf")
+                # vacía (libro sin portada) no es de otro tipo
+                elif kind in IMAGE_MAGIC and (head := z.open(href).read(4)) and not head.startswith(IMAGE_MAGIC[kind]):
+                    problems.append(f"{item.get('href')} no es una imagen {kind[6:].upper()}, aunque así se declara")
     ids = {name: {e.get("id") for e in tree.iter() if e.get("id")} for name, tree in trees.items()}
     for name, tree in trees.items():
         if not name.endswith(".xhtml"):
@@ -3487,7 +3498,9 @@ def check_epub(path):
                 problems.append(f"{name[len(base):]}: falta la imagen {img.get('src')}")
         for a in tree.iter(XHTML + "a"):
             target, _, anchor = a.get("href", "").partition("#")
-            if target and not re.match(r"https?://", target) and (base + target not in names or (anchor and anchor not in ids.get(base + target, ()))):
+            file = base + target if target else name  # «#nota3»: ancla del mismo archivo
+            if ((target or anchor) and not re.match(r"https?://", target)
+                    and (file not in names or (anchor and anchor not in ids.get(file, ())))):
                 problems.append(f"{name[len(base):]}: enlace roto a {a.get('href')}")
         h1 = next(tree.iter(XHTML + "h1"), None)
         if (re.fullmatch(r"OEBPS/sec\d+\.xhtml", name) and h1 is not None

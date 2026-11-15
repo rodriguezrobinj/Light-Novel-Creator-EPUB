@@ -5191,6 +5191,30 @@ def test_check_epub_reports_problems():
     assert convert.check_epub(out) == []  # una portadilla vacía es a propósito
 
 
+def test_check_epub_finds_wrong_image_type_local_anchor_and_mimetype():
+    """Un PNG guardado como .jpg, un enlace «#ancla» a nada en el mismo archivo y un mimetype comprimido
+    que no va el primero: problemas que los lectores no perdonan."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
+              convert.Block("image", 1, image=jpeg(10, 10))]
+    out = TMP / "revisar-tipos.epub"
+    convert.write_epub(convert.Book("Libro", "", jpeg(10, 10), blocks, [0]), [(0, "Cap 1")], out)
+    assert convert.check_epub(out) == [], convert.check_epub(out)
+    png = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False).tobytes("png")
+    broken = TMP / "revisar-tipos-roto.epub"
+    with zipfile.ZipFile(out) as src, zipfile.ZipFile(broken, "w", zipfile.ZIP_DEFLATED) as dst:
+        for name in sorted(src.namelist(), key=lambda n: n == "mimetype"):  # mimetype al final
+            data = src.read(name)
+            if name == "OEBPS/img/b00002.jpg":
+                data = png
+            if name == "OEBPS/sec001.xhtml":
+                data = data.replace(b"Uno.</p>", b'<a href="#nada">Uno.</a></p>')
+            dst.writestr(name, data)
+    problems = convert.check_epub(broken)
+    assert "img/b00002.jpg no es una imagen JPEG, aunque así se declara" in problems, problems
+    assert "sec001.xhtml: enlace roto a #nada" in problems, problems
+    assert any(p.startswith("El archivo mimetype no va el primero") for p in problems), problems
+
+
 def test_window_fix_case_and_undo_it_at_once():
     import app
 
