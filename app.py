@@ -1125,6 +1125,8 @@ def _plan(book, rows):
     chapters, removed, breaks = [], [], []
     for item, (kind, title, *_) in rows.items():  # el tercer valor, si está, es la marca de revisado
         k = int(item)
+        if not 0 <= k < len(book.blocks):  # fila de una edición que _replay ya no pudo aplicar
+            continue
         if book.blocks[k].kind == "break":  # ya es un separador: su fila solo lo muestra
             continue
         if book.blocks[k].kind == "image":

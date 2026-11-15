@@ -6527,6 +6527,21 @@ def test_replay_image_and_page_at_start():
     assert book.candidates == [2], book.candidates
 
 
+def test_plan_skips_rows_of_edits_not_replayed():
+    """Si _replay se para a mitad (la ilustración cambiada ya no es una imagen), las filas de los bloques que añadía
+    la edición siguiente no existen: la conversión de carpeta fallaba con IndexError en vez de convertir el tomo."""
+    import app
+
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
+                                           convert.Block("p", 1, "Dos.")], [0])
+    state = {"edits": [["image", 1, "x.png"], [3, 3, "# Cap 2\n\nMás."]],
+             "rows": {"0": [app.ON, "Cap 1"], "3": [app.ON, "Cap 2"]}}
+    done = app._replay(book, state)
+    chapters, removed, breaks = app._plan(book, state["rows"])
+    assert done == [] and len(book.blocks) == 3, (done, book.blocks)
+    assert chapters == [(0, "Cap 1")] and removed == breaks == [], (chapters, removed, breaks)
+
+
 def test_reviews_of_others_do_not_open_network_paths():
     """Un .lnepub.json ajeno junto al PDF (heredado de otro tomo de la serie) puede traer rutas de red: con solo
     mirarlas, Windows se conecta y entrega el hash de la contraseña. La fuente propia solo vale local, absoluta y
