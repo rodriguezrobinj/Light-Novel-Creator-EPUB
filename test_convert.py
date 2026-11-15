@@ -489,6 +489,22 @@ def test_ornament_image_between_paragraphs_is_a_scene_break():
     assert "break" not in page2, page2
 
 
+def test_page_full_of_strokes_is_analyzed_quickly():
+    """Una ilustración vectorial de miles de trazos tardaba decenas de segundos en agruparse: no es un separador."""
+    import time
+    doc = pymupdf.open()
+    page = add_page(doc, 1, [(72, 110, "Capitulo 1: Inicio", 20, "helv"), (92, 150, "Texto.", 11, "cour")])
+    shape = page.new_shape()
+    for k in range(2000):
+        x, y = 72 + (k % 50) * 9, 200 + (k // 50) * 12
+        shape.draw_line((x, y), (x + 4, y))
+        shape.finish()
+    shape.commit()
+    start = time.perf_counter()
+    boxes = convert._drawn(doc[0])
+    assert time.perf_counter() - start < 2 and boxes == [], (time.perf_counter() - start, len(boxes))
+
+
 def test_drawn_ornament_between_paragraphs_is_a_scene_break():
     """Eminence 7: el separador de escena va dibujado con trazos (dos barras y una raya cruzada), sin imagen ni
     texto. Es un separador y guarda su dibujo; el subrayado ancho bajo el título y el fondo de página, no."""

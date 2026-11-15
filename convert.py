@@ -270,7 +270,7 @@ def _row(spans):
                round(main["size"], 1), all(_bold(s) for s in spans))
 
 
-def _rows(page):
+def _rows(page, infos):
     """Agrupa los spans por línea base: el texto justificado parte una línea en varios spans.
     Las líneas que no van en horizontal se saltan: son el encabezado y el pie de una página girada
     para una ilustración apaisada (Re Zero 6), que quedarían en mitad de la página como títulos.
@@ -282,7 +282,7 @@ def _rows(page):
     for s in spans:
         if "symbol" in s["font"].lower():
             s["text"] = s["text"].translate(SYMBOL_FONT)
-    _inline_glyphs(page, spans)
+    _inline_glyphs(page, spans, infos)
     rows, group = [], []
     for s in sorted(spans, key=lambda s: s["origin"][1]):
         if group and abs(s["origin"][1] - group[0]["origin"][1]) > 2:
@@ -521,12 +521,12 @@ def _title(rows):
     return _key(" ".join(r.text for r in _first_group(heads))) if heads else ""
 
 
-def _frames(page):
+def _frames(page, drawings):
     """Recuadros dibujados alrededor de un texto: The World's Strongest Witch 1 pone las ventanas de estado en una
     doble línea hecha de tiras finas. Un marco son tiras que se tocan con lados a izquierda y derecha y algún borde
     arriba o abajo (partido entre páginas le falta uno); también vale un rectángulo trazado de una vez."""
     pieces, boxes = [], []
-    for d in page.get_drawings():
+    for d in drawings:
         r = pymupdf.Rect(d["rect"])
         if min(r.width, r.height) <= 4 and max(r.width, r.height) >= 20:
             pieces.append(r)
@@ -664,10 +664,11 @@ def _split_span(page, span, x):
              "bbox": (chars[k]["bbox"][0], *span["bbox"][1:])})
 
 
-def _inline_glyphs(page, spans):
+def _inline_glyphs(page, spans, infos=None):
     """Añade a spans los símbolos en imagen de una línea de texto: sin ellos «Margrave! ♡» perdía el ♡. Una imagen
-    el doble de ancha que alta lleva dos (Witch 1: «♥♥»); dentro del texto de un span, lo parte."""
-    for info in page.get_image_info():
+    el doble de ancha que alta lleva dos (Witch 1: «♥♥»); dentro del texto de un span, lo parte.
+    infos: page.get_image_info(), que _image_info vuelve a usar."""
+    for info in page.get_image_info() if infos is None else infos:
         box = pymupdf.Rect(info["bbox"])
         if not (3 <= box.width <= 40 and 3 <= box.height <= 20):
             continue
@@ -704,11 +705,12 @@ def _inline_glyphs(page, spans):
                       "font": "glyph", "icon": icon})
 
 
-def _image_info(page, digests):
+def _image_info(page, digests, infos=None):
     """Imágenes dibujadas en la página, con su xref y el bbox en coordenadas de la página girada.
     La xref sale del tamaño en píxeles y los bits por componente, que no obligan a decodificar. Si dos imágenes
     de la página coinciden en eso (tiras de Re Zero 8), de la huella MD5, como get_image_info(xrefs=True):
-    decodificarlas todas era un tercio del análisis de Kage 6. digests (xref -> huella) vale para todo el PDF."""
+    decodificarlas todas era un tercio del análisis de Kage 6. digests (xref -> huella) vale para todo el PDF.
+    infos: page.get_image_info(), ya pedido al leer el texto de la página."""
     sizes = collections.defaultdict(list)
     for xref, _, width, height, bpc, *_ in page.get_images():
         sizes[(width, height, bpc)].append(xref)
@@ -717,7 +719,7 @@ def _image_info(page, digests):
         # tomaría su xref; con huella saldría 0. No se ha visto en ningún PDF.
         return [dict(info, bbox=tuple(_shown(page, info)),
                      xref=sizes.get((info["width"], info["height"], info["bpc"]), [0])[0])
-                for info in page.get_image_info()]
+                for info in (page.get_image_info() if infos is None else infos)]
     by_digest = {}
     for xref, *_ in page.get_images():
         if xref not in digests:
@@ -782,12 +784,17 @@ def _ornaments(page, rows, infos, before=()):
     return sorted(found, key=lambda f: f[0])  # [(posición vertical, info)], de arriba abajo
 
 
-def _drawn(page):
+def _drawn(page, drawings=None):
     """Dibujos de trazos de la página agrupados en cajas, como las imágenes de _image_info ({"bbox", "xref": 0}):
     Eminence 7 dibuja su separador de escena (dos barras y una raya) sin imagen ni texto. El fondo de página
-    no cuenta."""
+    no cuenta. drawings: page.get_drawings(), compartido con _frames."""
+    drawings = page.get_drawings() if drawings is None else drawings
+    if len(drawings) > 300:
+        # shortcut: agrupar es cuadrático (2000 trazos, 22 s); una página así es una ilustración vectorial, no
+        # un separador. Si un PDF dibuja su separador en una página tan cargada, agrupar con una rejilla
+        return []
     boxes = []
-    for d in page.get_drawings():
+    for d in drawings:
         r = pymupdf.Rect(d["rect"]) + (-1, -1, 1, 1)  # una línea recta no tiene alto: sin margen no se toca con nada
         if abs(r) > 0.05 * abs(page.rect):
             continue
@@ -2519,9 +2526,10 @@ def analyze(pdf_path, progress=None):
         if doc.needs_pass:
             raise ValueError(f"El {kind} está protegido con contraseña.")
         n = doc.page_count
-        pages = []
+        pages, page_infos = [], []  # page_infos: get_image_info de cada página, para no pedirlo dos veces
         for i, page in enumerate(doc):
-            pages.append(_rows(page))
+            page_infos.append(page.get_image_info())
+            pages.append(_rows(page, page_infos[-1]))
             if progress:
                 progress(i + 1, 2 * n)
         pages = _strip_margins(pages, [page.rect.height for page in doc])
@@ -2585,7 +2593,8 @@ def analyze(pdf_path, progress=None):
         contents = []  # títulos del índice impreso
         repeated = ""  # título que la página anterior ya emitió junto a su ilustración
         follow = ""  # título de la portadilla anterior: la página siguiente lo repite antes del texto
-        frames = [_frames(page) for page in doc]
+        drawings = [page.get_drawings() for page in doc]  # una vez por página: _frames y _drawn
+        frames = [_frames(page, d) for page, d in zip(doc, drawings)]
         repeats = collections.Counter(tuple(round(v) for v in b) for page_frames in frames for b in page_frames)
         frames = [[b for b in page_frames if repeats[tuple(round(v) for v in b)] <= max(3, n // 5)]
                   for page_frames in frames]
@@ -2615,8 +2624,8 @@ def analyze(pdf_path, progress=None):
                                     x0=min(r.x0 for r in group), x1=max(r.x1 for r in group))]
                     follow = _key(text)
             headings = [r for r in rows if r.heading]
-            infos = _image_info(page, digests)
-            drawn = _drawn(page)
+            infos = _image_info(page, digests, page_infos[i])
+            drawn = _drawn(page, drawings[i])
             before, last_boxes = last_boxes, [info["bbox"] for info in infos + drawn]  # las de la anterior: cabeceras
             images = _images(page, infos)
             # ponytail: solo ilustraciones a página completa; las pequeñas dentro del texto se descartan
