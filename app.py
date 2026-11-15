@@ -1902,6 +1902,9 @@ class App:
             var.listeners.append(self.update_header)
         self.lang_timer = None
         self.lang_var.listeners.append(self.lang_changed)
+        self.autosave_timer = None
+        for var in self.fields().values():  # los datos del libro y sus opciones van en la revisión
+            var.listeners.append(self.autosave)
 
         # Lista a la izquierda, vistas previas a la derecha, con divisor
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -2304,11 +2307,13 @@ class App:
             return False
         if editor:
             editor.win.done(0)
+            self.save_review()  # con dónde quedó el editor (editor_at)
         self.poller.stop()
         self.watcher.stop()
         if self.lang_timer:  # el informe se recalcularía sobre la ventana ya cerrada
             qtk.cancel(self.lang_timer)
-        self.save_review()
+        if self.autosave_timer:  # ya se guardó arriba
+            qtk.cancel(self.autosave_timer)
         self.save_settings()
         if self.done:
             self.stop_work()
@@ -2568,11 +2573,28 @@ class App:
             self.tree.selection_set(item)
             self.tree.see(item)
 
+    def remember(self, change):
+        """Apunta un cambio para Ctrl+Z y guarda la revisión poco después (autosave)."""
+        self.history.append(change)
+        self.autosave()
+
+    def autosave(self):
+        """Guarda la revisión 2 s después del último cambio: una ventana cerrada de golpe (corte de luz, el
+        Administrador de tareas) ya no pierde lo revisado, y varios cambios seguidos son una sola escritura."""
+        if self.autosave_timer:
+            qtk.cancel(self.autosave_timer)
+        self.autosave_timer = qtk.after(2000, self.autosaved)
+
+    def autosaved(self):
+        self.autosave_timer = None
+        if not self.closed:
+            self.save_review()
+
     def row_state(self, item):
         return item, self.tree.set(item, "inc"), self.tree.set(item, "title")
 
     def set_kind(self, item, kind):
-        self.history.append([self.row_state(item)])
+        self.remember([self.row_state(item)])
         self.tree.set(item, "inc", kind)
         self.tree.item(item, tags=(KIND_TAG[kind],))
 
@@ -2610,6 +2632,7 @@ class App:
         item = selected[0]
         mark = "" if self.tree.set(item, "ok") else "✓"
         self.tree.set(item, "ok", mark)
+        self.autosave()
         done, total = self.update_reviewed()
         self.status.setText(f"Capítulos revisados: {done} de {total}")
         items = self.tree.get_children()
@@ -2625,6 +2648,7 @@ class App:
         if not self.history:
             return
         change = self.history.pop()
+        self.autosave()
         if isinstance(change, dict):
             self.book.blocks, self.book.candidates = change["blocks"], change["candidates"]
             del self.edits[change["edits"]:]
@@ -2892,7 +2916,7 @@ class App:
                 return
             text = entry.text().strip()
             if text and text != self.tree.set(item, "title"):
-                self.history.append([self.row_state(item)])
+                self.remember([self.row_state(item)])
                 self.tree.set(item, "title", text)
             close()
             self.update_preview()
@@ -3537,7 +3561,7 @@ class App:
         la fila de antes de los cambios y se vuelve a elegir donde quede. kinds: por cada edición, el tipo
         (Capítulo/Subtítulo) de sus títulos, en orden. retype: {fila: tipo} de títulos que solo cambian de tipo."""
         rows = self.rows()
-        self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
+        self.remember({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})  # edit_section crea listas nuevas
         rows = {k: [v[0], titles[k], *v[2:]] if titles and k in titles else v for k, v in rows.items()}
         rows = {k: [retype[k], *v[1:]] if retype and k in retype else v for k, v in rows.items()}
@@ -3829,7 +3853,7 @@ class App:
         revisión como ["image", bloque, archivo]."""
         rows = self.rows()
         item = self.tree.selection()[0] if self.tree.selection() else None
-        self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
+        self.remember({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})
         for k, data, path in changes:
             _swap_image(self.book, k, data)
@@ -4144,6 +4168,7 @@ class App:
         kind, value = choice
         self.book.cover = _cover_image(self.pdf_doc, choice, self.book)
         self.cover_choice = [kind, value]
+        self.autosave()
         labels = {"page": lambda: f"Portada: página {value + 1}", "image": lambda: f"Portada: ilustración de la "
                   f"página {self.book.blocks[int(value)].page}", "file": lambda: f"Portada: {Path(value).name}",
                   "text": lambda: "Portada: con título"}
@@ -4274,7 +4299,7 @@ class App:
                     changed.append(self.row_state(item))
                     self.tree.set(item, "title", title)
         if changed:
-            self.history.append(changed)
+            self.remember(changed)
             self.update_preview()
         self.status.setText(f"{done} en {convert.counted(len(changed), 'título')}")
 
@@ -4300,7 +4325,7 @@ class App:
                 self.tree.set(item, "inc", SEP)
                 self.tree.item(item, tags=(KIND_TAG[SEP],))
         if changed:
-            self.history.append(changed)
+            self.remember(changed)
             self.update_reviewed()
             self.update_preview()
         self.status.setText(f"{convert.counted(len(changed), 'apartado')} como separador")
@@ -4708,7 +4733,7 @@ class App:
         if start <= dest <= end:  # ya está ahí
             return
         rows = self.rows()
-        self.history.append({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
+        self.remember({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})
         mapping = convert.move_section(self.book, start, end, dest)
         self.edits.append(["move", start, end, dest])

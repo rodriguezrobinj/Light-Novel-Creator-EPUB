@@ -2610,6 +2610,37 @@ def test_window_review_is_restored_when_reopening_the_pdf():
     assert fresh == (app.ON, "Clásico", None), fresh
 
 
+def test_window_autosaves_the_review():
+    """La revisión se guarda sola poco después de cada cambio (tipo de una fila, título, un dato del libro), una
+    vez por tanda: una ventana cerrada de golpe ya no pierde lo revisado."""
+    import json
+    import time
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    root.update()
+    review = app._review_path(window.pdf)
+    review.unlink(missing_ok=True)
+    saves, save = [], window.save_review
+    window.save_review = lambda: saves.append(1) or save()
+    item = first_title(window)
+    window.set_kind(item, app.OFF)
+    window.tree.set(item, "title", "Capítulo uno")
+    window.publisher_var.set("Grupo Autoguardado")
+    deadline = time.time() + 10
+    while not saves and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    state = json.loads(review.read_text(encoding="utf-8")) if review.is_file() else {}
+    autosaved = len(saves)
+    window.close()
+    assert autosaved == 1, saves
+    assert state.get("publisher") == "Grupo Autoguardado" and state["rows"][item][:2] == [app.OFF, "Capítulo uno"], state
+
+
 def test_window_metadata_cover_and_shrink_reach_the_epub():
     import time
 
