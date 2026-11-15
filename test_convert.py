@@ -2975,6 +2975,13 @@ def test_link_sections_and_credits_page():
     assert opf.index('idref="cover"') < opf.index('idref="credits"') < opf.index('idref="contents"'), opf
 
 
+def test_link_sections_ignores_words_containing_a_network_name():
+    blocks = [("heading", "Cap 1"), ("p", "Sembró la discordia entre ellos."), ("heading", "Cap 2"),
+              ("p", "Síguenos en Discord.")]
+    book = convert.Book("Libro", "", b"", [convert.Block(k, 1, h) for k, h in blocks], [0, 2])
+    assert convert.link_sections(book) == [2], convert.link_sections(book)  # «discordia» no es un enlace
+
+
 def make_group_pdf():
     doc = pymupdf.open()
     add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"),

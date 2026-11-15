@@ -1422,8 +1422,9 @@ def spanish_case(title, words):
     return "".join(parts)
 
 
-LINKS = re.compile(r"https?://|www\.|facebook|twitter|discord|patreon|ko-fi|paypal|instagram|tiktok|wixsite"
-                   r"|blogspot", re.I)
+# palabras completas: «discordia» o «twitteros» no son publicidad del grupo
+LINKS = re.compile(r"https?://|www\.|\b(?:facebook|twitter|discord|patreon|ko-fi|paypal|instagram|tiktok|wixsite"
+                   r"|blogspot)\b", re.I)
 
 
 def link_sections(book):
