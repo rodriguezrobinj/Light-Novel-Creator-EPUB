@@ -3624,6 +3624,25 @@ def test_editor_sheet_round_trip():
     assert sources == [2, 3, 4, 5, 6, 7, 8, 9, 10], sources
 
 
+def test_editor_long_separator_is_not_shrunk():
+    """«◇◇◇…» de 42 rombos (Oukoku 4, pág. 107) se dibuja a la medida de la hoja: encogido como imagen, los
+    trazos finos se perdían y el separador salía entrecortado."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Antes."), (2, "[Separador 2]"), (3, "Después.")], {2: "◇" * 42})
+    cursor = QTextCursor(sheet.document().findBlockByNumber(1))
+    cursor.movePosition(QTextCursor.MoveOperation.Right)
+    shown = cursor.charFormat().toImageFormat()
+    picture = sheet.document().resource(sheet.document().ResourceType.ImageResource, shown.name())
+    size = (shown.width(), picture.width(), picture.height(), shown.height())
+    assert size[0] == size[1] <= 420 and size[2] == size[3], size
+
+
 def test_editor_pastes_html_with_italics():
     """Pegar de Word o de la web (HTML) conserva cursiva, negrita (también la de un estilo font-weight) y
     superíndice; colores y tamaños no. «[Ilustración 1]» de fuera entra como texto, no como ilustración."""
