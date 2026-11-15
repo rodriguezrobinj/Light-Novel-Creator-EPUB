@@ -124,7 +124,9 @@ def _series_volume(stem, meta_title):
     if not m:
         return "", ""
     series = re.sub(r"\[[^\]]*\]", "", stem[:m.start()]).strip(" -–—_.")
-    return series or meta_title.strip(), m.group(1).replace(",", ".")
+    # el título del PDF «Maryoku - Volumen 3» también lleva el volumen: la serie es lo de antes
+    series = series or VOLUME.split(meta_title)[0].strip(" -–—_.") or meta_title.strip()
+    return series, m.group(1).replace(",", ".")
 
 
 QUOTE_OPENERS = set("  ([¿¡—–«“‘")  # tras estos caracteres, una comilla abre
@@ -268,7 +270,7 @@ def _row(spans):
                round(main["size"], 1), all(_bold(s) for s in spans))
 
 
-def _rows(page):
+def _rows(page, infos):
     """Agrupa los spans por línea base: el texto justificado parte una línea en varios spans.
     Las líneas que no van en horizontal se saltan: son el encabezado y el pie de una página girada
     para una ilustración apaisada (Re Zero 6), que quedarían en mitad de la página como títulos.
@@ -280,7 +282,7 @@ def _rows(page):
     for s in spans:
         if "symbol" in s["font"].lower():
             s["text"] = s["text"].translate(SYMBOL_FONT)
-    _inline_glyphs(page, spans)
+    _inline_glyphs(page, spans, infos)
     rows, group = [], []
     for s in sorted(spans, key=lambda s: s["origin"][1]):
         if group and abs(s["origin"][1] - group[0]["origin"][1]) > 2:
@@ -316,7 +318,8 @@ def _footnotes(rows, body, height):
 def _attach_notes(blocks, notes):
     """Cambia cada llamada de los bloques por su nota (dentro del párrafo, así sobrevive a editar y
     mover secciones). Una llamada sin nota vuelve a ser texto («m²»); una nota sin llamada va al final
-    del último párrafo, para no perderla."""
+    del último párrafo, para no perderla. Sin párrafo (página de título), devuelve esas notas para
+    que vayan en uno propio."""
     used = set()
 
     def note(m):
@@ -327,9 +330,12 @@ def _attach_notes(blocks, notes):
 
     for b in blocks:
         b.html = REF_MARK.sub(note, b.html)
+    rest = "".join(f'<span class="nota">{text}</span>' for num, text in notes.items() if num not in used)
     last = next((b for b in reversed(blocks) if b.kind == "p"), None)
-    if last is not None:
-        last.html += "".join(f'<span class="nota">{text}</span>' for num, text in notes.items() if num not in used)
+    if last is None:
+        return rest
+    last.html += rest
+    return ""
 
 
 def _norm(text):
@@ -345,12 +351,20 @@ def _strip_margins(pages, heights):
         return " ".join(re.sub(r"[\W\d_]+", " ", KEYWORDS.sub(" ", _norm(text).replace("#", " "))).split())
 
     counts, loose_counts = collections.Counter(), collections.Counter()
+    sizes = collections.defaultdict(collections.Counter)  # texto -> tamaños con que sale en las franjas
     for rows, h in zip(pages, heights):
-        counts.update({_norm(r.text) for r in rows if in_band(r, h)})
-        loose_counts.update({loose(r.text) for r in rows if in_band(r, h)})
+        band = [r for r in rows if in_band(r, h)]
+        counts.update({_norm(r.text) for r in band})
+        loose_counts.update({loose(r.text) for r in band})
+        for r in band:
+            sizes[_norm(r.text)][round(r.size)] += 1
     least = max(2, REPEAT * len(pages))
     repeated = {k for k, n in counts.items() if n >= least}
-    repeated.add("#")  # números de página sueltos
+
+    def big(r):
+        # El título del capítulo en la franja, mucho mayor que el encabezado pequeño que repite su texto
+        # (no un tamaño algo distinto: Mitsuha 6 numera algunas páginas en otra letra)
+        return r.size >= 1.3 * sizes[_norm(r.text)].most_common(1)[0][0]
     # Encabezados que cambian con el capítulo: la variante del prólogo o de las palabras del autor
     # ("Einherjar Project Palabras del autor | 230") sale en pocas páginas, pero empieza igual.
     loose_repeated = tuple(k for k, n in loose_counts.items() if n >= least and len(k) >= 6)
@@ -361,7 +375,8 @@ def _strip_margins(pages, heights):
         # La clave suelta solo para líneas con número de página que no abren con "Capítulo…": un título
         # de capítulo en la franja superior también se queda en pocas palabras repetidas
         footer = re.search(r"\d", r.text) and not KEYWORDS.match(r.text.strip(LABEL_DECOR))
-        return _norm(r.text) in repeated or bool(footer and loose_repeated and loose(r.text).startswith(loose_repeated))
+        return (_norm(r.text) == "#" or (_norm(r.text) in repeated and not big(r))  # "#": números de página sueltos
+                or bool(footer and loose_repeated and loose(r.text).startswith(loose_repeated)))
 
     return [[r for r in rows if not margin(r, h)] for rows, h in zip(pages, heights)]
 
@@ -512,12 +527,12 @@ def _title(rows):
     return _key(" ".join(r.text for r in _first_group(heads))) if heads else ""
 
 
-def _frames(page):
+def _frames(page, drawings):
     """Recuadros dibujados alrededor de un texto: The World's Strongest Witch 1 pone las ventanas de estado en una
     doble línea hecha de tiras finas. Un marco son tiras que se tocan con lados a izquierda y derecha y algún borde
     arriba o abajo (partido entre páginas le falta uno); también vale un rectángulo trazado de una vez."""
     pieces, boxes = [], []
-    for d in page.get_drawings():
+    for d in drawings:
         r = pymupdf.Rect(d["rect"])
         if min(r.width, r.height) <= 4 and max(r.width, r.height) >= 20:
             pieces.append(r)
@@ -655,10 +670,11 @@ def _split_span(page, span, x):
              "bbox": (chars[k]["bbox"][0], *span["bbox"][1:])})
 
 
-def _inline_glyphs(page, spans):
+def _inline_glyphs(page, spans, infos=None):
     """Añade a spans los símbolos en imagen de una línea de texto: sin ellos «Margrave! ♡» perdía el ♡. Una imagen
-    el doble de ancha que alta lleva dos (Witch 1: «♥♥»); dentro del texto de un span, lo parte."""
-    for info in page.get_image_info():
+    el doble de ancha que alta lleva dos (Witch 1: «♥♥»); dentro del texto de un span, lo parte.
+    infos: page.get_image_info(), que _image_info vuelve a usar."""
+    for info in page.get_image_info() if infos is None else infos:
         box = pymupdf.Rect(info["bbox"])
         if not (3 <= box.width <= 40 and 3 <= box.height <= 20):
             continue
@@ -695,11 +711,12 @@ def _inline_glyphs(page, spans):
                       "font": "glyph", "icon": icon})
 
 
-def _image_info(page, digests):
+def _image_info(page, digests, infos=None):
     """Imágenes dibujadas en la página, con su xref y el bbox en coordenadas de la página girada.
     La xref sale del tamaño en píxeles y los bits por componente, que no obligan a decodificar. Si dos imágenes
     de la página coinciden en eso (tiras de Re Zero 8), de la huella MD5, como get_image_info(xrefs=True):
-    decodificarlas todas era un tercio del análisis de Kage 6. digests (xref -> huella) vale para todo el PDF."""
+    decodificarlas todas era un tercio del análisis de Kage 6. digests (xref -> huella) vale para todo el PDF.
+    infos: page.get_image_info(), ya pedido al leer el texto de la página."""
     sizes = collections.defaultdict(list)
     for xref, _, width, height, bpc, *_ in page.get_images():
         sizes[(width, height, bpc)].append(xref)
@@ -708,7 +725,7 @@ def _image_info(page, digests):
         # tomaría su xref; con huella saldría 0. No se ha visto en ningún PDF.
         return [dict(info, bbox=tuple(_shown(page, info)),
                      xref=sizes.get((info["width"], info["height"], info["bpc"]), [0])[0])
-                for info in page.get_image_info()]
+                for info in (page.get_image_info() if infos is None else infos)]
     by_digest = {}
     for xref, *_ in page.get_images():
         if xref not in digests:
@@ -773,12 +790,17 @@ def _ornaments(page, rows, infos, before=()):
     return sorted(found, key=lambda f: f[0])  # [(posición vertical, info)], de arriba abajo
 
 
-def _drawn(page):
+def _drawn(page, drawings=None):
     """Dibujos de trazos de la página agrupados en cajas, como las imágenes de _image_info ({"bbox", "xref": 0}):
     Eminence 7 dibuja su separador de escena (dos barras y una raya) sin imagen ni texto. El fondo de página
-    no cuenta."""
+    no cuenta. drawings: page.get_drawings(), compartido con _frames."""
+    drawings = page.get_drawings() if drawings is None else drawings
+    if len(drawings) > 300:
+        # shortcut: agrupar es cuadrático (2000 trazos, 22 s); una página así es una ilustración vectorial, no
+        # un separador. Si un PDF dibuja su separador en una página tan cargada, agrupar con una rejilla
+        return []
     boxes = []
-    for d in page.get_drawings():
+    for d in drawings:
         r = pymupdf.Rect(d["rect"]) + (-1, -1, 1, 1)  # una línea recta no tiene alto: sin margen no se toca con nada
         if abs(r) > 0.05 * abs(page.rect):
             continue
@@ -997,7 +1019,14 @@ def _replace(html_text, rules):
     parts = re.split(r"(<[^>]+>)", html_text)
     for k in range(0, len(parts), 2):
         for pattern, new, regex in rules:
-            parts[k] = pattern.sub((lambda m: m.expand(new)) if regex else (lambda _: new), parts[k])
+            if not regex:
+                parts[k] = pattern.sub(lambda _: new, parts[k])
+                continue
+            # La regex ve el texto sin entidades («;» no rompe «&amp;») y lo que sale se escapa:
+            # una plantilla «\074script\076» no mete etiquetas en el EPUB
+            plain = html.unescape(parts[k])
+            if pattern.search(plain):
+                parts[k] = html.escape(pattern.sub(new, plain), quote=False)
     return "".join(parts)
 
 
@@ -1011,31 +1040,41 @@ def rule_pattern(find):
 
 
 def _rules(replacements):
-    """[(buscar, reemplazo)] a [(expresión, reemplazo, es_regex)]. Una expresión regular no válida
-    se salta: la ventana ya avisa al escribirla, y así una conversión por lotes no se para."""
+    """[(buscar, reemplazo)] a [(expresión, reemplazo, es_regex)]. Una expresión regular o una plantilla
+    no válida («\\2» con un solo grupo) se salta: la ventana ya avisa al escribirla, y así una conversión
+    por lotes no se para."""
     rules = []
     for find, new in replacements:
         if not find:
             continue
         try:
-            regex = find.startswith("re:")
-            rules.append((rule_pattern(find), html.escape(new, quote=False), regex))  # "\1" no cambia al escapar
-        except re.error:
+            rules.append(_rule(find, new))
+        except (re.error, IndexError):
             continue
     return rules
+
+
+def _rule(find, new):
+    """Una regla de _rules. La plantilla de una regex va sin escapar: «\\g<1>» escapado ya no sería un
+    grupo. Lanza re.error o IndexError si la expresión o su plantilla no valen."""
+    pattern, regex = rule_pattern(find), find.startswith("re:")
+    if regex:
+        pattern.sub(new, "")  # compila la plantilla aunque no haya coincidencias: avisa de grupos que no hay
+    return pattern, new if regex else html.escape(new, quote=False), regex
 
 
 def count_matches(book, replacements):
     """Cuántas veces aplica cada regla en los párrafos y títulos del libro: [(buscar, veces o error)]."""
     texts = [b.html for b in book.blocks if b.kind in ("p", "heading")]
     counts = []
-    for find, _ in replacements:
+    for find, new in replacements:
         try:
-            pattern = rule_pattern(find)
-        except re.error as e:
+            pattern, _, regex = _rule(find, new)
+        except (re.error, IndexError) as e:
             counts.append((find, f"expresión no válida: {e}"))
             continue
-        counts.append((find, sum(len(pattern.findall(part)) for t in texts for part in re.split(r"<[^>]+>", t))))
+        see = html.unescape if regex else str  # como _replace: la regex ve el texto sin entidades
+        counts.append((find, sum(len(pattern.findall(see(part))) for t in texts for part in re.split(r"<[^>]+>", t))))
     return counts
 
 
@@ -1062,7 +1101,8 @@ def replace_text(book, find, new, word=False, blocks=None):
 
 TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
 INLINE = re.compile(r"&lt;(/?)(i|b|sup|sc)&gt;")
-NOTE_MARK = re.compile(r"\[Nota: (.+?)\]")  # nota al pie en el editor de texto
+# nota al pie en el editor de texto; puede llevar corchetes dentro («[Nota: ver [Arco 2].]»)
+NOTE_MARK = re.compile(r"\[Nota: ((?:[^\[\]]|\[[^\[\]]*\])+)\]")
 # Enlace escrito en el editor, ya escapado: solo direcciones web (un javascript: no sirve en un libro)
 LINK_MARK = re.compile(r'&lt;a href="(https?://[^"\s<>]+)"&gt;(.*?)&lt;/a&gt;')
 CENTER = "<center>"  # al principio de una línea del editor: párrafo centrado (carta, cartel)
@@ -1105,7 +1145,7 @@ def _inline(text):
     """Línea escrita por el usuario a XHTML: escapada, salvo <i> y <b>, que se conservan si están bien
     cerradas; si no, se quitan para no romper el EPUB. "[Nota: …]" vuelve a ser la nota al pie, si
     dentro las etiquetas también cierran (si no, cruzarían el límite de la nota)."""
-    out = INLINE.sub(r"<\1\2>", html.escape(text, quote=False))
+    out = INLINE.sub(r"<\1\2>", html.escape(BAD_XML.sub("", text), quote=False))  # un control rompe el XML
     out = out if _balanced(out) else TAGS.sub("", out)
     out = LINK_MARK.sub(lambda m: f'<a href="{m[1]}">{m[2]}</a>' if _balanced(m[2]) else m[0], out)
     out = NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
@@ -1422,8 +1462,9 @@ def spanish_case(title, words):
     return "".join(parts)
 
 
-LINKS = re.compile(r"https?://|www\.|facebook|twitter|discord|patreon|ko-fi|paypal|instagram|tiktok|wixsite"
-                   r"|blogspot", re.I)
+# palabras completas: «discordia» o «twitteros» no son publicidad del grupo
+LINKS = re.compile(r"https?://|www\.|\b(?:facebook|twitter|discord|patreon|ko-fi|paypal|instagram|tiktok|wixsite"
+                   r"|blogspot)s?\b", re.I)  # «Patreons» (Nageki 1) sí
 
 
 def link_sections(book):
@@ -1448,6 +1489,8 @@ def _join(a, b):
     """Une dos líneas de un párrafo; una palabra partida con guion se junta aunque haya etiquetas.
     Un honorífico tras el guion ("Gilbert-" / "kun") no es una palabra partida: conserva el guion."""
     if re.search(r"\w-$", TAGS.sub("", a)) and TAGS.sub("", b)[:1].islower():
+        if re.search(r"(?:^|\s)-[^\s-][^-]*\w-$", TAGS.sub("", a)):  # cierra un inciso: «-dijo Subaru-»
+            return f"{a} {b}"
         if re.match(r"[^\W\d_]*", TAGS.sub("", b)).group().lower() in HONORIFICS:
             return a + b
         i = a.rindex("-")  # el guion final; detrás solo puede haber etiquetas de cierre
@@ -1681,7 +1724,7 @@ def _remojibake(text):
 # Una oración que acaba en ? o !, desde el corte anterior. Los puntos suspensivos, la raya y el cierre de
 # comillas no cortan: «¿El grupo que... los fundó?», «¿Conoces este país —el reino— ahora?» (Re Zero 2,
 # Nageki 1), «¿Desde cuándo el concepto de «hacer trampa» se aplica?» (Maryoku)
-SENTENCE = re.compile(r"((?:\.{2,}|[^.!?])*?)([?!]+)")
+SENTENCE = re.compile(r"((?:\.{2,}+|[^.!?])*?)([?!]+)")  # posesivo: «Pensé....» largo no se cuelga
 LEAD = re.compile(r"(?:\s|[«»“”\"'(—–-]|</?(?:i|b|sup)>|<small class=\"sc\">|</small>)*")   # lo que va antes de la primera palabra
 DOUBLED = re.compile(r"\b(de|la|el|que|en|y|los|las|un|una|por|con|se|lo) \1\b", re.I)
 
@@ -2059,7 +2102,9 @@ def _facts(text):
     words = re.findall(r"[a-záéíóúñü']+", text.lower())
     english = sum(w in ENGLISH for w in words)
     capital = next((m.span() for m in CAPITAL.finditer(text) if m[1].lower() not in ABBREVIATIONS), None)
-    return (bool(re.fullmatch(r"\W*\d+\W*", text)), bool(LINKS.search(text)),
+    # «—¡3!» es un diálogo (una cuenta atrás), no un número de página
+    return (bool(re.fullmatch(r"\W*\d+\W*", text)) and not re.search(r"[—―¡¿!?«»]", text),
+            bool(LINKS.search(text)),
             "\ufffd" in text or bool(MOJIBAKE.search(text)),
             len(words) >= 6 and english >= 0.35 * len(words) and sum(w in SPANISH for w in words) < english,
             capital, bool(re.search(r"[^\W\d_]$", text)))
@@ -2193,7 +2238,8 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                     "capítulo con «Editar texto…» (tecla E). Si era un índice o créditos, ignora el aviso.")
               for page, letters, why in book.skipped
               if letters >= 20 and not (why == TOC_SKIPPED and book.toc)]  # índice leído: lo compara la ventana
-    lines = collections.Counter(_plain(b).strip() for b in blocks if b.kind == "p")
+    # Los recuadros («HP: 10/10») se repiten por la historia: no son encabezados del PDF
+    lines = collections.Counter(_plain(b).strip() for b in blocks if b.kind == "p" and b.align != "frame")
     heads = [k for k, b in enumerate(blocks) if b.kind == "heading"] + [len(blocks)]
     drop = (lambda k: (k, k + 1, ""))
     honorifics = honorific_fixes([_plain(b) for b in blocks if b.kind == "p"])
@@ -2219,7 +2265,9 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                        "un cambio de página o una ilustración.")
             if head and not head.endswith(END_PUNCT):
                 between = [_line(blocks[i], i) for i in range(j + 1, k)]  # se quedan tras el párrafo unido
-                edit = (j, k + 1, "\n\n".join([_line(blocks[j], j).rstrip() + " " + _line(b, k).lstrip()] + between))
+                # el segundo pierde su <center>/<marco>: si no, quedaría escrito en medio del párrafo
+                tail = _line(replace(b, align=""), k).lstrip()
+                edit = (j, k + 1, "\n\n".join([_line(blocks[j], j).rstrip() + " " + tail] + between))
                 report.append(Issue("lower", k, b.page, "Revisar", "Párrafo partido", problem,
                                     "Unirlo al párrafo anterior.", before,
                                     _cut(head, tail=True) + " " + _cut(text), edit, text))
@@ -2484,9 +2532,10 @@ def analyze(pdf_path, progress=None):
         if doc.needs_pass:
             raise ValueError(f"El {kind} está protegido con contraseña.")
         n = doc.page_count
-        pages = []
+        pages, page_infos = [], []  # page_infos: get_image_info de cada página, para no pedirlo dos veces
         for i, page in enumerate(doc):
-            pages.append(_rows(page))
+            page_infos.append(page.get_image_info())
+            pages.append(_rows(page, page_infos[-1]))
             if progress:
                 progress(i + 1, 2 * n)
         pages = _strip_margins(pages, [page.rect.height for page in doc])
@@ -2550,7 +2599,8 @@ def analyze(pdf_path, progress=None):
         contents = []  # títulos del índice impreso
         repeated = ""  # título que la página anterior ya emitió junto a su ilustración
         follow = ""  # título de la portadilla anterior: la página siguiente lo repite antes del texto
-        frames = [_frames(page) for page in doc]
+        drawings = [page.get_drawings() for page in doc]  # una vez por página: _frames y _drawn
+        frames = [_frames(page, d) for page, d in zip(doc, drawings)]
         repeats = collections.Counter(tuple(round(v) for v in b) for page_frames in frames for b in page_frames)
         frames = [[b for b in page_frames if repeats[tuple(round(v) for v in b)] <= max(3, n // 5)]
                   for page_frames in frames]
@@ -2580,8 +2630,8 @@ def analyze(pdf_path, progress=None):
                                     x0=min(r.x0 for r in group), x1=max(r.x1 for r in group))]
                     follow = _key(text)
             headings = [r for r in rows if r.heading]
-            infos = _image_info(page, digests)
-            drawn = _drawn(page)
+            infos = _image_info(page, digests, page_infos[i])
+            drawn = _drawn(page, drawings[i])
             before, last_boxes = last_boxes, [info["bbox"] for info in infos + drawn]  # las de la anterior: cabeceras
             images = _images(page, infos)
             # ponytail: solo ilustraciones a página completa; las pequeñas dentro del texto se descartan
@@ -2723,7 +2773,9 @@ def analyze(pdf_path, progress=None):
                 blocks.append(Block("break", num, image=_ornament_image(doc, page, ornaments[0][1])))
                 para = None
             # Desde el párrafo que venía abierto de la página anterior: también puede llevar llamadas de esta
-            _attach_notes(blocks[max(start - 1, 0):], notes)
+            lost = _attach_notes(blocks[max(start - 1, 0):], notes)
+            if lost:
+                blocks.append(Block("p", num, lost))
             if art:
                 blocks.append(Block("image", num, image=_extract(doc, art)))
             # Imágenes que no entran solas, apuntadas como descartadas para poder recuperarlas en la
@@ -2746,7 +2798,8 @@ def analyze(pdf_path, progress=None):
         else:
             cover = _render(doc[0], crop=True)
 
-        outline = [(title, p) for level, title, p in doc.get_toc() if level == 1]
+        # un marcador sin destino (página -1) haría un capítulo falso al principio
+        outline = [(title, p) for level, title, p in doc.get_toc() if level == 1 and 1 <= p <= n]
         if outline:
             chosen, inserted = set(), []
             for title, p in outline:
@@ -2894,9 +2947,9 @@ def _xhtml(title, body, lang):
     return ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
             f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"'
             f' lang="{lang}" xml:lang="{lang}">\n'
-            f'<head><meta charset="utf-8"/><title>{html.escape(title)}</title>'
+            f'<head><meta charset="utf-8"/><title>{html.escape(BAD_XML.sub("", title))}</title>'
             '<link rel="stylesheet" type="text/css" href="style.css"/></head>\n'
-            f'<body>\n{body}\n</body>\n</html>\n')
+            f'<body>\n{BAD_XML.sub("", body)}\n</body>\n</html>\n')  # un carácter de control rompe el XML
 
 
 KOBO_BLOCK = re.compile(r"(<(p|h1|h2)\b[^>]*>)(.*?)(</\2>)", re.S)
@@ -3052,7 +3105,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     noted = 0  # notas al pie escritas: numeración seguida en todo el libro, ids únicos
     for n, (title, is_chapter, blocks) in enumerate(sections, 1):
         name = f"sec{n:03d}.xhtml"
-        parts = [_chapter_heading(fix(html.escape(title)))] if is_chapter else []
+        # quote=False: la limpieza tipográfica ve las comillas («"Hola"» -> «“Hola”»), no &quot;
+        heading = fix(html.escape(title, quote=False))
+        parts = [_chapter_heading(heading)] if is_chapter else []
         pending = None  # página que empieza en este tramo: su marca va en el siguiente párrafo o título
         notes = []  # (número, html) de las notas de esta sección: van al final, tras el texto
 
@@ -3098,8 +3153,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             elif b.kind == "break" or k in breaks:
                 parts.append(_separator(b if b.kind == "break" else Block("break", b.page), k, style, separator, images))
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
-                parts.append(f'{mark()}<h2 id="t{k}">{fix(b.html)}</h2>')  # fuera: el título queda limpio
-                subtitles.setdefault(name, []).append((f"t{k}", fix(b.html)))
+                parts.append(f'{mark()}<h2 id="t{k}">{NOTE.sub(noteref, fix(b.html))}</h2>')  # fuera: el título queda limpio
+                # en el índice, texto solo: <i> no vale en el <text> del NCX y la nota no es del título
+                subtitles.setdefault(name, []).append((f"t{k}", TAGS.sub("", NOTE.sub("", fix(b.html)))))
             else:
                 if framed[at]:
                     bullet = _plain(b)[:1] in BULLETS  # un apartado nuevo del recuadro («◆ Equipment») se separa
@@ -3118,9 +3174,10 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         tag, kind = ("div", "") if epub2 else ("aside", ' epub:type="footnote"')
         parts += [f'<{tag}{kind} class="nota" id="nota{k}"><p><a href="#ref{k}">{k}</a>. {text}</p></{tag}>'
                   for k, text in notes]
-        files[name] = _xhtml(title, "\n".join(parts), lang)
+        files[name] = _xhtml(html.unescape(heading), "\n".join(parts), lang)
 
-    uid = f"urn:uuid:{uuid.uuid4()}"
+    # el mismo libro exportado otra vez conserva su identificador: el lector no lo duplica ni pierde la posición
+    uid = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'{book.series}|{book.volume}|{book.title}|{book.author}')}"
     title = html.escape(book.title)
     meta = []  # metadatos: en EPUB 3 los roles y el orden van en <meta refines>; en EPUB 2, como atributos opf:
 
@@ -3144,7 +3201,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     if book.publisher:
         meta.append(f"<dc:publisher>{html.escape(book.publisher)}</dc:publisher>")
     if book.description:
-        meta.append(f"<dc:description>{html.escape(BAD_XML.sub('', book.description))}</dc:description>")
+        meta.append(f"<dc:description>{html.escape(book.description)}</dc:description>")
     meta += [f"<dc:subject>{html.escape(s.strip())}</dc:subject>" for s in book.subjects.split(",") if s.strip()]
     if book.date:
         meta.append(f"<dc:date>{html.escape(book.date)}</dc:date>")
@@ -3231,12 +3288,12 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         subs = subtitles.get(name, [])
         children = "".join(f'<li><a href="{name}#{anchor}">{text}</a></li>' for anchor, text in subs)
         children = f"<ol>{children}</ol>" if subs else ""
-        items.append(f'<li><a href="{name}">{fix(html.escape(t))}</a>{children}</li>')
+        items.append(f'<li><a href="{name}">{fix(html.escape(t, quote=False))}</a>{children}</li>')
         minutes = reading_minutes([b for _, b in sec[2]]) if reading else 0
         extra = f' <span class="min">· {minutes} min</span>' if minutes else ""
-        shown.append(f'<li><a href="{name}">{fix(html.escape(t))}</a>{extra}{children}</li>')
+        shown.append(f'<li><a href="{name}">{fix(html.escape(t, quote=False))}</a>{extra}{children}</li>')
         order += 1  # playOrder: el capítulo antes que sus subtítulos, todos correlativos
-        point = (f'<navPoint id="n{order}" playOrder="{order}"><navLabel><text>{fix(html.escape(t))}</text></navLabel>'
+        point = (f'<navPoint id="n{order}" playOrder="{order}"><navLabel><text>{fix(html.escape(t, quote=False))}</text></navLabel>'
                  f'<content src="{name}"/>')
         for anchor, text in subs:
             order += 1
@@ -3278,16 +3335,19 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
             z.writestr("META-INF/container.xml", CONTAINER)
-            z.writestr("OEBPS/content.opf", opf)
+            z.writestr("OEBPS/content.opf", BAD_XML.sub("", opf))  # metadatos pegados con controles
             z.writestr("OEBPS/nav.xhtml", nav)
             if contents:
                 z.writestr("OEBPS/contents.xhtml", contents_page)
             if credits:
                 z.writestr("OEBPS/credits.xhtml", credits_page)
-            z.writestr("OEBPS/toc.ncx", ncx)
+            z.writestr("OEBPS/toc.ncx", BAD_XML.sub("", ncx))
             z.writestr("OEBPS/style.css", css)
             z.writestr("OEBPS/cover.xhtml", cover)
-            z.writestr("OEBPS/cover.jpg", _shrink(book.cover, limit) if limit and book.cover else book.cover)
+            cover_data = _shrink(book.cover, limit) if limit and book.cover else book.cover
+            if cover_data[:4] == b"\x89PNG":  # ilustración con transparencia como portada: cover.jpg es JPEG
+                cover_data = _jpeg(_rgb(pymupdf.Pixmap(cover_data), alpha=False), 90)
+            z.writestr("OEBPS/cover.jpg", cover_data)
             total, done = len(files) + len(images) + 1, 1
             if progress:
                 progress(done, total)
@@ -3424,9 +3484,13 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     step(100, 100)
 
 
+IMAGE_MAGIC = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG", "image/gif": b"GIF8"}  # primeros bytes
+
+
 def check_epub(path):
-    """Revisa un EPUB ya escrito: XML válido, ningún archivo, imagen ni enlace del índice que falte, y
-    ningún capítulo vacío (salvo portadillas como "Parte uno"). Devuelve los problemas, en español."""
+    """Revisa un EPUB ya escrito: XML válido, mimetype el primero y sin comprimir, ningún archivo, imagen
+    ni enlace (también «#ancla» del mismo archivo) que falte, imágenes del tipo declarado y ningún capítulo
+    vacío (salvo portadillas como "Parte uno"). Devuelve los problemas, en español."""
     problems = []
     with zipfile.ZipFile(path) as z:
         names = set(z.namelist())
@@ -3436,12 +3500,19 @@ def check_epub(path):
                 trees[name] = ET.fromstring(z.read(name))
             except ET.ParseError as e:
                 problems.append(f"{name}: XML no válido ({e})")
-    base = "OEBPS/"
-    opf = trees.get(base + "content.opf")
-    if opf is not None:
-        for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
-            if base + item.get("href") not in names:
-                problems.append(f"Falta {item.get('href')}, declarado en content.opf")
+        first = z.infolist()[0] if z.infolist() else None
+        if first is None or first.filename != "mimetype" or first.compress_type != zipfile.ZIP_STORED:
+            problems.append("El archivo mimetype no va el primero y sin comprimir: algunos lectores no abren el libro")
+        base = "OEBPS/"
+        opf = trees.get(base + "content.opf")
+        if opf is not None:
+            for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
+                href, kind = base + item.get("href", ""), item.get("media-type", "")
+                if href not in names:
+                    problems.append(f"Falta {item.get('href')}, declarado en content.opf")
+                # vacía (libro sin portada) no es de otro tipo
+                elif kind in IMAGE_MAGIC and (head := z.open(href).read(4)) and not head.startswith(IMAGE_MAGIC[kind]):
+                    problems.append(f"{item.get('href')} no es una imagen {kind[6:].upper()}, aunque así se declara")
     ids = {name: {e.get("id") for e in tree.iter() if e.get("id")} for name, tree in trees.items()}
     for name, tree in trees.items():
         if not name.endswith(".xhtml"):
@@ -3451,7 +3522,9 @@ def check_epub(path):
                 problems.append(f"{name[len(base):]}: falta la imagen {img.get('src')}")
         for a in tree.iter(XHTML + "a"):
             target, _, anchor = a.get("href", "").partition("#")
-            if target and not re.match(r"https?://", target) and (base + target not in names or (anchor and anchor not in ids.get(base + target, ()))):
+            file = base + target if target else name  # «#nota3»: ancla del mismo archivo
+            if ((target or anchor) and not re.match(r"https?://", target)
+                    and (file not in names or (anchor and anchor not in ids.get(file, ())))):
                 problems.append(f"{name[len(base):]}: enlace roto a {a.get('href')}")
         h1 = next(tree.iter(XHTML + "h1"), None)
         if (re.fullmatch(r"OEBPS/sec\d+\.xhtml", name) and h1 is not None

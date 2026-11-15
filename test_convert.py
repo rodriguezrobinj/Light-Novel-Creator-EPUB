@@ -116,6 +116,21 @@ def test_analyze():
     assert book.title == "novela" and book.cover[:3] == b"\xff\xd8\xff"
 
 
+def test_chapter_title_in_header_band_is_not_its_running_header():
+    """El encabezado de cada página repite el nombre del capítulo en pequeño; el título grande de la
+    primera página, también en la franja de arriba, no se quita con él."""
+    doc = pymupdf.open()
+    for n in range(1, 5):
+        rows = [(72, 30, "Capitulo 1: Inicio", 9, "helv")]
+        rows += [(72, 85, "Capitulo 1: Inicio", 20, "hebo")] if n == 1 else []
+        add_page(doc, n, rows + [(92, 140, f"Texto de la pagina {n}.", 11, "cour")])
+    path = TMP / "titulo-en-franja.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = [plain(b.html) for b in book.blocks if b.kind == "heading"]
+    assert heads == ["Capitulo 1: Inicio"], [(b.kind, b.html) for b in book.blocks]
+
+
 def test_soft_hyphen_at_line_end_joins_word():
     """Algunos PDF entregan el guion de partición como U+00AD: al final de línea une la palabra."""
     def span(text):
@@ -136,6 +151,7 @@ def test_series_and_volume_from_file_name():
         ("Mi Serie Vol. 2.5", "", ("Mi Serie", "2.5")),
         ("Otra serie - Tomo 3", "", ("Otra serie", "3")),
         ("Una novela suelta", "Una novela suelta", ("", "")),
+        ("Volumen 3 [WP]", "Maryoku - Volumen 3", ("Maryoku", "3")),
     ]
     for stem, meta, expected in cases:
         assert convert._series_volume(stem, meta) == expected, (stem, convert._series_volume(stem, meta))
@@ -476,6 +492,22 @@ def test_ornament_image_between_paragraphs_is_a_scene_break():
     page2 = [b.kind for b in blocks if b.page == 2]
     assert page1 == ["heading", "p", "break", "p"], page1
     assert "break" not in page2, page2
+
+
+def test_page_full_of_strokes_is_analyzed_quickly():
+    """Una ilustración vectorial de miles de trazos tardaba decenas de segundos en agruparse: no es un separador."""
+    import time
+    doc = pymupdf.open()
+    page = add_page(doc, 1, [(72, 110, "Capitulo 1: Inicio", 20, "helv"), (92, 150, "Texto.", 11, "cour")])
+    shape = page.new_shape()
+    for k in range(2000):
+        x, y = 72 + (k % 50) * 9, 200 + (k // 50) * 12
+        shape.draw_line((x, y), (x + 4, y))
+        shape.finish()
+    shape.commit()
+    start = time.perf_counter()
+    boxes = convert._drawn(doc[0])
+    assert time.perf_counter() - start < 2 and boxes == [], (time.perf_counter() - start, len(boxes))
 
 
 def test_drawn_ornament_between_paragraphs_is_a_scene_break():
@@ -1041,6 +1073,17 @@ def test_outline_bookmarks_choose_chapters():
     assert book.blocks[0].kind == "heading" and book.blocks[1].kind == "image"
 
 
+def test_outline_bookmark_without_page_is_not_a_chapter():
+    """Un marcador sin destino (página -1) no crea un capítulo falso al principio del libro."""
+    doc = pymupdf.open(make_novel())
+    doc.set_toc([[1, "Roto", -1], [1, "Capitulo 1: Inicio", 3]])
+    path = TMP / "marcador-roto.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [plain(book.blocks[i].html) for i in book.candidates]
+    assert "Roto" not in titles and titles[0] == "Capitulo 1: Inicio", titles
+
+
 def test_illustration_under_text_is_kept():
     """Ilustración a página completa con el texto de la novela encima: se guarda el texto y la imagen
     incrustada original (sin el texto). Una imagen repetida en muchas páginas es un fondo y se ignora."""
@@ -1247,6 +1290,30 @@ def test_epub_index_nests_subtitles_under_their_chapter():
     page, anchor = target.split("#")
     assert f'id="{anchor}"' in sections["OEBPS/" + page], target  # el enlace lleva al subtítulo
     assert f'href="{target}"' in nav
+
+
+def test_epub_titles_without_controls_tags_in_index_or_hidden_quotes():
+    """Un carácter de control pegado en un título o en el texto no rompe el XML; un subtítulo en cursiva
+    con nota sale en el índice como texto, con la nota como llamada en el <h2>; las comillas del título
+    pasan por la limpieza tipográfica, también en <title>."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno\x01 dos."),
+              convert.Block("heading", 1, '<i>El</i> lado<span class="nota">Una nota.</span>'),
+              convert.Block("p", 1, convert._inline("Tres\x0b cuatro."))]
+    book = convert.Book("Libro\x08", "Autora\x02", b"", blocks, [0])
+    out = TMP / "controles.epub"
+    convert.write_epub(book, [(0, 'Capítulo 1: "Hola"\x07')], out, typography=True)
+    with zipfile.ZipFile(out) as z:
+        texts = {n: z.read(n).decode() for n in z.namelist() if n.endswith((".xhtml", ".opf", ".ncx"))}
+    for name, text in texts.items():
+        ET.fromstring(text.replace("<!DOCTYPE html>", ""))  # XML válido
+        assert not convert.BAD_XML.search(text), name
+    ns = {"n": "http://www.daisy.org/z3986/2005/ncx/"}
+    labels = [t.text for t in ET.fromstring(texts["OEBPS/toc.ncx"]).iter("{%s}text" % ns["n"])]
+    assert "El lado" in labels and all(t and "<" not in t for t in labels), labels
+    assert '<a href="sec001.xhtml#t2">El lado</a>' in texts["OEBPS/nav.xhtml"], texts["OEBPS/nav.xhtml"]
+    section = texts["OEBPS/sec001.xhtml"]
+    assert re.search(r'<h2 id="t2"><i>El</i> lado<a class="nref"[^>]*>1</a></h2>', section), section
+    assert "<title>Capítulo 1: «Hola»</title>" in section and "«Hola»" in texts["OEBPS/nav.xhtml"], section
 
 
 def sectioned_book():
@@ -2563,6 +2630,23 @@ def test_load_cover_converts_png_to_jpeg():
         raise AssertionError("debía avisar de la imagen que falta")
 
 
+def test_epub_png_cover_is_jpeg_and_identifier_is_stable():
+    """Una portada PNG (ilustración con transparencia) se guarda como JPEG de verdad en cover.jpg; exportar
+    el mismo libro dos veces da el mismo identificador, y otro libro, otro."""
+    png = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 60), True).tobytes("png")
+    book = convert.Book("Libro", "Autora", png, [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno.")],
+                        [0], series="Serie", volume="1")
+    uids = []
+    for name, title in (("uno", "Libro"), ("dos", "Libro"), ("tres", "Otro libro")):
+        book.title = title
+        out = TMP / f"portada-{name}.epub"
+        convert.write_epub(book, [(0, "Cap 1")], out)
+        with zipfile.ZipFile(out) as z:
+            assert z.read("OEBPS/cover.jpg")[:3] == b"\xff\xd8\xff"
+        uids.append(re.search(r'<dc:identifier id="uid">([^<]+)<', epub_file(out, "OEBPS/content.opf"))[1])
+    assert uids[0] == uids[1] != uids[2] and uids[0].startswith("urn:uuid:"), uids
+
+
 def test_window_keyboard_shortcuts_change_type():
     import app
 
@@ -3065,6 +3149,12 @@ def test_line_break_before_honorific_keeps_hyphen():
     assert convert._join("una pala-", "bra partida") == "una palabra partida"
 
 
+def test_line_break_after_closing_inciso_hyphen_keeps_it():
+    """El guion que cierra un inciso abierto en la misma línea no es una palabra partida."""
+    assert convert._join("—No lo sé -dijo Subaru-", "y se marchó.") == "—No lo sé -dijo Subaru- y se marchó."
+    assert convert._join("y la contra-", "seña era") == "y la contraseña era"
+
+
 def test_edit_section_moves_images_and_adds_titles():
     blocks = [("heading", "Cap 1"), ("p", "Uno &amp; <i>dos</i>."), ("image", ""), ("break", "* * *"), ("p", "Tres."),
               ("heading", "Cap 2"), ("p", "Cuatro.")]
@@ -3103,6 +3193,13 @@ def test_link_sections_and_credits_page():
         assert line in credits, credits
     opf = epub_file(out, "OEBPS/content.opf")
     assert opf.index('idref="cover"') < opf.index('idref="credits"') < opf.index('idref="contents"'), opf
+
+
+def test_link_sections_ignores_words_containing_a_network_name():
+    blocks = [("heading", "Cap 1"), ("p", "Sembró la discordia entre ellos."), ("heading", "Cap 2"),
+              ("p", "Síguenos en Discord."), ("heading", "Agradecimiento a los Patreons"), ("p", "Gracias.")]
+    book = convert.Book("Libro", "", b"", [convert.Block(k, 1, h) for k, h in blocks], [0, 2, 4])
+    assert convert.link_sections(book) == [2, 4], convert.link_sections(book)  # «discordia» no es un enlace
 
 
 def make_group_pdf():
@@ -5433,6 +5530,26 @@ def test_footnotes_leave_body_and_keep_reference_place():
     assert not any("permanecia" in b.html for b in book.blocks if b is not note), [b.html for b in book.blocks]
 
 
+def test_footnote_on_page_without_paragraph_is_kept():
+    """Una nota al pie en una página con solo el título del capítulo se perdía: no había párrafo donde ponerla."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"), (72, 737, "1", 7, "cour"),
+                      (72 + 7 * 0.6 + 0.8, 740, "Una nota del titulo.", 9, "cour")])
+    for number in (2, 3):
+        add_page(doc, number, [(92, 140, line("Otra pagina con texto normal de la novela", 57), 11, "cour"),
+                               (72, 154, "y su final.", 11, "cour")])
+    path = TMP / "nota-sin-parrafo.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    assert any("Una nota del titulo." in b.html for b in book.blocks), [b.html for b in book.blocks]
+
+
+def test_note_mark_with_brackets_inside():
+    """«[Nota: …]» del editor con corchetes dentro sigue siendo una sola nota."""
+    out = convert._inline("Hola[Nota: Pasa en [Arco 2] luego.] y fin.")
+    assert out == 'Hola<span class="nota">Pasa en [Arco 2] luego.</span> y fin.', out
+
+
 def test_footnotes_become_popup_notes():
     book = convert.Book("Libro", "", jpeg(60, 80), [
         convert.Block("heading", 1, "Capitulo 1"),
@@ -5503,6 +5620,30 @@ def test_check_epub_reports_problems():
                                                  convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Ya.")], [0, 1])
     convert.write_epub(empty_part, [(0, "Parte uno"), (1, "Cap 1")], out)
     assert convert.check_epub(out) == []  # una portadilla vacía es a propósito
+
+
+def test_check_epub_finds_wrong_image_type_local_anchor_and_mimetype():
+    """Un PNG guardado como .jpg, un enlace «#ancla» a nada en el mismo archivo y un mimetype comprimido
+    que no va el primero: problemas que los lectores no perdonan."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
+              convert.Block("image", 1, image=jpeg(10, 10))]
+    out = TMP / "revisar-tipos.epub"
+    convert.write_epub(convert.Book("Libro", "", jpeg(10, 10), blocks, [0]), [(0, "Cap 1")], out)
+    assert convert.check_epub(out) == [], convert.check_epub(out)
+    png = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False).tobytes("png")
+    broken = TMP / "revisar-tipos-roto.epub"
+    with zipfile.ZipFile(out) as src, zipfile.ZipFile(broken, "w", zipfile.ZIP_DEFLATED) as dst:
+        for name in sorted(src.namelist(), key=lambda n: n == "mimetype"):  # mimetype al final
+            data = src.read(name)
+            if name == "OEBPS/img/b00002.jpg":
+                data = png
+            if name == "OEBPS/sec001.xhtml":
+                data = data.replace(b"Uno.</p>", b'<a href="#nada">Uno.</a></p>')
+            dst.writestr(name, data)
+    problems = convert.check_epub(broken)
+    assert "img/b00002.jpg no es una imagen JPEG, aunque así se declara" in problems, problems
+    assert "sec001.xhtml: enlace roto a #nada" in problems, problems
+    assert any(p.startswith("El archivo mimetype no va el primero") for p in problems), problems
 
 
 def test_window_fix_case_and_undo_it_at_once():
@@ -6121,6 +6262,21 @@ def test_quality_report_explains_previews_and_fixes():
     assert book.candidates == [0, 5], book.candidates
 
 
+def test_quality_fixes_keep_dialogue_numbers_frames_and_alignment():
+    """«—¡3!» no es número de página; un recuadro repetido («HP: 10/10») no es encabezado; unir un párrafo
+    partido centrado no deja «<center>» escrito en medio del texto."""
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "—¡3!"), B("p", 1, "Ella dijo que")]
+    blocks += [B("p", n, "HP: 10/10", align="frame") for n in (2, 3, 4)]
+    blocks += [B("p", 5, "La carta decía"), B("p", 5, "que volvería pronto.", align="center")]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    report = convert.quality_report(book)
+    kinds = [i.kind for i in report]
+    assert "number" not in kinds and "repeated" not in kinds, kinds
+    joined = next(i for i in report if i.kind == "lower" and i.block == 7)
+    assert joined.edit == (6, 8, "La carta decía que volvería pronto."), joined.edit
+
+
 def test_quality_report_finds_untranslated_text():
     """Un párrafo en inglés se avisa; uno español con palabras inglesas sueltas, no."""
     texts = ["The castle stood on the hill above the village, and its towers were dark.",
@@ -6185,6 +6341,15 @@ def test_quality_report_fixes_fansub_typos():
     assert [b.html for b in book.blocks[1:7]] == ["¿Qué haces? —preguntó. ¡Ven aquí!", "Lo vi de lejos.",
                                                   "A ver si llegas pronto.", "¿Por qué lo hiciste?",
                                                   "<i>¿Qué haces?</i>", "«¿Qué?» ¡Ven aquí!"], [b.html for b in book.blocks]
+
+
+def test_opening_marks_with_many_dots_is_fast():
+    """Muchos puntos seguidos tras un «¡No!» tardaban segundos en el informe (retroceso de la expresión)."""
+    import time
+    start = time.perf_counter()
+    fixed = convert._opening_marks("—¡No! Pensé" + "." * 26 + " y nada más.")
+    assert time.perf_counter() - start < 0.1, time.perf_counter() - start
+    assert fixed == "—¡No! Pensé" + "." * 26 + " y nada más.", fixed
 
 
 def test_quality_report_unifies_honorific_variants():
@@ -7175,6 +7340,20 @@ def test_regex_replacements_and_counts():
     convert.write_epub(book, [(0, "Cap 1")], out, replacements=rules)  # la regla mala se salta
     text = epub_file(out, "OEBPS/sec001.xhtml")
     assert "<p>Onii-chan y Onii-chan y Onii-chan.</p>" in text and "Capítulo 1" in text, text
+
+
+def test_regex_replacements_keep_entities_groups_and_tags_safe():
+    """Una regex con «\\g<1>» funciona; «;» no rompe «&amp;»; una plantilla «\\074script\\076» no mete
+    etiquetas; «\\2» con un solo grupo se avisa y se salta en vez de parar la conversión."""
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"),
+                                           convert.Block("p", 1, "Tom &amp; Jerry; Rem-kun.")], [0])
+    rules = [(r"re:(\w+)-kun", r"\g<1>-san"), ("re:;", ","), ("re:Jerry", r"\074script\076"), (r"re:(Tom)", r"\2")]
+    counts = convert.count_matches(book, rules)
+    assert [n for _, n in counts[:3]] == [1, 1, 1] and "no válida" in counts[3][1], counts
+    out = TMP / "regex-seguras.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, replacements=rules)
+    text = epub_file(out, "OEBPS/sec001.xhtml")
+    assert "<p>Tom &amp; &lt;script&gt;, Rem-san.</p>" in text, text
 
 
 def test_epub_extras_pages_classes_fonts_metadata():
@@ -8711,7 +8890,7 @@ def test_translate_google_deepl_and_errors():
 
 
 def test_translate_gcloud_models_and_hints():
-    """Google Cloud: API oficial por lotes con la clave en la URL. Google gratis con una página de captcha o sin
+    """Google Cloud: API oficial por lotes con la clave en una cabecera, no en la URL. Google gratis con una página de captcha o sin
     respuesta: el aviso dice qué hacer. Un modelo que ya no existe se nombra, y «Buscar modelos» trae los de hoy."""
     import io
     import urllib.error
@@ -8719,14 +8898,15 @@ def test_translate_gcloud_models_and_hints():
 
     saved = translate._get, translate._post, translate._sleep, translate._form
     posts, gets = [], []
-    translate._post = lambda url, headers, body: posts.append((url, body)) or {
+    translate._post = lambda url, headers, body: posts.append((url, headers, body)) or {
         "data": {"translations": [{"translatedText": t.replace("Tom", "Tomás")} for t in body["q"]]}}
     translate._sleep = lambda s: None
     try:
         assert translate.translate("Google Cloud (clave)", ["Tom &amp; <i>Jerry</i>", "Hi"], "auto", "es",
                                    api_key="AIza") == ["Tomás &amp; <i>Jerry</i>", "Hi"]
-        url, body = posts[0]
-        assert url.endswith("/language/translate/v2?key=AIza") and body["format"] == "html", (url, body)
+        url, headers, body = posts[0]
+        assert url.endswith("/language/translate/v2") and body["format"] == "html", (url, body)
+        assert headers == {"X-Goog-Api-Key": "AIza"}, headers
         assert body["q"][0] == "Tom &amp;amp; <i>Jerry</i>" and "source" not in body and body["target"] == "es"
         assert translate.batches(["x"] * 150, "gcloud") == [list(range(100)), list(range(100, 150))]
 

@@ -406,8 +406,9 @@ def _gcloud(texts, src, dst, api_key):
     body = {"q": [_markup(t) for t in texts], "target": dst, "format": "html"}
     if src != "auto":
         body["source"] = src
-    url = "https://translation.googleapis.com/language/translate/v2?" + urllib.parse.urlencode({"key": api_key.strip()})
-    data = _request("Google Cloud", lambda: _post(url, {}, body))
+    # la clave en una cabecera y no en la URL: las URL acaban en registros de proxies y de errores
+    url = "https://translation.googleapis.com/language/translate/v2"
+    data = _request("Google Cloud", lambda: _post(url, {"X-Goog-Api-Key": api_key.strip()}, body))
     return [html.unescape(t["translatedText"]) for t in data["data"]["translations"]]
 
 
