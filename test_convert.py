@@ -3667,6 +3667,27 @@ def test_text_editor_styles_links_and_find_reach_the_book():
     assert replaced.endswith("reemplazos") and "linea" not in text.lower() and "fila" in text, (replaced, text[:200])
 
 
+def test_text_editor_links_take_the_theme_blue():
+    """Los enlaces de la hoja salen en el azul del tema: con el oscuro, el claro fijo apenas se leía (3:1)."""
+    import editor as ed
+    import theme
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, 'Ver <a href="https://example.com">la web</a>.')]
+    root, window, editor = editor_on(blocks, [0], dark=True)
+    block = editor.sheet.document().findBlockByNumber(1)
+    it, colors = block.begin(), []
+    while not it.atEnd():
+        f = it.fragment().charFormat()
+        if f.isAnchor():
+            colors.append(f.foreground().color().name())
+        it += 1
+    editor.win.done(0)
+    window.close()
+    ed.LINK_COLOR = theme.colors(False)["acc"]  # las hojas sueltas de otras pruebas, como antes
+    assert colors == [theme.colors(True)["acc"]], colors
+
+
 def sheet_with(lines):
     """Hoja suelta con lines de section_text; el párrafo n viene del bloque n."""
     import editor
@@ -3940,10 +3961,14 @@ def test_sheet_replace_sources_and_split_chapter():
     assert refused
 
 
-def editor_on(blocks, candidates):
-    """Ventana con un libro hecho a mano (y un PDF de una página por bloque) y su editor en la primera sección."""
+def editor_on(blocks, candidates, dark=False):
+    """Ventana con un libro hecho a mano (y un PDF de una página por bloque) y su editor en la primera sección;
+    dark: con el tema oscuro."""
     import app
     root, window = visible_window()
+    if dark:
+        window.theme_var.set("Oscuro")
+        window.apply_theme()
     doc = pymupdf.open()
     for n in range(max(b.page for b in blocks)):
         add_page(doc, n + 1, [(72, 100, f"Pagina {n}", 11, "helv")])

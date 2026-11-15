@@ -31,7 +31,7 @@ WHOLE = MIME + "-parrafos"  # lo copiado acaba en un salto de párrafo: se pegan
 ICON = _USER + 10     # imagen: la etiqueta <img> de un icono del texto (convert.ICON), que vuelve a section_text
 MARKS = re.compile(r'(</?(?:i|b|sup|sc)>|<a href="[^"]*">|</a>|<img class="icono" [^>]*>)')
 LINK = re.compile(r'<a href="([^"]*)">')
-LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; app.py pone el del tema
+LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; TextEditor pone el azul del tema
 NOTE = re.compile(r"\[Nota: [^\]]*\]")
 THUMB = 160  # alto de las miniaturas de ilustración en la hoja, en píxeles
 SPACE = 10  # píxeles entre párrafos, como el espaciado de Word (no se guarda)
@@ -1228,7 +1228,7 @@ class Sheet(QTextEdit):
         cursor.setPosition(block.position())
         cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
         cursor.removeSelectedText()
-        _insert_marked(cursor, line)
+        _insert_marked(cursor, line, self.color)  # los iconos, del color de los de la hoja
 
     # Cambios frente a lo cargado
     def changed_blocks(self):

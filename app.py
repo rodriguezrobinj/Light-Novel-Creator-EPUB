@@ -6312,6 +6312,7 @@ class TextEditor:
         QShortcut(QKeySequence("F11"), win, self.toggle_focus)  # también con el foco fuera de la hoja
         self.reading, self.speaker = None, None  # párrafo que se lee en voz alta (QTextBlock) y la voz (Speaker)
         self.colors = theme.colors(app.dark)
+        editor.LINK_COLOR = self.colors["acc"]  # el azul fijo apenas se leía sobre la hoja oscura (3:1)
         self.sheet = sheet = editor.Sheet()
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
         self.pages = {}  # (inicio, fin) -> {"doc", "look", "lines"} de cada sección visitada
