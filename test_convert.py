@@ -3250,6 +3250,38 @@ def test_link_sections_takes_handles_and_empty_titles_before_the_ads():
     assert convert.link_sections(book) == [2, 3, 4, 6, 7], convert.link_sections(book)
 
 
+def test_strange_grief_titles_bookmarks_and_patreon_page():
+    """Strange Grief Wants to Retire (Astral Novel). Tomo 10: el marcador del prólogo apunta a la página en blanco
+    de antes y el título salía dos veces; a doble espacio, «Capítulo Tres: La Batalla De Los» y «Dioses» (38 pt más
+    abajo, letra de 18) eran dos títulos y el capítulo quedaba cortado. Tomo 2: «… De «Absolute» + «Shadow»» perdía
+    el ». Tomo 3: la página de mecenas (nombres en 8 pt) avisaba de «Texto no incluido», ya en su ilustración."""
+    doc = pymupdf.open()
+    body = lambda y, n: [(85, y + 28 * j, line(f"Texto de la parte {n} linea {j}", 52), 12, "cour") for j in range(4)]
+    add_page(doc, 1, [])  # en blanco: aquí apunta el marcador del prólogo
+    add_page(doc, 2, [(85, 76, "Prologo: Divinidad", 18, "helv")] + body(130, 1))
+    add_page(doc, 3, [(85, 76, "Capitulo Tres: La Batalla De Los", 18, "helv"), (85, 114, "Dioses", 18, "helv")]
+             + body(160, 2))
+    add_page(doc, 4, [(85, 76, "Capitulo Cuatro: El Regreso De «Absolute", 18, "helv"), (85, 98, "Shadow»", 18, "helv")]
+             + body(160, 3))
+    # Tomos 4 y 6: «Bonus Story:» con su nombre en la línea de abajo sigue siendo un solo título
+    add_page(doc, 5, [(85, 76, "Bonus Story:", 18, "helv"), (85, 98, "La Coleccion de Reliquias", 18, "helv")]
+             + body(160, 4))
+    add_page(doc, 6, [(89, 107, "Especial Agradecimiento a los Patreons:", 26, "helv")]
+             + [(57, 152 + 19 * j, name, 8, "helv") for j, name in enumerate(("Carlos Ivan", "Marco Alvarez", "Pedro"))])
+    doc.set_toc([[1, "Prologo: Divinidad", 1], [1, "Capitulo Tres: La Batalla De Los Dioses", 3],
+                 [1, "Capitulo Cuatro: El Regreso De «Absolute Shadow»", 4], [1, "Bonus Story: La Coleccion de Reliquias", 5]])
+    path = TMP / "strange-grief.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    chapters = [html.unescape(book.blocks[k].html) for k in book.candidates]
+    assert chapters == ["Prologo: Divinidad", "Capitulo Tres: La Batalla De Los Dioses",
+                        "Capitulo Cuatro: El Regreso De «Absolute Shadow»", "Bonus Story: La Coleccion de Reliquias"], chapters
+    assert [b.kind for b in book.blocks if b.page == 6] == ["image"] and not book.skipped, (book.skipped, book.blocks[-1])
+    assert convert._series_volume("Strange Grief Wants to Retire - Volumen SS1 [Astral Novel]", "") == (
+        "Strange Grief Wants to Retire", "")
+    assert convert._typography("Uhm...Esta bien, y …Ya.") == "Uhm… Esta bien, y …Ya."  # 76 veces en el tomo 2
+
+
 def test_group_credits_page_becomes_an_illustration():
     """Easygoing 1 (Bell T): la última página («¡Gracias por Leer!», Patreon, redes, «@Dierch», logos) salía como
     cuatro secciones de texto en «Quitar». La página entera de publicidad del grupo es una ilustración, que se

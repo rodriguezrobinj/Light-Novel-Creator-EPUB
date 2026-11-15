@@ -125,7 +125,10 @@ def _series_volume(stem, meta_title):
     Si el nombre no dice la serie ("Volumen 1 World Project"), se usa el título del PDF."""
     m = VOLUME.search(stem)
     if not m:
-        return "", ""
+        # «Volumen SS1» (historias cortas, Strange Grief): la serie sí, sin número que ordenar
+        side = re.search(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*[^\W\d_]+\d*\b", stem, re.I)
+        series = re.sub(r"\[[^\]]*\]", "", stem[:side.start()]).strip(" -–—_.") if side else ""
+        return series, ""
     series = re.sub(r"\[[^\]]*\]", "", stem[:m.start()]).strip(" -–—_.")
     # el título del PDF «Maryoku - Volumen 3» también lleva el volumen: la serie es lo de antes
     if not series:
@@ -200,6 +203,7 @@ def _typography(html_text, dashes=True):
             text = re.sub(r"(?<=[^\W\d_])\s*[—―─]{2,}\s*(?=[^\W\d_]|[¿¡«“\"])", " — ", text)
         text = re.sub(r"[—―─]{2,}", "—", text)
         text = re.sub(r"…\.+", "…", re.sub(r"\.{3,}", "…", text)).replace("─", "—")  # «….»: sobra el punto
+        text = re.sub(r"(?<=[^\W\d_]{2})…(?=[A-ZÁÉÍÓÚÑ])", "… ", text)  # «Uhm…Esta» (Strange Grief 2: 76 veces)
         text = re.sub(r" {2,}", " ", text)
         parts[k] = re.sub(r" +([,.;:!?])", r"\1", text)
     chunks = [list(parts[k]) for k in range(0, len(parts), 2)]
@@ -424,8 +428,11 @@ CHAPTER_LABEL = re.compile(
 def _label(row):
     """Texto de una etiqueta de capítulo sola ("» Capítulo 1 «", "«Prólogo»", "CAPITULO UNO:"), sin
     adornos; None si la línea es otra cosa."""
-    text = row.text.strip(LABEL_DECOR).rstrip(":.").strip()
-    if text and (CHAPTER_LABEL.fullmatch(text) or (text != row.text.strip() and len(text) <= 40)):
+    text, raw = row.text.strip(LABEL_DECOR).rstrip(":.").strip(), row.text.strip()
+    # Con adorno a los dos lados: «Shadow»» es el final de un título partido («… «Absolute» + «Shadow»», Strange
+    # Grief 2), no una etiqueta; quitarle el » lo dejaba sin cerrar
+    marked = raw.endswith((":", ".")) or (raw[:1] in LABEL_DECOR and raw[-1:] in LABEL_DECOR)  # «Bonus Story:»
+    if text and (CHAPTER_LABEL.fullmatch(text) or (marked and text != raw and len(text) <= 40)):
         return text
     return None
 
@@ -2859,6 +2866,20 @@ def analyze(pdf_path, progress=None):
             chosen, inserted = set(), []
             for title, p in outline:
                 k = next((k for k, b in enumerate(blocks) if b.kind == "heading" and b.page == p), None)
+                if k is None:  # Strange Grief 10: el marcador apunta a la página en blanco de antes de su título
+                    k = next((k for k, b in enumerate(blocks) if b.kind == "heading" and b.page == p + 1
+                              and _key(html.unescape(b.html)) and _key(title).startswith(_key(html.unescape(b.html)))),
+                             None)
+                # A doble espacio, la segunda línea del título queda lejos y era otro título («Capítulo Tres: La
+                # Batalla De Los» + «Dioses», Strange Grief 10): el marcador lo dice entero, y se unen
+                while (k is not None and k + 1 < len(blocks) and blocks[k + 1].kind == "heading"
+                       and blocks[k + 1].page == blocks[k].page
+                       and len(_key(html.unescape(blocks[k].html))) < len(_key(title))
+                       and _key(title).startswith(_key(html.unescape(blocks[k].html + " " + blocks[k + 1].html)))):
+                    blocks[k].html += " " + blocks[k + 1].html
+                    blocks[k].rect = _rect([blocks[k], blocks[k + 1]]) if blocks[k].rect and blocks[k + 1].rect \
+                        else blocks[k].rect
+                    del blocks[k + 1]
                 if k is None:
                     k = next((k for k, b in enumerate(blocks) if b.page >= p), len(blocks))
                     blocks.insert(k, Block("heading", p, html.escape(title)))
@@ -2975,6 +2996,8 @@ def _credit_pages_as_images(book, doc):
             blocks.append(Block("image", b.page, image=_credit_image(doc[b.page - 1])))
     book.blocks = blocks
     book.candidates = [mapping[k] for k in book.candidates if k in mapping]
+    # Los nombres de la lista de mecenas (Strange Grief 1) van en la imagen: ya no es texto perdido
+    book.skipped = [s for s in book.skipped if s[0] not in pages]
 
 
 def uncredited(book):
