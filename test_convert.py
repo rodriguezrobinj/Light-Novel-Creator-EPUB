@@ -1246,6 +1246,30 @@ def test_epub_index_nests_subtitles_under_their_chapter():
     assert f'href="{target}"' in nav
 
 
+def test_epub_titles_without_controls_tags_in_index_or_hidden_quotes():
+    """Un carácter de control pegado en un título o en el texto no rompe el XML; un subtítulo en cursiva
+    con nota sale en el índice como texto, con la nota como llamada en el <h2>; las comillas del título
+    pasan por la limpieza tipográfica, también en <title>."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno\x01 dos."),
+              convert.Block("heading", 1, '<i>El</i> lado<span class="nota">Una nota.</span>'),
+              convert.Block("p", 1, convert._inline("Tres\x0b cuatro."))]
+    book = convert.Book("Libro\x08", "Autora\x02", b"", blocks, [0])
+    out = TMP / "controles.epub"
+    convert.write_epub(book, [(0, 'Capítulo 1: "Hola"\x07')], out, typography=True)
+    with zipfile.ZipFile(out) as z:
+        texts = {n: z.read(n).decode() for n in z.namelist() if n.endswith((".xhtml", ".opf", ".ncx"))}
+    for name, text in texts.items():
+        ET.fromstring(text.replace("<!DOCTYPE html>", ""))  # XML válido
+        assert not convert.BAD_XML.search(text), name
+    ns = {"n": "http://www.daisy.org/z3986/2005/ncx/"}
+    labels = [t.text for t in ET.fromstring(texts["OEBPS/toc.ncx"]).iter("{%s}text" % ns["n"])]
+    assert "El lado" in labels and all(t and "<" not in t for t in labels), labels
+    assert '<a href="sec001.xhtml#t2">El lado</a>' in texts["OEBPS/nav.xhtml"], texts["OEBPS/nav.xhtml"]
+    section = texts["OEBPS/sec001.xhtml"]
+    assert re.search(r'<h2 id="t2"><i>El</i> lado<a class="nref"[^>]*>1</a></h2>', section), section
+    assert "<title>Capítulo 1: «Hola»</title>" in section and "«Hola»" in texts["OEBPS/nav.xhtml"], section
+
+
 def sectioned_book():
     """Libro mínimo: dos capítulos, el primero con dos subtítulos."""
     blocks = [("heading", "Cap 1"), ("p", "Uno."), ("heading", "Lado A"), ("p", "Texto A."),

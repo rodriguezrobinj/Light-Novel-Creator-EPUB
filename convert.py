@@ -1122,7 +1122,7 @@ def _inline(text):
     """Línea escrita por el usuario a XHTML: escapada, salvo <i> y <b>, que se conservan si están bien
     cerradas; si no, se quitan para no romper el EPUB. "[Nota: …]" vuelve a ser la nota al pie, si
     dentro las etiquetas también cierran (si no, cruzarían el límite de la nota)."""
-    out = INLINE.sub(r"<\1\2>", html.escape(text, quote=False))
+    out = INLINE.sub(r"<\1\2>", html.escape(BAD_XML.sub("", text), quote=False))  # un control rompe el XML
     out = out if _balanced(out) else TAGS.sub("", out)
     out = LINK_MARK.sub(lambda m: f'<a href="{m[1]}">{m[2]}</a>' if _balanced(m[2]) else m[0], out)
     out = NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
@@ -2917,9 +2917,9 @@ def _xhtml(title, body, lang):
     return ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
             f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"'
             f' lang="{lang}" xml:lang="{lang}">\n'
-            f'<head><meta charset="utf-8"/><title>{html.escape(title)}</title>'
+            f'<head><meta charset="utf-8"/><title>{html.escape(BAD_XML.sub("", title))}</title>'
             '<link rel="stylesheet" type="text/css" href="style.css"/></head>\n'
-            f'<body>\n{body}\n</body>\n</html>\n')
+            f'<body>\n{BAD_XML.sub("", body)}\n</body>\n</html>\n')  # un carácter de control rompe el XML
 
 
 KOBO_BLOCK = re.compile(r"(<(p|h1|h2)\b[^>]*>)(.*?)(</\2>)", re.S)
@@ -3075,7 +3075,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     noted = 0  # notas al pie escritas: numeración seguida en todo el libro, ids únicos
     for n, (title, is_chapter, blocks) in enumerate(sections, 1):
         name = f"sec{n:03d}.xhtml"
-        parts = [_chapter_heading(fix(html.escape(title)))] if is_chapter else []
+        # quote=False: la limpieza tipográfica ve las comillas («"Hola"» -> «“Hola”»), no &quot;
+        heading = fix(html.escape(title, quote=False))
+        parts = [_chapter_heading(heading)] if is_chapter else []
         pending = None  # página que empieza en este tramo: su marca va en el siguiente párrafo o título
         notes = []  # (número, html) de las notas de esta sección: van al final, tras el texto
 
@@ -3121,8 +3123,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             elif b.kind == "break" or k in breaks:
                 parts.append(_separator(b if b.kind == "break" else Block("break", b.page), k, style, separator, images))
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
-                parts.append(f'{mark()}<h2 id="t{k}">{fix(b.html)}</h2>')  # fuera: el título queda limpio
-                subtitles.setdefault(name, []).append((f"t{k}", fix(b.html)))
+                parts.append(f'{mark()}<h2 id="t{k}">{NOTE.sub(noteref, fix(b.html))}</h2>')  # fuera: el título queda limpio
+                # en el índice, texto solo: <i> no vale en el <text> del NCX y la nota no es del título
+                subtitles.setdefault(name, []).append((f"t{k}", TAGS.sub("", NOTE.sub("", fix(b.html)))))
             else:
                 if framed[at]:
                     bullet = _plain(b)[:1] in BULLETS  # un apartado nuevo del recuadro («◆ Equipment») se separa
@@ -3141,7 +3144,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         tag, kind = ("div", "") if epub2 else ("aside", ' epub:type="footnote"')
         parts += [f'<{tag}{kind} class="nota" id="nota{k}"><p><a href="#ref{k}">{k}</a>. {text}</p></{tag}>'
                   for k, text in notes]
-        files[name] = _xhtml(title, "\n".join(parts), lang)
+        files[name] = _xhtml(html.unescape(heading), "\n".join(parts), lang)
 
     uid = f"urn:uuid:{uuid.uuid4()}"
     title = html.escape(book.title)
@@ -3167,7 +3170,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     if book.publisher:
         meta.append(f"<dc:publisher>{html.escape(book.publisher)}</dc:publisher>")
     if book.description:
-        meta.append(f"<dc:description>{html.escape(BAD_XML.sub('', book.description))}</dc:description>")
+        meta.append(f"<dc:description>{html.escape(book.description)}</dc:description>")
     meta += [f"<dc:subject>{html.escape(s.strip())}</dc:subject>" for s in book.subjects.split(",") if s.strip()]
     if book.date:
         meta.append(f"<dc:date>{html.escape(book.date)}</dc:date>")
@@ -3254,12 +3257,12 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         subs = subtitles.get(name, [])
         children = "".join(f'<li><a href="{name}#{anchor}">{text}</a></li>' for anchor, text in subs)
         children = f"<ol>{children}</ol>" if subs else ""
-        items.append(f'<li><a href="{name}">{fix(html.escape(t))}</a>{children}</li>')
+        items.append(f'<li><a href="{name}">{fix(html.escape(t, quote=False))}</a>{children}</li>')
         minutes = reading_minutes([b for _, b in sec[2]]) if reading else 0
         extra = f' <span class="min">· {minutes} min</span>' if minutes else ""
-        shown.append(f'<li><a href="{name}">{fix(html.escape(t))}</a>{extra}{children}</li>')
+        shown.append(f'<li><a href="{name}">{fix(html.escape(t, quote=False))}</a>{extra}{children}</li>')
         order += 1  # playOrder: el capítulo antes que sus subtítulos, todos correlativos
-        point = (f'<navPoint id="n{order}" playOrder="{order}"><navLabel><text>{fix(html.escape(t))}</text></navLabel>'
+        point = (f'<navPoint id="n{order}" playOrder="{order}"><navLabel><text>{fix(html.escape(t, quote=False))}</text></navLabel>'
                  f'<content src="{name}"/>')
         for anchor, text in subs:
             order += 1
@@ -3301,13 +3304,13 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
             z.writestr("META-INF/container.xml", CONTAINER)
-            z.writestr("OEBPS/content.opf", opf)
+            z.writestr("OEBPS/content.opf", BAD_XML.sub("", opf))  # metadatos pegados con controles
             z.writestr("OEBPS/nav.xhtml", nav)
             if contents:
                 z.writestr("OEBPS/contents.xhtml", contents_page)
             if credits:
                 z.writestr("OEBPS/credits.xhtml", credits_page)
-            z.writestr("OEBPS/toc.ncx", ncx)
+            z.writestr("OEBPS/toc.ncx", BAD_XML.sub("", ncx))
             z.writestr("OEBPS/style.css", css)
             z.writestr("OEBPS/cover.xhtml", cover)
             z.writestr("OEBPS/cover.jpg", _shrink(book.cover, limit) if limit and book.cover else book.cover)
