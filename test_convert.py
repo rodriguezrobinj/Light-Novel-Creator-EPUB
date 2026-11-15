@@ -1851,10 +1851,9 @@ def test_window_close_stops_work_and_removes_partial_epub():
     import time
 
     root, window = visible_window()
-    window.run(time.sleep, (30,), lambda _: None)
     partial = TMP / "cerrar.epub.tmp"
     partial.write_bytes(b"a medio escribir")
-    window.partial = str(partial)
+    window.run(time.sleep, (30,), lambda _: None, partial=[partial])
     window.close()
     assert not partial.exists()
     assert not window.proc.is_alive()
