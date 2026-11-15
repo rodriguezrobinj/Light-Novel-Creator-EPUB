@@ -1954,6 +1954,58 @@ def test_window_starts_work_with_big_data_without_freezing():
     assert took < 0.5, took
 
 
+def test_window_cancels_work_and_cleans_up():
+    """«Cancelar» junto a la barra detiene el trabajo y borra lo que dejó a medias; un trabajo que no llega a
+    empezar (datos que no se pueden pasar al proceso) avisa y no deja la ventana ocupada; cerrar a mitad borra los
+    datos del trabajo, y al arrancar se barren los de más de un día que dejó una ventana cerrada de golpe."""
+    import tempfile
+    import time
+
+    import app
+
+    root, window = visible_window()
+    shown, original = [], app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message, **_: shown.append(message)
+    try:
+        started = window.run(len, (lambda: None,), lambda _: None)  # una lambda no se puede pasar al proceso
+        window.poll()
+        failed = started, window.done, window.open_btn.isEnabled()
+    finally:
+        app.messagebox.showerror = original
+    partial = TMP / "a medias.epub.tmp"
+    partial.write_bytes(b"PK")
+    window.run(time.sleep, (30,), lambda _: None, partial=[partial])
+    root.update()
+    visible = window.cancel_btn.isVisible()
+    proc, args_file = window.proc, window.args_file
+    window.cancel_btn.click()
+    root.update()
+    window.poll()
+    cancelled = (proc.is_alive(), partial.exists(), Path(args_file).exists(), window.done, window.cancel_btn.isVisible(),
+                 window.status.text(), window.open_btn.isEnabled())
+    window.run(time.sleep, (30,), lambda _: None)
+    args_file = window.args_file
+    window.close()
+    closed = Path(args_file).exists()
+    saved, tempfile.tempdir = tempfile.tempdir, str(TMP)  # el barrido mira en %TEMP%: aquí, la carpeta de la prueba
+    try:
+        old, new, other = TMP / "lnepub-trabajo-viejo.pickle", TMP / "lnepub-vista-1.epub", TMP / "lnepub-otro.epub"
+        for path in (old, new, other):
+            path.write_bytes(b"x")
+        os.utime(old, (time.time() - 2 * 86400,) * 2)
+        os.utime(other, (time.time() - 2 * 86400,) * 2)
+        app._sweep_temp()
+        swept = old.exists(), new.exists(), other.exists()
+    finally:
+        tempfile.tempdir = saved
+    assert failed == (False, None, True) and shown and "No se pudo empezar" in shown[0], (failed, shown)
+    assert visible, "sin botón Cancelar durante el trabajo"
+    assert cancelled == (False, False, False, None, False, "Cancelado", True), cancelled
+    assert not closed, "quedó el archivo de datos del trabajo"
+    assert swept == (False, True, True), swept
+    assert app._batch_partials([TMP / "Libro.pdf"]) == [f"{TMP / 'Libro.epub'}.tmp", f"{TMP / 'Libro.kepub.epub'}.tmp"]
+
+
 def test_window_quality_report_not_repeated_for_the_same_text():
     """El informe tarda ~1 s en un libro largo: deshacer, cambiar de tema o abrir el informe con el mismo
     texto no lo calculan otra vez (la ventana se congelaba cada vez). Un cambio del texto sí."""
@@ -2195,6 +2247,39 @@ def test_window_epubcheck_asks_before_downloading():
     assert "Java" in told[0] and "33 MB" in asked[0] and ran == [], (told, asked, ran)
     assert clean == "Sin errores ni advertencias: el EPUB cumple el estándar.", clean
     assert status == "EPUBCheck: 1 error, 1 advertencia", status
+
+
+def test_epubcheck_download_is_checked_and_replaced_whole():
+    """La descarga de EPUBCheck se compara con el resumen del oficial antes de descomprimirla (Java ejecutaría lo
+    que traiga), y se pone en su sitio de una vez: un corte a mitad dejaba el .jar sin sus bibliotecas."""
+    import io
+
+    import app
+
+    inside = f"epubcheck-{app.EPUBCHECK_VERSION}/"
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as z:
+        z.writestr(inside + "epubcheck.jar", b"jar")
+        z.writestr(inside + "lib/otra.jar", b"lib")
+    folder = TMP / "epubcheck-descarga"
+    (folder / inside).mkdir(parents=True, exist_ok=True)
+    (folder / inside / "epubcheck.jar").write_bytes(b"a medias")  # un corte anterior: sin lib/
+    saved = app.urllib.request.urlopen, app.EPUBCHECK_SHA256
+    app.urllib.request.urlopen = lambda url, timeout: io.BytesIO(data.getvalue())
+    try:
+        try:
+            app._download_epubcheck(folder)
+            refused = ""
+        except RuntimeError as e:
+            refused = str(e)
+        kept = (folder / inside / "epubcheck.jar").read_bytes()
+        app.EPUBCHECK_SHA256 = app._epubcheck_digest(zipfile.ZipFile(io.BytesIO(data.getvalue())))
+        jar = app._download_epubcheck(folder)
+    finally:
+        app.urllib.request.urlopen, app.EPUBCHECK_SHA256 = saved
+    assert "no coincide" in refused and kept == b"a medias", (refused, kept)
+    assert Path(jar).read_bytes() == b"jar" and (folder / inside / "lib" / "otra.jar").is_file(), jar
+    assert sorted(p.name for p in folder.iterdir()) == [inside.rstrip("/")], list(folder.iterdir())  # sin restos
 
 
 def test_write_pdf_bookmarks_numbers_and_metadata():

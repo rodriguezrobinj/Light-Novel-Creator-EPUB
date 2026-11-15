@@ -226,12 +226,23 @@ def _spell_server(requests, replies):
 EPUBCHECK_VERSION = "5.4.0"
 EPUBCHECK_URL = (f"https://github.com/w3c/epubcheck/releases/download/v{EPUBCHECK_VERSION}/"
                  f"epubcheck-{EPUBCHECK_VERSION}.zip")
+# Resumen de lo que trae el zip oficial (_epubcheck_digest), sacado de la copia de 5.4.0 descargada de GitHub: el zip
+# no se guarda y así vale sea cual sea su compresión. Con otra versión hay que sacarlo de nuevo; vacío, no se comprueba
+EPUBCHECK_SHA256 = "2f6c560858b770a2278c4c319f3a4f657f1e580e91ca0a0f948975a259281886"
 EPUBCHECK_LEVELS = {"FATAL": "Error grave", "ERROR": "Error", "WARNING": "Advertencia", "USAGE": "Sugerencia",
                     "INFO": "Información"}
 
 
 def _epubcheck_jar():
     return SETTINGS.parent / f"epubcheck-{EPUBCHECK_VERSION}" / "epubcheck.jar"
+
+
+def _epubcheck_digest(z):
+    """sha256 de los nombres y el sha256 de cada archivo del zip, en orden."""
+    digest = hashlib.sha256()
+    for name in sorted(n for n in z.namelist() if not n.endswith("/")):
+        digest.update(name.encode() + b"\0" + hashlib.sha256(z.read(name)).digest())
+    return digest.hexdigest()
 
 
 def _download_epubcheck(folder):
@@ -245,13 +256,27 @@ def _download_epubcheck(folder):
     except OSError as e:
         part.unlink(missing_ok=True)
         raise RuntimeError("No se pudo descargar EPUBCheck: comprueba la conexión a internet.") from e
-    with zipfile.ZipFile(part) as z:
-        names = z.namelist()
-        # Solo su carpeta: un nombre con «..» o fuera de ella escribiría donde no debe
-        if not names or any(not n.startswith(inside) or ".." in Path(n).parts for n in names):
-            raise RuntimeError("El archivo descargado de EPUBCheck no es el esperado.")
-        z.extractall(folder)
-    part.unlink()
+    try:
+        with zipfile.ZipFile(part) as z:
+            names = z.namelist()
+            # Solo su carpeta: un nombre con «..» o fuera de ella escribiría donde no debe
+            if not names or any(not n.startswith(inside) or ".." in Path(n).parts for n in names):
+                raise RuntimeError("El archivo descargado de EPUBCheck no es el esperado.")
+            if EPUBCHECK_SHA256 and _epubcheck_digest(z) != EPUBCHECK_SHA256:  # Java ejecutaría lo que traiga
+                raise RuntimeError("El EPUBCheck descargado no coincide con el oficial: no se usa.")
+            # Se descomprime aparte y se pone en su sitio de una vez: un corte a mitad dejaba el .jar sin sus
+            # bibliotecas y la ventana ya no lo volvía a descargar
+            tmp = Path(tempfile.mkdtemp(prefix="lnepub-epubcheck-", dir=folder))
+            try:
+                z.extractall(tmp)
+                shutil.rmtree(folder / inside, ignore_errors=True)
+                os.replace(tmp / inside, folder / inside)
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+    except zipfile.BadZipFile as e:
+        raise RuntimeError("El archivo descargado de EPUBCheck no es el esperado.") from e
+    finally:
+        part.unlink(missing_ok=True)
     return str(folder / inside / "epubcheck.jar")
 
 
@@ -476,6 +501,16 @@ def _analyze(pdf, progress=None):
     ventana congelaban al abrir (Kage 5: 2,4 s las repetidas; Nageki 1: 0,9 s el informe)."""
     book = convert.analyze(pdf, progress)
     return book, convert.duplicate_images(book), convert.quality_report(book), convert.report_memos()
+
+
+def _sweep_temp(age=86400):
+    """Borra de %TEMP% los datos de trabajos y las vistas previas de más de un día: los deja una ventana que se
+    cerró de golpe (corte de luz, Administrador de tareas)."""
+    for path in Path(tempfile.gettempdir()).glob("lnepub-*"):
+        if path.name.startswith(("lnepub-trabajo-", "lnepub-vista-")) and path.suffix in (".pickle", ".epub"):
+            with contextlib.suppress(OSError):  # otra ventana lo tiene abierto
+                if time.time() - path.stat().st_mtime > age:
+                    path.unlink()
 
 
 def _write_json(path, data):
@@ -1208,6 +1243,11 @@ def _prepare(pdf, options):
     return book, chapters, removed, state
 
 
+def _batch_partials(pdfs):
+    """Los EPUB a medio escribir que _batch puede dejar junto a cada PDF (normal o KEPUB, según su revisión)."""
+    return [f"{_epub_name(_out(pdf), kepub)}.tmp" for pdf in pdfs for kepub in (False, True)]
+
+
 def _batch(pdfs, options, progress=None):
     """Convierte varios PDF, cada uno junto a su EPUB (ver _prepare). Devuelve [(nombre del PDF,
     error o "", problemas del EPUB según check_epub)]."""
@@ -1706,13 +1746,14 @@ class App:
         self.events = multiprocessing.Queue()  # el proceso de trabajo envía aquí progreso y resultado
         self.done = None                       # qué hacer con el resultado del trabajo en curso
         self.latest = None                     # último progreso (hecho, total) pendiente de pintar
-        self.partial = None                    # EPUB a medio escribir del trabajo en curso
+        self.partial = None                    # archivos a medio escribir del trabajo en curso (ver run)
         self.args_file = ""                    # datos del trabajo en curso, para el proceso (ver run)
         self.reports = {}                      # informes de calidad ya calculados (ver quality_report)
         self.editor_save = None                # guarda y cierra el cuadro de edición abierto
         self.view = None                       # última posición del scroll de la lista
         self.pdf_doc = None                    # PDF abierto para la vista previa
         self.preview_path = os.path.join(tempfile.gettempdir(), f"lnepub-vista-{os.getpid()}.epub")
+        _sweep_temp()
         # Lo que se escribió en preview_path y ese EPUB ya maquetado ((ancho, alto), documento, páginas): un
         # cambio pedía la vista previa hasta 4 veces y maquetarla cada vez paraba la ventana medio segundo
         self.preview_key, self.preview_doc = None, None
@@ -1951,7 +1992,9 @@ class App:
         self.status = StatusLabel(objectName="muted")
         # Un estado largo se recorta en vez de ensanchar la ventana más allá de la pantalla
         self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        status_row = _row(self.progress, self.status, self.quality_btn)
+        self.cancel_btn = _button("Cancelar", self.cancel_work)  # solo con un trabajo en curso (update_chrome)
+        self.cancel_btn.setToolTip("Detiene el trabajo en curso; lo que estaba a medio escribir se borra")
+        status_row = _row(self.progress, self.cancel_btn, self.status, self.quality_btn)
         status_row.setStretchFactor(self.status, 1)  # con un hueco elástico al lado, Ignored se quedaba en 0 px
         rows.addLayout(status_row)
         outer.addWidget(bottom)
@@ -2123,27 +2166,54 @@ class App:
         self.views_size = None
         self.redraw()
 
-    def run(self, work, args, done, report=False, busy="Analizando…"):
+    def run(self, work, args, done, report=False, busy="Analizando…", partial=()):
         """Ejecuta work(*args) en otro proceso y llama a done(resultado) en la ventana.
-        Con report=True, work recibe progress=... y la barra avanza junto al texto busy. False si ya había
-        un trabajo en curso: su resultado llegaría a este done."""
+        Con report=True, work recibe progress=... y la barra avanza junto al texto busy. partial: archivos a medio
+        escribir que se borran si el trabajo se cancela o se cierra la ventana. False si ya había un trabajo en
+        curso (su resultado llegaría a este done) o si no se pudo empezar."""
         if self.done:
+            self.status.setText("Espera a que termine el trabajo en curso")  # el menú no se desactiva como los botones
             return False
         self.open_btn.setEnabled(False)
         self.batch_btn.setEnabled(False)
         self.gen_btn.setEnabled(False)
         self.pdf_btn.setEnabled(False)
-        self.done, self.busy = done, busy
+        self.done, self.busy, self.partial = done, busy, list(partial)
         self.update_chrome()  # sin libro, la barra de abajo aparece para el progreso
         # Los datos van en un archivo: por la tubería del proceso nuevo, la ventana esperaba a que arrancara
         # para leerlos (unos 3 s con un libro con ilustraciones). Así start() vuelve enseguida.
-        fd, path = tempfile.mkstemp(prefix="lnepub-trabajo-", suffix=".pickle")
-        with os.fdopen(fd, "wb") as f:
-            pickle.dump(args, f, protocol=pickle.HIGHEST_PROTOCOL)
-        self.args_file = path
-        self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, path, report), daemon=True)
-        self.proc.start()
+        try:
+            fd, self.args_file = tempfile.mkstemp(prefix="lnepub-trabajo-", suffix=".pickle")
+            with os.fdopen(fd, "wb") as f:
+                pickle.dump(args, f, protocol=pickle.HIGHEST_PROTOCOL)
+            self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, self.args_file, report),
+                                                daemon=True)
+            self.proc.start()
+        except Exception as e:  # disco lleno, sin permisos en %TEMP%: sin esto la ventana se quedaba ocupada
+            _log(traceback.format_exc())
+            self.proc = None
+            self.finish(("error", f"No se pudo empezar el trabajo: {e or type(e).__name__}"))
+            return False
         return True
+
+    def stop_work(self):
+        """Detiene el proceso de trabajo y borra lo que dejó a medias: el EPUB o PDF y el archivo de sus datos."""
+        if self.proc is not None and self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join()
+        for path in self.partial or ():
+            Path(path).unlink(missing_ok=True)
+        if self.args_file:
+            with contextlib.suppress(OSError):  # el proceso lo borra al leerlo
+                os.remove(self.args_file)
+
+    def cancel_work(self):
+        """«Cancelar», junto a la barra de progreso."""
+        if not self.done:
+            return
+        self.stop_work()
+        self.events = multiprocessing.Queue()  # la del proceso detenido puede quedar a medias o con su último aviso
+        self.finish(("cancel",))
 
     def update_chrome(self):
         """Sin libro abierto, solo lo que sirve para empezar: abrir, convertir una carpeta, las herramientas que no
@@ -2153,6 +2223,7 @@ class App:
         for widget in (self.options_row, self.quality_btn, self.recent_btn, self.file_label, self.find_btn):
             widget.setVisible(has)
         self.bottom.setVisible(has or self.done is not None)
+        self.cancel_btn.setVisible(self.done is not None)
         for action in self.book_actions:  # ocultas: en gris, en el tema oscuro parecían activas
             action.setVisible(has)
 
@@ -2196,6 +2267,13 @@ class App:
             self.pdf_btn.setEnabled(True)
         if event[0] == "done":
             done(event[1])
+        elif event[0] == "cancel":
+            self.progress.setValue(0)
+            if not self.book:  # análisis cancelado: el libro de antes ya se cerró, se vuelve al inicio
+                self.pdf = None
+                self.stack.setCurrentIndex(0)
+                self.update_header()
+            self.status.setText("Cancelado")
         else:
             self.progress.setValue(0)
             self.status.setText("Error")
@@ -2232,11 +2310,8 @@ class App:
             qtk.cancel(self.lang_timer)
         self.save_review()
         self.save_settings()
-        if self.done and self.proc.is_alive():
-            self.proc.terminate()
-            self.proc.join()
-            if self.partial:
-                Path(self.partial).unlink(missing_ok=True)
+        if self.done:
+            self.stop_work()
         self.thumb_job += 1  # cancela las miniaturas pendientes
         if self.pdf_doc:
             self.pdf_doc.close()
@@ -2596,6 +2671,7 @@ class App:
     def open_path(self, path):
         """Abre un PDF o un EPUB: desde el botón, el menú de recientes o arrastrado sobre el .exe."""
         if self.done:  # hay un trabajo en curso
+            self.status.setText("Espera a que termine el trabajo en curso")  # doble clic en el panel de serie
             return
         if not Path(path).is_file():
             messagebox.showerror("Error", f"No se encuentra el archivo:\n{path}")
@@ -2846,9 +2922,9 @@ class App:
         out = _epub_name(out, self.kepub_var.get())
         chapters, removed, breaks = self.prepare_output()
         self.status.setText("Generando EPUB…")
-        if self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
-                    lambda problems: self.saved(out, problems), report=True, busy="Generando EPUB…"):
-            self.partial = f"{out}.tmp"  # el nombre temporal que usa write_epub
+        self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
+                 lambda problems: self.saved(out, problems), report=True, busy="Generando EPUB…",
+                 partial=[f"{out}.tmp"])  # el nombre temporal que usa write_epub
 
     def fill_pdf_menu(self):
         """«PDF ▾»: el tamaño preferido (Opciones → PDF) primero."""
@@ -2874,9 +2950,9 @@ class App:
         chapters, removed, breaks = self.prepare_output()
         self.status.setText(f"Generando PDF {size}…")
         options = {**self.write_options(breaks), "whole_words": self.whole_words_var.get()}  # solo el PDF
-        if self.run(_write_pdf, (self.book, chapters, out, removed, options, size),
-                    lambda problems: self.saved(out, problems), report=True, busy="Maquetando el PDF…"):
-            self.partial = f"{out}.tmp"
+        self.run(_write_pdf, (self.book, chapters, out, removed, options, size),
+                 lambda problems: self.saved(out, problems), report=True, busy="Maquetando el PDF…",
+                 partial=[f"{out}.tmp"])
 
     def prepare_output(self):
         """Los datos de la ventana al libro y la revisión guardada antes de generar: (capítulos, quitados, separadores)."""
@@ -4016,7 +4092,7 @@ class App:
             return
         options = self.new_book_options()
         self.run(_batch, ([str(p) for p in pdfs], options), lambda results: self.batch_done(results, folder),
-                 report=True, busy="Convirtiendo…")
+                 report=True, busy="Convirtiendo…", partial=_batch_partials(pdfs))
 
     def batch_done(self, results, folder=None):
         self.progress.setValue(0)
@@ -4048,7 +4124,8 @@ class App:
         if ready:
             self.watch_skip.update(ready)  # un PDF que falla no se reintenta en cada vuelta
             options = self.new_book_options()
-            self.run(_batch, (ready, options), self.watch_done, report=True, busy="Carpeta vigilada:")
+            self.run(_batch, (ready, options), self.watch_done, report=True, busy="Carpeta vigilada:",
+                     partial=_batch_partials(ready))
 
     def watch_done(self, results):
         """Sin ventanas emergentes: la conversión pasa sola, quizá con el usuario en otra cosa."""
@@ -4578,9 +4655,8 @@ class App:
         self.save_review()  # el tomo abierto entra con lo revisado hasta ahora
         options = self.new_book_options()
         options["replacements"] = self.replacements
-        if self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems), report=True,
-                    busy="Preparando el recopilatorio…"):
-            self.partial = f"{out}.tmp"
+        self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems), report=True,
+                 busy="Preparando el recopilatorio…", partial=[f"{out}.tmp"])
 
     def install(self):
         """Instala el .exe para este usuario (ver _install). Desde Python no hay .exe que instalar."""
