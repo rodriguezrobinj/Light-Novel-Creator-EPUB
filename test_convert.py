@@ -9181,6 +9181,9 @@ if __name__ == "__main__":
     # prefijo lnepub-: el hook de limpieza borra lo que quede si las pruebas se cortan
     with tempfile.TemporaryDirectory(prefix="lnepub-test-", ignore_cleanup_errors=True) as tmp:
         TMP = Path(tmp)
+        # antes de importar app, que lee de aquí sus rutas: los procesos hijos heredan el entorno, no el parche de abajo
+        for var in ("APPDATA", "LOCALAPPDATA"):
+            os.environ[var] = str(TMP / var.lower())
         import app
         app.SETTINGS = TMP / "ajustes.json"  # nunca las preferencias reales del usuario
         for name, fn in list(globals().items()):
