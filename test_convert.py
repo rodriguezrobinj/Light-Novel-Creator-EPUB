@@ -7528,6 +7528,35 @@ def test_kepub_option_profiles_and_names():
     assert "kepub" in app.INHERITED and "kepub" in __import__("options").BOOK_KEYS
 
 
+def test_window_asks_before_overwriting_the_final_name():
+    """El diálogo de guardar solo pregunta por el nombre elegido: «Libro.epub» con el formato Kobo se escribe como
+    «Libro.kepub.epub», y «Libro» sin extensión como «Libro.pdf»; si ese archivo ya existe, se pregunta antes de
+    pisarlo, y con «No» no se genera nada."""
+    import app
+
+    root, window = versioned_window()
+    for name in ("Pisar.kepub.epub", "Pisar.pdf"):
+        (TMP / name).write_bytes(b"de antes")
+    asked, ran, answers = [], [], [False, True, False]
+    saved = app.filedialog.asksaveasfilename, app.messagebox.askyesno, window.run
+    app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or answers.pop(0)
+    window.run = lambda work, args, done, **_: ran.append(args[2]) or True
+    try:
+        window.kepub_var.set(True)
+        app.filedialog.asksaveasfilename = lambda **_: str(TMP / "Pisar.epub")
+        window.generate()  # «No»: nada
+        window.generate()  # «Sí»: el .kepub.epub
+        app.filedialog.asksaveasfilename = lambda **_: str(TMP / "Pisar")
+        window.generate_pdf("A5")  # «No»
+        app.filedialog.asksaveasfilename = lambda **_: str(TMP / "Nuevo")
+        window.generate_pdf("A5")  # no existe: sin preguntar
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.askyesno, window.run = saved
+    window.close()
+    assert len(asked) == 3 and "Pisar.kepub.epub" in asked[0] and "Pisar.pdf" in asked[2], asked
+    assert ran == [str(TMP / "Pisar.kepub.epub"), str(TMP / "Nuevo.pdf")], ran
+
+
 def test_batch_with_kobo_writes_kepub():
     import app
 

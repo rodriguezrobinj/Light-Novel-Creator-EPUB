@@ -578,6 +578,13 @@ def _epub_name(path, kepub):
     return re.sub(r"(\.kepub)?\.epub$", "", str(path), flags=re.I) + (".kepub.epub" if kepub else ".epub")
 
 
+def _confirm_name(chosen, final, parent=None):
+    """El diálogo de guardar solo pregunta antes de pisar el nombre elegido; si luego cambia (la extensión o el
+    .kepub.epub del Kobo se añaden después), un archivo con el nombre final se reemplaza solo si el usuario quiere."""
+    return (os.path.normcase(chosen) == os.path.normcase(final) or not Path(final).exists()
+            or messagebox.askyesno("Reemplazar", f"Ya existe «{Path(final).name}».\n\n¿Reemplazarlo?", parent=parent))
+
+
 def _out(source):
     """Ruta del EPUB de salida sin extensión: junto al original y con su nombre; un EPUB de entrada lleva
     además «(LNC)» para no pisarse."""
@@ -2979,12 +2986,11 @@ class App:
             self.editor_save()
 
     def generate(self):
-        out = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[("EPUB", "*.epub")],
-                                           initialdir=self.pdf.parent,
-                                           initialfile=_epub_name(_out(self.pdf).name, self.kepub_var.get()))
-        if not out:
+        chosen = filedialog.asksaveasfilename(filetypes=[("EPUB", "*.epub")], initialdir=self.pdf.parent,
+                                              initialfile=_epub_name(_out(self.pdf).name, self.kepub_var.get()))
+        out = _epub_name(chosen, self.kepub_var.get())  # sin extensión, o .kepub.epub para el Kobo
+        if not chosen or not _confirm_name(chosen, out):
             return
-        out = _epub_name(out, self.kepub_var.get())
         chapters, removed, breaks = self.prepare_output()
         self.status.setText("Generando EPUB…")
         self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
@@ -3004,10 +3010,10 @@ class App:
         """«PDF ▾»: el libro maquetado en PDF al tamaño elegido (convert.PDF_SIZES), con las opciones del EPUB."""
         if not self.book:
             return
-        out = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")],
-                                           initialdir=self.pdf.parent,
-                                           initialfile=f"{_out(self.pdf).name} ({size}).pdf")
-        if not out:
+        chosen = filedialog.asksaveasfilename(filetypes=[("PDF", "*.pdf")], initialdir=self.pdf.parent,
+                                              initialfile=f"{_out(self.pdf).name} ({size}).pdf")
+        out = chosen if chosen.lower().endswith(".pdf") else chosen + ".pdf"
+        if not chosen or not _confirm_name(chosen, out):
             return
         if Path(out).resolve() == Path(self.pdf).resolve():  # mismo nombre que el original: lo pisaría
             messagebox.showerror("Generar PDF", "Ese es el PDF original: elige otro nombre.")
@@ -4065,9 +4071,10 @@ class App:
         def export_one():
             row = listing.currentRow()
             name = self.image_name(row + 1, order[row])
-            path = filedialog.asksaveasfilename(defaultextension=Path(name).suffix, initialfile=name,
-                                                initialdir=folder_of_book(), filetypes=IMAGE_TYPES, parent=win)
-            if path:
+            chosen = filedialog.asksaveasfilename(initialfile=name, initialdir=folder_of_book(), filetypes=IMAGE_TYPES,
+                                                  parent=win)
+            path = chosen if Path(chosen).suffix else chosen + Path(name).suffix
+            if chosen and _confirm_name(chosen, path, win):
                 Path(path).write_bytes(self.book.blocks[order[row]].image)
                 note.setText(f"Exportada en {path}")
 
@@ -4478,11 +4485,12 @@ class App:
     def export_report(self, report, score, parent):
         """«Exportar…» del informe de calidad: .html para leerlo sin la app o .csv para Excel."""
         name = f"{self.pdf.stem if self.pdf else self.book.title} - informe de calidad.html"
-        path = filedialog.asksaveasfilename(defaultextension=".html", initialfile=name, parent=parent,
-                                            initialdir=str(self.pdf.parent) if self.pdf else None,
-                                            filetypes=[("Página web", "*.html"), ("Tabla para Excel", "*.csv")],
-                                            title="Exportar el informe de calidad")
-        if not path:
+        chosen = filedialog.asksaveasfilename(initialfile=name, parent=parent,
+                                              initialdir=str(self.pdf.parent) if self.pdf else None,
+                                              filetypes=[("Página web", "*.html"), ("Tabla para Excel", "*.csv")],
+                                              title="Exportar el informe de calidad")
+        path = chosen if Path(chosen).suffix else chosen + ".html"
+        if not chosen or not _confirm_name(chosen, path, parent):
             return
         try:
             convert.export_report(report, path, self.title_var.get() or self.book.title, score)
@@ -4717,12 +4725,11 @@ class App:
                 messagebox.showinfo("Volumen recopilatorio", "Elige al menos dos tomos.")
             return
         pdfs = sorted(paths)
-        out = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[("EPUB", "*.epub")],
-                                           initialdir=Path(pdfs[0]).parent,
-                                           initialfile=_epub_name("Recopilatorio", self.kepub_var.get()))
-        if not out:
+        chosen = filedialog.asksaveasfilename(filetypes=[("EPUB", "*.epub")], initialdir=Path(pdfs[0]).parent,
+                                              initialfile=_epub_name("Recopilatorio", self.kepub_var.get()))
+        out = _epub_name(chosen, self.kepub_var.get())
+        if not chosen or not _confirm_name(chosen, out):
             return
-        out = _epub_name(out, self.kepub_var.get())
         self.save_review()  # el tomo abierto entra con lo revisado hasta ahora
         options = self.new_book_options()
         options["replacements"] = self.replacements
