@@ -615,9 +615,11 @@ class Sheet(QTextEdit):
         # los de abajo se movían y Qt no volvía a pintar lo visible: huecos con el texto «debajo» hasta mover el
         # divisor. Con cada cambio de alto se pinta la hoja entera
         document.documentLayout().documentSizeChanged.connect(lambda size: self.viewport().update())
+        document.documentLayout().update.connect(lambda rect: self.viewport().update())
         look = self.look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
         look.tags = self.tags
         look.set_unknown(self.unknown)
+        document.pageCount()  # maqueta la hoja entera ya: Qt lo hace a trozos y pintaba con ella a medias
         self.moveCursor(QTextCursor.MoveOperation.Start)
         return document, look
 
@@ -726,6 +728,18 @@ class Sheet(QTextEdit):
         self.setDocument(document)
         document.setDefaultFont(self.font())
         self.look = look
+        document.pageCount()  # maquetada entera, como al cargarla
+
+    def scrollContentsBy(self, dx, dy):
+        """Al desplazarse Qt mueve lo ya pintado y solo dibuja la franja nueva: si la maquetación cambió entre
+        tanto (salto a un párrafo lejano en un capítulo largo), quedaban restos y huecos. Se pinta todo."""
+        super().scrollContentsBy(dx, dy)
+        self.viewport().update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.document().pageCount()  # otro ancho, otra maquetación: entera, no a trozos
+        self.viewport().update()
 
     def content(self):
         return dump(self.document())
@@ -789,6 +803,8 @@ class Sheet(QTextEdit):
         # En la hoja de estilo: la QSS de la ventana (9 pt para todo) pisaría un setFont o la fuente del documento
         self.setStyleSheet(f"QTextEdit#sheet {{ font-family: 'Segoe UI'; font-size: {FONT_SIZE * percent / 100:.1f}pt; }}")
         self.document().setDefaultFont(self.font())
+        self.document().pageCount()  # otra letra, otra maquetación: entera
+        self.viewport().update()
 
     def goto_source(self, k):
         """Cursor al principio del párrafo que viene del bloque k (si está)."""
