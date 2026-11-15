@@ -1272,7 +1272,7 @@ def _prepare(pdf, options):
 
 def _batch_partials(pdfs):
     """Los EPUB a medio escribir que _batch puede dejar junto a cada PDF (normal o KEPUB, según su revisión)."""
-    return [f"{_epub_name(_out(pdf), kepub)}.tmp" for pdf in pdfs for kepub in (False, True)]
+    return [convert.partial_path(_epub_name(_out(pdf), kepub)) for pdf in pdfs for kepub in (False, True)]
 
 
 def _batch(pdfs, options, progress=None):
@@ -1688,8 +1688,7 @@ class _Cards(QStyledItemDelegate):
             original, translation = item.text(0), item.text(1)
             head = QFont(opt.font)
             head.setBold(original.startswith("# "))
-            original = MARKUP.sub("", original.removeprefix("# ").removeprefix(convert.CENTER)
-                                    .removeprefix(convert.FRAME).removeprefix(convert.RIGHT))
+            original = MARKUP.sub("", convert.split_prefix(original)[1])
             hint = QFont(opt.font)
             hint.setItalic(True)
             blocks = [(original, head, tones["muted"]),
@@ -3012,7 +3011,7 @@ class App:
         self.status.setText("Generando EPUB…")
         self.run(_write_checked, (self.book, chapters, out, removed, self.write_options(breaks)),
                  lambda problems: self.saved(out, problems), report=True, busy="Generando EPUB…",
-                 partial=[f"{out}.tmp"])  # el nombre temporal que usa write_epub
+                 partial=[convert.partial_path(out)])
 
     def fill_pdf_menu(self):
         """«PDF ▾»: el tamaño preferido (Opciones → PDF) primero."""
@@ -3040,7 +3039,7 @@ class App:
         options = {**self.write_options(breaks), "whole_words": self.whole_words_var.get()}  # solo el PDF
         self.run(_write_pdf, (self.book, chapters, out, removed, options, size),
                  lambda problems: self.saved(out, problems), report=True, busy="Maquetando el PDF…",
-                 partial=[f"{out}.tmp"])
+                 partial=[convert.partial_path(out)])
 
     def prepare_output(self):
         """Los datos de la ventana al libro y la revisión guardada antes de generar: (capítulos, quitados, separadores)."""
@@ -4747,7 +4746,7 @@ class App:
         options = self.new_book_options()
         options["replacements"] = self.replacements
         self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems, of_book=False), report=True,
-                 busy="Preparando el recopilatorio…", partial=[f"{out}.tmp"])
+                 busy="Preparando el recopilatorio…", partial=[convert.partial_path(out)])
 
     def install(self):
         """Instala el .exe para este usuario (ver _install). Desde Python no hay .exe que instalar."""
@@ -5335,8 +5334,7 @@ class App:
                         taken += 1
                     rows[str(k)] = code, prefix, text
                     index.setdefault(code, []).append(str(k))
-                    table.insert("", "end", iid=str(k), values=(prefix.removeprefix(convert.CENTER)
-                                                                 .removeprefix(convert.FRAME).removeprefix(convert.RIGHT) + text,
+                    table.insert("", "end", iid=str(k), values=(("# " if prefix == "# " else "") + text,
                                                                  done.get(code, {}).get("text", ""),
                                                                  state_of(code, text, texts)))
                     mark_langs(str(k))

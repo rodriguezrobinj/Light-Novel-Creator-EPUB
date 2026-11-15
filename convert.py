@@ -1108,6 +1108,22 @@ LINK_MARK = re.compile(r'&lt;a href="(https?://[^"\s<>]+)"&gt;(.*?)&lt;/a&gt;')
 CENTER = "<center>"  # al principio de una línea del editor: párrafo centrado (carta, cartel)
 FRAME = "<marco>"  # al principio de una línea del editor: párrafo dentro de un recuadro (ventana de estado)
 RIGHT = "<derecha>"  # al principio de una línea del editor: párrafo a la derecha (firma de una carta)
+ALIGN_PREFIX = {"center": CENTER, "frame": FRAME, "right": RIGHT}  # alineación de Block -> prefijo de su línea
+
+
+def partial_path(out_path):
+    """Nombre del archivo a medio escribir: write_epub y write_pdf escriben ahí y renombran al acabar; la ventana lo
+    borra si se cierra o se cancela antes."""
+    return f"{out_path}.tmp"
+
+
+def split_prefix(line):
+    """(prefijo, resto) de una línea de section_text: "# " de un título o el de una alineación. Todo el que
+    lea líneas lo quita aquí: una alineación nueva solo se añade a ALIGN_PREFIX."""
+    for prefix in ("# ", *ALIGN_PREFIX.values()):
+        if line.startswith(prefix):
+            return prefix, line[len(prefix):]
+    return "", line
 # Versalitas en el libro: <small> y no <span>, que cortaría la nota (<span class="nota">…</span>) que la lleve
 SC_OPEN, SC_CLOSE = '<small class="sc">', "</small>"
 BULLETS = "■◆●▪•◇□▶►◼"  # viñetas: dentro de un recuadro, las líneas sin ella van sangradas bajo la anterior
@@ -1123,7 +1139,7 @@ def section_text(book, start, end):
 def _line(b, k):
     """Línea de section_text del bloque b, que es el número k del libro."""
     if b.kind == "p":
-        prefix = {"center": CENTER, "frame": FRAME, "right": RIGHT}.get(b.align, "")
+        prefix = ALIGN_PREFIX.get(b.align, "")
         text = NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>")
         return prefix + html.unescape(text)
     if b.kind == "heading":
@@ -1190,14 +1206,10 @@ def edit_section(book, start, end, text):
             new.append(Block("heading", page, _inline(line[2:].strip())))
         elif SCENE_BREAK.fullmatch(line):
             new.append(Block("break", page, html.escape(line, quote=False)))
-        elif line.startswith(CENTER):
-            new.append(Block("p", page, _inline(line[len(CENTER):].strip()), align="center"))
-        elif line.startswith(FRAME):
-            new.append(Block("p", page, _inline(line[len(FRAME):].strip()), align="frame"))
-        elif line.startswith(RIGHT):
-            new.append(Block("p", page, _inline(line[len(RIGHT):].strip()), align="right"))
         else:
-            new.append(Block("p", page, _inline(line)))
+            prefix, rest = split_prefix(line)
+            align = next((a for a, p in ALIGN_PREFIX.items() if p == prefix), "")
+            new.append(Block("p", page, _inline(rest.strip() if align else line), align=align))
         if j in origin and new[-1].kind in ("p", "heading") and not (m or line in same):
             page = new[-1].page = origin[j].page
             new[-1].rect = origin[j].rect
@@ -3330,7 +3342,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     credits_page = _xhtml("Créditos", '<h1 class="toc">Créditos</h1>\n'
                           + "\n".join(f'<p class="credits">{line}</p>' for line in lines), lang)
 
-    tmp = f"{out_path}.tmp"
+    tmp = partial_path(out_path)
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
@@ -3477,7 +3489,7 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
             continue
         page.insert_textbox(pymupdf.Rect(0, height - 26, width, height - 10), str(n + 1), fontsize=fontsize * 0.75,
                             fontname="tiro", color=(0.45, 0.45, 0.45), align=pymupdf.TEXT_ALIGN_CENTER)
-    partial = f"{out_path}.tmp"
+    partial = partial_path(out_path)
     pdf.save(partial, garbage=3, deflate=True)
     pdf.close()
     os.replace(partial, out_path)

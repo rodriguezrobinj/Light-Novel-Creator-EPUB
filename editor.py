@@ -140,10 +140,7 @@ def _insert_object(cursor, kind, n, pictures, color):
 
 def _strip(line):
     """La línea sin su prefijo de section_text: "# ", "<center>", "<marco>" o "<derecha>"."""
-    for prefix in ("# ", convert.CENTER, convert.FRAME, convert.RIGHT):
-        if line.startswith(prefix):
-            return line[len(prefix):]
-    return line
+    return convert.split_prefix(line)[1]
 
 
 def align_format(f, how=None):
