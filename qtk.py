@@ -747,12 +747,6 @@ class TextBox(QPlainTextEdit):
     def edit_undo(self):
         self.undo()
 
-    def edit_reset(self):
-        self.document().clearUndoRedoStacks()
-
-    def bell(self):
-        QApplication.beep()
-
     def tag_configure(self, tag, foreground=None, background=None, underline=False, overstrike=False,
                       weight=None, italic=False, size=None):
         look = QTextCharFormat()

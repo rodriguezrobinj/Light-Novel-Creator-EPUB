@@ -6,7 +6,7 @@ import difflib
 import html
 import re
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat)
 from PySide6.QtWidgets import QApplication, QTextEdit
