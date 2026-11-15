@@ -26,6 +26,7 @@ RIGHTED = _USER + 9   # párrafo a la derecha (firma de una carta): vuelve con <
 FRAME_PAD = 16        # píxeles entre el recuadro y su texto
 SUB = 18              # sangría de una línea sin viñeta en un recuadro con viñetas («HP: 10/10» bajo «■ Lorna»)
 MIME = "application/x-lnc-hoja"  # copiar y pegar dentro de la hoja conserva formato e ilustraciones
+WHOLE = MIME + "-parrafos"  # lo copiado acaba en un salto de párrafo: se pegan párrafos enteros
 ICON = _USER + 10     # imagen: la etiqueta <img> de un icono del texto (convert.ICON), que vuelve a section_text
 MARKS = re.compile(r'(</?(?:i|b|sup|sc)>|<a href="[^"]*">|</a>|<img class="icono" [^>]*>)')
 LINK = re.compile(r'<a href="([^"]*)">')
@@ -656,17 +657,21 @@ class Sheet(QTextEdit):
         if getattr(self, "relinking", False):
             return
         block, last = document.findBlock(pos), document.findBlock(pos + added)
+        before = source_of(block.previous()) if block.previous().isValid() else None
+        used = None  # orígenes en la hoja: se miran una vez por cambio, no por párrafo (pegar 300 tardaba 86 s)
         while block.isValid():
-            prev = block.previous()
             k = source_of(block)
-            if prev.isValid() and k is not None and k == source_of(prev) and not objects_of(block):
-                used, other = set(), document.firstBlock()
-                while other.isValid():
-                    used.add(source_of(other))
-                    other = other.next()
+            # el del de arriba de antes de recuperar el suyo: si no, solo se recuperaba un párrafo de cada dos
+            if before is not None and k == before and not objects_of(block):
+                if used is None:
+                    used, other = set(), document.firstBlock()
+                    while other.isValid():
+                        used.add(source_of(other))
+                        other = other.next()
                 text = "\n\n".join(_lines(block))
                 match = next(((j, line) for j, line in loaded.get(text, ()) if j not in used), None)
                 if match:
+                    used.add(match[0])
                     f = block.blockFormat()
                     f.setProperty(SOURCE, match[0])
                     f.setProperty(ORIGINAL, match[1])
@@ -679,6 +684,7 @@ class Sheet(QTextEdit):
                         cursor.endEditBlock()
                     finally:
                         self.relinking = False
+            before = k
             if block == last:
                 break
             block = block.next()
@@ -785,9 +791,10 @@ class Sheet(QTextEdit):
                 found.append(j)
         return found
 
-    def current_source(self):
-        """Bloque del libro del párrafo del cursor o, en uno nuevo sin origen, el del anterior que lo tenga."""
-        block = self.textCursor().block()
+    def current_source(self, block=None):
+        """Bloque del libro del párrafo del cursor (o de block) o, en uno nuevo sin origen, el del anterior que lo
+        tenga."""
+        block = self.textCursor().block() if block is None else block
         while block.isValid():
             k = source_of(block)
             if k is not None:
@@ -1375,6 +1382,8 @@ class Sheet(QTextEdit):
         mime = QMimeData()
         mime.setText(cursor.selection().toPlainText().replace("￼", "").replace(" ", "\n"))
         mime.setData(MIME, dump(copy).encode("utf-8"))
+        if cursor.selectedText().endswith("\u2029"):  # dump no guarda el último salto
+            mime.setData(WHOLE, b"1")
         return mime
 
     def canInsertFromMimeData(self, source):
@@ -1384,7 +1393,6 @@ class Sheet(QTextEdit):
         """De la hoja: con su formato, sin repetir una ilustración que ya está. De Word, Google Docs o la web
         (HTML): con cursiva, negrita, superíndice, versalitas y enlaces, sin colores ni tamaños. Si no, solo el
         texto."""
-        k = self.current_source()
         raw, objects = False, True
         if source.hasFormat(MIME):
             present = self.objects()
@@ -1401,7 +1409,17 @@ class Sheet(QTextEdit):
         cursor = self.textCursor()
         cursor.beginEditBlock()
         cursor.removeSelectedText()
+        whole = source.hasFormat(WHOLE)
+        before = whole and cursor.atBlockStart() and cursor.block().previous().isValid()
+        if before:  # párrafos enteros al principio de uno: tras el de arriba, y este queda como estaba
+            cursor.movePosition(QTextCursor.MoveOperation.PreviousCharacter)
+            lines = [""] + lines  # el primero, en un párrafo nuevo
+        k = self.current_source(cursor.block())
         insert_lines(cursor, [(k, line) for line in lines], self.pictures, raw=raw, color=self.color,
                      objects=objects)
+        if before:
+            cursor.movePosition(QTextCursor.MoveOperation.NextBlock)
+        elif whole:  # en medio de un párrafo: lo que sigue va en el suyo, no pegado al último
+            cursor.insertBlock()
         cursor.endEditBlock()
         self.setTextCursor(cursor)

@@ -3145,6 +3145,48 @@ def test_editor_sheet_actions_paste_and_undo():
                     ["Dijo", "hola, y se fue."], 2, "<b>Pegado</b> de fuera", 1, 1], seen
 
 
+def test_editor_sheet_moves_whole_paragraphs_with_their_pages():
+    """Cortar párrafos enteros (del principio del 2 al del 6) y pegarlos al principio de otro: cada uno queda en
+    su párrafo, sin pegarse al de destino, y todos conservan su bloque (su página del PDF) y su línea original,
+    también el de destino. Mover 300 de 800 no tarda: antes recorría la hoja entera por cada párrafo."""
+    import time
+
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+
+    def move(count, first, last, to):
+        sheet = editor.Sheet()
+        sheet.set_content([(k, f"Párrafo {k}.") for k in range(count)], {})
+        doc = sheet.document()
+        c = sheet.textCursor()
+        c.setPosition(doc.findBlockByNumber(first).position())
+        c.setPosition(doc.findBlockByNumber(last).position(), QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+        sheet.cut()
+        c.setPosition(doc.findBlockByNumber(to - (last - first)).position())
+        sheet.setTextCursor(c)
+        start = time.perf_counter()
+        sheet.paste()
+        took = time.perf_counter() - start
+        blocks = [doc.findBlockByNumber(n) for n in range(doc.blockCount())]
+        return sheet, [(b.text(), editor.source_of(b)) for b in blocks], took
+
+    sheet, small, _ = move(12, 2, 6, 10)
+    texts, changed = [t for t, _ in small], len(sheet.changed_blocks())
+    sheet.undo()
+    undone = sheet.content()
+    _, big, moved = move(800, 100, 400, 700)
+    assert texts == [f"Párrafo {k}." for k in (0, 1, 6, 7, 8, 9, 2, 3, 4, 5, 10, 11)], texts
+    assert all(t == f"Párrafo {k}." for t, k in small) and changed == 0, (small, changed)
+    assert undone == "\n\n".join(f"Párrafo {k}." for k in (0, 1, 6, 7, 8, 9, 10, 11)), undone
+    assert all(t == f"Párrafo {k}." for t, k in big), [x for x in big if x[0] != f"Párrafo {x[1]}."][:5]
+    assert moved < 3, moved
+
+
 def test_editor_sheet_superscript_small_caps_right():
     """Superíndice, versalitas y párrafo a la derecha se cargan y vuelven igual; los botones de la hoja los ponen
     en lo elegido; derecha y centrado se excluyen; Ctrl+D pone a la derecha y Ctrl+Mayús+= el superíndice."""
