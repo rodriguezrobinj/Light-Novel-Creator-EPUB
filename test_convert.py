@@ -111,6 +111,21 @@ def test_analyze():
     assert book.title == "novela" and book.cover[:3] == b"\xff\xd8\xff"
 
 
+def test_chapter_title_in_header_band_is_not_its_running_header():
+    """El encabezado de cada página repite el nombre del capítulo en pequeño; el título grande de la
+    primera página, también en la franja de arriba, no se quita con él."""
+    doc = pymupdf.open()
+    for n in range(1, 5):
+        rows = [(72, 30, "Capitulo 1: Inicio", 9, "helv")]
+        rows += [(72, 85, "Capitulo 1: Inicio", 20, "hebo")] if n == 1 else []
+        add_page(doc, n, rows + [(92, 140, f"Texto de la pagina {n}.", 11, "cour")])
+    path = TMP / "titulo-en-franja.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = [plain(b.html) for b in book.blocks if b.kind == "heading"]
+    assert heads == ["Capitulo 1: Inicio"], [(b.kind, b.html) for b in book.blocks]
+
+
 def test_soft_hyphen_at_line_end_joins_word():
     """Algunos PDF entregan el guion de partición como U+00AD: al final de línea une la palabra."""
     def span(text):
@@ -131,6 +146,7 @@ def test_series_and_volume_from_file_name():
         ("Mi Serie Vol. 2.5", "", ("Mi Serie", "2.5")),
         ("Otra serie - Tomo 3", "", ("Otra serie", "3")),
         ("Una novela suelta", "Una novela suelta", ("", "")),
+        ("Volumen 3 [WP]", "Maryoku - Volumen 3", ("Maryoku", "3")),
     ]
     for stem, meta, expected in cases:
         assert convert._series_volume(stem, meta) == expected, (stem, convert._series_volume(stem, meta))
@@ -1036,6 +1052,17 @@ def test_outline_bookmarks_choose_chapters():
     # "Capitulo 2: Final" no tiene marcador, pero es un capítulo: se añade (hay PDF con marcadores incompletos)
     assert titles == ["Ilustraciones", "Capitulo 1: Inicio", "Capitulo 2: Final"], titles
     assert book.blocks[0].kind == "heading" and book.blocks[1].kind == "image"
+
+
+def test_outline_bookmark_without_page_is_not_a_chapter():
+    """Un marcador sin destino (página -1) no crea un capítulo falso al principio del libro."""
+    doc = pymupdf.open(make_novel())
+    doc.set_toc([[1, "Roto", -1], [1, "Capitulo 1: Inicio", 3]])
+    path = TMP / "marcador-roto.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [plain(book.blocks[i].html) for i in book.candidates]
+    assert "Roto" not in titles and titles[0] == "Capitulo 1: Inicio", titles
 
 
 def test_illustration_under_text_is_kept():
