@@ -36,7 +36,7 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QLockFile, QObject, QProcess, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPainterPath,
                            QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -1778,6 +1778,7 @@ class App:
         self.matches = []                      # resultados de la búsqueda: (bloque, página, texto)
         self.dark = False                      # tema oscuro activo
         self.proc = None
+        self.book_lock = self.lock_key = None  # candado del libro abierto (ver lock_book)
         self.closed = False                    # ventana cerrada: lo diferido (miniaturas, repintar) ya no se hace
         self._description = ""                 # sinopsis (propiedad description)
         self.replacements = []                 # [[buscar, reemplazo]]; se editan en su propio cuadro
@@ -2274,6 +2275,7 @@ class App:
             self.progress.setValue(0)
             if not self.book:  # análisis cancelado: el libro de antes ya se cerró, se vuelve al inicio
                 self.pdf = None
+                self.lock_book(None)  # otra ventana ya lo puede abrir
                 self.stack.setCurrentIndex(0)
                 self.update_header()
             self.status.setText("Cancelado")
@@ -2324,6 +2326,7 @@ class App:
         if self.preview_doc:
             self.preview_doc[1].close()
         Path(self.preview_path).unlink(missing_ok=True)
+        self.lock_book(None)
         self.root.on_close, self.closed = None, True
         self.root.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # libera la ventana y sus diálogos
         self.root.close()
@@ -2681,6 +2684,28 @@ class App:
             if win and shiboken6.isValid(win):
                 win.close()
 
+    def lock_book(self, path):
+        """Candado del libro path para esta ventana, en la carpeta de ajustes (None: suelta el que tenga). False si
+        otra ventana lo tiene abierto: las dos guardarían su revisión una encima de la otra."""
+        key = hashlib.sha1(str(path).lower().encode()).hexdigest()[:16] if path else None
+        if key == self.lock_key:
+            return True
+        lock = None
+        if key:
+            folder = SETTINGS.parent / "abiertos"
+            with contextlib.suppress(OSError):
+                folder.mkdir(parents=True, exist_ok=True)
+            lock = QLockFile(str(folder / f"{key}.lock"))
+            lock.setStaleLockTime(0)  # vale mientras viva la otra ventana; si murió de golpe, Qt lo quita
+            if not lock.tryLock(0):
+                if lock.error() == QLockFile.LockError.LockFailedError:
+                    return False
+                lock = key = None  # sin poder escribir el candado (carpeta de solo lectura), se abre igual
+        if self.book_lock:
+            self.book_lock.unlock()
+        self.book_lock, self.lock_key = lock, key
+        return True
+
     def open_pdf(self):
         path = filedialog.askopenfilename(filetypes=[("PDF o EPUB", "*.pdf *.epub")],
                                           initialdir=self.settings.get("folder"))
@@ -2703,6 +2728,11 @@ class App:
         if not self.save_review() and not messagebox.askyesno(
                 "Abrir", f"{self.status.text()}.\n\n¿Abrir el otro libro igual? Se pierde lo revisado en este desde la "
                          "última vez que se guardó."):
+            return
+        if not self.lock_book(Path(path).resolve()):
+            messagebox.showerror("Abrir", f"«{Path(path).name}» ya está abierto en otra ventana de {APP_NAME}.\n\n"
+                                          "Ciérralo allí para abrirlo aquí: si no, cada ventana guardaría su revisión "
+                                          "encima de la de la otra.")
             return
         self.close_tools(BLOCK_TOOLS + BOOK_TOOLS)  # sin cerrar, cambiarían el libro nuevo con datos del anterior
         path = str(Path(path).resolve())

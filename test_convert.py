@@ -6606,6 +6606,47 @@ def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
     assert (opened, left) == (6, 0), (opened, left)
 
 
+def test_window_refuses_a_book_open_in_another_window():
+    """Dos ventanas con el mismo libro guardarían su revisión una encima de la otra: la segunda no lo abre y lo
+    dice; al cerrar la primera, ya se puede. Volver a abrirlo en su misma ventana sí vale."""
+    import time
+
+    import app
+
+    def wait(window):
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            window.root.repaint()
+            app.qtk.pump()
+            time.sleep(0.05)
+
+    pdf = TMP / "Candado - Volumen 1.pdf"
+    make_novel().replace(pdf)
+    settings = TMP / f"ajustes-candado-{time.time_ns()}.json"  # las dos ventanas, con la misma carpeta de ajustes
+    root, first = visible_window(settings)
+    first.open_path(str(pdf))
+    wait(first)
+    first.open_path(str(pdf))  # el mismo libro en su ventana: se vuelve a abrir
+    reopened = first.done is not None
+    wait(first)
+    shown, original = [], app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message, **_: shown.append(message)
+    try:
+        root2, second = visible_window(settings)
+        second.open_path(str(pdf))
+        refused = second.done is None and second.book is None
+        first.close()
+        second.open_path(str(pdf))
+        accepted = second.done is not None
+        wait(second)
+    finally:
+        app.messagebox.showerror = original
+    second.close()
+    assert reopened, "no se pudo volver a abrir el libro en su ventana"
+    assert refused and len(shown) == 1 and "ya está abierto en otra ventana" in shown[0], (refused, shown)
+    assert accepted, "tras cerrar la primera ventana el libro seguía bloqueado"
+
+
 def test_editor_page_buttons_below_the_page():
     """Los botones de hojear el PDF del editor van debajo de la página, no encima tapándola."""
     import qtk
