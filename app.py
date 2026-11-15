@@ -6824,7 +6824,7 @@ class TextEditor:
         if not shiboken6.isValid(self.diff_frame):
             return
         block = self.sheet.textCursor().block()
-        original = block.blockFormat().property(editor.ORIGINAL)
+        original = editor.original_of(block)
         if (not self.show_changes_action.isChecked() or editor.objects_of(block) or not block.text().strip()
                 or (original is not None and editor.block_lines(block) == [original])):
             self.diff_frame.hide()
@@ -7013,7 +7013,7 @@ class TextEditor:
         k = block.blockFormat().property(editor.SOURCE)
         if k is None or k not in self.issues or editor.objects_of(block):
             return []
-        original = block.blockFormat().property(editor.ORIGINAL)
+        original = editor.original_of(block)
         return list(self.issues[k]) if original is not None and editor.block_lines(block) == [original] else []
 
     def block_issue(self, block):

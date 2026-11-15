@@ -345,6 +345,12 @@ def objects_of(block):
     return found
 
 
+def original_of(block):
+    """Línea con que se cargó el párrafo, o None si es nuevo. PySide da [] por una propiedad "" (párrafo vacío)."""
+    value = block.blockFormat().property(ORIGINAL)
+    return "" if value == [] else value
+
+
 def source_of(block):
     """Bloque del libro del que viene el párrafo: el de su objeto, o el que recuerda su formato."""
     objects = objects_of(block)
@@ -529,7 +535,7 @@ class Look(QSyntaxHighlighter):
                 f.setUnderlineColor(broken)
                 self.setFormat(c, 1, f)
         if self.changes and text.strip() and not objects_of(block):
-            original = block.blockFormat().property(ORIGINAL)
+            original = original_of(block)
             if original is None:
                 spans = [(0, len(text))]  # párrafo nuevo: todo es lo puesto
             elif block_lines(block) == [original]:
@@ -1212,7 +1218,7 @@ class Sheet(QTextEdit):
         found, block = [], self.document().firstBlock()
         while block.isValid():
             lines = [line for line in block_lines(block) if line.strip()]
-            original = block.blockFormat().property(ORIGINAL)
+            original = original_of(block)
             if lines and (original is None or lines != [original]):
                 found.append(block)
             block = block.next()
@@ -1236,7 +1242,7 @@ class Sheet(QTextEdit):
 
     def restore(self, block):
         """Devuelve el párrafo a su línea original (título, centrado y texto): un paso de deshacer."""
-        original = block.blockFormat().property(ORIGINAL)
+        original = original_of(block)
         heading, centered = original.startswith("# "), original.startswith(convert.CENTER)
         framed, right = original.startswith(convert.FRAME), original.startswith(convert.RIGHT)
         cursor = QTextCursor(self.document())

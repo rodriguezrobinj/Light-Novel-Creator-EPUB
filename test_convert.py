@@ -4064,6 +4064,31 @@ def test_editor_shows_changes():
     assert hidden_clean and gone, (hidden_clean, gone)
 
 
+def test_editor_sheet_changes_in_a_loaded_empty_paragraph():
+    """Un párrafo que se cargó vacío: con «Mostrar cambios», lo escrito en él se subraya como puesto (antes el
+    coloreado fallaba: PySide devuelve [] por la línea original vacía), cuenta como cambio y vuelve a vacío."""
+    import qtk
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Uno."), (2, ""), (3, "Tres.")], {})
+    sheet.look.show_changes("#2e9d4a")
+    block = sheet.document().findBlockByNumber(1)
+    QTextCursor(block).insertText("Nuevo")
+    qtk.pump()
+    block = sheet.document().findBlockByNumber(1)
+    marked = any(r.format.underlineStyle() == QTextCharFormat.UnderlineStyle.SingleUnderline
+                 for r in block.layout().formats())
+    changed = [b.text() for b in sheet.changed_blocks()]
+    original = editor.original_of(block)
+    sheet.restore(block)
+    assert marked and changed == ["Nuevo"] and original == "", (marked, changed, original)
+    assert sheet.content() == "Uno.\n\nTres.", sheet.content()
+
+
 def test_editor_focus_mode():
     """F11 deja solo la hoja: sin cinta ni panel del PDF. Esc vuelve a como estaba sin preguntar si se descartan
     los cambios, y el editor sigue abierto con ellos."""
