@@ -3250,6 +3250,91 @@ def test_link_sections_takes_handles_and_empty_titles_before_the_ads():
     assert convert.link_sections(book) == [2, 3, 4, 6, 7], convert.link_sections(book)
 
 
+def test_group_credits_page_becomes_an_illustration():
+    """Easygoing 1 (Bell T): la última página («¡Gracias por Leer!», Patreon, redes, «@Dierch», logos) salía como
+    cuatro secciones de texto en «Quitar». La página entera de publicidad del grupo es una ilustración, que se
+    conserva; en una página con texto de la novela, la publicidad sigue como texto para quitar."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"),
+                      (72, 140, "La espada Excalibur brillaba.", 11, "cour"),
+                      (72, 168, "Otro parrafo del capitulo.", 11, "cour")])
+    add_page(doc, 2, [(72, 100, "y el capitulo termino.", 11, "cour"),
+                      (72, 150, "Agradecimientos", 20, "helv"),
+                      (72, 190, "Siguenos en https://discord.gg/grupo", 11, "cour")])
+    add_page(doc, 3, [(72, 100, "Capitulo 2: Final", 20, "helv"),
+                      (72, 140, "El final de la historia.", 11, "cour")])
+    add_page(doc, 4, [(200, 100, "Gracias por Leer!", 20, "helv"), (200, 140, "Suscribete a nuestro Patreon!", 14, "helv"),
+                      (200, 170, "patreon.com/Grupo", 14, "helv"), (200, 220, "@Dierch @Dierch90", 14, "helv")])
+    # Mitsuha 1: el epílogo del autor, con un enlace, es prosa: sigue como texto aunque su sección sea corta
+    add_page(doc, 5, [(72, 100, "Epilogo 1", 20, "helv")]
+             + [(72, 140 + 14 * n, line(f"Hola, soy la autora y escribo la linea {n} del epilogo", 70), 11, "cour")
+                for n in range(18)] + [(72, 420, "Mi blog: http://autora.blog/", 11, "cour")])
+    path = TMP / "creditos-grupo.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    kinds = [(b.kind, b.page) for b in book.blocks]
+    chapters = [convert._plain(book.blocks[k]) for k in book.candidates]
+    assert [k for k in kinds if k[1] == 4] == [("image", 4)], kinds
+    image = next(b for b in book.blocks if b.page == 4)
+    assert image.keep and image.image[:3] == b"\xff\xd8\xff", image
+    shown = pymupdf.Pixmap(image.image).width, pymupdf.Pixmap(image.image).height  # sin el pie ni el blanco
+    assert shown[1] < shown[0] * 0.6, shown
+    assert ("heading", 5) in kinds and ("image", 5) not in kinds, kinds
+    assert chapters == ["Capitulo 1: Inicio", "Agradecimientos", "Capitulo 2: Final", "Epilogo 1"], chapters
+    # como texto, se siguen proponiendo para quitar (el epílogo, por su enlace, como ya pasaba)
+    assert [convert._plain(book.blocks[k]) for k in convert.link_sections(book)] == ["Agradecimientos", "Epilogo 1"]
+
+
+def test_review_from_before_credit_pages_is_carried_over():
+    """Las revisiones guardadas cuentan bloques: con la página del grupo en una ilustración, la de Easygoing 1
+    (o Eminence 7, con su traducción) dejaba de coincidir y sus cambios iban a un .bak. Se trasladan: el texto
+    editado, los títulos y la posición del editor siguen; un cambio en la página del grupo sí aparta la revisión."""
+    import json
+
+    import app
+
+    doc = pymupdf.open()
+    add_page(doc, 1, [(200, 100, "Creditos", 20, "helv"), (200, 140, "Visitanos en http://grupo.net/", 11, "helv")])
+    add_page(doc, 2, [(72, 100, "Capitulo 1: Inicio", 20, "helv"), (72, 140, "La espada brillaba.", 11, "cour"),
+                      (72, 168, "Otro parrafo del capitulo.", 11, "cour")])
+    add_page(doc, 3, [(72, 100, "Capitulo 2: Final", 20, "helv"), (72, 140, "El final de la historia.", 11, "cour")])
+    add_page(doc, 4, [(200, 100, "Gracias por Leer!", 20, "helv"), (200, 140, "patreon.com/Grupo", 14, "helv")])
+    pdf = TMP / "revision-de-antes.pdf"
+    doc.save(pdf)
+    book = convert.analyze(pdf)
+    assert [b.kind for b in book.blocks][0] == "image" and book.blocks[-1].kind == "image", book.blocks
+    raw = convert.uncredited(book)[0]  # los bloques del análisis de antes: cada página del grupo, otra vez texto
+    text = lambda html_: next(k for k, b in enumerate(raw) if b.html == html_)
+    para, final, thanks = text("Otro parrafo del capitulo."), text("Capitulo 2: Final"), text("Gracias por Leer!")
+    old = {"pdf": app._fingerprint(pdf), "blocks": len(raw), "edits": [[para, para + 1, "Otro parrafo, corregido."]],
+           "rows": {str(final): [app.ON, "Capítulo 2: El final"], str(thanks): [app.CUT, "Gracias por Leer!"]},
+           "editor_at": para, "title": "Mi libro revisado"}
+    app._write_json(app._review_path(pdf), old)
+    book, chapters, removed, state = app._prepare(pdf, {})
+    texts = [convert._plain(b) for b in book.blocks]
+    assert "Otro parrafo, corregido." in texts and "Otro parrafo del capitulo." not in texts, texts
+    assert (book.blocks[state["editor_at"]].html, state["blocks"]) == ("Otro parrafo, corregido.", len(book.blocks))
+    assert [t for _, t in chapters][-1] == "Capítulo 2: El final" and book.title == "Mi libro revisado", chapters
+    assert book.blocks[-1].kind == "image" and book.blocks[-1].keep and not removed, removed
+    # la ventana la guarda ya trasladada y deja la de antes en .bak
+    root, window = visible_window()
+    window.pdf = pdf
+    window.show_book(convert.analyze(pdf))
+    status = window.status.text()
+    window.close()
+    saved = json.loads(app._review_path(pdf).read_text(encoding="utf-8"))
+    assert status.startswith("Revisión anterior recuperada"), status
+    assert saved["blocks"] == len(book.blocks) and app._review_path(pdf).with_name(pdf.stem + ".lnepub.json.bak").exists()
+    # Eminence 7 editó su página de créditos: eso no se traslada, y el libro la deja como texto, como antes, para
+    # que la revisión entera siga valiendo
+    touching = {**old, "edits": [[thanks, thanks + 1, "Gracias."]]}
+    assert app._migrate_review(touching, convert.analyze(pdf)) is None
+    app._write_json(app._review_path(pdf), touching)
+    book, chapters, removed, state = app._prepare(pdf, {})
+    texts = [convert._plain(b) for b in book.blocks]
+    assert "Gracias." in texts and book.blocks[-1].kind != "image" and state["blocks"] == len(raw), texts[-4:]
+
+
 def test_link_sections_takes_empty_titles_after_the_ads_at_the_end():
     """Easygoing 3-6 (Bell T): tras «@Dierch @Dierch90», «Ilustraciones por RicMo90» y el logo, sin texto, cierran el
     libro. Salía como capítulo vacío. Un capítulo con texto tras la publicidad se queda."""
@@ -3319,7 +3404,9 @@ def make_group_pdf():
     add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"),
                       (72, 140, "La espada Excalibur brillaba.", 11, "cour"),
                       (72, 168, "Otro parrafo del capitulo.", 11, "cour")])
-    add_page(doc, 2, [(72, 100, "Agradecimientos", 20, "helv"),
+    # con el final del capítulo en la misma página: la publicidad sigue como texto para quitar (una página entera
+    # del grupo iría como ilustración, _credit_pages_as_images)
+    add_page(doc, 2, [(72, 60, "Y el capitulo termino.", 11, "cour"), (72, 100, "Agradecimientos", 20, "helv"),
                       (72, 140, "Siguenos en https://discord.gg/grupo", 11, "cour")])
     add_page(doc, 3, [(72, 100, "Capitulo 2: Final", 20, "helv"),
                       (72, 140, "El final de la historia.", 11, "cour")])
@@ -5940,14 +6027,14 @@ def test_rezero_like_pdf():
     book = convert.analyze(make_rezero_like())
     heads = [(html.unescape(book.blocks[k].html), k in book.candidates) for k, b in enumerate(book.blocks)
              if b.kind == "heading"]
-    assert heads == [("OBRA ORIGINAL", False), ("TRADUCCION", False), ("Capitulo 1: El fin del principio", True),
+    assert heads == [("Capitulo 1: El fin del principio", True),
                      ("Parte 1", False), ("Parte 2", False), ("Capitulo 2: Una prueba tardia", True),
                      ("Parte 1", False), ("Parte 2", False)], heads
     assert (book.author, book.translator) == ("Tappei Nagatsuki", "Ana - Luis - Eva"), (book.author, book.translator)
     text = " ".join(b.html for b in book.blocks)
     assert "Grupo X" not in text and "Re Zero Volumen" not in text, text[-300:]
-    cut = [book.blocks[k].html for k in convert.link_sections(book)]
-    assert cut == ["OBRA ORIGINAL", "TRADUCCION"], cut  # toda la página de créditos, no solo el último título
+    # toda la página de créditos, con sus dos títulos, es publicidad del grupo: va como su ilustración
+    assert (book.blocks[0].kind, book.blocks[0].page) == ("image", 1) and not convert.link_sections(book)
 
 
 def test_named_part_stays_a_chapter():

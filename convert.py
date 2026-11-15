@@ -112,6 +112,9 @@ class Book:
     date: str = ""         # fecha de publicación (AAAA o AAAA-MM-DD)
     skipped: list = field(default_factory=list)  # [(página, letras, motivo)] de texto que no entró
     toc: list = field(default_factory=list)  # [(título, página o None)] del índice impreso del PDF
+    # [(índice de la ilustración, [bloques que sustituye], [cuáles de ellos eran capítulo])] de
+    # _credit_pages_as_images: con ellos una revisión hecha antes sobre esos bloques se traslada (uncredited)
+    credit_pages: list = field(default_factory=list)
 
 
 VOLUME = re.compile(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*0*(\d+(?:[.,]\d+)?)", re.I)
@@ -2913,10 +2916,83 @@ def analyze(pdf_path, progress=None):
             title = f"{series} - Volumen {volume}"
         credits = _credits(blocks[:candidates[0]] if candidates else [])
         # El autor de los metadatos suele ser quien maquetó el PDF: manda la página de créditos
-        return Book(title, credits.get("author") or meta.get("author") or "", cover, blocks, candidates, series,
+        book = Book(title, credits.get("author") or meta.get("author") or "", cover, blocks, candidates, series,
                     volume, translator=credits.get("translator", ""), illustrator=credits.get("illustrator", ""),
                     proofreader=credits.get("proofreader", ""), editor=credits.get("editor", ""), skipped=skipped,
                     toc=contents)
+        _credit_pages_as_images(book, doc)
+        return book
+
+
+CREDIT_LETTERS = 800  # una página del grupo con más letras es prosa con un enlace, no créditos
+
+
+def _credit_image(page):
+    """La página del grupo como imagen, de su primer a su último texto o logo: sin el número de página del pie
+    (Easygoing 1: «- 199 -») ni el medio folio en blanco de debajo."""
+    height = page.rect.height
+    boxes = [pymupdf.Rect(b[:4]) for b in page.get_text("blocks")
+             if b[4].strip() and b[1] > BAND * height and b[3] < (1 - BAND) * height]
+    boxes += [pymupdf.Rect(info["bbox"]) & page.rect for info in page.get_image_info()]
+    boxes = [box for box in boxes if not box.is_empty]
+    if not boxes:
+        return _render(page)
+    clip = pymupdf.Rect(page.rect.x0, min(b.y0 for b in boxes) - 40, page.rect.x1, max(b.y1 for b in boxes) + 40)
+    return _jpeg(page.get_pixmap(dpi=150, clip=clip & page.rect), 85)
+
+
+def _credit_pages_as_images(book, doc):
+    """Easygoing 1 (Bell T): la página de créditos y redes del grupo, con sus logos, salía como varias secciones
+    de texto para quitar. Una página cuyo texto es todo publicidad (link_sections) pasa a ser una ilustración de la
+    página entera, que se conserva; en una página con texto de la novela, la publicidad sigue como texto."""
+    heads = [k for k, b in enumerate(book.blocks) if b.kind == "heading"]
+    starts, cut = set(book.candidates), set()
+    for k in link_sections(book):
+        chapter = k in starts
+        cut.update(range(k, next((j for j in heads if j > k and (j in starts or not chapter)), len(book.blocks))))
+    by_page = collections.defaultdict(list)
+    for k, b in enumerate(book.blocks):
+        by_page[b.page].append(k)
+    text = lambda ks: " ".join(_plain(book.blocks[k]) for k in ks if book.blocks[k].kind in ("p", "heading"))
+    # El enlace, en la misma página y con poco texto: los créditos y redes de las muestras tienen de 34 a 573 letras;
+    # el epílogo de FUNA (Mitsuha 1) o las palabras del traductor (Megami 1), con un enlace, más de 1000: son prosa
+    pages = {p for p, ks in by_page.items()
+             if any(book.blocks[k].kind == "heading" and k in cut for k in ks)
+             and all(k in cut for k in ks if book.blocks[k].kind in ("p", "heading"))
+             and LINKS.search(text(ks)) and _letters(text(ks)) < CREDIT_LETTERS}
+    if not pages:
+        return
+    # Los bloques de una página van seguidos; si no (un marcador insertado), la página se deja como estaba
+    pages = {p for p in pages if by_page[p] == list(range(by_page[p][0], by_page[p][-1] + 1))}
+    blocks, mapping = [], {}
+    for k, b in enumerate(book.blocks):
+        if b.page not in pages:
+            mapping[k] = len(blocks)
+            blocks.append(b)
+        elif k == by_page[b.page][0]:  # los logos y separadores de la página van ya en la imagen
+            book.credit_pages.append((len(blocks), [book.blocks[j] for j in by_page[b.page]],
+                                      [j - k for j in by_page[b.page] if j in starts]))
+            blocks.append(Block("image", b.page, image=_credit_image(doc[b.page - 1])))
+    book.blocks = blocks
+    book.candidates = [mapping[k] for k in book.candidates if k in mapping]
+
+
+def uncredited(book):
+    """El libro con las páginas del grupo otra vez como texto, como lo daba el análisis antes de
+    _credit_pages_as_images: (bloques, candidatos, [(inicio, bloques)] de cada página). Los bloques son los mismos
+    objetos, no copias."""
+    marks = {k: (region, offsets) for k, region, offsets in book.credit_pages}
+    blocks, candidates, spans, chapters = [], [], [], set(book.candidates)
+    for k, b in enumerate(book.blocks):
+        if k in marks:
+            region, offsets = marks[k]
+            spans.append((len(blocks), len(region)))
+            candidates += [len(blocks) + o for o in offsets]
+            blocks += region
+        else:
+            candidates += [len(blocks)] if k in chapters else []
+            blocks.append(b)
+    return blocks, candidates, spans
 
 
 # Tipografía de libro impreso, común a todos los estilos: partición de palabras (el idioma ya va en
