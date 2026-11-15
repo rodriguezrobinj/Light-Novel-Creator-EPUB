@@ -944,13 +944,23 @@ def _write_versions(pdf, versions):
 
 def _append_version(pdf, version):
     """Añade una versión al final del zip sin reescribir las de antes: con muchas, rehacerlo entero en cada EPUB
-    generado tardaba más y más. Borrar y renombrar sí lo reescriben entero (_write_versions)."""
-    with zipfile.ZipFile(_versions_path(pdf), "a", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        names = set(z.namelist())
-        n = len(names)
-        while f"{n:04}.json" in names:  # nombres por orden: _load_versions las lee así
-            n += 1
-        z.writestr(f"{n:04}.json", json.dumps(version, ensure_ascii=False))
+    generado tardaba más y más. Borrar y renombrar sí lo reescriben entero (_write_versions). Se añade sobre una
+    copia y luego se cambia por el original: un corte a medias no deja el zip roto con todas las versiones dentro."""
+    path = _versions_path(pdf)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        if path.exists():
+            shutil.copyfile(path, tmp)  # copia de bytes, sin recomprimir: sigue siendo rápido
+        with zipfile.ZipFile(tmp, "a", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            names = set(z.namelist())
+            n = len(names)
+            while f"{n:04}.json" in names:  # nombres por orden: _load_versions las lee así
+                n += 1
+            z.writestr(f"{n:04}.json", json.dumps(version, ensure_ascii=False))
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _shown(key, value):

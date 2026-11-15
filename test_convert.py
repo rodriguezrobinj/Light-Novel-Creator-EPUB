@@ -8504,6 +8504,30 @@ def test_damaged_versions_file_is_set_aside():
     assert app._load_versions(window.pdf)[1].name == path.name + ".2.bak" and backup.read_bytes() == b"no es un zip"
 
 
+def test_appending_a_version_never_breaks_the_saved_ones():
+    """Añadir una versión escribe sobre una copia: si se corta a medias, el zip de antes sigue entero."""
+    import app
+
+    pdf = TMP / "versiones-cortadas.pdf"
+    pdf.write_bytes(b"%PDF")
+    app._versions_path(pdf).unlink(missing_ok=True)
+    app._append_version(pdf, {"name": "Una", "state": {}})
+    app._append_version(pdf, {"name": "Dos", "state": {}})
+    before = app._versions_path(pdf).read_bytes()
+    saved = app.os.replace
+    app.os.replace = lambda *a: (_ for _ in ()).throw(OSError("corte"))
+    try:
+        app._append_version(pdf, {"name": "Tres", "state": {}})
+        raise AssertionError("debía fallar")
+    except OSError:
+        pass
+    finally:
+        app.os.replace = saved
+    assert app._versions_path(pdf).read_bytes() == before
+    assert not app._versions_path(pdf).with_name(app._versions_path(pdf).name + ".tmp").exists()
+    assert [v["name"] for v in app._load_versions(pdf)[0]] == ["Una", "Dos"]
+
+
 def test_version_of_another_analysis_is_not_restored():
     """Una versión con otros bloques (otro PDF u otra forma de leerlo) se compara, pero no se aplica."""
     import app
