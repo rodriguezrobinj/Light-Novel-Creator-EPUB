@@ -2488,7 +2488,8 @@ def test_window_keyboard_shortcuts_change_type():
 
 
 def test_window_review_is_restored_when_reopening_the_pdf():
-    """La revisión se guarda al cerrar y vuelve al abrir el mismo PDF; si el PDF cambia, no."""
+    """La revisión se guarda al cerrar y vuelve al abrir el mismo PDF, aunque OneDrive le cambie la fecha al
+    sincronizar; si el PDF cambia, no."""
     import app
 
     root, window = visible_window()
@@ -2503,6 +2504,7 @@ def test_window_review_is_restored_when_reopening_the_pdf():
     window.pdf_page = 2
     window.cover_from_page()
     window.close()
+    os.utime(window.pdf, ns=(1_000_000_000, 1_000_000_000))  # OneDrive al sincronizar: otra fecha, mismo PDF
 
     root, window = visible_window()
     window.pdf = TMP / "novela.pdf"
@@ -2514,7 +2516,7 @@ def test_window_review_is_restored_when_reopening_the_pdf():
                         "Revisión anterior recuperada"), restored
 
     root, window = visible_window()
-    window.pdf = make_novel()  # PDF nuevo en la misma ruta: la revisión guardada ya no vale
+    window.pdf = make_novel()  # PDF nuevo en la misma ruta y del mismo tamaño (otro /ID): la revisión ya no vale
     window.show_book(convert.analyze(window.pdf))
     fresh = (window.tree.set(item, "inc"), window.style_var.get(), window.cover_choice)
     window.close()
@@ -7157,6 +7159,8 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
 
     root, window = visible_window()
     window.pdf = make_novel()
+    for old in TMP.glob(app._review_path(window.pdf).name + "*"):  # de otras pruebas con la misma novela
+        old.unlink()
     window.show_book(convert.analyze(window.pdf))
     window.set_kind(first_title(window), app.OFF)
     window.title_var.set("Mi título")
@@ -7178,6 +7182,13 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
     assert backup.is_file() and json.loads(backup.read_text(encoding="utf-8")) == state, "se perdió la revisión vieja"
     assert status.startswith("La revisión guardada no coincide") and backup.name in status, status  # delante: no se corta
     assert kept[:2] == ("Mi título", [["Witch", "Bruja"]]) and kept[2] != app.OFF, kept
+    review.write_text(json.dumps(state), encoding="utf-8")  # otra revisión que no vale: la copia anterior no se pisa
+    root, window = visible_window()
+    window.pdf = TMP / "novela.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    window.close()
+    second = review.with_name(review.name + ".2.bak")
+    assert json.loads(backup.read_text(encoding="utf-8")) == state and second.is_file(), "se pisó la copia anterior"
 
 
 def test_window_does_not_start_a_second_job():
@@ -7822,6 +7833,8 @@ def test_damaged_versions_file_is_set_aside():
     backup = path.with_name(path.name + ".bak")
     assert backup.read_bytes() == b"no es un zip" and backup.name in status, status
     assert [v["name"] for v in versions] == ["Nueva"], versions
+    path.write_bytes(b"otro roto")  # el segundo .bak no pisa el primero
+    assert app._load_versions(window.pdf)[1].name == path.name + ".2.bak" and backup.read_bytes() == b"no es un zip"
 
 
 def test_version_of_another_analysis_is_not_restored():

@@ -750,29 +750,48 @@ def _translate_thread(job, out, stop):
 
 
 def _fingerprint(pdf):
-    """Tamaño y fecha del PDF: si cambian, la revisión guardada es de otro PDF y no se usa."""
-    stat = Path(pdf).stat()
-    return [stat.st_size, stat.st_mtime_ns]
+    """Tamaño, fecha y resumen del final del PDF (su índice y su /ID): si cambian el tamaño o el resumen, la
+    revisión guardada es de otro PDF y no se usa. La fecha no cuenta: OneDrive la cambia al sincronizar."""
+    with open(pdf, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        f.seek(max(0, size - 65536))
+        return [size, os.fstat(f.fileno()).st_mtime_ns, hashlib.sha1(f.read()).hexdigest()]
+
+
+def _same_pdf(saved, pdf):
+    """saved (el "pdf" de una revisión) es de este PDF. Las revisiones de antes no traen resumen: basta el tamaño."""
+    now = _fingerprint(pdf)
+    return saved[0] == now[0] and list(saved[2:]) in ([], now[2:])
 
 
 def _read_review(pdf, blocks=None):
     """Revisión guardada de este PDF, o None si no hay o si el PDF cambió desde entonces. Sin blocks
-    (el panel de serie, que no analiza) solo se compara el PDF."""
+    (el panel de serie, que no analiza) solo se compara el PDF (_same_pdf: sin la fecha, que OneDrive cambia y
+    apartaba la revisión aunque el PDF fuera el mismo)."""
     try:
         state = json.loads(_review_path(pdf).read_text(encoding="utf-8"))
-        if (state["pdf"] == _fingerprint(pdf) and blocks in (None, state["blocks"])
+        if (_same_pdf(state["pdf"], pdf) and blocks in (None, state["blocks"])
                 and isinstance(state["rows"], dict)):
             return state
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
     return None
+
+
+def _backup_path(path):
+    """.bak libre para apartar path: uno anterior no se pisa (.bak, .2.bak, .3.bak…)."""
+    backup, n = path.with_name(path.name + ".bak"), 1
+    while backup.exists():
+        n += 1
+        backup = path.with_name(f"{path.name}.{n}.bak")
+    return backup
 
 
 def _set_aside(pdf):
     """Revisión guardada que ya no vale (otro análisis u otro PDF), apartada en .bak antes de que la ventana
     escriba la nueva encima. Devuelve la copia, o None si no había revisión."""
     review = _review_path(pdf)
-    backup = review.with_name(review.name + ".bak")
+    backup = _backup_path(review)
     try:
         os.replace(review, backup)
     except OSError:
@@ -819,7 +838,7 @@ def _load_versions(pdf):
         return [], None
     except (zipfile.BadZipFile, zlib.error, ValueError, KeyError):
         pass
-    backup = path.with_name(path.name + ".bak")
+    backup = _backup_path(path)
     os.replace(path, backup)
     return [], backup
 
@@ -4717,11 +4736,11 @@ class App:
         return True
 
     def restorable(self, state):
-        """Una versión vale para este libro si es del mismo análisis: mismos bloques y mismo tamaño de PDF (la
+        """Una versión vale para este libro si es del mismo análisis: mismos bloques y el mismo PDF (_same_pdf: la
         fecha no: OneDrive la cambia al sincronizar)."""
         try:
             return (state.get("blocks") == self.analyzed and isinstance(state.get("rows"), dict)
-                    and state["pdf"][0] == _fingerprint(self.pdf)[0])
+                    and _same_pdf(state["pdf"], self.pdf))
         except (OSError, KeyError, TypeError, IndexError):
             return False
 
