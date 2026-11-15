@@ -92,10 +92,8 @@ def key(text):
 def _split(line, kind):
     """(prefijo, texto) de una línea de section_text: "# " de un título, "<center>" de un párrafo centrado,
     "<marco>" de uno en recuadro, "<derecha>" de uno a la derecha. El prefijo no se traduce ni cuenta para la clave."""
-    for prefix in ("# ",) if kind == "heading" else (convert.CENTER, convert.FRAME, convert.RIGHT):
-        if line.startswith(prefix):
-            return prefix, line[len(prefix):]
-    return "", line
+    prefix, text = convert.split_prefix(line)
+    return (prefix, text) if (prefix == "# ") == (kind == "heading") else ("", line)
 
 
 def _hide_icons(text):
@@ -406,8 +404,9 @@ def _gcloud(texts, src, dst, api_key):
     body = {"q": [_markup(t) for t in texts], "target": dst, "format": "html"}
     if src != "auto":
         body["source"] = src
-    url = "https://translation.googleapis.com/language/translate/v2?" + urllib.parse.urlencode({"key": api_key.strip()})
-    data = _request("Google Cloud", lambda: _post(url, {}, body))
+    # la clave en una cabecera y no en la URL: las URL acaban en registros de proxies y de errores
+    url = "https://translation.googleapis.com/language/translate/v2"
+    data = _request("Google Cloud", lambda: _post(url, {"X-Goog-Api-Key": api_key.strip()}, body))
     return [html.unescape(t["translatedText"]) for t in data["data"]["translations"]]
 
 

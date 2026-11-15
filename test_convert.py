@@ -9,6 +9,11 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+# pymupdf 2.0 importa pymupdf.layout y pymupdf4llm (onnxruntime y numpy, unos 3 s más) y el motor no los usa; el
+# .exe los excluye. Aquí arriba también vale para los procesos de trabajo, que reimportan este módulo
+for _unused in ("pymupdf.layout", "pymupdf4llm"):
+    sys.modules.setdefault(_unused, None)
+
 import pymupdf
 
 import convert
@@ -111,6 +116,21 @@ def test_analyze():
     assert book.title == "novela" and book.cover[:3] == b"\xff\xd8\xff"
 
 
+def test_chapter_title_in_header_band_is_not_its_running_header():
+    """El encabezado de cada página repite el nombre del capítulo en pequeño; el título grande de la
+    primera página, también en la franja de arriba, no se quita con él."""
+    doc = pymupdf.open()
+    for n in range(1, 5):
+        rows = [(72, 30, "Capitulo 1: Inicio", 9, "helv")]
+        rows += [(72, 85, "Capitulo 1: Inicio", 20, "hebo")] if n == 1 else []
+        add_page(doc, n, rows + [(92, 140, f"Texto de la pagina {n}.", 11, "cour")])
+    path = TMP / "titulo-en-franja.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = [plain(b.html) for b in book.blocks if b.kind == "heading"]
+    assert heads == ["Capitulo 1: Inicio"], [(b.kind, b.html) for b in book.blocks]
+
+
 def test_soft_hyphen_at_line_end_joins_word():
     """Algunos PDF entregan el guion de partición como U+00AD: al final de línea une la palabra."""
     def span(text):
@@ -131,6 +151,7 @@ def test_series_and_volume_from_file_name():
         ("Mi Serie Vol. 2.5", "", ("Mi Serie", "2.5")),
         ("Otra serie - Tomo 3", "", ("Otra serie", "3")),
         ("Una novela suelta", "Una novela suelta", ("", "")),
+        ("Volumen 3 [WP]", "Maryoku - Volumen 3", ("Maryoku", "3")),
     ]
     for stem, meta, expected in cases:
         assert convert._series_volume(stem, meta) == expected, (stem, convert._series_volume(stem, meta))
@@ -473,6 +494,22 @@ def test_ornament_image_between_paragraphs_is_a_scene_break():
     assert "break" not in page2, page2
 
 
+def test_page_full_of_strokes_is_analyzed_quickly():
+    """Una ilustración vectorial de miles de trazos tardaba decenas de segundos en agruparse: no es un separador."""
+    import time
+    doc = pymupdf.open()
+    page = add_page(doc, 1, [(72, 110, "Capitulo 1: Inicio", 20, "helv"), (92, 150, "Texto.", 11, "cour")])
+    shape = page.new_shape()
+    for k in range(2000):
+        x, y = 72 + (k % 50) * 9, 200 + (k // 50) * 12
+        shape.draw_line((x, y), (x + 4, y))
+        shape.finish()
+    shape.commit()
+    start = time.perf_counter()
+    boxes = convert._drawn(doc[0])
+    assert time.perf_counter() - start < 2 and boxes == [], (time.perf_counter() - start, len(boxes))
+
+
 def test_drawn_ornament_between_paragraphs_is_a_scene_break():
     """Eminence 7: el separador de escena va dibujado con trazos (dos barras y una raya cruzada), sin imagen ni
     texto. Es un separador y guarda su dibujo; el subrayado ancho bajo el título y el fondo de página, no."""
@@ -662,9 +699,7 @@ def test_jpeg_encoder_is_fast_and_keeps_the_picture():
     mitad del análisis (Kage 6). La imagen conserva tamaño, color y gris."""
     import time
 
-    color = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 1240, 1754), False)
-    color.clear_with(200)
-    color.set_rect(pymupdf.IRect(0, 0, 620, 877), (200, 30, 30))
+    color = painted(1240, 1754, (200, 200, 200), (0, 0, 620, 877, (200, 30, 30)))
     gray = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.IRect(0, 0, 40, 30), False)
     gray.clear_with(90)
     convert._jpeg(gray, 85)  # el primer uso carga el codificador
@@ -1038,6 +1073,17 @@ def test_outline_bookmarks_choose_chapters():
     assert book.blocks[0].kind == "heading" and book.blocks[1].kind == "image"
 
 
+def test_outline_bookmark_without_page_is_not_a_chapter():
+    """Un marcador sin destino (página -1) no crea un capítulo falso al principio del libro."""
+    doc = pymupdf.open(make_novel())
+    doc.set_toc([[1, "Roto", -1], [1, "Capitulo 1: Inicio", 3]])
+    path = TMP / "marcador-roto.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [plain(book.blocks[i].html) for i in book.candidates]
+    assert "Roto" not in titles and titles[0] == "Capitulo 1: Inicio", titles
+
+
 def test_illustration_under_text_is_kept():
     """Ilustración a página completa con el texto de la novela encima: se guarda el texto y la imagen
     incrustada original (sin el texto). Una imagen repetida en muchas páginas es un fondo y se ignora."""
@@ -1244,6 +1290,30 @@ def test_epub_index_nests_subtitles_under_their_chapter():
     page, anchor = target.split("#")
     assert f'id="{anchor}"' in sections["OEBPS/" + page], target  # el enlace lleva al subtítulo
     assert f'href="{target}"' in nav
+
+
+def test_epub_titles_without_controls_tags_in_index_or_hidden_quotes():
+    """Un carácter de control pegado en un título o en el texto no rompe el XML; un subtítulo en cursiva
+    con nota sale en el índice como texto, con la nota como llamada en el <h2>; las comillas del título
+    pasan por la limpieza tipográfica, también en <title>."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno\x01 dos."),
+              convert.Block("heading", 1, '<i>El</i> lado<span class="nota">Una nota.</span>'),
+              convert.Block("p", 1, convert._inline("Tres\x0b cuatro."))]
+    book = convert.Book("Libro\x08", "Autora\x02", b"", blocks, [0])
+    out = TMP / "controles.epub"
+    convert.write_epub(book, [(0, 'Capítulo 1: "Hola"\x07')], out, typography=True)
+    with zipfile.ZipFile(out) as z:
+        texts = {n: z.read(n).decode() for n in z.namelist() if n.endswith((".xhtml", ".opf", ".ncx"))}
+    for name, text in texts.items():
+        ET.fromstring(text.replace("<!DOCTYPE html>", ""))  # XML válido
+        assert not convert.BAD_XML.search(text), name
+    ns = {"n": "http://www.daisy.org/z3986/2005/ncx/"}
+    labels = [t.text for t in ET.fromstring(texts["OEBPS/toc.ncx"]).iter("{%s}text" % ns["n"])]
+    assert "El lado" in labels and all(t and "<" not in t for t in labels), labels
+    assert '<a href="sec001.xhtml#t2">El lado</a>' in texts["OEBPS/nav.xhtml"], texts["OEBPS/nav.xhtml"]
+    section = texts["OEBPS/sec001.xhtml"]
+    assert re.search(r'<h2 id="t2"><i>El</i> lado<a class="nref"[^>]*>1</a></h2>', section), section
+    assert "<title>Capítulo 1: «Hola»</title>" in section and "«Hola»" in texts["OEBPS/nav.xhtml"], section
 
 
 def sectioned_book():
@@ -1851,10 +1921,9 @@ def test_window_close_stops_work_and_removes_partial_epub():
     import time
 
     root, window = visible_window()
-    window.run(time.sleep, (30,), lambda _: None)
     partial = TMP / "cerrar.epub.tmp"
     partial.write_bytes(b"a medio escribir")
-    window.partial = str(partial)
+    window.run(time.sleep, (30,), lambda _: None, partial=[partial])
     window.close()
     assert not partial.exists()
     assert not window.proc.is_alive()
@@ -1906,7 +1975,9 @@ def test_window_open_file_with_too_long_path():
         root.destroy()
     assert len(str(path)) >= 260, len(str(path))
     assert len(asked) == 1 and "260" in asked[0] and "caracteres" in asked[0], asked
-    assert launched == [["explorer", str(folder)], ["explorer", str(folder)]], launched
+    assert launched == [[app.EXPLORER, str(folder)], [app.EXPLORER, str(folder)]], launched
+    assert Path(app.EXPLORER).is_absolute() and Path(app.POWERSHELL).is_file(), (app.EXPLORER, app.POWERSHELL)
+    assert os.environ["NoDefaultCurrentDirectoryInExePath"] == "1"  # ni java ni calibre salen de la carpeta actual
 
 
 def test_window_reports_worker_crash():
@@ -1950,6 +2021,58 @@ def test_window_starts_work_with_big_data_without_freezing():
     root.destroy()
     assert results == [3_000_000], results
     assert took < 0.5, took
+
+
+def test_window_cancels_work_and_cleans_up():
+    """«Cancelar» junto a la barra detiene el trabajo y borra lo que dejó a medias; un trabajo que no llega a
+    empezar (datos que no se pueden pasar al proceso) avisa y no deja la ventana ocupada; cerrar a mitad borra los
+    datos del trabajo, y al arrancar se barren los de más de un día que dejó una ventana cerrada de golpe."""
+    import tempfile
+    import time
+
+    import app
+
+    root, window = visible_window()
+    shown, original = [], app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message, **_: shown.append(message)
+    try:
+        started = window.run(len, (lambda: None,), lambda _: None)  # una lambda no se puede pasar al proceso
+        window.poll()
+        failed = started, window.done, window.open_btn.isEnabled()
+    finally:
+        app.messagebox.showerror = original
+    partial = TMP / "a medias.epub.tmp"
+    partial.write_bytes(b"PK")
+    window.run(time.sleep, (30,), lambda _: None, partial=[partial])
+    root.update()
+    visible = window.cancel_btn.isVisible()
+    proc, args_file = window.proc, window.args_file
+    window.cancel_btn.click()
+    root.update()
+    window.poll()
+    cancelled = (proc.is_alive(), partial.exists(), Path(args_file).exists(), window.done, window.cancel_btn.isVisible(),
+                 window.status.text(), window.open_btn.isEnabled())
+    window.run(time.sleep, (30,), lambda _: None)
+    args_file = window.args_file
+    window.close()
+    closed = Path(args_file).exists()
+    saved, tempfile.tempdir = tempfile.tempdir, str(TMP)  # el barrido mira en %TEMP%: aquí, la carpeta de la prueba
+    try:
+        old, new, other = TMP / "lnepub-trabajo-viejo.pickle", TMP / "lnepub-vista-1.epub", TMP / "lnepub-otro.epub"
+        for path in (old, new, other):
+            path.write_bytes(b"x")
+        os.utime(old, (time.time() - 2 * 86400,) * 2)
+        os.utime(other, (time.time() - 2 * 86400,) * 2)
+        app._sweep_temp()
+        swept = old.exists(), new.exists(), other.exists()
+    finally:
+        tempfile.tempdir = saved
+    assert failed == (False, None, True) and shown and "No se pudo empezar" in shown[0], (failed, shown)
+    assert visible, "sin botón Cancelar durante el trabajo"
+    assert cancelled == (False, False, False, None, False, "Cancelado", True), cancelled
+    assert not closed, "quedó el archivo de datos del trabajo"
+    assert swept == (False, True, True), swept
+    assert app._batch_partials([TMP / "Libro.pdf"]) == [f"{TMP / 'Libro.epub'}.tmp", f"{TMP / 'Libro.kepub.epub'}.tmp"]
 
 
 def test_window_quality_report_not_repeated_for_the_same_text():
@@ -2195,6 +2318,39 @@ def test_window_epubcheck_asks_before_downloading():
     assert status == "EPUBCheck: 1 error, 1 advertencia", status
 
 
+def test_epubcheck_download_is_checked_and_replaced_whole():
+    """La descarga de EPUBCheck se compara con el resumen del oficial antes de descomprimirla (Java ejecutaría lo
+    que traiga), y se pone en su sitio de una vez: un corte a mitad dejaba el .jar sin sus bibliotecas."""
+    import io
+
+    import app
+
+    inside = f"epubcheck-{app.EPUBCHECK_VERSION}/"
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as z:
+        z.writestr(inside + "epubcheck.jar", b"jar")
+        z.writestr(inside + "lib/otra.jar", b"lib")
+    folder = TMP / "epubcheck-descarga"
+    (folder / inside).mkdir(parents=True, exist_ok=True)
+    (folder / inside / "epubcheck.jar").write_bytes(b"a medias")  # un corte anterior: sin lib/
+    saved = app.urllib.request.urlopen, app.EPUBCHECK_SHA256
+    app.urllib.request.urlopen = lambda url, timeout: io.BytesIO(data.getvalue())
+    try:
+        try:
+            app._download_epubcheck(folder)
+            refused = ""
+        except RuntimeError as e:
+            refused = str(e)
+        kept = (folder / inside / "epubcheck.jar").read_bytes()
+        app.EPUBCHECK_SHA256 = app._epubcheck_digest(zipfile.ZipFile(io.BytesIO(data.getvalue())))
+        jar = app._download_epubcheck(folder)
+    finally:
+        app.urllib.request.urlopen, app.EPUBCHECK_SHA256 = saved
+    assert "no coincide" in refused and kept == b"a medias", (refused, kept)
+    assert Path(jar).read_bytes() == b"jar" and (folder / inside / "lib" / "otra.jar").is_file(), jar
+    assert sorted(p.name for p in folder.iterdir()) == [inside.rstrip("/")], list(folder.iterdir())  # sin restos
+
+
 def test_write_pdf_bookmarks_numbers_and_metadata():
     """PDF maquetado desde el libro: tamaño elegido, índice como marcadores, título y autor en las propiedades,
     número de página al pie salvo en la portada y en las ilustraciones a página completa; sin restos .tmp."""
@@ -2339,10 +2495,20 @@ def test_pdf_illustration_page_height_follows_the_image():
     fills = [page.get_image_bbox(page.get_images(full=True)[0]) == page.rect for page in pdf]
     assert sizes == [(420, 301), (420, 840)] and all(fills), (sizes, fills)
 
+
+def painted(width, height, back, *boxes):
+    """Pixmap RGB de color back con rectángulos (x0, y0, x1, y1, color). Con Pillow: set_rect de pymupdf 2.0
+    recorre píxel a píxel en Python (40 s en 2000×3000)."""
+    from PIL import Image
+
+    img = Image.new("RGB", (width, height), back)
+    for *box, color in boxes:
+        img.paste(color, box)
+    return pymupdf.Pixmap(pymupdf.csRGB, width, height, img.tobytes(), False)
+
+
 def jpeg(width, height):
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
-    pix.set_rect(pix.irect, (200, 120, 40))
-    pix.set_rect(pymupdf.IRect(0, 0, width // 2, height // 3), (20, 60, 200))
+    pix = painted(width, height, (200, 120, 40), (0, 0, width // 2, height // 3, (20, 60, 200)))
     return pix.tobytes("jpg", jpg_quality=95)
 
 
@@ -2446,7 +2612,7 @@ def test_shrink_makes_big_images_lighter():
         assert max(pix.width, pix.height) == convert.SHRINK, (pix.width, pix.height)
         assert len(data) < len(big) and data[:3] == b"\xff\xd8\xff"
     small = jpeg(300, 400)
-    assert convert._shrink(small) == small or len(convert._shrink(small)) < len(small)
+    assert convert._shrink(small) == small  # bajo el límite y sin nada que ganar: la original tal cual
 
 
 def test_load_cover_converts_png_to_jpeg():
@@ -2462,6 +2628,23 @@ def test_load_cover_converts_png_to_jpeg():
         pass
     else:
         raise AssertionError("debía avisar de la imagen que falta")
+
+
+def test_epub_png_cover_is_jpeg_and_identifier_is_stable():
+    """Una portada PNG (ilustración con transparencia) se guarda como JPEG de verdad en cover.jpg; exportar
+    el mismo libro dos veces da el mismo identificador, y otro libro, otro."""
+    png = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 60), True).tobytes("png")
+    book = convert.Book("Libro", "Autora", png, [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno.")],
+                        [0], series="Serie", volume="1")
+    uids = []
+    for name, title in (("uno", "Libro"), ("dos", "Libro"), ("tres", "Otro libro")):
+        book.title = title
+        out = TMP / f"portada-{name}.epub"
+        convert.write_epub(book, [(0, "Cap 1")], out)
+        with zipfile.ZipFile(out) as z:
+            assert z.read("OEBPS/cover.jpg")[:3] == b"\xff\xd8\xff"
+        uids.append(re.search(r'<dc:identifier id="uid">([^<]+)<', epub_file(out, "OEBPS/content.opf"))[1])
+    assert uids[0] == uids[1] != uids[2] and uids[0].startswith("urn:uuid:"), uids
 
 
 def test_window_keyboard_shortcuts_change_type():
@@ -2488,7 +2671,8 @@ def test_window_keyboard_shortcuts_change_type():
 
 
 def test_window_review_is_restored_when_reopening_the_pdf():
-    """La revisión se guarda al cerrar y vuelve al abrir el mismo PDF; si el PDF cambia, no."""
+    """La revisión se guarda al cerrar y vuelve al abrir el mismo PDF, aunque OneDrive le cambie la fecha al
+    sincronizar; si el PDF cambia, no."""
     import app
 
     root, window = visible_window()
@@ -2503,6 +2687,7 @@ def test_window_review_is_restored_when_reopening_the_pdf():
     window.pdf_page = 2
     window.cover_from_page()
     window.close()
+    os.utime(window.pdf, ns=(1_000_000_000, 1_000_000_000))  # OneDrive al sincronizar: otra fecha, mismo PDF
 
     root, window = visible_window()
     window.pdf = TMP / "novela.pdf"
@@ -2514,11 +2699,42 @@ def test_window_review_is_restored_when_reopening_the_pdf():
                         "Revisión anterior recuperada"), restored
 
     root, window = visible_window()
-    window.pdf = make_novel()  # PDF nuevo en la misma ruta: la revisión guardada ya no vale
+    window.pdf = make_novel()  # PDF nuevo en la misma ruta y del mismo tamaño (otro /ID): la revisión ya no vale
     window.show_book(convert.analyze(window.pdf))
     fresh = (window.tree.set(item, "inc"), window.style_var.get(), window.cover_choice)
     window.close()
     assert fresh == (app.ON, "Clásico", None), fresh
+
+
+def test_window_autosaves_the_review():
+    """La revisión se guarda sola poco después de cada cambio (tipo de una fila, título, un dato del libro), una
+    vez por tanda: una ventana cerrada de golpe ya no pierde lo revisado."""
+    import json
+    import time
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    root.update()
+    review = app._review_path(window.pdf)
+    review.unlink(missing_ok=True)
+    saves, save = [], window.save_review
+    window.save_review = lambda: saves.append(1) or save()
+    item = first_title(window)
+    window.set_kind(item, app.OFF)
+    window.tree.set(item, "title", "Capítulo uno")
+    window.publisher_var.set("Grupo Autoguardado")
+    deadline = time.time() + 10
+    while not saves and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    state = json.loads(review.read_text(encoding="utf-8")) if review.is_file() else {}
+    autosaved = len(saves)
+    window.close()
+    assert autosaved == 1, saves
+    assert state.get("publisher") == "Grupo Autoguardado" and state["rows"][item][:2] == [app.OFF, "Capítulo uno"], state
 
 
 def test_window_metadata_cover_and_shrink_reach_the_epub():
@@ -2559,9 +2775,7 @@ def test_window_metadata_cover_and_shrink_reach_the_epub():
 
 def two_color(width, height):
     """JPEG con la mitad izquierda roja y la derecha azul, para saber qué mitad es cada página."""
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
-    pix.set_rect(pix.irect, (255, 0, 0))
-    pix.set_rect(pymupdf.IRect(width // 2, 0, width, height), (0, 0, 255))
+    pix = painted(width, height, (255, 0, 0), (width // 2, 0, width, height, (0, 0, 255)))
     return pix.tobytes("jpg", jpg_quality=95)
 
 
@@ -2935,6 +3149,12 @@ def test_line_break_before_honorific_keeps_hyphen():
     assert convert._join("una pala-", "bra partida") == "una palabra partida"
 
 
+def test_line_break_after_closing_inciso_hyphen_keeps_it():
+    """El guion que cierra un inciso abierto en la misma línea no es una palabra partida."""
+    assert convert._join("—No lo sé -dijo Subaru-", "y se marchó.") == "—No lo sé -dijo Subaru- y se marchó."
+    assert convert._join("y la contra-", "seña era") == "y la contraseña era"
+
+
 def test_edit_section_moves_images_and_adds_titles():
     blocks = [("heading", "Cap 1"), ("p", "Uno &amp; <i>dos</i>."), ("image", ""), ("break", "* * *"), ("p", "Tres."),
               ("heading", "Cap 2"), ("p", "Cuatro.")]
@@ -2973,6 +3193,13 @@ def test_link_sections_and_credits_page():
         assert line in credits, credits
     opf = epub_file(out, "OEBPS/content.opf")
     assert opf.index('idref="cover"') < opf.index('idref="credits"') < opf.index('idref="contents"'), opf
+
+
+def test_link_sections_ignores_words_containing_a_network_name():
+    blocks = [("heading", "Cap 1"), ("p", "Sembró la discordia entre ellos."), ("heading", "Cap 2"),
+              ("p", "Síguenos en Discord."), ("heading", "Agradecimiento a los Patreons"), ("p", "Gracias.")]
+    book = convert.Book("Libro", "", b"", [convert.Block(k, 1, h) for k, h in blocks], [0, 2, 4])
+    assert convert.link_sections(book) == [2, 4], convert.link_sections(book)  # «discordia» no es un enlace
 
 
 def make_group_pdf():
@@ -3145,6 +3372,49 @@ def test_editor_sheet_actions_paste_and_undo():
                     ["Dijo", "hola, y se fue."], 2, "<b>Pegado</b> de fuera", 1, 1], seen
 
 
+def test_editor_sheet_moves_whole_paragraphs_with_their_pages():
+    """Cortar párrafos enteros (del principio del 2 al del 6) y pegarlos al principio de otro: cada uno queda en
+    su párrafo, sin pegarse al de destino, y todos conservan su bloque (su página del PDF) y su línea original,
+    también el de destino. Mover 300 de 800 no tarda: antes recorría la hoja entera por cada párrafo."""
+    import time
+
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+
+    def move(count, first, last, to):
+        sheet = editor.Sheet()
+        sheet.set_content([(k, f"Párrafo {k}.") for k in range(count)], {})
+        doc = sheet.document()
+        c = sheet.textCursor()
+        c.setPosition(doc.findBlockByNumber(first).position())
+        c.setPosition(doc.findBlockByNumber(last).position(), QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+        cut = sheet.createMimeDataFromSelection()  # Ctrl+X sin el portapapeles del sistema
+        sheet.textCursor().removeSelectedText()
+        c.setPosition(doc.findBlockByNumber(to - (last - first)).position())
+        sheet.setTextCursor(c)
+        start = time.perf_counter()
+        sheet.insertFromMimeData(cut)
+        took = time.perf_counter() - start
+        blocks = [doc.findBlockByNumber(n) for n in range(doc.blockCount())]
+        return sheet, [(b.text(), editor.source_of(b)) for b in blocks], took
+
+    sheet, small, _ = move(12, 2, 6, 10)
+    texts, changed = [t for t, _ in small], len(sheet.changed_blocks())
+    sheet.undo()
+    undone = sheet.content()
+    _, big, moved = move(800, 100, 400, 700)
+    assert texts == [f"Párrafo {k}." for k in (0, 1, 6, 7, 8, 9, 2, 3, 4, 5, 10, 11)], texts
+    assert all(t == f"Párrafo {k}." for t, k in small) and changed == 0, (small, changed)
+    assert undone == "\n\n".join(f"Párrafo {k}." for k in (0, 1, 6, 7, 8, 9, 10, 11)), undone
+    assert all(t == f"Párrafo {k}." for t, k in big), [x for x in big if x[0] != f"Párrafo {x[1]}."][:5]
+    assert moved < 3, moved
+
+
 def test_editor_sheet_superscript_small_caps_right():
     """Superíndice, versalitas y párrafo a la derecha se cargan y vuelven igual; los botones de la hoja los ponen
     en lo elegido; derecha y centrado se excluyen; Ctrl+D pone a la derecha y Ctrl+Mayús+= el superíndice."""
@@ -3262,6 +3532,40 @@ def test_editor_sheet_links_center_levels_case_and_search():
                     "hola mundo, Hola otra vez.", "[Nota: aclaración]"], seen
 
 
+def test_editor_sheet_change_case_with_emoji_and_long_letters():
+    """Mayús+F3 con un emoji (dos posiciones en Qt) o con letras que al cambiar se alargan («ß» → «SS», «ﬁ» →
+    «FI»): cambia lo demás sin descolocarse, deja esas como están y un Ctrl+Z lo deshace todo, sin llevarse
+    lo que se escriba después."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "😀 hola mundo"), (2, "straße ﬁn")], {})
+
+    def run(n):
+        block = sheet.document().findBlockByNumber(n)
+        c = sheet.textCursor()
+        c.setPosition(block.position())
+        c.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+        sheet.change_case()
+        return sheet.document().findBlockByNumber(n).text()
+
+    seen = [run(0), run(0), run(1)]
+    sheet.undo()
+    sheet.undo()
+    sheet.undo()
+    back = sheet.content()
+    sheet.textCursor().insertText("Ya ")
+    sheet.undo()
+    after = sheet.content()
+    assert seen == ["😀 Hola Mundo", "😀 HOLA MUNDO", "Straße ﬁn"], seen
+    assert back == after == "😀 hola mundo\n\nstraße ﬁn", (back, after)
+
+
 def test_editor_sheet_looks_and_spelling():
     """Los títulos se ven grandes y en negrita sin guardar negrita; las palabras desconocidas salen subrayadas."""
     import qtk
@@ -3277,6 +3581,79 @@ def test_editor_sheet_looks_and_spelling():
     bold = any(f.format.fontWeight() >= 600 for f in heading)
     assert bold and sheet.content() == "# Título" + chr(10) * 2 + "Ella dijó que sí.", (bold, sheet.content())
     assert sheet.misspelled() == ["dijó"], sheet.misspelled()
+
+
+def test_editor_sheet_marks_the_right_word_after_emoji():
+    """Tras un emoji (dos posiciones en Qt, un carácter en Python) se subraya la palabra mal escrita, el trozo
+    puesto con «Mostrar cambios» y el trozo de un aviso del informe, no lo de al lado."""
+    import types
+
+    import app
+    import qtk
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "😀😀 hola palabrx"), (2, "😀 el gato")], {})
+    sheet.look.set_unknown({"palabrx"})
+    block = sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.setPosition(block.position() + 6)  # tras «😀 el »
+    c.setPosition(block.position() + 10, QTextCursor.MoveMode.KeepAnchor)
+    c.insertText("perro")
+    sheet.look.show_changes("#2e9d4a")
+    qtk.pump()
+
+    def spans(n, style):
+        return sorted((r.start, r.start + r.length) for r in sheet.document().findBlockByNumber(n).layout().formats()
+                      if r.format.underlineStyle() == style)
+
+    spell = spans(0, QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
+    added = spans(1, QTextCharFormat.UnderlineStyle.SingleUnderline)
+    start, end = app.TextEditor.issue_range(sheet.document().findBlockByNumber(0), types.SimpleNamespace(span=(3, 7)))
+    c.setPosition(sheet.document().findBlockByNumber(0).position() + start)
+    c.setPosition(sheet.document().findBlockByNumber(0).position() + end, QTextCursor.MoveMode.KeepAnchor)
+    assert spell == [(10, 17)] and added == [(6, 11)], (spell, added)
+    assert c.selectedText() == "hola", c.selectedText()
+
+
+def test_editor_sheet_colors_once_when_opening():
+    """Abrir un capítulo colorea cada párrafo una vez, y la primera tecla solo el suyo: antes se coloreaba tres
+    veces y la primera tecla congelaba la hoja más de un segundo en un capítulo largo."""
+    import qtk
+
+    import editor
+
+    qtk.app()
+    calls = []
+
+    class Counted(editor.Look):
+        def highlightBlock(self, text):
+            calls.append(text)
+            super().highlightBlock(text)
+
+    real, editor.Look = editor.Look, Counted
+    try:
+        sheet = editor.Sheet()
+        sheet.resize(600, 400)
+        sheet.show()
+        sheet.unknown = {"dijó"}
+        sheet.set_content([(k, f"Ella dijó que sí, párrafo {k}.") for k in range(60)], {})
+        qtk.pump()
+        opened = len(calls)
+        calls.clear()
+        cursor = sheet.textCursor()
+        cursor.insertText("x")
+        qtk.pump()
+        typed = len(calls)
+        underlined = len(sheet.misspelled())
+        sheet.close()
+    finally:
+        editor.Look = real
+    assert opened == 60 and typed == 1, (opened, typed)
+    assert underlined == 60, underlined
 
 
 def test_text_editor_opens_section_and_saves_only_changes():
@@ -3518,6 +3895,27 @@ def test_text_editor_styles_links_and_find_reach_the_book():
     assert replaced.endswith("reemplazos") and "linea" not in text.lower() and "fila" in text, (replaced, text[:200])
 
 
+def test_text_editor_links_take_the_theme_blue():
+    """Los enlaces de la hoja salen en el azul del tema: con el oscuro, el claro fijo apenas se leía (3:1)."""
+    import editor as ed
+    import theme
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, 'Ver <a href="https://example.com">la web</a>.')]
+    root, window, editor = editor_on(blocks, [0], dark=True)
+    block = editor.sheet.document().findBlockByNumber(1)
+    it, colors = block.begin(), []
+    while not it.atEnd():
+        f = it.fragment().charFormat()
+        if f.isAnchor():
+            colors.append(f.foreground().color().name())
+        it += 1
+    editor.win.done(0)
+    window.close()
+    ed.LINK_COLOR = theme.colors(False)["acc"]  # las hojas sueltas de otras pruebas, como antes
+    assert colors == [theme.colors(True)["acc"]], colors
+
+
 def sheet_with(lines):
     """Hoja suelta con lines de section_text; el párrafo n viene del bloque n."""
     import editor
@@ -3740,6 +4138,35 @@ def test_sheet_changes_and_restore():
     assert split == [False, False] and joined is False, (split, joined)
 
 
+def test_sheet_changed_paragraphs_follow_format_and_undo_quickly():
+    """Los párrafos cambiados se recuerdan entre pausas al escribir, pero una cursiva puesta o quitada, un
+    deshacer o un rehacer se notan igual; mirar 800 párrafos otra vez no cuesta casi nada."""
+    import time
+
+    from PySide6.QtGui import QTextCursor
+    sheet = sheet_with([f"Párrafo {k} con texto." for k in range(800)])
+    doc = sheet.document()
+    first = sheet.changed_blocks()
+    start = time.perf_counter()
+    again = sheet.changed_blocks()
+    took = time.perf_counter() - start
+    cursor = doc.find("texto")
+    sheet.setTextCursor(cursor)
+    sheet.toggle_italic()
+    italic = [b.text() for b in sheet.changed_blocks()]
+    sheet.undo()
+    undone = sheet.changed_blocks()
+    sheet.redo()
+    redone = [b.text() for b in sheet.changed_blocks()]
+    QTextCursor(doc.findBlockByNumber(5)).insertBlock()  # un párrafo nuevo y vacío no cuenta
+    QTextCursor(doc.findBlockByNumber(5)).insertText("Nuevo.")
+    added = [b.text() for b in sheet.changed_blocks()]
+    assert first == again == [] and undone == [], (first, again, undone)
+    assert italic == redone == ["Párrafo 0 con texto."], (italic, redone)
+    assert added == ["Párrafo 0 con texto.", "Nuevo."], added
+    assert took < 0.05, took
+
+
 def test_sheet_replace_sources_and_split_chapter():
     """El arreglo de «Párrafo partido» une dos párrafos con una ilustración en medio y la ilustración sigue;
     un arreglo vacío quita el párrafo. «Dividir capítulo» pone un título de capítulo en el cursor."""
@@ -3762,10 +4189,14 @@ def test_sheet_replace_sources_and_split_chapter():
     assert refused
 
 
-def editor_on(blocks, candidates):
-    """Ventana con un libro hecho a mano (y un PDF de una página por bloque) y su editor en la primera sección."""
+def editor_on(blocks, candidates, dark=False):
+    """Ventana con un libro hecho a mano (y un PDF de una página por bloque) y su editor en la primera sección;
+    dark: con el tema oscuro."""
     import app
     root, window = visible_window()
+    if dark:
+        window.theme_var.set("Oscuro")
+        window.apply_theme()
     doc = pymupdf.open()
     for n in range(max(b.page for b in blocks)):
         add_page(doc, n + 1, [(72, 100, f"Pagina {n}", 11, "helv")])
@@ -3949,6 +4380,31 @@ def test_editor_shows_changes():
     assert marked and shown, (marked, shown, bar)
     assert ">gato</s>" in bar and ">perro</u>" in bar and "negro" in bar and "<i>" not in bar, bar
     assert hidden_clean and gone, (hidden_clean, gone)
+
+
+def test_editor_sheet_changes_in_a_loaded_empty_paragraph():
+    """Un párrafo que se cargó vacío: con «Mostrar cambios», lo escrito en él se subraya como puesto (antes el
+    coloreado fallaba: PySide devuelve [] por la línea original vacía), cuenta como cambio y vuelve a vacío."""
+    import qtk
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Uno."), (2, ""), (3, "Tres.")], {})
+    sheet.look.show_changes("#2e9d4a")
+    block = sheet.document().findBlockByNumber(1)
+    QTextCursor(block).insertText("Nuevo")
+    qtk.pump()
+    block = sheet.document().findBlockByNumber(1)
+    marked = any(r.format.underlineStyle() == QTextCharFormat.UnderlineStyle.SingleUnderline
+                 for r in block.layout().formats())
+    changed = [b.text() for b in sheet.changed_blocks()]
+    original = editor.original_of(block)
+    sheet.restore(block)
+    assert marked and changed == ["Nuevo"] and original == "", (marked, changed, original)
+    assert sheet.content() == "Uno.\n\nTres.", sheet.content()
 
 
 def test_editor_focus_mode():
@@ -4498,6 +4954,23 @@ def test_spell_server_answers_checks_before_suggestions():
     assert not worker.is_alive()
 
 
+def test_app_ends_after_stopping_spell_server_with_words_pending():
+    """Cerrar el editor detiene el proceso de ortografía con palabras aún por enviar: el programa debe terminar igual
+    (se quedaba colgado al salir, esperando a mandar lo que ya nadie iba a leer)."""
+    import subprocess
+
+    code = ("import multiprocessing, sys\nsys.path.insert(0, %r)\nimport app\n"
+            "if __name__ == '__main__':\n"
+            "    requests, replies, proc = app._start_spell_process()\n"
+            "    proc.terminate(); proc.join()\n"
+            "    requests.put(('check', ['palabra'] * 400000))\n") % str(Path(__file__).parent)
+    script = TMP / "ortografia_al_salir.py"
+    script.write_text(code, encoding="utf-8")
+    run = subprocess.run([sys.executable, str(script)], capture_output=True, timeout=120,
+                         env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+    assert run.returncode == 0, run.stderr.decode(errors="replace")[-500:]
+
+
 def test_text_editor_review_split_find_and_stats():
     """Ctrl+Intro marca el capítulo como revisado y abre el siguiente sin revisar; «Dividir» parte el
     capítulo y al aceptar la lista tiene la fila nueva; buscar con palabra completa y mayúsculas, y «Todos»
@@ -4536,6 +5009,36 @@ def test_text_editor_review_split_find_and_stats():
     assert loose == 4 and whole == 3 and len(exact) == 1 and "de él y" in exact[0], (loose, whole, exact)
     assert listed and grid[3:6] == ["Palabras", "12", "15"] and "42 %" in grid, grid  # 5 de 12 en diálogo
     assert ("Capítulo 1.5: Interludio", app.ON) in rows, rows
+
+
+def test_text_editor_menus_do_not_pile_up():
+    """Cada clic derecho y cada «Todos» abren su menú o su lista; el anterior, ya cerrado, se borra: antes
+    quedaban todos vivos mientras el editor estuviera abierto (500 filas por «Todos»)."""
+    import shiboken6
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Él dijo algo, y él calló.")], [0])
+    pos = editor.sheet.cursorRect(editor.sheet.document().find("dijo")).center()
+    editor.context_menu(pos)
+    first = editor.context
+    first.close()
+    editor.context_menu(pos)
+    second = editor.context
+    second.close()
+    editor.find_entry.setText("él")
+    editor.show_all_matches()
+    old = editor.matches_popup
+    old.hide()
+    editor.show_all_matches()
+    new = editor.matches_popup
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    alive = [shiboken6.isValid(w) for w in (first, second, old, new)]
+    new.hide()
+    editor.win.done(0)
+    window.close()
+    assert alive == [False, True, False, True], alive
 
 
 def test_text_editor_ribbon_follows_the_cursor():
@@ -5044,6 +5547,26 @@ def test_footnotes_leave_body_and_keep_reference_place():
     assert not any("permanecia" in b.html for b in book.blocks if b is not note), [b.html for b in book.blocks]
 
 
+def test_footnote_on_page_without_paragraph_is_kept():
+    """Una nota al pie en una página con solo el título del capítulo se perdía: no había párrafo donde ponerla."""
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"), (72, 737, "1", 7, "cour"),
+                      (72 + 7 * 0.6 + 0.8, 740, "Una nota del titulo.", 9, "cour")])
+    for number in (2, 3):
+        add_page(doc, number, [(92, 140, line("Otra pagina con texto normal de la novela", 57), 11, "cour"),
+                               (72, 154, "y su final.", 11, "cour")])
+    path = TMP / "nota-sin-parrafo.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    assert any("Una nota del titulo." in b.html for b in book.blocks), [b.html for b in book.blocks]
+
+
+def test_note_mark_with_brackets_inside():
+    """«[Nota: …]» del editor con corchetes dentro sigue siendo una sola nota."""
+    out = convert._inline("Hola[Nota: Pasa en [Arco 2] luego.] y fin.")
+    assert out == 'Hola<span class="nota">Pasa en [Arco 2] luego.</span> y fin.', out
+
+
 def test_footnotes_become_popup_notes():
     book = convert.Book("Libro", "", jpeg(60, 80), [
         convert.Block("heading", 1, "Capitulo 1"),
@@ -5114,6 +5637,30 @@ def test_check_epub_reports_problems():
                                                  convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Ya.")], [0, 1])
     convert.write_epub(empty_part, [(0, "Parte uno"), (1, "Cap 1")], out)
     assert convert.check_epub(out) == []  # una portadilla vacía es a propósito
+
+
+def test_check_epub_finds_wrong_image_type_local_anchor_and_mimetype():
+    """Un PNG guardado como .jpg, un enlace «#ancla» a nada en el mismo archivo y un mimetype comprimido
+    que no va el primero: problemas que los lectores no perdonan."""
+    blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
+              convert.Block("image", 1, image=jpeg(10, 10))]
+    out = TMP / "revisar-tipos.epub"
+    convert.write_epub(convert.Book("Libro", "", jpeg(10, 10), blocks, [0]), [(0, "Cap 1")], out)
+    assert convert.check_epub(out) == [], convert.check_epub(out)
+    png = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False).tobytes("png")
+    broken = TMP / "revisar-tipos-roto.epub"
+    with zipfile.ZipFile(out) as src, zipfile.ZipFile(broken, "w", zipfile.ZIP_DEFLATED) as dst:
+        for name in sorted(src.namelist(), key=lambda n: n == "mimetype"):  # mimetype al final
+            data = src.read(name)
+            if name == "OEBPS/img/b00002.jpg":
+                data = png
+            if name == "OEBPS/sec001.xhtml":
+                data = data.replace(b"Uno.</p>", b'<a href="#nada">Uno.</a></p>')
+            dst.writestr(name, data)
+    problems = convert.check_epub(broken)
+    assert "img/b00002.jpg no es una imagen JPEG, aunque así se declara" in problems, problems
+    assert "sec001.xhtml: enlace roto a #nada" in problems, problems
+    assert any(p.startswith("El archivo mimetype no va el primero") for p in problems), problems
 
 
 def test_window_fix_case_and_undo_it_at_once():
@@ -5626,9 +6173,7 @@ def test_duplicate_images_and_trim():
     book = convert.Book("Libro", "", art, [convert.Block("image", 1, image=other), convert.Block("image", 2, image=art),
                                            convert.Block("image", 3, image=other)], [])
     assert convert.duplicate_images(book) == [1, 2]  # la portada otra vez y la repetida
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 400, 500), False)
-    pix.set_rect(pix.irect, (255, 255, 255))
-    pix.set_rect(pymupdf.IRect(40, 50, 360, 450), (30, 90, 160))
+    pix = painted(400, 500, (255, 255, 255), (40, 50, 360, 450, (30, 90, 160)))
     trimmed = pymupdf.Pixmap(convert._trim(pix.tobytes("jpg", jpg_quality=95)))
     assert abs(trimmed.width - 320) <= 4 and abs(trimmed.height - 400) <= 4, (trimmed.width, trimmed.height)
     assert convert._trim(other) == other  # sin margen blanco no cambia
@@ -5734,6 +6279,21 @@ def test_quality_report_explains_previews_and_fixes():
     assert book.candidates == [0, 5], book.candidates
 
 
+def test_quality_fixes_keep_dialogue_numbers_frames_and_alignment():
+    """«—¡3!» no es número de página; un recuadro repetido («HP: 10/10») no es encabezado; unir un párrafo
+    partido centrado no deja «<center>» escrito en medio del texto."""
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "—¡3!"), B("p", 1, "Ella dijo que")]
+    blocks += [B("p", n, "HP: 10/10", align="frame") for n in (2, 3, 4)]
+    blocks += [B("p", 5, "La carta decía"), B("p", 5, "que volvería pronto.", align="center")]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    report = convert.quality_report(book)
+    kinds = [i.kind for i in report]
+    assert "number" not in kinds and "repeated" not in kinds, kinds
+    joined = next(i for i in report if i.kind == "lower" and i.block == 7)
+    assert joined.edit == (6, 8, "La carta decía que volvería pronto."), joined.edit
+
+
 def test_quality_report_finds_untranslated_text():
     """Un párrafo en inglés se avisa; uno español con palabras inglesas sueltas, no."""
     texts = ["The castle stood on the hill above the village, and its towers were dark.",
@@ -5798,6 +6358,15 @@ def test_quality_report_fixes_fansub_typos():
     assert [b.html for b in book.blocks[1:7]] == ["¿Qué haces? —preguntó. ¡Ven aquí!", "Lo vi de lejos.",
                                                   "A ver si llegas pronto.", "¿Por qué lo hiciste?",
                                                   "<i>¿Qué haces?</i>", "«¿Qué?» ¡Ven aquí!"], [b.html for b in book.blocks]
+
+
+def test_opening_marks_with_many_dots_is_fast():
+    """Muchos puntos seguidos tras un «¡No!» tardaban segundos en el informe (retroceso de la expresión)."""
+    import time
+    start = time.perf_counter()
+    fixed = convert._opening_marks("—¡No! Pensé" + "." * 26 + " y nada más.")
+    assert time.perf_counter() - start < 0.1, time.perf_counter() - start
+    assert fixed == "—¡No! Pensé" + "." * 26 + " y nada más.", fixed
 
 
 def test_quality_report_unifies_honorific_variants():
@@ -6450,21 +7019,28 @@ def test_window_dialogs_fit_the_screen():
 
 
 def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
-    """Ortografía y «Añadir página» se cierran al abrir otro PDF (si no, cambiarían el libro nuevo); con un
-    trabajo en curso, «Ortografía…» lo dice en vez de no hacer nada."""
+    """Ortografía, «Añadir página», Versiones, el informe de calidad, Ilustraciones y la portada se cierran al abrir
+    otro PDF (si no, cambiarían el libro nuevo: «Borrar» de Versiones escribía las del libro anterior en el nuevo);
+    con un trabajo en curso, «Ortografía…» lo dice en vez de no hacer nada."""
     import time
 
     pdf = TMP / "Otra - Volumen 1.pdf"
     make_novel().replace(pdf)
     root, window = visible_window()
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
-                                                     convert.Block("p", 1, "Ella dijó que sí.")], [0]))
+                                                     convert.Block("p", 1, "Ella dijó que sí."),
+                                                     convert.Block("image", 1, image=jpeg(40, 60))], [0]))
     window.done = lambda result: None  # un trabajo en curso
     window.spelling()
     busy = window.status.text()
     window.done = None
     window.spelling_dialog([("dijó", 1, ["dijo"])])
     window.add_page()
+    window.pdf = pdf  # Versiones pide un PDF
+    window.versions()
+    window.quality()
+    window.images_dialog()
+    window.choose_cover()
     root.update()
     opened = len(root.dialogs())
     window.open_path(str(pdf))
@@ -6476,7 +7052,48 @@ def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
         time.sleep(0.05)
     window.close()
     assert busy == "Espera a que termine el trabajo en curso", busy
-    assert (opened, left) == (2, 0), (opened, left)
+    assert (opened, left) == (6, 0), (opened, left)
+
+
+def test_window_refuses_a_book_open_in_another_window():
+    """Dos ventanas con el mismo libro guardarían su revisión una encima de la otra: la segunda no lo abre y lo
+    dice; al cerrar la primera, ya se puede. Volver a abrirlo en su misma ventana sí vale."""
+    import time
+
+    import app
+
+    def wait(window):
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            window.root.repaint()
+            app.qtk.pump()
+            time.sleep(0.05)
+
+    pdf = TMP / "Candado - Volumen 1.pdf"
+    make_novel().replace(pdf)
+    settings = TMP / f"ajustes-candado-{time.time_ns()}.json"  # las dos ventanas, con la misma carpeta de ajustes
+    root, first = visible_window(settings)
+    first.open_path(str(pdf))
+    wait(first)
+    first.open_path(str(pdf))  # el mismo libro en su ventana: se vuelve a abrir
+    reopened = first.done is not None
+    wait(first)
+    shown, original = [], app.messagebox.showerror
+    app.messagebox.showerror = lambda title, message, **_: shown.append(message)
+    try:
+        root2, second = visible_window(settings)
+        second.open_path(str(pdf))
+        refused = second.done is None and second.book is None
+        first.close()
+        second.open_path(str(pdf))
+        accepted = second.done is not None
+        wait(second)
+    finally:
+        app.messagebox.showerror = original
+    second.close()
+    assert reopened, "no se pudo volver a abrir el libro en su ventana"
+    assert refused and len(shown) == 1 and "ya está abierto en otra ventana" in shown[0], (refused, shown)
+    assert accepted, "tras cerrar la primera ventana el libro seguía bloqueado"
 
 
 def test_editor_page_buttons_below_the_page():
@@ -6507,12 +7124,61 @@ def test_replay_image_and_page_at_start():
     blocks = [convert.Block("heading", 1, "Capítulo 1"), convert.Block("image", 1, image=JPEG),
               convert.Block("image", 2, image=JPEG)]
     book = convert.Book("Libro", "", b"", blocks, [0])
-    state = {"edits": [["image", 1, str(picture)], ["image", 2, str(TMP / "no-existe.png")], [0, 0, "# Créditos\n\nGracias."]]}
+    stored = app._store_image(picture)  # la ventana guarda así cada ilustración cambiada
+    state = {"edits": [["image", 1, stored], ["image", 2, str(TMP / "no-existe.png")], [0, 0, "# Créditos\n\nGracias."]]}
     done = app._replay(book, state)
     assert done == state["edits"], done
     assert [b.kind for b in book.blocks] == ["heading", "p", "heading", "image", "image"], book.blocks
     assert pymupdf.Pixmap(book.blocks[3].image).width == 20 and book.blocks[4].image == JPEG, book.blocks
     assert book.candidates == [2], book.candidates
+
+
+def test_plan_skips_rows_of_edits_not_replayed():
+    """Si _replay se para a mitad (la ilustración cambiada ya no es una imagen), las filas de los bloques que añadía
+    la edición siguiente no existen: la conversión de carpeta fallaba con IndexError en vez de convertir el tomo."""
+    import app
+
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
+                                           convert.Block("p", 1, "Dos.")], [0])
+    state = {"edits": [["image", 1, "x.png"], [3, 3, "# Cap 2\n\nMás."]],
+             "rows": {"0": [app.ON, "Cap 1"], "3": [app.ON, "Cap 2"]}}
+    done = app._replay(book, state)
+    chapters, removed, breaks = app._plan(book, state["rows"])
+    assert done == [] and len(book.blocks) == 3, (done, book.blocks)
+    assert chapters == [(0, "Cap 1")] and removed == breaks == [], (chapters, removed, breaks)
+
+
+def test_reviews_of_others_do_not_open_network_paths():
+    """Un .lnepub.json ajeno junto al PDF (heredado de otro tomo de la serie) puede traer rutas de red: con solo
+    mirarlas, Windows se conecta y entrega el hash de la contraseña. La fuente propia solo vale local, absoluta y
+    .ttf/.otf, y una ilustración cambiada solo desde la carpeta de ilustraciones del programa; ni se mira el disco."""
+    import pathlib
+
+    import app
+
+    unc, looked = r"\\192.168.1.50\s\x.ttf", []
+    assert app._font_file(r"C:\Fuentes\Mia.TTF") and app._font_file("C:/Fuentes/mia.otf")
+    assert not [p for p in (unc, "//192.168.1.50/s/x.ttf", r"\\?\UNC\srv\s\x.ttf", "mia.ttf", r"C:\x\mia.exe", "")
+                if app._font_file(p)]
+    assert app._stored_image(app.SETTINGS.parent / "ilustraciones" / "a.png")
+    assert not app._stored_image(app.SETTINGS.parent / "ilustraciones" / ".." / "a.png")
+    assert not app._stored_image(r"\\192.168.1.50\s\x.png") and not app._stored_image(TMP / "a.png")
+    is_file, read_bytes = pathlib.Path.is_file, pathlib.Path.read_bytes
+    pathlib.Path.is_file = lambda self: looked.append(str(self)) or is_file(self)
+    pathlib.Path.read_bytes = lambda self: looked.append(str(self)) or read_bytes(self)
+    try:
+        written = app._write_options({"font": "x.ttf", "font_file": unc})
+        book = convert.Book("Libro", "", b"", [convert.Block("image", 1, image=JPEG)], [])
+        done = app._replay(book, {"edits": [["image", 0, r"\\192.168.1.50\s\x.png"]]})
+        root, window = visible_window()
+        window.apply_state({"font": "x.ttf", "font_file": unc})
+        kept = window.font_file_var.get(), window.font_var.get()
+        window.close()
+    finally:
+        pathlib.Path.is_file, pathlib.Path.read_bytes = is_file, read_bytes
+    assert written["font"] == "" and book.blocks[0].image == JPEG and done, (written["font"], done)
+    assert kept == ("", "Del lector"), kept
+    assert not [p for p in looked if "192.168" in p], looked
 
 
 
@@ -6643,6 +7309,39 @@ def test_window_quality_report_says_where_and_opens_the_editor_on_the_problem():
     assert bar == (True, "● Menor · Mayúscula innecesaria"), bar
     assert title.startswith("Texto · Capítulo 0"), title
 
+
+def test_window_quality_report_editor_in_a_book_without_rows():
+    """Libro sin ningún título ni ilustración: la lista está vacía y el editor se abre por filas. «Abrir en el
+    editor» del informe daba «tuple index out of range»; ahora explica qué hacer."""
+    import app
+
+    B = convert.Block
+    blocks = [B("p", 1, "Primero llegó la carta."), B("p", 1, html.escape("“¿Viene alguien, Señora Bruja?”, dijo."))]
+    doc = pymupdf.open()
+    add_page(doc, 1, [])
+    doc.save(TMP / "sin-filas.pdf")
+    root, window = visible_window()
+    window.pdf = TMP / "sin-filas.pdf"
+    window.show_book(convert.Book("Libro", "", b"", blocks, []))
+    shown, saved = [], app.messagebox.showinfo
+    app.messagebox.showinfo = lambda title, message, **_: shown.append(message)
+    try:
+        assert not window.tree.get_children()
+        window.quality()
+        root.update()
+        parts = root.dialogs()[-1].parts
+        table = parts["table"]
+        table.selection_set(table.get_children()[0])
+        root.update()
+        parts["edit"].click()
+        root.update()
+    finally:
+        app.messagebox.showinfo = saved
+    editor = window.text_editor
+    window.close()
+    assert editor is None, editor
+    assert shown and "Añadir página" in shown[0], shown
+
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
     página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""
@@ -6693,6 +7392,20 @@ def test_regex_replacements_and_counts():
     assert "<p>Onii-chan y Onii-chan y Onii-chan.</p>" in text and "Capítulo 1" in text, text
 
 
+def test_regex_replacements_keep_entities_groups_and_tags_safe():
+    """Una regex con «\\g<1>» funciona; «;» no rompe «&amp;»; una plantilla «\\074script\\076» no mete
+    etiquetas; «\\2» con un solo grupo se avisa y se salta en vez de parar la conversión."""
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"),
+                                           convert.Block("p", 1, "Tom &amp; Jerry; Rem-kun.")], [0])
+    rules = [(r"re:(\w+)-kun", r"\g<1>-san"), ("re:;", ","), ("re:Jerry", r"\074script\076"), (r"re:(Tom)", r"\2")]
+    counts = convert.count_matches(book, rules)
+    assert [n for _, n in counts[:3]] == [1, 1, 1] and "no válida" in counts[3][1], counts
+    out = TMP / "regex-seguras.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out, replacements=rules)
+    text = epub_file(out, "OEBPS/sec001.xhtml")
+    assert "<p>Tom &amp; &lt;script&gt;, Rem-san.</p>" in text, text
+
+
 def test_epub_extras_pages_classes_fonts_metadata():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
               convert.Block("p", 1, "Querida Ana:", align="center"), convert.Block("p", 2, "【Habilidad adquirida】"),
@@ -6735,6 +7448,29 @@ def test_omnibus_joins_volumes():
     assert titles[0] == "Mi Serie - Volumen 1" and "Mi Serie - Volumen 2" in titles, titles
     assert titles.count("Capitulo 1: Inicio") == 2, titles
     assert "Mi Serie - Volúmenes 1-2" in epub_file(out, "OEBPS/content.opf")
+
+
+def test_window_omnibus_result_stays_out_of_the_open_book():
+    """El recopilatorio no es el libro abierto: sus avisos y su versión automática no se apuntan en él (el panel
+    de serie mostraba los avisos del recopilatorio en el tomo abierto)."""
+    import app
+
+    root, window = versioned_window()
+    out = str(TMP / "Recopilatorio.epub")
+    saved = app.filedialog.askopenfilenames, app.filedialog.asksaveasfilename, window.run
+    app.filedialog.askopenfilenames = lambda **_: (str(TMP / "a.pdf"), str(TMP / "b.pdf"))
+    app.filedialog.asksaveasfilename = lambda **_: out
+    window.run = lambda work, args, done, **_: done(["un aviso"]) or True
+    try:
+        window.omnibus()
+        root.update()
+    finally:
+        app.filedialog.askopenfilenames, app.filedialog.asksaveasfilename, window.run = saved
+    result = [d.windowTitle() for d in root.dialogs()]
+    kept = window.last_problems, app._load_versions(window.pdf)[0], window.status.text()
+    window.close()
+    assert kept[:2] == (None, []) and "Recopilatorio.epub" in kept[2], kept
+    assert result, "sin el diálogo del EPUB generado"
 
 
 def test_worker_error_is_logged():
@@ -6986,7 +7722,8 @@ def test_custom_font_is_embedded():
 
 
 def test_serve_gives_the_epub_over_http():
-    """El servidor de «Enviar al móvil» da el EPUB en cualquier ruta y deja de hacerlo al cerrar la ventana."""
+    """El servidor de «Enviar al móvil» da el EPUB solo en su ruta con clave al azar (otra da 404 y no cuenta como
+    enviado), deja de hacerlo al cerrar la ventana y la ventana se cierra sola a los SEND_MINUTES."""
     import urllib.error
     import urllib.request
 
@@ -6996,14 +7733,24 @@ def test_serve_gives_the_epub_over_http():
     epub = TMP / "Mi novela.epub"
     epub.write_bytes(b"PK" + os.urandom(5000))
     server = app._serve(epub, "127.0.0.1")
+    other = app._serve(epub, "127.0.0.1")
     port = server.server_port
-    got = []
-    for path in ("x", "otra/ruta"):
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/{path}", timeout=5) as r:
-            got.append((r.read() == epub.read_bytes(), r.headers["Content-Type"], r.headers["Content-Disposition"]))
-    server.shutdown()
-    server.server_close()
-    assert got == [(True, "application/epub+zip", "attachment; filename*=UTF-8''Mi%20novela.epub")] * 2, got
+    missing = []
+    for path in ("/x", "/Mi%20novela.epub", other.path):  # sin la clave de este servidor, nada
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+            missing.append(200)
+        except urllib.error.HTTPError as e:
+            missing.append(e.code)
+    guessed = server.downloaded
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{server.path}", timeout=5) as r:
+        got = (r.read() == epub.read_bytes(), r.headers["Content-Type"], r.headers["Content-Disposition"])
+    for s in (server, other):
+        s.shutdown()
+        s.server_close()
+    assert missing == [404] * 3 and not guessed, (missing, guessed)
+    assert got == (True, "application/epub+zip", "attachment; filename*=UTF-8''Mi%20novela.epub"), got
+    assert server.path.endswith("/Mi%20novela.epub") and len(server.path) > 20 and server.downloaded, server.path
     root, window = visible_window()
     shown = []
     original, lan = app.messagebox.showerror, app._lan_ip
@@ -7017,7 +7764,7 @@ def test_serve_gives_the_epub_over_http():
     win, server = window.phone_window
     qr = [label for label in win.findChildren(QLabel) if label.pixmap() and not label.pixmap().isNull()]
     texts = " ".join(label.text() for label in win.findChildren(QLabel))
-    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=5) as r:
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}{server.path}", timeout=5) as r:
         served = r.read() == epub.read_bytes()
     win.close()
     root.update()
@@ -7027,11 +7774,21 @@ def test_serve_gives_the_epub_over_http():
     except (urllib.error.URLError, OSError):
         stopped = True
     sent = app._sent_text(epub)  # el móvil lo descargó: el panel de serie lo cuenta como enviado
+    app.SEND_MINUTES = 0  # a los SEND_MINUTES la ventana se cierra sola
+    try:
+        window.send_to_phone(epub, ip="127.0.0.1")
+        expiring = window.phone_window[0]
+        for _ in range(20):
+            root.update()
+        expired = not app.shiboken6.isValid(expiring) or not expiring.isVisible()  # cerrada, o ya borrada
+    finally:
+        app.SEND_MINUTES = 10
     window.close()
+    assert expired, "la ventana de «Enviar al móvil» no se cerró sola"
     assert sent.startswith("Wi-Fi · "), sent
     assert shown == ["No hay red local: conecta el equipo a la Wi-Fi."], shown
     assert len(qr) == 1 and served and stopped, (len(qr), served, stopped)
-    assert f"http://127.0.0.1:{server.server_port}/Mi%20novela.epub" in texts and "Firewall" in texts, texts
+    assert f"http://127.0.0.1:{server.server_port}{server.path}" in texts and "Firewall" in texts, texts
 
 
 def test_text_cover():
@@ -7157,6 +7914,8 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
 
     root, window = visible_window()
     window.pdf = make_novel()
+    for old in TMP.glob(app._review_path(window.pdf).name + "*"):  # de otras pruebas con la misma novela
+        old.unlink()
     window.show_book(convert.analyze(window.pdf))
     window.set_kind(first_title(window), app.OFF)
     window.title_var.set("Mi título")
@@ -7178,6 +7937,13 @@ def test_window_keeps_a_copy_of_a_review_that_no_longer_matches():
     assert backup.is_file() and json.loads(backup.read_text(encoding="utf-8")) == state, "se perdió la revisión vieja"
     assert status.startswith("La revisión guardada no coincide") and backup.name in status, status  # delante: no se corta
     assert kept[:2] == ("Mi título", [["Witch", "Bruja"]]) and kept[2] != app.OFF, kept
+    review.write_text(json.dumps(state), encoding="utf-8")  # otra revisión que no vale: la copia anterior no se pisa
+    root, window = visible_window()
+    window.pdf = TMP / "novela.pdf"
+    window.show_book(convert.analyze(window.pdf))
+    window.close()
+    second = review.with_name(review.name + ".2.bak")
+    assert json.loads(backup.read_text(encoding="utf-8")) == state and second.is_file(), "se pisó la copia anterior"
 
 
 def test_window_does_not_start_a_second_job():
@@ -7223,7 +7989,8 @@ def test_window_does_not_decode_illustrations_again():
 
 def test_window_warns_when_the_review_cannot_be_saved():
     """Si la revisión no se puede escribir (OneDrive la bloquea, carpeta de solo lectura), se avisa y no
-    queda un temporal; la revisión anterior sigue entera."""
+    queda un temporal; la revisión anterior sigue entera. Cerrar o abrir otro libro preguntan antes de perderla, y
+    un bloqueo breve (OneDrive sincronizando) se reintenta."""
     import app
 
     root, window = visible_window()
@@ -7232,14 +7999,36 @@ def test_window_warns_when_the_review_cannot_be_saved():
     review = app._review_path(window.pdf)
     review.unlink(missing_ok=True)
     review.mkdir()  # en su sitio, una carpeta: el reemplazo falla
+    asked, original = [], app.messagebox.askyesno
+    app.messagebox.askyesno = lambda title, message, **kwargs: asked.append((title, message)) or False
     try:
-        window.save_review()
+        saved = window.save_review()
         status = window.status.text()
+        window.open_path(str(window.pdf))  # «No»: sigue con este libro, sin analizar otro
+        opened = window.done is None and window.book is not None
+        closed = window.close()  # «No»: la ventana sigue abierta
     finally:
+        app.messagebox.askyesno = original
         review.rmdir()
+    replace, tries = app.os.replace, []
+
+    def busy(src, dst):  # OneDrive bloquea el archivo un momento
+        tries.append(dst)
+        if len(tries) < 3:
+            raise PermissionError(13, "El proceso no tiene acceso al archivo")
+        replace(src, dst)
+
+    app.os.replace = busy
+    try:
+        retried = window.save_review()
+    finally:
+        app.os.replace = replace
     window.close()
-    assert "No se pudo guardar la revisión" in status, status
+    assert saved is False and "No se pudo guardar la revisión" in status, status
     assert not list(TMP.glob("*.json.tmp")), "quedó un temporal"
+    assert [t for t, _ in asked] == ["Abrir", "Cerrar"] and status in asked[1][1], asked
+    assert opened and closed is False, (opened, closed)
+    assert retried and len(tries) == 3 and review.is_file(), tries
 
 
 def test_kepub_option_profiles_and_names():
@@ -7254,6 +8043,66 @@ def test_kepub_option_profiles_and_names():
     assert all("kepub" in p for name, p in app.PROFILES.items() if name != "Personalizado")
     assert app._write_options({"kepub": True})["kepub"] and not app._write_options({})["kepub"]
     assert "kepub" in app.INHERITED and "kepub" in __import__("options").BOOK_KEYS
+
+
+def test_review_field_lists_agree():
+    """Las listas de campos de la revisión van a mano: un campo que falta en una se pierde sin aviso (no se
+    hereda, no sale al comparar versiones, la opción no llega a la ventana o al libro)."""
+    import dataclasses
+    import types
+
+    import app
+    import options
+
+    class Window:  # sin ventana: cada atributo es un Var que devuelve su propio nombre
+        fields = app.App.fields
+
+        def __getattr__(self, name):
+            return types.SimpleNamespace(get=lambda: name)
+
+        def rows(self):
+            return {}
+
+    fields = Window().fields()
+    state = set(app.App.review_state(Window()))
+    assert all(var.get() == f"{key}_var" for key, var in fields.items())  # BOOK_FIELDS se leen como <campo>_var
+    assert set(options.BOOK_KEYS) <= set(fields), set(options.BOOK_KEYS) - set(fields)
+    assert set(app.BOOK_FIELDS) - {"description"} <= set(fields) and "description" in state
+    assert set(app.BOOK_FIELDS) <= {f.name for f in dataclasses.fields(convert.Book)}
+    assert set(app.INHERITED) <= state, set(app.INHERITED) - state
+    assert set(app.SERIES_VOCAB) <= set(app.INHERITED)
+    shown_apart = {"blocks", "edits", "rows"}  # análisis, ediciones y filas: no son datos ni opciones del libro
+    unlabeled = state - shown_apart - set(app.VERSION_NOISE) - set(app.FIELD_LABELS)
+    assert not unlabeled, unlabeled
+
+
+def test_window_asks_before_overwriting_the_final_name():
+    """El diálogo de guardar solo pregunta por el nombre elegido: «Libro.epub» con el formato Kobo se escribe como
+    «Libro.kepub.epub», y «Libro» sin extensión como «Libro.pdf»; si ese archivo ya existe, se pregunta antes de
+    pisarlo, y con «No» no se genera nada."""
+    import app
+
+    root, window = versioned_window()
+    for name in ("Pisar.kepub.epub", "Pisar.pdf"):
+        (TMP / name).write_bytes(b"de antes")
+    asked, ran, answers = [], [], [False, True, False]
+    saved = app.filedialog.asksaveasfilename, app.messagebox.askyesno, window.run
+    app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or answers.pop(0)
+    window.run = lambda work, args, done, **_: ran.append(args[2]) or True
+    try:
+        window.kepub_var.set(True)
+        app.filedialog.asksaveasfilename = lambda **_: str(TMP / "Pisar.epub")
+        window.generate()  # «No»: nada
+        window.generate()  # «Sí»: el .kepub.epub
+        app.filedialog.asksaveasfilename = lambda **_: str(TMP / "Pisar")
+        window.generate_pdf("A5")  # «No»
+        app.filedialog.asksaveasfilename = lambda **_: str(TMP / "Nuevo")
+        window.generate_pdf("A5")  # no existe: sin preguntar
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.askyesno, window.run = saved
+    window.close()
+    assert len(asked) == 3 and "Pisar.kepub.epub" in asked[0] and "Pisar.pdf" in asked[2], asked
+    assert ran == [str(TMP / "Pisar.kepub.epub"), str(TMP / "Nuevo.pdf")], ran
 
 
 def test_batch_with_kobo_writes_kepub():
@@ -7289,6 +8138,8 @@ def test_install_quotes_paths_with_apostrophes_for_powershell():
     out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Write-Output {app._ps_quote(path)}"],
                          capture_output=True, text=True, check=True).stdout.strip()
     assert out == path, out
+    # PowerShell toma también ‘ ’ ‚ ‛ por comillas simples: sin doblarlos, el resto de la ruta se ejecutaba
+    assert app._ps_quote("O’Neil‘s ‚x‛") == "'O’’Neil‘‘s ‚‚x‛‛'", app._ps_quote("O’Neil‘s ‚x‛")
 
 
 def test_qtk_rowlist_works_like_treeview():
@@ -7354,6 +8205,45 @@ def test_qtk_textbox_understands_tk_indices():
     seen.append(text.tag_names("1.6"))
     assert seen == ["uno dos\n\ntres", "3.2", "tres", "dos", "3.4", True, "1.4", "uno dos\n\ntres\n", "3.2",
                     "uno dos", ("1.0", "1.3", ("1.0", "1.3")), True, ("src4",)], seen
+
+
+def test_qtk_textbox_counts_an_emoji_as_one_character():
+    """Como en Tk, un emoji es un carácter en los índices («1.0+1c», «1.2»), aunque Qt le dé dos posiciones: las
+    vistas previas subrayan lo que toca."""
+    import qtk
+
+    qtk.app()
+    text = qtk.TextBox()
+    text.insert("end", "😀ab\n😀😀c")
+    text.tag_add("new", "1.0+1c", "1.0+2c")
+    text.tag_add("sel", "2.2", "2.3")
+    seen = [text.get("1.0+1c", "1.0+2c"), text.get("1.0"), text.index("1.end"), text.search("c", "1.0"),
+            text.tag_ranges("new"), text.textCursor().selectedText(), text.index("sel.first"), text.get("2.1", "2.end")]
+    text.delete("2.0")
+    seen.append(text.get("2.0", "2.end"))
+    assert seen == ["a", "😀", "1.3", "2.2", ("1.1", "1.2"), "c", "2.2", "😀c", "😀c"], seen
+
+
+def test_qtk_textbox_closed_before_painting_its_tags():
+    """Una vista previa que se cierra justo tras marcar sus tags (cambiar de aviso deprisa) no da error al
+    pintarlos: el pintado pendiente se va con ella."""
+    import shiboken6
+
+    import qtk
+
+    qtk.app()
+    errors, hook = [], sys.excepthook
+    sys.excepthook = lambda *exc: errors.append(exc[1])
+    try:
+        text = qtk.TextBox()
+        text.insert("end", "uno dos")
+        text.tag_configure("new", foreground="red")
+        text.tag_add("new", "1.0", "1.3")
+        shiboken6.delete(text)
+        qtk.pump()
+    finally:
+        sys.excepthook = hook
+    assert errors == [], errors
 
 
 def test_theme_text_is_readable():
@@ -7527,7 +8417,19 @@ def test_window_start_screen_shows_only_what_needs_no_book():
     broken.write_bytes(b"no es un pdf")
     app._render_thumbs([(str(never), str(app._thumb_path(never))), (str(broken), str(app._thumb_path(broken)))])
     first_page = app.QPixmap(str(app._thumb_path(never)))
+    # Con miniaturas de páginas en la tira (otro atributo que el proceso de recientes), un reciente nuevo pide la suya
+    window.thumbs = {0: (40, 60)}
+    later = TMP / "sin-miniatura.pdf"
+    later.write_bytes(make_novel().read_bytes())
+    started, start = [], app._start_thumbs
+    app._start_thumbs = lambda jobs: started.append(jobs)  # None: como si no arrancara
+    try:
+        window.settings["recent"] = [str(later)]
+        window.fill_recent()
+    finally:
+        app._start_thumbs = start
     window.close()
+    assert started and started[0][0][0] == str(later), started
     assert hidden == [False] * 7 and not any(tools_off), (hidden, tools_off)
     assert shown == [True] * 7 and all(tools_on), (shown, tools_on)
     assert "inicio" in cards[0] and "PDF" in cards[0] and "Sin revisar" in cards[0], cards[0]
@@ -7761,14 +8663,19 @@ def test_window_versions_compare_and_restore():
 
 
 def test_window_version_after_each_new_epub():
-    """Generar el EPUB deja una versión automática (la publicada); generar otra vez sin cambios no la repite."""
+    """Generar el EPUB deja una versión automática (la publicada); generar otra vez sin cambios no la repite. Cada
+    una se añade al zip sin reescribir las anteriores."""
     import app
 
     root, window = versioned_window()
-    window.saved(str(TMP / "publicado.epub"), [])
-    window.saved(str(TMP / "publicado.epub"), ["un aviso"])  # solo cambian los avisos: no es otra versión
-    window.publisher_var.set("Grupo Y")
-    window.saved(str(TMP / "publicado.epub"), [])
+    rewrite, app._write_versions = app._write_versions, None  # añadir una no debe rehacer el zip entero
+    try:
+        window.saved(str(TMP / "publicado.epub"), [])
+        window.saved(str(TMP / "publicado.epub"), ["un aviso"])  # solo cambian los avisos: no es otra versión
+        window.publisher_var.set("Grupo Y")
+        window.saved(str(TMP / "publicado.epub"), [])
+    finally:
+        app._write_versions = rewrite
     versions = app._load_versions(window.pdf)[0]
     changes = app._version_changes(versions[0]["state"], versions[1]["state"])
     window.close()
@@ -7822,6 +8729,32 @@ def test_damaged_versions_file_is_set_aside():
     backup = path.with_name(path.name + ".bak")
     assert backup.read_bytes() == b"no es un zip" and backup.name in status, status
     assert [v["name"] for v in versions] == ["Nueva"], versions
+    path.write_bytes(b"otro roto")  # el segundo .bak no pisa el primero
+    assert app._load_versions(window.pdf)[1].name == path.name + ".2.bak" and backup.read_bytes() == b"no es un zip"
+
+
+def test_appending_a_version_never_breaks_the_saved_ones():
+    """Añadir una versión escribe sobre una copia: si se corta a medias, el zip de antes sigue entero."""
+    import app
+
+    pdf = TMP / "versiones-cortadas.pdf"
+    pdf.write_bytes(b"%PDF")
+    app._versions_path(pdf).unlink(missing_ok=True)
+    app._append_version(pdf, {"name": "Una", "state": {}})
+    app._append_version(pdf, {"name": "Dos", "state": {}})
+    before = app._versions_path(pdf).read_bytes()
+    saved = app.os.replace
+    app.os.replace = lambda *a: (_ for _ in ()).throw(OSError("corte"))
+    try:
+        app._append_version(pdf, {"name": "Tres", "state": {}})
+        raise AssertionError("debía fallar")
+    except OSError:
+        pass
+    finally:
+        app.os.replace = saved
+    assert app._versions_path(pdf).read_bytes() == before
+    assert not app._versions_path(pdf).with_name(app._versions_path(pdf).name + ".tmp").exists()
+    assert [v["name"] for v in app._load_versions(pdf)[0]] == ["Una", "Dos"]
 
 
 def test_version_of_another_analysis_is_not_restored():
@@ -8007,7 +8940,7 @@ def test_translate_google_deepl_and_errors():
 
 
 def test_translate_gcloud_models_and_hints():
-    """Google Cloud: API oficial por lotes con la clave en la URL. Google gratis con una página de captcha o sin
+    """Google Cloud: API oficial por lotes con la clave en una cabecera, no en la URL. Google gratis con una página de captcha o sin
     respuesta: el aviso dice qué hacer. Un modelo que ya no existe se nombra, y «Buscar modelos» trae los de hoy."""
     import io
     import urllib.error
@@ -8015,14 +8948,15 @@ def test_translate_gcloud_models_and_hints():
 
     saved = translate._get, translate._post, translate._sleep, translate._form
     posts, gets = [], []
-    translate._post = lambda url, headers, body: posts.append((url, body)) or {
+    translate._post = lambda url, headers, body: posts.append((url, headers, body)) or {
         "data": {"translations": [{"translatedText": t.replace("Tom", "Tomás")} for t in body["q"]]}}
     translate._sleep = lambda s: None
     try:
         assert translate.translate("Google Cloud (clave)", ["Tom &amp; <i>Jerry</i>", "Hi"], "auto", "es",
                                    api_key="AIza") == ["Tomás &amp; <i>Jerry</i>", "Hi"]
-        url, body = posts[0]
-        assert url.endswith("/language/translate/v2?key=AIza") and body["format"] == "html", (url, body)
+        url, headers, body = posts[0]
+        assert url.endswith("/language/translate/v2") and body["format"] == "html", (url, body)
+        assert headers == {"X-Goog-Api-Key": "AIza"}, headers
         assert body["q"][0] == "Tom &amp;amp; <i>Jerry</i>" and "source" not in body and body["target"] == "es"
         assert translate.batches(["x"] * 150, "gcloud") == [list(range(100)), list(range(100, 150))]
 
@@ -9157,7 +10091,7 @@ def test_style_guide_tokens_icons_and_no_loose_colors():
     # Excepción: U+1F5CE (documento) sale monocromo, comprobado dibujándolo con la fuente de Windows
     emoji = re.compile("[🀀-🗍🗏-🫿⚠⏮⏭⚙⛓❗⚓]")
     assert not [k for k, v in theme.ICONS.items() if emoji.search(v)], theme.ICONS
-    allowed = {"app.py": {"#1f6fd1", "#2e9d4a", "#f08c00"}, "qtk.py": {"#f08c00"},
+    allowed = {"app.py": {"#1f6fd1", "#2e9d4a", "#f08c00"}, "qtk.py": {"#f08c00"}, "options.py": set(),
                "editor.py": {"#2a62c8", "#888888", "#2e9d4a"}}  # marcas que no cambian con el tema
     for name, colors in allowed.items():
         text = (Path(__file__).parent / name).read_text(encoding="utf-8")
@@ -9172,6 +10106,9 @@ if __name__ == "__main__":
     # prefijo lnepub-: el hook de limpieza borra lo que quede si las pruebas se cortan
     with tempfile.TemporaryDirectory(prefix="lnepub-test-", ignore_cleanup_errors=True) as tmp:
         TMP = Path(tmp)
+        # antes de importar app, que lee de aquí sus rutas: los procesos hijos heredan el entorno, no el parche de abajo
+        for var in ("APPDATA", "LOCALAPPDATA"):
+            os.environ[var] = str(TMP / var.lower())
         import app
         app.SETTINGS = TMP / "ajustes.json"  # nunca las preferencias reales del usuario
         for name, fn in list(globals().items()):
