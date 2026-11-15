@@ -5741,6 +5741,21 @@ def test_quality_report_explains_previews_and_fixes():
     assert book.candidates == [0, 5], book.candidates
 
 
+def test_quality_fixes_keep_dialogue_numbers_frames_and_alignment():
+    """«—¡3!» no es número de página; un recuadro repetido («HP: 10/10») no es encabezado; unir un párrafo
+    partido centrado no deja «<center>» escrito en medio del texto."""
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "—¡3!"), B("p", 1, "Ella dijo que")]
+    blocks += [B("p", n, "HP: 10/10", align="frame") for n in (2, 3, 4)]
+    blocks += [B("p", 5, "La carta decía"), B("p", 5, "que volvería pronto.", align="center")]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    report = convert.quality_report(book)
+    kinds = [i.kind for i in report]
+    assert "number" not in kinds and "repeated" not in kinds, kinds
+    joined = next(i for i in report if i.kind == "lower" and i.block == 7)
+    assert joined.edit == (6, 8, "La carta decía que volvería pronto."), joined.edit
+
+
 def test_quality_report_finds_untranslated_text():
     """Un párrafo en inglés se avisa; uno español con palabras inglesas sueltas, no."""
     texts = ["The castle stood on the hill above the village, and its towers were dark.",

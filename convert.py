@@ -2060,7 +2060,9 @@ def _facts(text):
     words = re.findall(r"[a-záéíóúñü']+", text.lower())
     english = sum(w in ENGLISH for w in words)
     capital = next((m.span() for m in CAPITAL.finditer(text) if m[1].lower() not in ABBREVIATIONS), None)
-    return (bool(re.fullmatch(r"\W*\d+\W*", text)), bool(LINKS.search(text)),
+    # «—¡3!» es un diálogo (una cuenta atrás), no un número de página
+    return (bool(re.fullmatch(r"\W*\d+\W*", text)) and not re.search(r"[—―¡¿!?«»]", text),
+            bool(LINKS.search(text)),
             "\ufffd" in text or bool(MOJIBAKE.search(text)),
             len(words) >= 6 and english >= 0.35 * len(words) and sum(w in SPANISH for w in words) < english,
             capital, bool(re.search(r"[^\W\d_]$", text)))
@@ -2194,7 +2196,8 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                     "capítulo con «Editar texto…» (tecla E). Si era un índice o créditos, ignora el aviso.")
               for page, letters, why in book.skipped
               if letters >= 20 and not (why == TOC_SKIPPED and book.toc)]  # índice leído: lo compara la ventana
-    lines = collections.Counter(_plain(b).strip() for b in blocks if b.kind == "p")
+    # Los recuadros («HP: 10/10») se repiten por la historia: no son encabezados del PDF
+    lines = collections.Counter(_plain(b).strip() for b in blocks if b.kind == "p" and b.align != "frame")
     heads = [k for k, b in enumerate(blocks) if b.kind == "heading"] + [len(blocks)]
     drop = (lambda k: (k, k + 1, ""))
     honorifics = honorific_fixes([_plain(b) for b in blocks if b.kind == "p"])
@@ -2220,7 +2223,9 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                        "un cambio de página o una ilustración.")
             if head and not head.endswith(END_PUNCT):
                 between = [_line(blocks[i], i) for i in range(j + 1, k)]  # se quedan tras el párrafo unido
-                edit = (j, k + 1, "\n\n".join([_line(blocks[j], j).rstrip() + " " + _line(b, k).lstrip()] + between))
+                # el segundo pierde su <center>/<marco>: si no, quedaría escrito en medio del párrafo
+                tail = _line(replace(b, align=""), k).lstrip()
+                edit = (j, k + 1, "\n\n".join([_line(blocks[j], j).rstrip() + " " + tail] + between))
                 report.append(Issue("lower", k, b.page, "Revisar", "Párrafo partido", problem,
                                     "Unirlo al párrafo anterior.", before,
                                     _cut(head, tail=True) + " " + _cut(text), edit, text))
