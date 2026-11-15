@@ -147,7 +147,9 @@ def test_series_and_volume_from_file_name():
         ("Maryoku Cheat na Majo ni Narimashita - Volumen 01 [WP]", "", ("Maryoku Cheat na Majo ni Narimashita", "1")),
         ("Nageki no Bourei wa Intai Shitai - Volumen 1", "", ("Nageki no Bourei wa Intai Shitai", "1")),
         ("Volumen 1 World Project", "Am I Actually the Strongest?", ("Am I Actually the Strongest?", "1")),
-        ("Volumen 7 World Project", "KAGE NO JITSURYOKUSHA NI NARITAKUTE!", ("KAGE NO JITSURYOKUSHA NI NARITAKUTE!", "7")),
+        # en mayúsculas no casaba con «Kage no Jitsuryokusha ni Naritakute» de los otros tomos: dos series en el lector
+        ("Volumen 7 World Project", "KAGE NO JITSURYOKUSHA NI NARITAKUTE!", ("Kage no Jitsuryokusha ni Naritakute", "7")),
+        ("Volumen 2", "LA ESPADA DEL REY", ("La Espada del Rey", "2")),
         ("Mi Serie Vol. 2.5", "", ("Mi Serie", "2.5")),
         ("Otra serie - Tomo 3", "", ("Otra serie", "3")),
         ("Una novela suelta", "Una novela suelta", ("", "")),
@@ -1463,7 +1465,7 @@ def test_window_epub_preview_follows_include_mark():
     with zipfile.ZipFile(window.preview_path) as z:
         body = "".join(z.read(n).decode() for n in z.namelist() if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n))
     window.close()
-    assert re.search(r"<h2[^>]*>Capitulo 1: Inicio</h2>", body), re.findall(r"<h\d[^>]*>[^<]*</h\d>", body)
+    assert re.search(r"<h2[^>]*>Capítulo 1: Inicio</h2>", body), re.findall(r"<h\d[^>]*>[^<]*</h\d>", body)
 
 
 def test_window_series_fields_reach_the_epub():
@@ -1528,8 +1530,8 @@ def test_window_removed_section_preview_and_epub():
         window.close()
     assert preview == ("Esta sección no irá en el EPUB", None), preview
     text = epub_text(out)
-    assert "Capitulo 1: Inicio" not in text and "Primera linea" not in text
-    assert "Capitulo 2: Final" in text
+    assert "Capítulo 1: Inicio" not in text and "Primera linea" not in text
+    assert "Capítulo 2: Final" in text  # la limpieza tipográfica pone la tilde
 
 
 def test_window_typography_checkbox_reaches_the_epub():
@@ -2383,6 +2385,31 @@ def test_write_pdf_bookmarks_numbers_and_metadata():
     assert not list(TMP.glob("libro.pdf.tmp")), "queda el .tmp"
 
 
+def test_write_pdf_contents_page_numbers_links_and_body_font():
+    """Mitsuha 1 en A5: la página «Contenido» era una lista de títulos sin número de página ni enlace (en papel o en
+    una tableta no servía) y el número del pie salía en Times, no en la letra del libro (Charis SIL de MuPDF)."""
+    B = convert.Block
+    text = "Ella abrió la puerta y miró el pasillo vacío antes de seguir. " * 12
+    long = "Capítulo 2: Un título que significa mucho y no cabe en una sola línea de la página del índice"
+    blocks = ([B("heading", 1, "Capítulo 1: Inicio")] + [B("p", 1, text) for _ in range(10)]
+              + [B("heading", 2, "El lado de la bruja")] + [B("p", 2, text) for _ in range(4)]
+              + [B("heading", 3, long)] + [B("p", 3, text) for _ in range(4)])
+    book = convert.Book("Mi novela", "Autora X", jpeg(400, 600), blocks, [0, 16])
+    out = TMP / "indice.pdf"
+    convert.write_pdf(book, [(0, "Capítulo 1: Inicio"), (16, long)], out, size="A5", typography=True)
+    with pymupdf.open(out) as pdf:
+        toc = {title: page for _, title, page in pdf.get_toc()}
+        index = next(page for page in pdf if "Contenido" in page.get_text())
+        words = index.get_text("words")
+        links = {link["page"] + 1 for link in index.get_links() if link["kind"] == pymupdf.LINK_GOTO}
+        right = max(w[2] for w in words)
+        numbers = [w[4] for w in words if w[4].isdigit() and w[2] > right - 1]
+        fonts = {f[3] for page in pdf for f in page.get_fonts()}
+    assert len(toc) == 3 and numbers == [str(p) for p in toc.values()], (toc, numbers)
+    assert links == set(toc.values()), (links, toc)
+    assert not any("Times" in f or "Tiro" in f for f in fonts), fonts
+
+
 def test_write_pdf_small_caps_keep_their_letters():
     """Making Magic: en el PDF del estilo «Novela ligera», sin tipografía elegida, «Chapter 3» (versalitas) se
     leía «CƒĵǙǵŧǡ 3»: las versalitas de la letra por defecto de MuPDF no guardan sus letras. Al reabrir el PDF
@@ -3202,6 +3229,44 @@ def test_link_sections_ignores_words_containing_a_network_name():
               ("p", "Síguenos en Discord."), ("heading", "Agradecimiento a los Patreons"), ("p", "Gracias.")]
     book = convert.Book("Libro", "", b"", [convert.Block(k, 1, h) for k, h in blocks], [0, 2, 4])
     assert convert.link_sections(book) == [2, 4], convert.link_sections(book)  # «discordia» no es un enlace
+
+
+def test_link_sections_takes_handles_and_empty_titles_before_the_ads():
+    """Mitsuha 6 (Bell Traducciones): al final, «¡Gracias por Leer!» sin texto, enlaces y «@Dierch», «@Dierch90»
+    como títulos. Salían como capítulos vacíos en el EPUB. Un correo o una arroba en el texto no cuentan."""
+    blocks = [("heading", "Capítulo 1"), ("p", "Texto largo. " * 200), ("heading", "¡Gracias por Leer!"),
+              ("heading", "¡Suscríbete a nuestro Patreon!"), ("heading", "patreon.com/Grupo"),
+              ("p", "Traducción por:"), ("heading", "@Dierch"), ("heading", "@Dierch90"),
+              ("heading", "Capítulo 2"), ("p", "Le escribió a ana@correo.es y a @ ella. " + "Más texto. " * 30)]
+    book = convert.Book("Libro", "", b"", [convert.Block(k, 1, h) for k, h in blocks], [0, 2, 3, 4, 6, 7, 8])
+    assert convert.link_sections(book) == [2, 3, 4, 6, 7], convert.link_sections(book)
+
+
+def test_blank_line_scene_break_in_short_dialogue_book():
+    """Kage 7 (World Project): diálogos de una línea, así que el paso entre párrafos (25 pt) sale más que el de línea
+    (17 pt), y la escena cambia con una línea en blanco (50 pt). Se tomaba 25 por interlínea y no había separadores."""
+    doc = pymupdf.open()
+    for number in (1, 2, 3):
+        lines, y = [(72, 100, "Capitulo 1: Inicio", 20, "helv")] if number == 1 else [], 130
+        for n in range(9):
+            if number == 2 and n == 5:
+                y += 25  # la línea en blanco
+            lines.append((92, y, f"“Sí, ya voy {number}{n}.”", 14, "cour"))
+            lines.append((92, y + 25, f"“Bien, entonces {number}{n}.”", 14, "cour"))
+            lines.append((92, y + 50, line(f"Ella lo miro {number}{n} y luego", 50), 14, "cour"))
+            lines.append((72, y + 67, f"se marcho {number}{n}.", 14, "cour"))
+            y += 92
+            if y > 700:
+                break
+        add_page(doc, number, lines)
+    path = TMP / "escena-en-blanco.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    breaks = [(k, b.page) for k, b in enumerate(book.blocks) if b.kind == "break"]
+    assert [page for _, page in breaks] == [2], breaks
+    k = breaks[0][0]
+    assert "se marcho 24." in book.blocks[k - 1].html and "Sí, ya voy 25" in book.blocks[k + 1].html, (
+        book.blocks[k - 1].html, book.blocks[k + 1].html)
 
 
 def make_group_pdf():
@@ -5508,6 +5573,35 @@ def test_window_kindle_profile_hyphenates():
     assert kindle and not phone, (kindle, phone)
 
 
+def test_typography_double_dash_comma_before_aside_and_ellipsis_period():
+    """Mitsuha 1: 325 rayas dobles japonesas («familia——su madre») y 198 «—Hola, —dijo»; Megami 1: 71 «….».
+    El informe los marcaba, pero el EPUB y el PDF salían así con la limpieza tipográfica marcada."""
+    cases = {
+        "Hace seis meses perdió a su familia——su madre y su hermano——en un accidente.":
+            "Hace seis meses perdió a su familia —su madre y su hermano— en un accidente.",
+        "Oh, pero no te preocupes——suicidarse era lo último.": "Oh, pero no te preocupes —suicidarse era lo último.",
+        "——¡Espera!": "—¡Espera!",
+        "El jefe de cocina del vizconde Ryner—— ¡Marcel!": "El jefe de cocina del vizconde Ryner —¡Marcel!",
+        "—Pero yo——": "—Pero yo—",
+        "— No reconozco este techo, — murmuró Mitsuha.": "—No reconozco este techo —murmuró Mitsuha.",
+        "—Esa persona…. No, ¿sabes qué?": "—Esa persona… No, ¿sabes qué?",
+        "“¡….! ¡Espera!”": "«¡…! ¡Espera!»",
+        "—Sí, — respondió el soldado, —un buque.": "—Sí —respondió el soldado—, un buque.",
+        "—<i>Hola</i>…. —dijo.": "—<i>Hola</i>… —dijo.",
+    }
+    # sin cambios: palabra compuesta, inciso bien puesto, abreviatura y raya que abre el diálogo tras la narración
+    cases.update({s: s for s in ("Greg-sama vio 1-2 casas.", "—¡Ven! —dijo él.", "pieles, etc.— que",
+                                 "El guardia contestó, —tengo hambre.")})
+    got = {k: convert._typography(k) for k in cases}
+    assert got == cases, {k: v for k, v in got.items() if v != cases[k]}
+    assert convert._typography("Título——Final", dashes=False) == "Título—Final"
+    # Kage 7 (World Project): «Prologo: …» en el índice; la tilde de Capítulo, Prólogo y Epílogo, solo en títulos
+    titles = {"Prologo: La Primavera": "Prólogo: La Primavera", "<i>CAPITULO 3</i>": "<i>CAPÍTULO 3</i>",
+              "epilogo": "epílogo", "Capitulos sueltos": "Capitulos sueltos"}
+    assert {t: convert._typography(t, dashes=False) for t in titles} == titles
+    assert convert._typography("Yo capitulo ante ti.") == "Yo capitulo ante ti."
+
+
 def test_typography_dash_at_paragraph_end():
     """Kage 5: la portadilla "- Kage no Jitsuryokusha ni Naritakute! -" como párrafo rompía la tipografía."""
     assert convert._typography("- Kage no Jitsuryokusha ni Naritakute! -") == "—Kage no Jitsuryokusha ni Naritakute! —"
@@ -6450,9 +6544,6 @@ def test_quality_report_fixes_grammar_and_typography():
         ("“¡Entendido!”dijo Teto.", "nospace", "“¡Entendido!” dijo Teto."),
         ("¿Qué?. Y entonces….", "punct", "¿Qué? Y entonces…"), ("Hola,, adiós.", "punct", "Hola, adiós."),
         ("Lo dejé así. . Además, nada.", "punct", "Lo dejé así. Además, nada."),
-        # Mitsuha: coma antes de la raya del narrador, y la frase que sigue tras el inciso
-        ("—Sí, — respondió el soldado, —un buque llegó.", "dialog", "—Sí —respondió el soldado—, un buque llegó."),
-        ("—Está muerto. —señaló Ferris—. Vamos.", "dialog", "—Está muerto —señaló Ferris—. Vamos."),
         ("¡El comercio va a explotar. ¡Lo sé!", "closing", "¡El comercio va a explotar! ¡Lo sé!"),
         # Aciertos que no deben perderse con las excepciones de abajo
         ("“Si”, decretó Shinichi.", "accent", "“Sí”, decretó Shinichi."),
@@ -6482,6 +6573,8 @@ def test_quality_report_fixes_grammar_and_typography():
             "—¿¡Qué…¡?", "¿Por qué estarían?¡ campo de prácticas, dices?",
             # Maryoku: la raya cierra el inciso; Re Zero: narración y luego el diálogo
             "Los materiales —huesos, pieles, etc.— que quedaron.", "El guardia contestó, ―tengo entendido que sí.",
+            # Mitsuha: coma o punto antes de la raya del narrador; ya lo arregla la limpieza tipográfica del EPUB
+            "—Sí, — respondió el soldado, —un buque llegó.", "—Está muerto. —señaló Ferris—. Vamos.",
             # Mitsuha: el signo de cierre falta antes de la comilla o el paréntesis, no al final
             "“¡Esa sí que es una gran noticia,” celebró Mitsuha dando saltos.", "¡Quizás usan una aleación diferente)."]
     texts = [t for t, _, _ in cases] + fine
@@ -6522,21 +6615,29 @@ def check_typo_cases(kind, cases, fine, **options):
     assert got == [fixed for _, fixed in cases], [(g, f) for g, (_, f) in zip(got, cases) if g != f]
 
 
+def check_dialog_cases(cases, fine):
+    """La puntuación del inciso del narrador la arregla la limpieza tipográfica del EPUB: cases [(texto, arreglado)]
+    salen arreglados y sin aviso (ya no hace falta); fine no cambia."""
+    assert [convert._typography(t) for t, _ in cases] == [f for _, f in cases], [convert._typography(t) for t, _ in cases]
+    assert [convert._dialog_fix(t) for t in fine] == fine, [convert._dialog_fix(t) for t in fine]
+    assert not [i for i in convert.quality_report(_typo_book([t for t, _ in cases] + fine)) if i.kind == "dialog"]
+
+
 def test_quality_report_leaves_narration_after_aside():
     """Tras «—dijo él.» casi siempre sigue narración, no diálogo (Mitsuha 1: 31 de 31, Re Zero 1: 16 de 16): no se
     pide raya de cierre. El punto antes del inciso sí se corrige."""
-    check_typo_cases("dialog", [("—Ven. —dijo él.", "—Ven —dijo él.")],
-                     ["—Ven —dijo él. Luego se fue.", "—No te muevas —dijo la chica—. Podía verse en sus ojos.",
-                      "—Ven —dijo él.", "—Ven —dijo él—. Vamos ya."])
+    check_dialog_cases([("—Ven. —dijo él.", "—Ven —dijo él.")],
+                       ["—Ven —dijo él. Luego se fue.", "—No te muevas —dijo la chica—. Podía verse en sus ojos.",
+                        "—Ven —dijo él.", "—Ven —dijo él—. Vamos ya."])
 
 
 def test_quality_report_moves_dash_after_exclamation():
     """Making Magic traducido por DeepSeek: «—¡Por favor… Creación!— Y aquello…»: tras ! o ? acaba lo que se dice y
     la narración que sigue abre con su raya pegada: «…Creación! —Y aquello…». Con minúscula es un inciso: no."""
-    check_typo_cases("dialog", [("—¡Por favor, Creación!— Y aquello fue una fruta.",
-                                 "—¡Por favor, Creación! —Y aquello fue una fruta."),
-                                ("—¿Vienes?—Ella no respondió.", "—¿Vienes? —Ella no respondió.")],
-                     ["—¡Ven! —dijo él.", "—¡Ven! —Y se fue.", "Gritó: ¡Fuego!—"])
+    check_dialog_cases([("—¡Por favor, Creación!— Y aquello fue una fruta.",
+                         "—¡Por favor, Creación! —Y aquello fue una fruta."),
+                        ("—¿Vienes?—Ella no respondió.", "—¿Vienes? —Ella no respondió.")],
+                       ["—¡Ven! —dijo él.", "—¡Ven! —Y se fue.", "Gritó: ¡Fuego!—"])
 
 
 def test_quality_report_finds_calques():
@@ -7437,8 +7538,34 @@ def test_epub_extras_pages_classes_fonts_metadata():
     convert.write_epub(book, [(0, "Cap 1")], old, epub2=True)
     opf2 = epub_file(old, "OEBPS/content.opf")
     assert 'version="2.0"' in opf2 and "refines" not in opf2 and 'opf:role="aut"' in opf2, opf2
-    assert 'properties=' not in opf2 and "page-list" not in epub_file(old, "OEBPS/nav.xhtml")
+    assert 'properties=' not in opf2 and "nav.xhtml" not in opf2  # EPUB 2: el índice es toc.ncx
     ET.fromstring(opf2.encode())
+
+
+def test_epub2_files_are_xhtml_11_without_nav():
+    """EPUBCheck daba unos 85 errores por libro con «EPUB 2»: DOCTYPE de HTML5 en vez del de XHTML 1.1,
+    <meta charset> (no existe en XHTML 1.1) y nav.xhtml con <nav epub:type>, que EPUB 2 no tiene: su índice es toc.ncx."""
+    B = convert.Block
+    book = convert.Book("Libro", "Autora", jpeg(300, 400), [B("heading", 1, "Cap 1"), B("p", 1, 'Texto<span class="nota">una nota</span>.')], [0])
+    for contents in (True, False):
+        out = TMP / f"epub2-{contents}.epub"
+        convert.write_epub(book, [(0, "Cap 1")], out, epub2=True, contents=contents, credits=True)
+        with zipfile.ZipFile(out) as z:
+            names = z.namelist()
+            pages = {n: z.read(n).decode() for n in names if n.endswith(".xhtml")}
+            opf = z.read("OEBPS/content.opf").decode()
+        assert "OEBPS/nav.xhtml" not in names and "nav.xhtml" not in opf, (names, opf)
+        for name, text in pages.items():
+            assert ('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">'
+                    in text), (name, text[:200])
+            assert "<meta charset" not in text and 'http-equiv="Content-Type"' in text and "epub:" not in text, name
+            ET.fromstring(text.encode())
+        toc = '<reference type="toc" title="Índice" href="contents.xhtml"/>'
+        assert (toc in opf) == contents and ('type="toc"' in opf) == contents, opf
+        assert not convert.check_epub(out), convert.check_epub(out)
+    epub3 = TMP / "epub3.epub"
+    convert.write_epub(book, [(0, "Cap 1")], epub3)
+    assert "<!DOCTYPE html>" in epub_file(epub3, "OEBPS/sec001.xhtml") and "OEBPS/nav.xhtml" in zipfile.ZipFile(epub3).namelist()
 
 
 def test_omnibus_joins_volumes():
@@ -7452,7 +7579,7 @@ def test_omnibus_joins_volumes():
     titles = re.findall(r'<li><a href="sec\d+\.xhtml">([^<]+)</a>', nav)
     assert problems == [], problems
     assert titles[0] == "Mi Serie - Volumen 1" and "Mi Serie - Volumen 2" in titles, titles
-    assert titles.count("Capitulo 1: Inicio") == 2, titles
+    assert titles.count("Capítulo 1: Inicio") == 2, titles
     assert "Mi Serie - Volúmenes 1-2" in epub_file(out, "OEBPS/content.opf")
 
 

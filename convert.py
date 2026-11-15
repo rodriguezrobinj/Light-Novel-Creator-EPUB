@@ -125,8 +125,16 @@ def _series_volume(stem, meta_title):
         return "", ""
     series = re.sub(r"\[[^\]]*\]", "", stem[:m.start()]).strip(" -–—_.")
     # el título del PDF «Maryoku - Volumen 3» también lleva el volumen: la serie es lo de antes
-    series = series or VOLUME.split(meta_title)[0].strip(" -–—_.") or meta_title.strip()
+    if not series:
+        series = VOLUME.split(meta_title)[0].strip(" -–—_.") or meta_title.strip()
+        if series.isupper():  # «KAGE NO … NARITAKUTE!» (Kage 7): como los otros tomos, o el lector ve dos series
+            words = series.rstrip("!¡?¿. ").lower().split(" ")
+            series = " ".join(w if n and w in SERIES_PARTICLES else w[:1].upper() + w[1:] for n, w in enumerate(words))
     return series, m.group(1).replace(",", ".")
+
+
+# Partículas japonesas y palabras cortas del español que van en minúscula en el nombre de una serie
+SERIES_PARTICLES = set("no ni wa wo ga to de e mo ka na o del la el los las y en a con por para un una".split())
 
 
 QUOTE_OPENERS = set("  ([¿¡—–«“‘")  # tras estos caracteres, una comilla abre
@@ -184,7 +192,11 @@ def _typography(html_text, dashes=True):
     no arrastrar errores del PDF. dashes=False en los títulos: en "Serie - Volumen 1" el guion separa."""
     parts = re.split(r"(<[^>]+>)", html_text)  # el texto queda en las posiciones pares
     for k in range(0, len(parts), 2):
-        text = re.sub(r"\.{3,}", "…", parts[k]).replace("─", "—")
+        text = parts[k]
+        if dashes:  # raya doble japonesa entre palabras («familia——su madre»): inciso, con sus espacios
+            text = re.sub(r"(?<=[^\W\d_])\s*[—―─]{2,}\s*(?=[^\W\d_]|[¿¡«“\"])", " — ", text)
+        text = re.sub(r"[—―─]{2,}", "—", text)
+        text = re.sub(r"…\.+", "…", re.sub(r"\.{3,}", "…", text)).replace("─", "—")  # «….»: sobra el punto
         text = re.sub(r" {2,}", " ", text)
         parts[k] = re.sub(r" +([,.;:!?])", r"\1", text)
     chunks = [list(parts[k]) for k in range(0, len(parts), 2)]
@@ -212,7 +224,19 @@ def _typography(html_text, dashes=True):
             chunks[j][i] = "‘" if opening else "’"  # entre letras es apóstrofo: ’
     for j, chunk in enumerate(chunks):
         parts[2 * j] = "".join(chunk)
-    return "".join(parts)
+    # «—Hola, —dijo» -> «—Hola —dijo»: el mismo arreglo que el aviso «Puntuación del inciso del narrador»
+    if dashes:
+        return _dialog_fix("".join(parts))
+    return LABEL_START.sub(_label_accent, "".join(parts))  # títulos: «Prologo:» -> «Prólogo:»
+
+
+LABEL_START = re.compile(r"^((?:<[^>]+>|[^\w<])*)(capitulo|prologo|epilogo)\b", re.I)
+
+
+def _label_accent(m):
+    """La tilde que le falta a Capítulo, Prólogo o Epílogo al empezar un título, con sus mayúsculas."""
+    word, fixed = m[2], LABEL_FIX[m[2].lower()]
+    return m[1] + (fixed.upper() if word.isupper() else fixed if word[0].isupper() else fixed.lower())
 
 
 def _bold(s):
@@ -1476,7 +1500,7 @@ def spanish_case(title, words):
 
 # palabras completas: «discordia» o «twitteros» no son publicidad del grupo
 LINKS = re.compile(r"https?://|www\.|\b(?:facebook|twitter|discord|patreon|ko-fi|paypal|instagram|tiktok|wixsite"
-                   r"|blogspot)s?\b", re.I)  # «Patreons» (Nageki 1) sí
+                   r"|blogspot)s?\b|(?<![\w.@])@[^\W\d_]\w{2,}", re.I)  # «Patreons» (Nageki 1) sí; «@Dierch» sí, un correo no
 
 
 def link_sections(book):
@@ -1493,6 +1517,11 @@ def link_sections(book):
         end = next((j for j in heads if j > k and (j in book.candidates or not chapter)), len(book.blocks))
         text = " ".join(TAGS.sub("", b.html) for b in book.blocks[k:end] if b.kind in ("p", "heading"))
         if len(text) < 2000 and LINKS.search(text) and k not in found:
+            found.append(k)
+    # Un título sin nada debajo justo antes de la publicidad («¡Gracias por Leer!», Mitsuha 6) va con ella
+    for at in range(len(heads) - 2, -1, -1):
+        k, nxt = heads[at], heads[at + 1]
+        if nxt in found and k not in found and all(b.kind == "heading" for b in book.blocks[k:nxt]):
             found.append(k)
     return sorted(found)
 
@@ -2084,6 +2113,7 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
      "La pregunta o la exclamación se abre con ¿ o ¡ pero acaba en punto: le falta su signo de cierre.",
      "Corregirlo."),
 )
+_dialog_fix = next(rule for kind, _, rule, _, _ in TYPOS if kind == "dialog")  # también en _typography
 
 
 def _beside_icons(fix, line):
@@ -2572,12 +2602,15 @@ def analyze(pdf_path, progress=None):
         indent_style = indents > total * 0.05  # los párrafos se marcan con sangría
         # Hueco que separa escenas (Mitsuha GambaTrans: 3,3 líneas): bastante más que el espacio entre párrafos, y
         # raro. Si sale en casi cada página es el estilo del libro (Megami 4: una línea en blanco entre párrafos)
+        # Con diálogos de una línea, el paso entre párrafos sale más que el de línea (Kage 7, World Project: 25 pt
+        # frente a 17) y el hueco de escena, una línea en blanco, no llegaba: se mide desde el paso de línea
+        step = min((g for g, c in gaps.items() if c >= 0.3 * gaps[line_gap]), default=line_gap)
         spaced = collections.Counter()
         for rows in pages:
             normal = [r for r in rows if r.size == body]
-            spaced.update(round(b.y - a.y) for a, b in zip(normal, normal[1:]) if b.y - a.y > line_gap * 1.15)
-        paragraph_gap = max((g for g in spaced if g < 3 * line_gap), key=spaced.get, default=line_gap)
-        scene_gap = max(SCENE_GAP * line_gap, 1.8 * paragraph_gap)
+            spaced.update(round(b.y - a.y) for a, b in zip(normal, normal[1:]) if b.y - a.y > step * 1.15)
+        paragraph_gap = max((g for g in spaced if g < 3 * step), key=spaced.get, default=step)
+        scene_gap = max(SCENE_GAP * step, 1.8 * paragraph_gap)
         if sum(count for gap, count in spaced.items() if gap > scene_gap) > 2 * n:  # Megami 4: 4 por página
             scene_gap = None
 
@@ -2955,11 +2988,15 @@ CONTAINER = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def _xhtml(title, body, lang):
-    return ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
-            f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"'
-            f' lang="{lang}" xml:lang="{lang}">\n'
-            f'<head><meta charset="utf-8"/><title>{html.escape(BAD_XML.sub("", title))}</title>'
+def _xhtml(title, body, lang, epub2=False):
+    """Página XHTML del libro. epub2: XHTML 1.1, como pide EPUB 2 (sin <meta charset> ni lang, que no existen en él)."""
+    head = (('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n'
+             f'<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}">\n'
+             '<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>') if epub2 else
+            ('<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"'
+             f' lang="{lang}" xml:lang="{lang}">\n<head><meta charset="utf-8"/>'))
+    return ('<?xml version="1.0" encoding="utf-8"?>\n' + head
+            + f'<title>{html.escape(BAD_XML.sub("", title))}</title>'
             '<link rel="stylesheet" type="text/css" href="style.css"/></head>\n'
             f'<body>\n{BAD_XML.sub("", body)}\n</body>\n</html>\n')  # un carácter de control rompe el XML
 
@@ -3186,7 +3223,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         tag, kind = ("div", "") if epub2 else ("aside", ' epub:type="footnote"')
         parts += [f'<{tag}{kind} class="nota" id="nota{k}"><p><a href="#ref{k}">{k}</a>. {text}</p></{tag}>'
                   for k, text in notes]
-        files[name] = _xhtml(html.unescape(heading), "\n".join(parts), lang)
+        files[name] = _xhtml(html.unescape(heading), "\n".join(parts), lang, epub2)
 
     # el mismo libro exportado otra vez conserva su identificador: el lector no lo duplica ni pierde la posición
     uid = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'{book.series}|{book.volume}|{book.title}|{book.author}')}"
@@ -3233,8 +3270,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         meta.append(f'<meta property="dcterms:modified">{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}</meta>')
         meta += _accessibility(bool(images))
     nav_props, cover_props = ("", "") if epub2 else (' properties="nav"', ' properties="cover-image"')
-    manifest = [
-        f'<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml"{nav_props}/>',
+    manifest = [] if epub2 else [f'<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml"{nav_props}/>']
+    manifest += [  # EPUB 2 no tiene nav.xhtml: su índice es toc.ncx
         '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
         '<item id="css" href="style.css" media-type="text/css"/>',
         f'<item id="cover-image" href="cover.jpg" media-type="image/jpeg"{cover_props}/>',
@@ -3288,7 +3325,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
 </spine>
 <guide>
 <reference type="cover" title="Portada" href="cover.xhtml"/>
-<reference type="toc" title="Índice" href="{toc_page}"/>
+{'' if epub2 and not contents else f'<reference type="toc" title="Índice" href="{toc_page}"/>'}
 <reference type="text" title="Inicio de la lectura" href="{reading_start}"/>
 </guide>
 </package>
@@ -3323,7 +3360,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                  + "</ol></nav>") if pages else ""
     nav = _xhtml("Índice", f'<nav epub:type="toc" id="toc"><h1>Índice</h1><ol>\n{items}\n</ol></nav>\n{landmarks}'
                  f"{page_list}", lang)
-    contents_page = _xhtml("Contenido", f'<h1 class="toc">Contenido</h1>\n<ol class="toc">\n{shown}\n</ol>', lang)
+    contents_page = _xhtml("Contenido", f'<h1 class="toc">Contenido</h1>\n<ol class="toc">\n{shown}\n</ol>', lang, epub2)
     ncx = f"""<?xml version="1.0" encoding="utf-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
 <head><meta name="dtb:uid" content="{uid}"/></head>
@@ -3333,14 +3370,14 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
 </navMap>
 </ncx>
 """
-    cover = _xhtml(book.title, '<div class="img"><img src="cover.jpg" alt="Portada"/></div>', lang)
+    cover = _xhtml(book.title, '<div class="img"><img src="cover.jpg" alt="Portada"/></div>', lang, epub2)
     serie = f"{book.series}, volumen {book.volume}" if book.series and book.volume else book.series
     lines = [f"<b>{title}</b>"] + [f"{label}: {html.escape(value)}" for label, value in (
         ("Título original", book.original_title), ("Serie", serie), ("Autor", book.author),
         ("Ilustraciones", book.illustrator), ("Traducción", book.translator), ("Corrección", book.proofreader),
         ("Edición", book.editor), ("Grupo", book.publisher)) if value] + [f"EPUB creado el {datetime.now():%d/%m/%Y}"]
     credits_page = _xhtml("Créditos", '<h1 class="toc">Créditos</h1>\n'
-                          + "\n".join(f'<p class="credits">{line}</p>' for line in lines), lang)
+                          + "\n".join(f'<p class="credits">{line}</p>' for line in lines), lang, epub2)
 
     tmp = partial_path(out_path)
     try:
@@ -3348,7 +3385,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
             z.writestr("META-INF/container.xml", CONTAINER)
             z.writestr("OEBPS/content.opf", BAD_XML.sub("", opf))  # metadatos pegados con controles
-            z.writestr("OEBPS/nav.xhtml", nav)
+            if not epub2:  # en EPUB 2 el índice es toc.ncx
+                z.writestr("OEBPS/nav.xhtml", nav)
             if contents:
                 z.writestr("OEBPS/contents.xhtml", contents_page)
             if credits:
@@ -3457,7 +3495,70 @@ def _full_page_images(pdf):
 
 # Making Magic: con la letra por defecto de MuPDF (Charis SIL) las versalitas quedan en el PDF como «CƒĵǙǵŧǡ 3»;
 # releído, «Chapter 3» no era etiqueta, y copiar o buscar fallaba. Mayúsculas algo menores: se ven casi igual
-PDF_CSS = "h1 .num, small.sc { font-variant: normal; text-transform: uppercase; }\nsmall.sc { font-size: 0.8em; }\n"
+PDF_CSS = ("h1 .num, small.sc { font-variant: normal; text-transform: uppercase; }\nsmall.sc { font-size: 0.8em; }\n"
+           "ol.toc { padding-right: 2.5em; }\n")  # el hueco del número de página en «Contenido» (_contents_numbers)
+PAGE_GRAY = (0.45, 0.45, 0.45)
+
+
+def _page_font(font):
+    """Letra de los números de página: la del texto. Sin fuente elegida, MuPDF maqueta con su Charis SIL."""
+    try:
+        if font in FONTS:
+            return pymupdf.Font(fontfile=str(FONT_DIR / f"{FONTS[font]}-400-normal.ttf"))
+        if font and Path(font).is_file():
+            return pymupdf.Font(fontfile=str(font))
+        m = pymupdf.mupdf  # Charis no está entre las letras con nombre de PyMuPDF: se pide a MuPDF
+        charis = m.FzFont(m.fz_new_builtin_font("Charis SIL", 0, 0))
+        return pymupdf.Font(fontbuffer=m.fz_buffer_extract_copy(m.FzBuffer(m.ll_fz_keep_buffer(charis.m_internal.buffer))))
+    except Exception:  # shortcut: otra versión de PyMuPDF sin esa llamada; Times, como antes, hasta adaptarla
+        return pymupdf.Font("tiro")
+
+
+def _write_number(page, font, text, x, y, size, right=False):
+    """Número de página en gris con la letra del libro; x es el borde derecho si right, si no el centro."""
+    writer = pymupdf.TextWriter(page.rect, color=PAGE_GRAY)
+    width = font.text_length(text, size)
+    writer.append((x - width if right else x - width / 2, y), text, font=font, fontsize=size)
+    writer.write_text(page)
+
+
+def _contents_numbers(pdf, toc, font):
+    """Número de página y enlace a cada título de la página «Contenido»: MuPDF la maqueta como una lista sin
+    números y sin enlaces. Cada título se busca en las líneas, en orden; uno largo ocupa varias."""
+    first = min((page for _, _, page, *_ in toc), default=1) - 1
+    start = next((n for n in range(first) if any(line.strip() == "Contenido" for line in pdf[n].get_text().splitlines())),
+                 None)
+    if start is None:
+        return
+    # NFKC: MuPDF une «fi» en una ligadura (Mitsuha 1: «Signiﬁca») y el título ya no casaba
+    norm = lambda s: " ".join(unicodedata.normalize("NFKC", s.replace("\xad", "")).split())
+    entries = iter([(norm(title), page) for _, title, page, *_ in toc])
+    current, rects = next(entries, None), []
+    for n in range(start, first):
+        page = pdf[n]
+        for link in page.get_links():  # MuPDF deja solo los de los subtítulos, y a otra página
+            page.delete_link(link)
+        lines = [line for block in page.get_text("dict")["blocks"] for line in block.get("lines", [])]
+        left = min((line["bbox"][0] for line in lines), default=0)
+        for line in lines:
+            text = norm("".join(span["text"] for span in line["spans"]))
+            if current is None or not text:
+                continue
+            title, target = current
+            remaining = title[len(" ".join(norm("".join(s["text"] for s in l["spans"])) for _, l in rects)):].strip()
+            if not (remaining.startswith(text) or text.startswith(remaining)):
+                continue  # «Contenido», o un título que no casa: se deja sin número
+            rects.append((n, line))
+            if len(text) < len(remaining) and remaining.startswith(text):
+                continue  # el título sigue en la línea siguiente
+            span = line["spans"][-1]
+            right = page.rect.width - left
+            _write_number(page, font, str(target), right, span["origin"][1], span["size"], right=True)
+            for at, part in rects:  # el enlace, en cada línea del título, hasta el número
+                box = pymupdf.Rect(part["bbox"])
+                box.x1 = right
+                pdf[at].insert_link({"kind": pymupdf.LINK_GOTO, "from": box, "page": target - 1, "to": pymupdf.Point(0, 0)})
+            current, rects = next(entries, None), []
 
 
 def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
@@ -3480,15 +3581,18 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     pdf = laid
     moved = _full_page_images(pdf)
     step(80, 100)
-    pdf.set_toc([[level, title, moved[page - 1] + 1, *rest] for level, title, page, *rest in toc])
+    toc = [[level, title, moved[page - 1] + 1, *rest] for level, title, page, *rest in toc]
+    pdf.set_toc(toc)
+    font = _page_font(options.get("font", ""))
+    if options.get("contents", True):
+        _contents_numbers(pdf, toc, font)
     pdf.set_metadata({"title": book.title, "author": book.author, "subject": book.series,
                       "creator": "Light Novel Creator", "producer": "Light Novel Creator"})
     for n, page in enumerate(pdf):
         step(80 + n * 15 // len(pdf), 100)
         if n == 0 or (not page.get_text().strip() and page.get_images()):  # portada, ilustración a página completa
             continue
-        page.insert_textbox(pymupdf.Rect(0, height - 26, width, height - 10), str(n + 1), fontsize=fontsize * 0.75,
-                            fontname="tiro", color=(0.45, 0.45, 0.45), align=pymupdf.TEXT_ALIGN_CENTER)
+        _write_number(page, font, str(n + 1), width / 2, height - 17, fontsize * 0.75)
     partial = partial_path(out_path)
     pdf.save(partial, garbage=3, deflate=True)
     pdf.close()
