@@ -115,8 +115,6 @@ THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe cong
 SUGGEST_AHEAD = 40        # sugerencias de ortografía pedidas por adelantado en cada capítulo
 MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
-# Aspecto de las marcas en el editor de texto (theme.editor_tags); "broken" es lo que edit_section quitaría
-LEVEL_COLOR = theme.level_colors(False)  # avisos del informe de calidad; en oscuro, theme.level_colors(True)
 LEVEL_NAMES = {"Grave": ("grave", "graves"), "Revisar": ("por revisar", "por revisar"),
                "Menor": ("menor", "menores")}  # singular y plural: «1 grave», «2 graves»
 LEVEL_PLURAL = {level: names[1] for level, names in LEVEL_NAMES.items()}
@@ -4285,11 +4283,6 @@ class App:
                               _button("Portada con título", lambda: (self.set_cover(("text", "")), win.close())), 1))
         win.show()
         self.cover_window = win, grid
-
-    def edit_more(self):
-        """Los datos que no van en la tarjeta del libro: están en el panel «Editar datos»."""
-        if not self.data_panel.isVisible():
-            self.toggle_data()
 
     def search_online(self, then=None):
         """Busca la serie en AniList; la elegida va a then (por defecto, apply_online)."""
