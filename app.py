@@ -501,6 +501,7 @@ def _analyze(pdf, progress=None):
     """convert.analyze, las ilustraciones repetidas y el informe de calidad, en el proceso de trabajo: en la
     ventana congelaban al abrir (Kage 5: 2,4 s las repetidas; Nageki 1: 0,9 s el informe)."""
     book = convert.analyze(pdf, progress)
+    _fit_review(pdf, book)
     return book, convert.duplicate_images(book), convert.quality_report(book), convert.report_memos()
 
 
@@ -860,6 +861,83 @@ def _read_review(pdf, blocks=None):
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
     return None
+
+
+def _migrate_review(state, book):
+    """Revisión hecha con el análisis de antes de convert._credit_pages_as_images (la página del grupo como texto),
+    trasladada a los bloques de ahora: sus cambios se repiten sobre el libro de antes y cada índice se cuenta con
+    la página ya en una ilustración. None si no es de ese análisis o si algún cambio tocaba la página del grupo."""
+    raw, candidates, spans_before = convert.uncredited(book)
+    raw = [dataclasses.replace(b) for b in raw]  # copias: repetir los cambios no toca el libro
+    regions = [raw[s:s + n] for s, n in spans_before]
+    if not regions or state.get("blocks") != len(raw):
+        return None
+    work = dataclasses.replace(book, blocks=raw, candidates=candidates, credit_pages=[])
+
+    def spans():  # dónde está ahora cada página del grupo: (inicio, bloques)
+        found = []
+        for region in regions:
+            at = next((i for i, b in enumerate(work.blocks) if b is region[0]), None)
+            if at is None or any(work.blocks[at + j] is not b for j, b in enumerate(region)):
+                raise LookupError
+            found.append((at, len(region)))
+        return found
+
+    def new(i, where):  # índice de antes -> de ahora; dentro de una página del grupo no hay
+        if any(s < i < s + n for s, n in where):
+            raise LookupError
+        return i - sum(n - 1 for s, n in where if s + n <= i)
+
+    edits = []
+    try:
+        for edit in state.get("edits", []):
+            where = spans()
+            if edit[0] == "image":
+                edits.append(["image", new(int(edit[1]), where), edit[2]])
+            elif edit[0] == "move":
+                start, end, dest = int(edit[1]), int(edit[2]), int(edit[3])
+                if any(start < s + n and end > s for s, n in where):
+                    raise LookupError
+                edits.append(["move", new(start, where), new(end, where), new(dest, where)])
+                convert.move_section(work, start, end, dest)
+            else:
+                start, end = int(edit[0]), int(edit[1])
+                if any(start < s + n and end > s for s, n in where):
+                    raise LookupError
+                edits.append([new(start, where), new(end, where), edit[2]])
+                convert.edit_section(work, start, end, str(edit[2]))
+        where = spans()
+        rows = {}
+        for item, row in state["rows"].items():
+            k = int(item)
+            if not any(s <= k < s + n for s, n in where):  # las filas de la página del grupo ya no existen
+                rows[str(new(k, where))] = row
+        at = state.get("editor_at")
+        at = new(at, where) if isinstance(at, int) and not any(s <= at < s + n for s, n in where) else None
+    except (LookupError, ValueError, TypeError, IndexError):
+        return None
+    return {**state, "blocks": len(book.blocks), "edits": edits, "rows": rows, "editor_at": at}
+
+
+def _review_for(pdf, book):
+    """La revisión guardada de pdf para este análisis: la suya o, si se hizo con la página del grupo como texto,
+    trasladada (_migrate_review). None si no hay o es de otro análisis."""
+    state = _read_review(pdf, len(book.blocks))
+    if state or not book.credit_pages:
+        return state
+    old = _read_review(pdf)
+    return _migrate_review(old, book) if old else None
+
+
+def _fit_review(pdf, book):
+    """Si la revisión de antes tocaba la página del grupo (Eminence 7 editó la suya) y no se puede trasladar, el
+    libro vuelve a llevar esas páginas como texto: así la revisión coincide entera y no se pierde nada."""
+    if not book.credit_pages or _review_for(pdf, book):
+        return
+    old = _read_review(pdf)
+    blocks, candidates, _ = convert.uncredited(book)
+    if old and old.get("blocks") == len(blocks):
+        book.blocks, book.candidates, book.credit_pages = blocks, candidates, []
 
 
 def _backup_path(path):
@@ -1242,7 +1320,8 @@ def _prepare(pdf, options):
     con lo detectado y los datos heredados de otro tomo de la serie (options: las opciones de la ventana
     para los PDF sin revisión). Devuelve (book, chapters, removed, state)."""
     book = convert.analyze(pdf)
-    state = _read_review(pdf, len(book.blocks))
+    _fit_review(pdf, book)
+    state = _review_for(pdf, book)
     if state:
         _replay(book, state)
         chapters, removed, breaks = _plan(book, state["rows"])
@@ -4918,10 +4997,18 @@ class App:
     def load_review(self, state=None):
         """Recupera la revisión guardada de este PDF, o la de una versión (state). False si no hay o si el PDF
         cambió desde entonces."""
+        moved = False
         if state is None:
-            state = _read_review(self.pdf, len(self.book.blocks)) if self.pdf else None
+            state = _review_for(self.pdf, self.book) if self.pdf else None
+            moved = bool(state) and state["blocks"] != (_read_review(self.pdf) or {}).get("blocks")
         if not state:
             return False
+        if moved:  # revisión del análisis de antes, trasladada: la original queda en .bak y se guarda la de ahora
+            try:
+                shutil.copy2(_review_path(self.pdf), _backup_path(_review_path(self.pdf)))
+                _write_json(_review_path(self.pdf), state)
+            except OSError:
+                pass  # se vuelve a trasladar la próxima vez
         self.edits = _replay(self.book, state)
         self.fill_tree({})
         for item, (kind, title, *done) in state["rows"].items():
