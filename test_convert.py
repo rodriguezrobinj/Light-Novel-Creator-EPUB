@@ -662,9 +662,7 @@ def test_jpeg_encoder_is_fast_and_keeps_the_picture():
     mitad del análisis (Kage 6). La imagen conserva tamaño, color y gris."""
     import time
 
-    color = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 1240, 1754), False)
-    color.clear_with(200)
-    color.set_rect(pymupdf.IRect(0, 0, 620, 877), (200, 30, 30))
+    color = painted(1240, 1754, (200, 200, 200), (0, 0, 620, 877, (200, 30, 30)))
     gray = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.IRect(0, 0, 40, 30), False)
     gray.clear_with(90)
     convert._jpeg(gray, 85)  # el primer uso carga el codificador
@@ -2339,10 +2337,20 @@ def test_pdf_illustration_page_height_follows_the_image():
     fills = [page.get_image_bbox(page.get_images(full=True)[0]) == page.rect for page in pdf]
     assert sizes == [(420, 301), (420, 840)] and all(fills), (sizes, fills)
 
+
+def painted(width, height, back, *boxes):
+    """Pixmap RGB de color back con rectángulos (x0, y0, x1, y1, color). Con Pillow: set_rect de pymupdf 2.0
+    recorre píxel a píxel en Python (40 s en 2000×3000)."""
+    from PIL import Image
+
+    img = Image.new("RGB", (width, height), back)
+    for *box, color in boxes:
+        img.paste(color, box)
+    return pymupdf.Pixmap(pymupdf.csRGB, width, height, img.tobytes(), False)
+
+
 def jpeg(width, height):
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
-    pix.set_rect(pix.irect, (200, 120, 40))
-    pix.set_rect(pymupdf.IRect(0, 0, width // 2, height // 3), (20, 60, 200))
+    pix = painted(width, height, (200, 120, 40), (0, 0, width // 2, height // 3, (20, 60, 200)))
     return pix.tobytes("jpg", jpg_quality=95)
 
 
@@ -2559,9 +2567,7 @@ def test_window_metadata_cover_and_shrink_reach_the_epub():
 
 def two_color(width, height):
     """JPEG con la mitad izquierda roja y la derecha azul, para saber qué mitad es cada página."""
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
-    pix.set_rect(pix.irect, (255, 0, 0))
-    pix.set_rect(pymupdf.IRect(width // 2, 0, width, height), (0, 0, 255))
+    pix = painted(width, height, (255, 0, 0), (width // 2, 0, width, height, (0, 0, 255)))
     return pix.tobytes("jpg", jpg_quality=95)
 
 
@@ -5626,9 +5632,7 @@ def test_duplicate_images_and_trim():
     book = convert.Book("Libro", "", art, [convert.Block("image", 1, image=other), convert.Block("image", 2, image=art),
                                            convert.Block("image", 3, image=other)], [])
     assert convert.duplicate_images(book) == [1, 2]  # la portada otra vez y la repetida
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 400, 500), False)
-    pix.set_rect(pix.irect, (255, 255, 255))
-    pix.set_rect(pymupdf.IRect(40, 50, 360, 450), (30, 90, 160))
+    pix = painted(400, 500, (255, 255, 255), (40, 50, 360, 450, (30, 90, 160)))
     trimmed = pymupdf.Pixmap(convert._trim(pix.tobytes("jpg", jpg_quality=95)))
     assert abs(trimmed.width - 320) <= 4 and abs(trimmed.height - 400) <= 4, (trimmed.width, trimmed.height)
     assert convert._trim(other) == other  # sin margen blanco no cambia
