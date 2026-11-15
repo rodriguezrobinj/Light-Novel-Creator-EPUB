@@ -11,7 +11,10 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=['pymupdf.layout', 'pymupdf4llm', 'onnxruntime', 'numpy', 'tkinter', 'PySide6.QtNetwork', 'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtTest', 'PySide6.QtPdf', 'PySide6.QtOpenGL', 'PySide6.QtDBus', 'PySide6.QtSvg',
-              'PIL._avif', 'PIL.AvifImagePlugin'],
+              'PIL._avif', 'PIL.AvifImagePlugin',
+              # segno prueba importlib_metadata (sus plugins to_*, que no se usan) antes que el de la biblioteca
+              # estándar; PyInstaller lo resuelve a la copia de setuptools y arrastra ~150 módulos y su runtime hook
+              'importlib_metadata', 'setuptools'],
     noarchive=False,
     optimize=0,
 )
@@ -23,6 +26,8 @@ a.binaries = [b for b in a.binaries if not any(name.lower() in b[0].lower().repl
 # pyphen trae patrones de unos 70 idiomas (6 MB): la partición de palabras solo usa el español
 a.datas = [d for d in a.datas if not d[0].replace('\\', '/').startswith('pyphen/dictionaries/')
            or d[0].endswith('hyph_es.dic')]
+# Lo trae hook-pyphen de pyinstaller-hooks-contrib (fijado en requirements.txt): sin él no se parten palabras
+assert any(d[0].endswith('hyph_es.dic') for d in a.datas), 'Falta hyph_es.dic de pyphen: el .exe no partiría palabras'
 pyz = PYZ(a.pure)
 
 exe = EXE(

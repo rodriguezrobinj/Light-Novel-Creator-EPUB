@@ -9,6 +9,11 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+# pymupdf 2.0 importa pymupdf.layout y pymupdf4llm (onnxruntime y numpy, unos 3 s más) y el motor no los usa; el
+# .exe los excluye. Aquí arriba también vale para los procesos de trabajo, que reimportan este módulo
+for _unused in ("pymupdf.layout", "pymupdf4llm"):
+    sys.modules.setdefault(_unused, None)
+
 import pymupdf
 
 import convert
@@ -662,9 +667,7 @@ def test_jpeg_encoder_is_fast_and_keeps_the_picture():
     mitad del análisis (Kage 6). La imagen conserva tamaño, color y gris."""
     import time
 
-    color = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 1240, 1754), False)
-    color.clear_with(200)
-    color.set_rect(pymupdf.IRect(0, 0, 620, 877), (200, 30, 30))
+    color = painted(1240, 1754, (200, 200, 200), (0, 0, 620, 877, (200, 30, 30)))
     gray = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.IRect(0, 0, 40, 30), False)
     gray.clear_with(90)
     convert._jpeg(gray, 85)  # el primer uso carga el codificador
@@ -2339,10 +2342,20 @@ def test_pdf_illustration_page_height_follows_the_image():
     fills = [page.get_image_bbox(page.get_images(full=True)[0]) == page.rect for page in pdf]
     assert sizes == [(420, 301), (420, 840)] and all(fills), (sizes, fills)
 
+
+def painted(width, height, back, *boxes):
+    """Pixmap RGB de color back con rectángulos (x0, y0, x1, y1, color). Con Pillow: set_rect de pymupdf 2.0
+    recorre píxel a píxel en Python (40 s en 2000×3000)."""
+    from PIL import Image
+
+    img = Image.new("RGB", (width, height), back)
+    for *box, color in boxes:
+        img.paste(color, box)
+    return pymupdf.Pixmap(pymupdf.csRGB, width, height, img.tobytes(), False)
+
+
 def jpeg(width, height):
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
-    pix.set_rect(pix.irect, (200, 120, 40))
-    pix.set_rect(pymupdf.IRect(0, 0, width // 2, height // 3), (20, 60, 200))
+    pix = painted(width, height, (200, 120, 40), (0, 0, width // 2, height // 3, (20, 60, 200)))
     return pix.tobytes("jpg", jpg_quality=95)
 
 
@@ -2446,7 +2459,7 @@ def test_shrink_makes_big_images_lighter():
         assert max(pix.width, pix.height) == convert.SHRINK, (pix.width, pix.height)
         assert len(data) < len(big) and data[:3] == b"\xff\xd8\xff"
     small = jpeg(300, 400)
-    assert convert._shrink(small) == small or len(convert._shrink(small)) < len(small)
+    assert convert._shrink(small) == small  # bajo el límite y sin nada que ganar: la original tal cual
 
 
 def test_load_cover_converts_png_to_jpeg():
@@ -2559,9 +2572,7 @@ def test_window_metadata_cover_and_shrink_reach_the_epub():
 
 def two_color(width, height):
     """JPEG con la mitad izquierda roja y la derecha azul, para saber qué mitad es cada página."""
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
-    pix.set_rect(pix.irect, (255, 0, 0))
-    pix.set_rect(pymupdf.IRect(width // 2, 0, width, height), (0, 0, 255))
+    pix = painted(width, height, (255, 0, 0), (width // 2, 0, width, height, (0, 0, 255)))
     return pix.tobytes("jpg", jpg_quality=95)
 
 
@@ -5626,9 +5637,7 @@ def test_duplicate_images_and_trim():
     book = convert.Book("Libro", "", art, [convert.Block("image", 1, image=other), convert.Block("image", 2, image=art),
                                            convert.Block("image", 3, image=other)], [])
     assert convert.duplicate_images(book) == [1, 2]  # la portada otra vez y la repetida
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 400, 500), False)
-    pix.set_rect(pix.irect, (255, 255, 255))
-    pix.set_rect(pymupdf.IRect(40, 50, 360, 450), (30, 90, 160))
+    pix = painted(400, 500, (255, 255, 255), (40, 50, 360, 450, (30, 90, 160)))
     trimmed = pymupdf.Pixmap(convert._trim(pix.tobytes("jpg", jpg_quality=95)))
     assert abs(trimmed.width - 320) <= 4 and abs(trimmed.height - 400) <= 4, (trimmed.width, trimmed.height)
     assert convert._trim(other) == other  # sin margen blanco no cambia
@@ -7254,6 +7263,37 @@ def test_kepub_option_profiles_and_names():
     assert all("kepub" in p for name, p in app.PROFILES.items() if name != "Personalizado")
     assert app._write_options({"kepub": True})["kepub"] and not app._write_options({})["kepub"]
     assert "kepub" in app.INHERITED and "kepub" in __import__("options").BOOK_KEYS
+
+
+def test_review_field_lists_agree():
+    """Las listas de campos de la revisión van a mano: un campo que falta en una se pierde sin aviso (no se
+    hereda, no sale al comparar versiones, la opción no llega a la ventana o al libro)."""
+    import dataclasses
+    import types
+
+    import app
+    import options
+
+    class Window:  # sin ventana: cada atributo es un Var que devuelve su propio nombre
+        fields = app.App.fields
+
+        def __getattr__(self, name):
+            return types.SimpleNamespace(get=lambda: name)
+
+        def rows(self):
+            return {}
+
+    fields = Window().fields()
+    state = set(app.App.review_state(Window()))
+    assert all(var.get() == f"{key}_var" for key, var in fields.items())  # BOOK_FIELDS se leen como <campo>_var
+    assert set(options.BOOK_KEYS) <= set(fields), set(options.BOOK_KEYS) - set(fields)
+    assert set(app.BOOK_FIELDS) - {"description"} <= set(fields) and "description" in state
+    assert set(app.BOOK_FIELDS) <= {f.name for f in dataclasses.fields(convert.Book)}
+    assert set(app.INHERITED) <= state, set(app.INHERITED) - state
+    assert set(app.SERIES_VOCAB) <= set(app.INHERITED)
+    shown_apart = {"blocks", "edits", "rows"}  # análisis, ediciones y filas: no son datos ni opciones del libro
+    unlabeled = state - shown_apart - set(app.VERSION_NOISE) - set(app.FIELD_LABELS)
+    assert not unlabeled, unlabeled
 
 
 def test_batch_with_kobo_writes_kepub():
@@ -9172,6 +9212,9 @@ if __name__ == "__main__":
     # prefijo lnepub-: el hook de limpieza borra lo que quede si las pruebas se cortan
     with tempfile.TemporaryDirectory(prefix="lnepub-test-", ignore_cleanup_errors=True) as tmp:
         TMP = Path(tmp)
+        # antes de importar app, que lee de aquí sus rutas: los procesos hijos heredan el entorno, no el parche de abajo
+        for var in ("APPDATA", "LOCALAPPDATA"):
+            os.environ[var] = str(TMP / var.lower())
         import app
         app.SETTINGS = TMP / "ajustes.json"  # nunca las preferencias reales del usuario
         for name, fn in list(globals().items()):
