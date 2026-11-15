@@ -3152,7 +3152,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                   for k, text in notes]
         files[name] = _xhtml(html.unescape(heading), "\n".join(parts), lang)
 
-    uid = f"urn:uuid:{uuid.uuid4()}"
+    # el mismo libro exportado otra vez conserva su identificador: el lector no lo duplica ni pierde la posición
+    uid = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'{book.series}|{book.volume}|{book.title}|{book.author}')}"
     title = html.escape(book.title)
     meta = []  # metadatos: en EPUB 3 los roles y el orden van en <meta refines>; en EPUB 2, como atributos opf:
 
@@ -3319,7 +3320,10 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             z.writestr("OEBPS/toc.ncx", BAD_XML.sub("", ncx))
             z.writestr("OEBPS/style.css", css)
             z.writestr("OEBPS/cover.xhtml", cover)
-            z.writestr("OEBPS/cover.jpg", _shrink(book.cover, limit) if limit and book.cover else book.cover)
+            cover_data = _shrink(book.cover, limit) if limit and book.cover else book.cover
+            if cover_data[:4] == b"\x89PNG":  # ilustración con transparencia como portada: cover.jpg es JPEG
+                cover_data = _jpeg(_rgb(pymupdf.Pixmap(cover_data), alpha=False), 90)
+            z.writestr("OEBPS/cover.jpg", cover_data)
             total, done = len(files) + len(images) + 1, 1
             if progress:
                 progress(done, total)

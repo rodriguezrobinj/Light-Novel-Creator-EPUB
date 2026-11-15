@@ -2515,6 +2515,23 @@ def test_load_cover_converts_png_to_jpeg():
         raise AssertionError("debía avisar de la imagen que falta")
 
 
+def test_epub_png_cover_is_jpeg_and_identifier_is_stable():
+    """Una portada PNG (ilustración con transparencia) se guarda como JPEG de verdad en cover.jpg; exportar
+    el mismo libro dos veces da el mismo identificador, y otro libro, otro."""
+    png = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 60), True).tobytes("png")
+    book = convert.Book("Libro", "Autora", png, [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno.")],
+                        [0], series="Serie", volume="1")
+    uids = []
+    for name, title in (("uno", "Libro"), ("dos", "Libro"), ("tres", "Otro libro")):
+        book.title = title
+        out = TMP / f"portada-{name}.epub"
+        convert.write_epub(book, [(0, "Cap 1")], out)
+        with zipfile.ZipFile(out) as z:
+            assert z.read("OEBPS/cover.jpg")[:3] == b"\xff\xd8\xff"
+        uids.append(re.search(r'<dc:identifier id="uid">([^<]+)<', epub_file(out, "OEBPS/content.opf"))[1])
+    assert uids[0] == uids[1] != uids[2] and uids[0].startswith("urn:uuid:"), uids
+
+
 def test_window_keyboard_shortcuts_change_type():
     import app
 
