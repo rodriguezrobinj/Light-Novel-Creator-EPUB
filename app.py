@@ -89,8 +89,17 @@ INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "la
              "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes")
 # De INHERITED, lo que es de toda la serie aunque el tomo ya tenga revisión: glosarios, diccionario y personajes
 SERIES_VOCAB = ("words", "glossary", "tr_glossary", "tr_notes")
+def _data_dir():
+    """Carpeta de preferencias y cachés. La versión portable trae «datos» junto al .exe: todo queda ahí,
+    se lleva en un USB y no deja nada en el equipo."""
+    portable = Path(sys.executable).parent / "datos"
+    if getattr(sys, "frozen", False) and portable.is_dir():
+        return portable
+    return Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB"
+
+
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
-SETTINGS = Path(os.environ.get("APPDATA") or Path.home()) / "PDF a EPUB" / "ajustes.json"
+SETTINGS = _data_dir() / "ajustes.json"
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión

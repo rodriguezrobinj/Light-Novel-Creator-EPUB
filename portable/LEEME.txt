@@ -1,0 +1,30 @@
+Light Novel Creator EPUB - versión portable
+===========================================
+
+Convierte los PDF de novelas ligeras en libros EPUB.
+
+Uso
+---
+1. Abre "PDF a EPUB.exe".
+2. Arrastra un PDF a la ventana, revisa los capítulos y pulsa "Generar EPUB...".
+
+No hace falta instalar nada. Funciona en Windows 10 y 11 de 64 bits.
+
+Si Windows muestra "Windows protegió su PC", pulsa "Más información" y
+luego "Ejecutar de todas formas". El programa no está firmado.
+
+La carpeta "datos"
+------------------
+Guarda las preferencias, la memoria de las series y las cachés. Mientras
+esté junto al .exe, el programa no escribe nada en el equipo, salvo la
+revisión (.lnepub.json) y el EPUB que deja junto a cada PDF.
+
+Copia la carpeta entera (el .exe y "datos") para llevarte el programa con
+tus ajustes.
+
+Código, errores y sugerencias
+-----------------------------
+https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB
+
+Licencia GNU AGPL v3 (archivo LICENSE). El código fuente completo está en
+la dirección de arriba.

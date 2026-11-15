@@ -8265,6 +8265,30 @@ def test_install_paths_are_per_user():
     assert "Programs" in str(exe) and exe.name == "PDF a EPUB.exe" and link.suffix == ".lnk", (exe, link)
 
 
+def test_portable_exe_keeps_data_next_to_it():
+    """El zip portable trae «datos» junto al .exe: las preferencias van ahí y no a %APPDATA%. Sin esa
+    carpeta, o desde Python, siguen en %APPDATA%."""
+    import app
+
+    folder = TMP / "portable"
+    exe = folder / "PDF a EPUB.exe"
+    folder.mkdir()
+    saved = sys.executable, getattr(sys, "frozen", None)
+    try:
+        sys.executable = str(exe)
+        assert "datos" not in app._data_dir().parts, app._data_dir()  # desde Python no es portable
+        sys.frozen = True
+        assert app._data_dir().name == "PDF a EPUB", app._data_dir()  # .exe sin «datos»: %APPDATA%
+        (folder / "datos").mkdir()
+        assert app._data_dir() == folder / "datos", app._data_dir()
+    finally:
+        sys.executable = saved[0]
+        if saved[1] is None:
+            del sys.frozen
+        else:
+            sys.frozen = saved[1]
+
+
 def test_edit_section_keeps_pages_of_unchanged_paragraphs():
     """Corregir una errata no cambia la página de los demás párrafos: la lista de páginas del EPUB y el
     panel del PDF del editor dependen de ella. Lo corregido en su sitio conserva la suya; lo nuevo toma la del
