@@ -350,15 +350,21 @@ def _strip_margins(pages, heights):
     def loose(text):  # "Einherjar Project Prólogo | 11" y "… Capítulo 3 | 25" -> "einherjar project"
         return " ".join(re.sub(r"[\W\d_]+", " ", KEYWORDS.sub(" ", _norm(text).replace("#", " "))).split())
 
-    def key(r):  # con el tamaño: el título grande del capítulo no es su encabezado pequeño de igual texto
-        return _norm(r.text), round(r.size)
-
     counts, loose_counts = collections.Counter(), collections.Counter()
+    sizes = collections.defaultdict(collections.Counter)  # texto -> tamaños con que sale en las franjas
     for rows, h in zip(pages, heights):
-        counts.update({key(r) for r in rows if in_band(r, h)})
-        loose_counts.update({loose(r.text) for r in rows if in_band(r, h)})
+        band = [r for r in rows if in_band(r, h)]
+        counts.update({_norm(r.text) for r in band})
+        loose_counts.update({loose(r.text) for r in band})
+        for r in band:
+            sizes[_norm(r.text)][round(r.size)] += 1
     least = max(2, REPEAT * len(pages))
     repeated = {k for k, n in counts.items() if n >= least}
+
+    def big(r):
+        # El título del capítulo en la franja, mucho mayor que el encabezado pequeño que repite su texto
+        # (no un tamaño algo distinto: Mitsuha 6 numera algunas páginas en otra letra)
+        return r.size >= 1.3 * sizes[_norm(r.text)].most_common(1)[0][0]
     # Encabezados que cambian con el capítulo: la variante del prólogo o de las palabras del autor
     # ("Einherjar Project Palabras del autor | 230") sale en pocas páginas, pero empieza igual.
     loose_repeated = tuple(k for k, n in loose_counts.items() if n >= least and len(k) >= 6)
@@ -369,7 +375,7 @@ def _strip_margins(pages, heights):
         # La clave suelta solo para líneas con número de página que no abren con "Capítulo…": un título
         # de capítulo en la franja superior también se queda en pocas palabras repetidas
         footer = re.search(r"\d", r.text) and not KEYWORDS.match(r.text.strip(LABEL_DECOR))
-        return (key(r) in repeated or _norm(r.text) == "#"  # "#": números de página sueltos
+        return (_norm(r.text) == "#" or (_norm(r.text) in repeated and not big(r))  # "#": números de página sueltos
                 or bool(footer and loose_repeated and loose(r.text).startswith(loose_repeated)))
 
     return [[r for r in rows if not margin(r, h)] for rows, h in zip(pages, heights)]
@@ -1458,7 +1464,7 @@ def spanish_case(title, words):
 
 # palabras completas: «discordia» o «twitteros» no son publicidad del grupo
 LINKS = re.compile(r"https?://|www\.|\b(?:facebook|twitter|discord|patreon|ko-fi|paypal|instagram|tiktok|wixsite"
-                   r"|blogspot)\b", re.I)
+                   r"|blogspot)s?\b", re.I)  # «Patreons» (Nageki 1) sí
 
 
 def link_sections(book):
