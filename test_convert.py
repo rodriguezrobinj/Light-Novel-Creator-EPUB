@@ -7226,7 +7226,8 @@ def test_custom_font_is_embedded():
 
 
 def test_serve_gives_the_epub_over_http():
-    """El servidor de «Enviar al móvil» da el EPUB en cualquier ruta y deja de hacerlo al cerrar la ventana."""
+    """El servidor de «Enviar al móvil» da el EPUB solo en su ruta con clave al azar (otra da 404 y no cuenta como
+    enviado), deja de hacerlo al cerrar la ventana y la ventana se cierra sola a los SEND_MINUTES."""
     import urllib.error
     import urllib.request
 
@@ -7236,14 +7237,24 @@ def test_serve_gives_the_epub_over_http():
     epub = TMP / "Mi novela.epub"
     epub.write_bytes(b"PK" + os.urandom(5000))
     server = app._serve(epub, "127.0.0.1")
+    other = app._serve(epub, "127.0.0.1")
     port = server.server_port
-    got = []
-    for path in ("x", "otra/ruta"):
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/{path}", timeout=5) as r:
-            got.append((r.read() == epub.read_bytes(), r.headers["Content-Type"], r.headers["Content-Disposition"]))
-    server.shutdown()
-    server.server_close()
-    assert got == [(True, "application/epub+zip", "attachment; filename*=UTF-8''Mi%20novela.epub")] * 2, got
+    missing = []
+    for path in ("/x", "/Mi%20novela.epub", other.path):  # sin la clave de este servidor, nada
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+            missing.append(200)
+        except urllib.error.HTTPError as e:
+            missing.append(e.code)
+    guessed = server.downloaded
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{server.path}", timeout=5) as r:
+        got = (r.read() == epub.read_bytes(), r.headers["Content-Type"], r.headers["Content-Disposition"])
+    for s in (server, other):
+        s.shutdown()
+        s.server_close()
+    assert missing == [404] * 3 and not guessed, (missing, guessed)
+    assert got == (True, "application/epub+zip", "attachment; filename*=UTF-8''Mi%20novela.epub"), got
+    assert server.path.endswith("/Mi%20novela.epub") and len(server.path) > 20 and server.downloaded, server.path
     root, window = visible_window()
     shown = []
     original, lan = app.messagebox.showerror, app._lan_ip
@@ -7257,7 +7268,7 @@ def test_serve_gives_the_epub_over_http():
     win, server = window.phone_window
     qr = [label for label in win.findChildren(QLabel) if label.pixmap() and not label.pixmap().isNull()]
     texts = " ".join(label.text() for label in win.findChildren(QLabel))
-    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=5) as r:
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}{server.path}", timeout=5) as r:
         served = r.read() == epub.read_bytes()
     win.close()
     root.update()
@@ -7267,11 +7278,21 @@ def test_serve_gives_the_epub_over_http():
     except (urllib.error.URLError, OSError):
         stopped = True
     sent = app._sent_text(epub)  # el móvil lo descargó: el panel de serie lo cuenta como enviado
+    app.SEND_MINUTES = 0  # a los SEND_MINUTES la ventana se cierra sola
+    try:
+        window.send_to_phone(epub, ip="127.0.0.1")
+        expiring = window.phone_window[0]
+        for _ in range(20):
+            root.update()
+        expired = not app.shiboken6.isValid(expiring) or not expiring.isVisible()  # cerrada, o ya borrada
+    finally:
+        app.SEND_MINUTES = 10
     window.close()
+    assert expired, "la ventana de «Enviar al móvil» no se cerró sola"
     assert sent.startswith("Wi-Fi · "), sent
     assert shown == ["No hay red local: conecta el equipo a la Wi-Fi."], shown
     assert len(qr) == 1 and served and stopped, (len(qr), served, stopped)
-    assert f"http://127.0.0.1:{server.server_port}/Mi%20novela.epub" in texts and "Firewall" in texts, texts
+    assert f"http://127.0.0.1:{server.server_port}{server.path}" in texts and "Firewall" in texts, texts
 
 
 def test_text_cover():

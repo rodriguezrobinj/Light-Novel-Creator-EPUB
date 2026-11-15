@@ -17,6 +17,7 @@ import os
 import pickle
 import queue
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -1388,25 +1389,33 @@ def _lan_ip():
             return "127.0.0.1"
 
 
+SEND_MINUTES = 10  # «Enviar al móvil» deja de enviar solo, por si la ventana se queda abierta
+
+
 def _serve(path, host):
-    """Sirve el EPUB por HTTP (cualquier ruta lo devuelve) en un puerto libre, desde un hilo: solo lee un
-    archivo, no usa PyMuPDF. server.shutdown() lo para."""
+    """Sirve el EPUB por HTTP en un puerto libre, desde un hilo: solo lee un archivo, no usa PyMuPDF. Solo en
+    server.path, con una clave al azar: cualquiera en la misma Wi-Fi (un café, una residencia) podía bajarlo
+    probando puertos. server.shutdown() lo para."""
     data, name = Path(path).read_bytes(), Path(path).name
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.path != self.server.path:
+                self.send_error(404)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/epub+zip")
             self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{urllib.parse.quote(name)}")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            self.wfile.write(data)  # si el móvil corta a mitad, falla aquí y no cuenta como enviado
             self.server.downloaded = True  # el panel de serie lo cuenta como enviado al cerrar la ventana
 
         def log_message(self, *args):
             pass  # el .exe no tiene consola: escribir en stderr (None) fallaría
 
     server = http.server.ThreadingHTTPServer((host, 0), Handler)
+    server.path, server.downloaded = f"/{secrets.token_urlsafe(8)}/{urllib.parse.quote(name)}", False
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -3179,7 +3188,7 @@ class App:
         except OSError as e:
             messagebox.showerror("Enviar al móvil", f"No se pudo enviar: {e.strerror or e}")
             return
-        url = f"http://{ip}:{server.server_port}/{urllib.parse.quote(Path(out).name)}"
+        url = f"http://{ip}:{server.server_port}{server.path}"
         png = io.BytesIO()
         segno.make(url).save(png, kind="png", scale=8, border=4)
         pixmap = QPixmap()
@@ -3194,11 +3203,12 @@ class App:
         column.addWidget(link)
         column.addWidget(_label("Escanea el código con el móvil conectado a la misma Wi-Fi, o escribe la dirección\n"
                                 "en su navegador. Si Windows pregunta en el Firewall, permite el acceso.\n"
-                                "Al cerrar esta ventana deja de enviarse.", "muted"))
+                                f"Al cerrar esta ventana, o a los {SEND_MINUTES} minutos, deja de enviarse.", "muted"))
         column.addLayout(_row(1, _button("Cerrar", win.close)))
         win.finished.connect(lambda _: (server.shutdown(), server.server_close(),
-                                        getattr(server, "downloaded", False) and _record_send(out, "Wi-Fi")))
+                                        server.downloaded and _record_send(out, "Wi-Fi")))
         win.show()
+        qtk.after(SEND_MINUTES * 60_000, lambda: shiboken6.isValid(win) and win.isVisible() and win.close())
         self.phone_window = win, server
 
     def add_to_calibre(self, out):
