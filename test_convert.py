@@ -3889,6 +3889,35 @@ def test_sheet_changes_and_restore():
     assert split == [False, False] and joined is False, (split, joined)
 
 
+def test_sheet_changed_paragraphs_follow_format_and_undo_quickly():
+    """Los párrafos cambiados se recuerdan entre pausas al escribir, pero una cursiva puesta o quitada, un
+    deshacer o un rehacer se notan igual; mirar 800 párrafos otra vez no cuesta casi nada."""
+    import time
+
+    from PySide6.QtGui import QTextCursor
+    sheet = sheet_with([f"Párrafo {k} con texto." for k in range(800)])
+    doc = sheet.document()
+    first = sheet.changed_blocks()
+    start = time.perf_counter()
+    again = sheet.changed_blocks()
+    took = time.perf_counter() - start
+    cursor = doc.find("texto")
+    sheet.setTextCursor(cursor)
+    sheet.toggle_italic()
+    italic = [b.text() for b in sheet.changed_blocks()]
+    sheet.undo()
+    undone = sheet.changed_blocks()
+    sheet.redo()
+    redone = [b.text() for b in sheet.changed_blocks()]
+    QTextCursor(doc.findBlockByNumber(5)).insertBlock()  # un párrafo nuevo y vacío no cuenta
+    QTextCursor(doc.findBlockByNumber(5)).insertText("Nuevo.")
+    added = [b.text() for b in sheet.changed_blocks()]
+    assert first == again == [] and undone == [], (first, again, undone)
+    assert italic == redone == ["Párrafo 0 con texto."], (italic, redone)
+    assert added == ["Párrafo 0 con texto.", "Nuevo."], added
+    assert took < 0.05, took
+
+
 def test_sheet_replace_sources_and_split_chapter():
     """El arreglo de «Párrafo partido» une dos párrafos con una ilustración en medio y la ilustración sigue;
     un arreglo vacío quita el párrafo. «Dividir capítulo» pone un título de capítulo en el cursor."""

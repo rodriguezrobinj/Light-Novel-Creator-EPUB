@@ -7754,8 +7754,11 @@ class TextEditor:
         if not self.app.pdf or not shiboken6.isValid(self.win):
             return
         path = _draft_path(self.app.pdf)
-        pages = [{"start": start, "end": end, "lines": [line for _, line in page["lines"]],
-                  "text": editor.dump(page["doc"])} for (start, end), page in self.pages.items() if self.page_dirty(page)]
+        pages = []
+        for (start, end), page in self.pages.items():
+            text = editor.dump(page["doc"])  # una vez: page_dirty la volcaba otra
+            if self.page_dirty(page, text):
+                pages.append({"start": start, "end": end, "lines": [line for _, line in page["lines"]], "text": text})
         try:
             if pages:
                 _write_json(path, {"saved": datetime.now().isoformat(timespec="minutes"), "pages": pages})
@@ -8078,11 +8081,13 @@ class TextEditor:
                             f"{words:,} palabra{'' if words == 1 else 's'}".replace(",", "."))
 
     @staticmethod
-    def page_dirty(page):
-        """¿Cambió algo que edit_section lea en esa sección? Líneas en blanco y espacios sobrantes no cuentan."""
+    def page_dirty(page, text=None):
+        """¿Cambió algo que edit_section lea en esa sección? Líneas en blanco y espacios sobrantes no cuentan.
+        text: su dump, si ya se tiene."""
         def lines(text):
             return [line.strip() for line in text.splitlines() if line.strip()]
-        return lines(editor.dump(page["doc"])) != lines("\n\n".join(line for _, line in page["lines"]))
+        text = editor.dump(page["doc"]) if text is None else text
+        return lines(text) != lines("\n\n".join(line for _, line in page["lines"]))
 
     def dirty(self):
         return any(self.page_dirty(page) for page in self.pages.values())

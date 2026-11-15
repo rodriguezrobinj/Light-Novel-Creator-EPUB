@@ -585,6 +585,7 @@ class Sheet(QTextEdit):
         self.pictures, self.color = {}, "#888888"
         self.bars, self.bar_color = [], QColor("#2e9d4a")  # párrafos cambiados: barrita en el margen
         self.origins = {}  # documento -> [(bloque, línea)] tal como se cargó
+        self.known = {}  # documento -> {párrafo: (revisión, ¿cambiado?)} de changed_blocks, hasta que cambie
         self.set_zoom(100)
 
     def set_content(self, lines, pictures, color="#888888", levels=None):
@@ -601,6 +602,8 @@ class Sheet(QTextEdit):
             if k is not None and not convert.TOKEN.fullmatch(line.strip()):
                 loaded.setdefault(_canonical(line), []).append((k, line))
         document.contentsChange.connect(lambda pos, removed, added: self.relink(document, loaded, pos, added))
+        self.known[document] = {}
+        document.contentsChange.connect(lambda pos, removed, added: self.forget(document, pos, added))
         # Letra y hoja antes del aspecto: con él puesto, cambiarlas volvía a colorear todo (3 veces al abrir)
         self.setDocument(document)
         document.setDefaultFont(self.font())
@@ -661,6 +664,15 @@ class Sheet(QTextEdit):
             self.relinking = False
         document.clearUndoRedoStacks()
         return document, look
+
+    def forget(self, document, pos, added):
+        """Los párrafos tocados (texto, formato o deshacer) se vuelven a comparar en changed_blocks."""
+        known, block, last = self.known[document], document.findBlock(pos), document.findBlock(pos + added)
+        while block.isValid():
+            known.pop(block.fragmentIndex(), None)
+            if block == last:
+                break
+            block = block.next()
 
     def relink(self, document, loaded, pos, added):
         """Al partir un párrafo, el nuevo copia el formato del de arriba y con él su origen. Si el trozo nuevo
@@ -1220,12 +1232,18 @@ class Sheet(QTextEdit):
 
     # Cambios frente a lo cargado
     def changed_blocks(self):
-        """Párrafos con texto distinto del cargado, o nuevos (sin línea original)."""
+        """Párrafos con texto distinto del cargado, o nuevos (sin línea original). Cada párrafo recuerda la
+        respuesta hasta que se toca: compararlos todos en cada pausa al escribir tardaba medio segundo."""
+        known = self.known.get(self.document(), {})
         found, block = [], self.document().firstBlock()
         while block.isValid():
-            lines = [line for line in block_lines(block) if line.strip()]
-            original = original_of(block)
-            if lines and (original is None or lines != [original]):
+            seen = known.get(block.fragmentIndex())
+            if seen is None or seen[0] != block.revision():
+                lines = [line for line in block_lines(block) if line.strip()]
+                original = original_of(block)
+                seen = known[block.fragmentIndex()] = (block.revision(),
+                                                       bool(lines and (original is None or lines != [original])))
+            if seen[1]:
                 found.append(block)
             block = block.next()
         return found
