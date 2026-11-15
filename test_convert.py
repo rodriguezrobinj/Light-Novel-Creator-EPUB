@@ -3279,6 +3279,43 @@ def test_editor_sheet_looks_and_spelling():
     assert sheet.misspelled() == ["dijó"], sheet.misspelled()
 
 
+def test_editor_sheet_colors_once_when_opening():
+    """Abrir un capítulo colorea cada párrafo una vez, y la primera tecla solo el suyo: antes se coloreaba tres
+    veces y la primera tecla congelaba la hoja más de un segundo en un capítulo largo."""
+    import qtk
+
+    import editor
+
+    qtk.app()
+    calls = []
+
+    class Counted(editor.Look):
+        def highlightBlock(self, text):
+            calls.append(text)
+            super().highlightBlock(text)
+
+    real, editor.Look = editor.Look, Counted
+    try:
+        sheet = editor.Sheet()
+        sheet.resize(600, 400)
+        sheet.show()
+        sheet.unknown = {"dijó"}
+        sheet.set_content([(k, f"Ella dijó que sí, párrafo {k}.") for k in range(60)], {})
+        qtk.pump()
+        opened = len(calls)
+        calls.clear()
+        cursor = sheet.textCursor()
+        cursor.insertText("x")
+        qtk.pump()
+        typed = len(calls)
+        underlined = len(sheet.misspelled())
+        sheet.close()
+    finally:
+        editor.Look = real
+    assert opened == 60 and typed == 1, (opened, typed)
+    assert underlined == 60, underlined
+
+
 def test_text_editor_opens_section_and_saves_only_changes():
     """El editor muestra la sección como section_text; aceptar sin cambios no toca el libro (los párrafos
     conservan su página), un cambio llega al libro, y cancelar con cambios pregunta antes de descartarlos."""

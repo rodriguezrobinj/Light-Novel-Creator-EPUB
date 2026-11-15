@@ -520,11 +520,12 @@ class Look(QSyntaxHighlighter):
             f = QTextCharFormat()
             f.setForeground(self.color("mark"))
             self.setFormat(m.start(), m.end() - m.start(), f)
+        broken = self.color("broken")  # fuera del bucle: se pinta letra a letra
         for m in self.matches(text):
             for c in range(m.start(), m.end()):  # encima de lo que ya tenga (título, nota)
                 f = QTextCharFormat(self.format(c))
                 f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
-                f.setUnderlineColor(self.color("broken"))
+                f.setUnderlineColor(broken)
                 self.setFormat(c, 1, f)
         if self.changes and text.strip() and not objects_of(block):
             original = block.blockFormat().property(ORIGINAL)
@@ -534,12 +535,13 @@ class Look(QSyntaxHighlighter):
                 spans = []
             else:
                 spans = added_spans(plain_line(original), text)
+            changes = QColor(self.changes)
             for start, size in spans:
                 for c in range(start, start + size):
                     f = QTextCharFormat(self.format(c))
                     f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
-                    f.setUnderlineColor(QColor(self.changes))
-                    f.setForeground(QColor(self.changes))
+                    f.setUnderlineColor(changes)
+                    f.setForeground(changes)
                     self.setFormat(c, 1, f)
 
 
@@ -586,10 +588,12 @@ class Sheet(QTextEdit):
             if k is not None and not convert.TOKEN.fullmatch(line.strip()):
                 loaded.setdefault(_canonical(line), []).append((k, line))
         document.contentsChange.connect(lambda pos, removed, added: self.relink(document, loaded, pos, added))
-        look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
+        # Letra y hoja antes del aspecto: con él puesto, cambiarlas volvía a colorear todo (3 veces al abrir)
+        self.setDocument(document)
+        document.setDefaultFont(self.font())
+        look = self.look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
         look.tags = self.tags
         look.set_unknown(self.unknown)
-        self.use(document, look)
         self.moveCursor(QTextCursor.MoveOperation.Start)
         return document, look
 
