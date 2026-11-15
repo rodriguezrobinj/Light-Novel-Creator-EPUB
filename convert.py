@@ -373,6 +373,69 @@ def _norm(text):
     return re.sub(r"\d+", "#", " ".join(text.lower().split()))
 
 
+OCR_DIR = Path(__file__).parent / "tessdata"  # modelo de español de Tesseract (tessdata_fast); en el .exe, junto a los módulos
+
+
+def _ocr(page, clip):
+    """Texto de una zona de la página con el Tesseract que trae MuPDF, o "" si no se puede leer."""
+    try:
+        pix = page.get_pixmap(dpi=300, clip=clip)
+        with pymupdf.open("pdf", pix.pdfocr_tobytes(language="spa", tessdata=str(OCR_DIR))) as scan:
+            return " ".join(scan[0].get_text().split())
+    except Exception:  # sin modelo o sin OCR en este MuPDF: el título se queda sin leer, como antes
+        return ""
+
+
+def _image_lines(page, rows, infos, body):
+    """Dónde puede haber un título hecho imagen (Oukoku e Tsuzuku Michi 3 y 4: texto rojo pasado a imagen, en
+    trozos de una franja sobre el texto, sin texto ni marcador): la línea de imágenes de alto de un renglón
+    grande, ancha, centrada y por encima del texto. No ilustraciones ni adornos."""
+    width = page.rect.width
+    first = min((r.y for r in rows if abs(r.size - body) < 0.5), default=None)
+    if first is None:
+        return []
+    lines = []
+    for b in sorted((pymupdf.Rect(i["bbox"]) for i in infos), key=lambda b: b.y0):
+        # Mismo alto y misma altura: la misma línea. La barra de la cabecera de Oukoku 4 cruza el título y no es él
+        if lines and abs(b.y0 - lines[-1].y0) < 0.2 * b.height and abs(b.y1 - lines[-1].y1) < 0.2 * b.height:
+            lines[-1] |= b
+        else:
+            lines.append(pymupdf.Rect(b))
+    found = []
+    for b in lines:
+        if (b.y1 < first and body <= b.height <= 3 * body and b.width >= 3 * b.height
+                and abs((b.x0 + b.x1) / 2 - width / 2) < 0.15 * width
+                and not any(b.y0 - r.size < r.y < b.y1 + r.size for r in rows)):  # el texto no la pisa
+            if found and b.y0 - found[-1].y1 < 0.6 * b.height:  # Mitsuha 5: título de dos o tres líneas
+                found[-1] |= b
+            else:
+                found.append(b)
+    return found
+
+
+def _image_title(page, box):
+    """Título leído por OCR en box, o "" si lo que hay no se lee como texto (un dibujo da «E =— 5»)."""
+    text = _ocr(page, box + (-2, -2, 2, 2))
+    letters = sum(c.isalpha() for c in text)
+    if len(text) <= 120 and (KEYWORDS.match(text) or 3 <= letters >= 0.6 * len(text.replace(" ", ""))):
+        return text
+    return ""
+
+
+OCR_NUMBER = re.compile(r"(cap[ií]tulo\s+)(\d+)(\)?)", re.I)
+
+
+def _renumber(titles):
+    """Arregla los números de capítulo que el OCR lee mal en letra decorativa (Mitsuha 4 a 6): «3)» es 31, y un
+    número entre dos que se siguen de dos en dos es el de en medio («39, 49, 41» -> 40)."""
+    titles = [OCR_NUMBER.sub(lambda m: m[1] + m[2] + ("1" if m[3] else ""), t, count=1) for t in titles]
+    numbered = [(k, int(m[2])) for k, t in enumerate(titles) if (m := OCR_NUMBER.match(t))]
+    for (_, a), (k, n), (_, b) in zip(numbered, numbered[1:], numbered[2:]):
+        if b == a + 2 and n != a + 1:
+            titles[k] = OCR_NUMBER.sub(lambda m: m[1] + str(a + 1), titles[k], count=1)
+    return titles
+
+
 def _strip_margins(pages, heights):
     """Quita encabezados y pies: líneas de las franjas que se repiten en muchas páginas."""
     def in_band(r, h):
@@ -2604,6 +2667,17 @@ def analyze(pdf_path, progress=None):
             for r in rows:
                 sizes[r.size] += len(r.text)
         body = sizes.most_common(1)[0][0]
+        # Títulos hechos imagen, por OCR. Con marcadores no: Mitsuha 7 ya los tiene y el OCR los leía peor
+        found = []  # (página, caja, texto)
+        if not doc.get_toc():
+            candidates = [_image_lines(page, rows, infos, body) for page, rows, infos in zip(doc, pages, page_infos)]
+            # La misma franja en muchas páginas es una cabecera o un logo, no un título: ni se lee
+            spots = collections.Counter(tuple(round(v) for v in b) for boxes in candidates for b in boxes)
+            found = [(i, b, text) for i, (page, boxes) in enumerate(zip(doc, candidates)) for b in boxes
+                     if spots[tuple(round(v) for v in b)] <= 2 and (text := _image_title(page, b))]
+        for (i, b, _), text in zip(found, _renumber([text for *_, text in found])):
+            pages[i] = sorted(pages[i] + [Row(text, html.escape(text), b.x0, b.x1, b.y1, round(body * 1.5, 1), True)],
+                              key=lambda r: r.y)
         gaps = collections.Counter()
         indents = total = 0
         for rows in pages:
@@ -2935,8 +3009,11 @@ def analyze(pdf_path, progress=None):
         meta_title = meta.get("title") or ""
         title = meta_title or Path(pdf_path).stem
         series, volume = _series_volume(Path(pdf_path).stem, meta_title)
-        # Sin el volumen en el título, todos los tomos se llamarían igual en lectores que no muestran la serie
-        if series and volume and not re.search(rf"(?<!\d)0*{re.escape(volume)}(?!\d)", meta_title):
+        # Sin el volumen en el título, todos los tomos se llamarían igual en lectores que no muestran la serie.
+        # Sin ninguna palabra de la serie es de otro libro: Oukoku e Tsuzuku Michi 1 trae «Amagi Brilliant Park»
+        words = lambda text: set(re.findall(r"[^\W\d_]{3,}", text.lower()))
+        if series and volume and (not re.search(rf"(?<!\d)0*{re.escape(volume)}(?!\d)", meta_title)
+                                  or not words(series) & words(meta_title)):
             title = f"{series} - Volumen {volume}"
         credits = _credits(blocks[:candidates[0]] if candidates else [])
         # El autor de los metadatos suele ser quien maquetó el PDF: manda la página de créditos
