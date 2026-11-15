@@ -5846,6 +5846,15 @@ def test_quality_report_fixes_fansub_typos():
                                                   "<i>¿Qué haces?</i>", "«¿Qué?» ¡Ven aquí!"], [b.html for b in book.blocks]
 
 
+def test_opening_marks_with_many_dots_is_fast():
+    """Muchos puntos seguidos tras un «¡No!» tardaban segundos en el informe (retroceso de la expresión)."""
+    import time
+    start = time.perf_counter()
+    fixed = convert._opening_marks("—¡No! Pensé" + "." * 26 + " y nada más.")
+    assert time.perf_counter() - start < 0.1, time.perf_counter() - start
+    assert fixed == "—¡No! Pensé" + "." * 26 + " y nada más.", fixed
+
+
 def test_quality_report_unifies_honorific_variants():
     """«Subaru-kun» y «Subaru kun», «senpai» y «sempai» en el mismo libro: aviso en la forma menos usada, con
     arreglo a la más usada. Lo que solo cambia de mayúscula, una sola forma o «San Pedro» no avisan."""

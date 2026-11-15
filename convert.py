@@ -1699,7 +1699,7 @@ def _remojibake(text):
 # Una oración que acaba en ? o !, desde el corte anterior. Los puntos suspensivos, la raya y el cierre de
 # comillas no cortan: «¿El grupo que... los fundó?», «¿Conoces este país —el reino— ahora?» (Re Zero 2,
 # Nageki 1), «¿Desde cuándo el concepto de «hacer trampa» se aplica?» (Maryoku)
-SENTENCE = re.compile(r"((?:\.{2,}|[^.!?])*?)([?!]+)")
+SENTENCE = re.compile(r"((?:\.{2,}+|[^.!?])*?)([?!]+)")  # posesivo: «Pensé....» largo no se cuelga
 LEAD = re.compile(r"(?:\s|[«»“”\"'(—–-]|</?(?:i|b|sup)>|<small class=\"sc\">|</small>)*")   # lo que va antes de la primera palabra
 DOUBLED = re.compile(r"\b(de|la|el|que|en|y|los|las|un|una|por|con|se|lo) \1\b", re.I)
 
