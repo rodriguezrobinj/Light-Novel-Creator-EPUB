@@ -168,6 +168,16 @@ def test_analyze_titles_volume_after_series():
         book.series, book.volume, book.title)
 
 
+def test_analyze_ignores_metadata_title_of_another_series():
+    """Oukoku e Tsuzuku Michi 1: el título del PDF es «Amagi Brilliant Park Volumen 1», de la plantilla de otra
+    serie, con el mismo número. Si no comparte ninguna palabra con la serie del archivo, manda la serie."""
+    path = TMP / "Mi Serie - Volumen 01 [WP].pdf"
+    with pymupdf.open(make_novel()) as doc:
+        doc.set_metadata({"title": "Amagi Brilliant Park Volumen 1"})
+        doc.save(path)
+    assert convert.analyze(path).title == "Mi Serie - Volumen 1"
+
+
 def test_epub_has_series_metadata():
     ns = {"o": "http://www.idpf.org/2007/opf"}
     book = convert.analyze(make_novel())
@@ -684,6 +694,55 @@ def test_ornament_at_page_top_opens_a_scene():
     doc.save(path)
     breaks = [b.page for b in convert.analyze(path).blocks if b.kind == "break"]
     assert breaks == [2], breaks
+
+
+def text_image(text, size=16):
+    """Texto rojo pasado a imagen, como los títulos de Oukoku e Tsuzuku Michi 3 y 4: (pixmap, ancho, alto) en pt."""
+    tmp = pymupdf.open()
+    p = tmp.new_page(width=600, height=60)
+    width = pymupdf.get_text_length(text, fontname="hebo", fontsize=size)
+    p.insert_text((5, 40), text, fontsize=size, fontname="hebo", color=(0.9, 0.1, 0.1))
+    clip = pymupdf.Rect(2, 40 - size, width + 8, 40 + size * 0.3)
+    return p.get_pixmap(dpi=300, clip=clip), clip.width, clip.height
+
+
+def test_title_made_of_images_is_read_with_ocr():
+    """Oukoku e Tsuzuku Michi 3 y 4: el título del capítulo es texto rojo hecho imagen, en trozos en una franja
+    sobre el texto, sin texto ni marcador. Se lee con OCR y abre capítulo; un trozo no es un adorno-separador."""
+    doc = pymupdf.open()
+    text = [(92, 150, line("Un parrafo cualquiera de la escena", 57), 11, "cour"), (72, 164, "fin uno.", 11, "cour"),
+            (92, 192, line("Otro parrafo de la misma escena", 57), 11, "cour"), (72, 206, "fin dos.", 11, "cour")]
+    # Trozos de una línea; el tercero, título de dos líneas (Mitsuha 5)
+    for n, lines in enumerate(([["Capítulo 1 -", "El nuevo reino"]], [["Capítulo 2 - Una batalla"], ["muy larga"]],
+                               [["Palabras del autor"]]), 1):
+        add_page(doc, 2 * n - 1, [(x, y + 30, t, s, f) for x, y, t, s, f in text])
+        for row, parts in enumerate(lines):
+            widths = [text_image(t) for t in parts]
+            x, y = (595 - sum(w + 3 for _, w, _ in widths)) / 2, 90 + row * 26
+            for pix, w, h in widths:  # trozos en la misma línea, centrados
+                doc[-1].insert_image(pymupdf.Rect(x, y, x + w, y + h), pixmap=pix)
+                x += w + 3
+        add_page(doc, 2 * n, text)
+    path = TMP / "titulo-imagen.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [(book.blocks[k].page, book.blocks[k].html) for k in book.candidates]
+    assert titles == [(1, "Capítulo 1 - El nuevo reino"), (3, "Capítulo 2 - Una batalla muy larga"),
+                      (5, "Palabras del autor")], titles
+    assert not any(b.kind == "break" for b in book.blocks), [b.page for b in book.blocks if b.kind == "break"]
+    # Con marcadores, los títulos salen de ellos: el OCR no se usa (Mitsuha 7)
+    doc.set_toc([[1, "Uno", 1]])
+    doc.save(TMP / "titulo-imagen-marcadores.pdf")
+    book = convert.analyze(TMP / "titulo-imagen-marcadores.pdf")
+    assert "Palabras del autor" not in [book.blocks[k].html for k in book.candidates]
+
+
+def test_renumber_fixes_ocr_chapter_numbers():
+    """Mitsuha 4 a 6: en la letra dorada el OCR lee «3)» por 31 y 49 por 40; la secuencia los delata."""
+    assert convert._renumber(["Capítulo 3) - A", "Capítulo 32 - B", "Capítulo 39 - C", "Capítulo 49 - D",
+                              "Capítulo Extra - E", "Capítulo 41 - F", "Palabras del autor"]) == [
+        "Capítulo 31 - A", "Capítulo 32 - B", "Capítulo 39 - C", "Capítulo 40 - D", "Capítulo Extra - E",
+        "Capítulo 41 - F", "Palabras del autor"]
 
 
 def test_image_info_matches_pymupdf_xrefs():
