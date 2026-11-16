@@ -4935,6 +4935,74 @@ def test_editor_focus_mode():
     assert moved == ((2, 4), (0, 2)) and not ribbon, (moved, ribbon)
 
 
+def test_editor_focus_mode_edges_drag_and_steady_bar():
+    """Pantalla completa: las flechas van en los bordes, lejos de la hoja; arrastrar el borde de la hoja la estrecha
+    (y no pasa del ancho de la página). En la barra de abajo, que salga o se vaya un aviso no mueve el capítulo."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
+    editor.win.resize(1300, 700)
+    editor.win.show()
+    QTest.keyClick(editor.sheet, Qt.Key.Key_F11)
+    root.update()
+    desk, sheet = editor.desk, editor.sheet
+    sheet_box = sheet.geometry()
+    edges = (editor.focus_prev.geometry().left() < 40, desk.width() - editor.focus_next.geometry().right() < 40,
+             sheet_box.left() - editor.focus_prev.geometry().right() > 20, editor.focus_prev.objectName() == "edge")
+    full, y = sheet.width(), desk.height() // 2
+    QTest.mousePress(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(sheet_box.right() + 4, y))
+    QTest.mouseMove(desk, QPoint(sheet_box.right() - 150, y))
+    QTest.mouseRelease(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(sheet_box.right() - 150, y))
+    root.update()
+    narrow = sheet.width()
+    QTest.mousePress(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(sheet.geometry().right() + 4, y))
+    QTest.mouseMove(desk, QPoint(desk.width() - 5, y))
+    QTest.mouseRelease(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(desk.width() - 5, y))
+    root.update()
+    widest = sheet.width()
+    editor.note.setText("Tipografía corregida en 3 párrafos de este capítulo")
+    root.update()
+    before = editor.chapter_btn.mapTo(editor.win, QPoint(0, 0)).x()
+    editor.note.setText("")
+    root.update()
+    after = editor.chapter_btn.mapTo(editor.win, QPoint(0, 0)).x()
+    editor.win.done(0)
+    window.close()
+    assert all(edges), (edges, desk.size(), sheet_box, editor.focus_prev.geometry())
+    assert narrow < full - 200 and widest <= editor.page_width() and widest > narrow, (full, narrow, widest)
+    assert before == after, (before, after)
+
+
+def test_dropdowns_join_their_button():
+    """Las listas y menús de un botón ▾ se ven como una pieza con su campo: sin borde de acento, sin la línea de en
+    medio (el campo abierto pierde su borde de ese lado y la lista el suyo); si la lista se abre encima, la unión
+    va arriba."""
+    import app
+    import qtk
+    import theme
+    from PySide6.QtWidgets import QComboBox, QMenu
+    q = qtk.app()
+    theme.apply(q, "Claro")
+    sheet = q.styleSheet()
+    menu = QMenu()
+    app._menu_button("Herramientas", menu)
+    combo = QComboBox()
+    combo.addItems([str(n) for n in range(40)])  # más alta que lo que queda debajo: se abre encima
+    combo.resize(160, 28)
+    combo.move(0, combo.screen().availableGeometry().bottom() - 40)
+    combo.show()
+    combo.showPopup()
+    q.processEvents()
+    up = combo.property("up")
+    combo.hidePopup()
+    combo.close()
+    assert menu.objectName() == "drop" and "QMenu#drop {{ border-top: 0; }}".replace("{{", "{").replace("}}", "}") in sheet
+    assert "QComboBox:on { border-bottom-color" in sheet and 'QComboBox[up="true"]:on' in sheet, sheet
+    assert theme.colors(False)["acc"] not in sheet.split("QComboBox QAbstractItemView")[1].split("}")[0]
+    assert up is True, up
+
+
 def test_editor_work_log():
     """«Cifras» cuenta el trabajo: aceptar suma los párrafos cambiados y el tiempo de hoy, marcar revisado suma un
     capítulo (desmarcar no resta), y el resumen da hoy, los últimos 7 días y el total."""

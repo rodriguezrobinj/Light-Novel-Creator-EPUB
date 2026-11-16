@@ -524,9 +524,9 @@ class ArrowButton(QPushButton):
     """Botón ◀ ▶ dibujado a trazos con el color del texto del tema: el glifo de texto se veía pixelado a 9 pt.
     direction: -1 a la izquierda, 1 a la derecha; double: dos flechas (de capítulo en capítulo)."""
 
-    def __init__(self, direction, command, tip="", double=False, size=6):
+    def __init__(self, direction, command, tip="", double=False, size=6, subtle=False):
         super().__init__()
-        self.direction, self.double, self.arrow = direction, double, size
+        self.direction, self.double, self.arrow, self.subtle = direction, double, size, subtle
         self.setToolTip(tip)
         self.setFixedWidth(36)
         self.clicked.connect(lambda: command())
@@ -536,7 +536,8 @@ class ArrowButton(QPushButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         group = QPalette.ColorGroup.Active if self.isEnabled() else QPalette.ColorGroup.Disabled
-        painter.setPen(QPen(self.palette().color(group, QPalette.ColorRole.ButtonText), 1.6, Qt.PenStyle.SolidLine,
+        role = QPalette.ColorRole.PlaceholderText if self.subtle and not self.underMouse() else QPalette.ColorRole.ButtonText
+        painter.setPen(QPen(self.palette().color(group, role), 1.6, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         d, half = self.direction, self.arrow / 2
         x, y = self.width() / 2, self.height() / 2
