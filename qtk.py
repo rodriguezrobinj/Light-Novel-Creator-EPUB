@@ -10,6 +10,7 @@ from PySide6.QtCore import (QEasingCurve, QEvent, QItemSelectionModel, QPoint, Q
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPalette,
                            QPen, QPixmap, QPolygonF, QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
+                               QPushButton,
                                QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTextEdit, QToolTip, QTreeWidget, QTreeWidgetItem, QWidget)
 
@@ -517,6 +518,33 @@ def qimage(pix, ink=None):
         pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
     form = QImage.Format.Format_Grayscale8 if pix.n == 1 else QImage.Format.Format_RGB888
     return QImage(pix.samples, pix.width, pix.height, pix.stride, form).copy()
+
+
+class ArrowButton(QPushButton):
+    """Botón ◀ ▶ dibujado a trazos con el color del texto del tema: el glifo de texto se veía pixelado a 9 pt.
+    direction: -1 a la izquierda, 1 a la derecha; double: dos flechas (de capítulo en capítulo)."""
+
+    def __init__(self, direction, command, tip="", double=False, size=6):
+        super().__init__()
+        self.direction, self.double, self.arrow = direction, double, size
+        self.setToolTip(tip)
+        self.setFixedWidth(36)
+        self.clicked.connect(lambda: command())
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        group = QPalette.ColorGroup.Active if self.isEnabled() else QPalette.ColorGroup.Disabled
+        painter.setPen(QPen(self.palette().color(group, QPalette.ColorRole.ButtonText), 1.6, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        d, half = self.direction, self.arrow / 2
+        x, y = self.width() / 2, self.height() / 2
+        for dx in ((-half * 0.8, half * 0.8) if self.double else (0,)):
+            tip = x + dx + d * half / 2
+            painter.drawPolyline([QPointF(tip - d * half, y - self.arrow * 0.75), QPointF(tip, y),
+                                  QPointF(tip - d * half, y + self.arrow * 0.75)])
+        painter.end()
 
 
 class Shimmer(QWidget):

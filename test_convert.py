@@ -4895,9 +4895,10 @@ def test_editor_sheet_changes_in_a_loaded_empty_paragraph():
 
 
 def test_editor_focus_mode():
-    """F11 deja solo la hoja y la fila del capítulo: sin pestañas, cinta ni panel del PDF, pero con ◀ capítulo ▶
-    (sin ella no había cómo cambiar de capítulo); Ctrl+AvPág pasa al siguiente. Esc vuelve a como estaba sin
-    preguntar si se descartan los cambios, y el editor sigue abierto con ellos."""
+    """F11 deja solo la hoja: sin cinta ni panel del PDF. Se cambia de capítulo con dos flechas a los lados de la
+    hoja (o Ctrl+AvPág), sin que la cinta vuelva a salir, y el capítulo y Revisado pasan a la barra de abajo.
+    Esc vuelve a como estaba, con ellos en su sitio, sin preguntar si se descartan los cambios, y el editor sigue
+    abierto con ellos."""
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     import app
@@ -4913,21 +4914,25 @@ def test_editor_focus_mode():
     try:
         QTest.keyClick(editor.sheet, Qt.Key.Key_F11)
         root.update()
-        focused = (editor.ribbon_pages.isHidden() and editor.ribbon_tabs.isHidden() and editor.side.isHidden()
-                   and not editor.sheet.isHidden())
-        nav = editor.next_chapter.isVisible() and editor.chapter_btn.isVisible()
-        QTest.keyClick(editor.sheet, Qt.Key.Key_PageDown, Qt.KeyboardModifier.ControlModifier)
+        focused = editor.ribbon_bar.isHidden() and editor.side.isHidden() and not editor.sheet.isHidden()
+        nav = (editor.focus_prev.isVisible(), editor.focus_next.isVisible(), editor.chapter_btn.isVisible(),
+               editor.review_btn.isVisible(), editor.status_row.indexOf(editor.chapter_btn) >= 0)
+        QTest.mouseClick(editor.focus_next, Qt.MouseButton.LeftButton)
         root.update()
-        moved = editor.current
+        moved, ribbon = editor.current, not editor.ribbon_bar.isHidden() or not editor.ribbon_pages.isHidden()
+        QTest.keyClick(editor.sheet, Qt.Key.Key_PageUp, Qt.KeyboardModifier.ControlModifier)
+        root.update()
+        moved = moved, editor.current
         QTest.keyClick(editor.win, Qt.Key.Key_Escape)
-        back = not editor.ribbon_pages.isHidden() and not editor.side.isHidden() and editor.win.isVisible()
+        back = (not editor.ribbon_pages.isHidden() and not editor.side.isHidden() and editor.win.isVisible()
+                and editor.tabs_row.indexOf(editor.chapter_btn) >= 0 and editor.focus_next.isHidden())
         kept = editor.dirty()
     finally:
         app.messagebox.askyesno = saved
         editor.win.done(0)
         window.close()
-    assert focused and nav and back and kept and not asked, (focused, nav, back, kept, asked)
-    assert moved == (2, 4), moved
+    assert focused and all(nav) and back and kept and not asked, (focused, nav, back, kept, asked)
+    assert moved == ((2, 4), (0, 2)) and not ribbon, (moved, ribbon)
 
 
 def test_editor_work_log():
@@ -9203,13 +9208,32 @@ def test_theme_controls_check_marks_and_attached_popups():
     assert light["acc"] in pixels and light["acc_ink"] in pixels, set(pixels)
     assert all(below), (popup, combo.geometry())
     assert wide == 220, wide
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    animated = [QApplication.isEffectEnabled(e) for e in (Qt.UIEffect.UI_AnimateCombo, Qt.UIEffect.UI_AnimateMenu)]
+    assert not any(animated), animated  # se abren de golpe
+
+
+def test_arrow_buttons_are_drawn_not_text():
+    """Los ◀ ▶ de las vistas previas y del panel del editor se dibujan a trazos con el color del texto: como glifo de
+    texto se veían pixelados. Doble (◀◀) para cambiar de capítulo."""
+    import qtk
+    import theme
+    theme.apply(qtk.app(), "Claro")
+    single, double = qtk.ArrowButton(1, lambda: None), qtk.ArrowButton(-1, lambda: None, double=True)
+    inks = []
+    for button in (single, double):
+        button.resize(36, 28)
+        shot = button.grab().toImage()
+        row = [shot.pixelColor(x, 14).lightness() for x in range(36)]
+        inks.append(sum(1 for v in row if v < 120))  # trazos oscuros en la línea del medio
+    assert single.text() == "" and inks[0] >= 1 and inks[1] > inks[0], inks
 
 
 def test_editor_marks_cursor_paragraph():
     """La hoja marca con un fondo tenue el párrafo del cursor, como el recuadro del original: se sabía dónde se
     estaba en el PDF pero no en la hoja. Sigue al cursor."""
-    from PySide6.QtGui import QColor, QTextCursor
-    import theme
+    from PySide6.QtGui import QTextCursor
     B = convert.Block
     root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos."),
                                       B("p", 1, "Tres.")], [0])
@@ -9228,12 +9252,9 @@ def test_editor_marks_cursor_paragraph():
     sheet.setTextCursor(QTextCursor(doc.findBlockByNumber(2)))
     root.update()
     second = tint(1), tint(2)
-    colors = theme.colors(window.dark)
     editor.win.done(0)
     window.close()
-    current = QColor(colors["current"]).name()
-    assert first[0] == current and first[1] != current, (first, current)
-    assert second[1] == current and second[0] != current, (second, current)
+    assert first[0] == second[1] and first[1] == second[0] and first[0] != first[1], (first, second)
 
 
 def test_theme_text_is_readable():

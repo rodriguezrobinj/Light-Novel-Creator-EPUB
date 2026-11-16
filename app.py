@@ -2366,6 +2366,8 @@ class App:
             self.tree.tag_configure(tag, font=self.fonts[tag], foreground=colors[tag])
         self.update_quality()
         self.redraw()
+        if self.text_editor:
+            self.text_editor.recolor(self.dark)
         if self.book is None:  # las tarjetas de recientes llevan colores del tema
             self.fill_recent()
 
@@ -2556,9 +2558,7 @@ class App:
         caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
         view = qtk.Preview()
         # ◀ leyenda ▶ en una sola línea: en pantallas bajas, cada píxel de alto es de la hoja
-        back, forward = _button("◀", lambda: step(-1)), _button("▶", lambda: step(1))
-        for button in (back, forward):
-            button.setFixedWidth(36)
+        back, forward = qtk.ArrowButton(-1, lambda: step(-1)), qtk.ArrowButton(1, lambda: step(1))
         column.addLayout(_row(back, caption, forward))
         column.addWidget(view, 1)
         return pane, caption, view
@@ -6821,7 +6821,7 @@ class TextEditor:
         editor.LINK_COLOR = self.colors["acc"]  # el azul fijo apenas se leía sobre la hoja oscura (3:1)
         self.sheet = sheet = editor.Sheet()
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
-        sheet.current_color = QColor(self.colors["current"])
+        sheet.mark_current = True
         self.pages = {}  # (inicio, fin) -> {"doc", "look", "lines"} de cada sección visitada
         # Avisos del informe por bloque, tomados al abrir: la hoja los marca en los párrafos sin cambiar
         self.issues = {}
@@ -6847,8 +6847,17 @@ class TextEditor:
         desk = QFrame(objectName="desk")
         desk_row = QHBoxLayout(desk)
         desk_row.setContentsMargins(16, 16, 16, 16)  # también abajo: sin él la hoja tocaba el borde
+        # En modo concentración, de capítulo en capítulo con dos flechas grandes a los lados, como un lector
+        self.focus_prev = qtk.ArrowButton(-1, lambda: self.step_section(-1), "Capítulo anterior (Ctrl+RePág)", size=12)
+        self.focus_next = qtk.ArrowButton(1, lambda: self.step_section(1), "Capítulo siguiente (Ctrl+AvPág)", size=12)
+        for button in (self.focus_prev, self.focus_next):
+            button.setObjectName("tool")
+            button.setFixedSize(48, 96)
+            button.hide()
         desk_row.addStretch(1)
+        desk_row.addWidget(self.focus_prev, 0, Qt.AlignmentFlag.AlignVCenter)
         desk_row.addWidget(sheet, 20)
+        desk_row.addWidget(self.focus_next, 0, Qt.AlignmentFlag.AlignVCenter)
         desk_row.addStretch(1)
         # Página del PDF a la derecha: se ajusta al ancho del panel y se amplía con el zoom
         self.canvas = qtk.Preview()
@@ -6864,12 +6873,10 @@ class TextEditor:
         side_column.addWidget(self.scroll, 1)
         # Fuera, de capítulo en capítulo (hojear página a página era lento para cruzar el libro); dentro, de página
         # ◀◀ y no los de saltar pista: Windows los dibuja como emoji azules
-        prev_btn, next_btn = _button("◀◀", lambda: self.step_section(-1)), _button("▶▶", lambda: self.step_section(1))
-        prev_btn.setToolTip("Capítulo anterior")
-        next_btn.setToolTip("Capítulo siguiente")
-        self.prev_page, self.next_page = _button("◀", lambda: self.step_page(-1)), _button("▶", lambda: self.step_page(1))
-        self.prev_page.setToolTip("Página anterior")
-        self.next_page.setToolTip("Página siguiente")
+        prev_btn = qtk.ArrowButton(-1, lambda: self.step_section(-1), "Capítulo anterior", double=True)
+        next_btn = qtk.ArrowButton(1, lambda: self.step_section(1), "Capítulo siguiente", double=True)
+        self.prev_page = qtk.ArrowButton(-1, lambda: self.step_page(-1), "Página anterior")
+        self.next_page = qtk.ArrowButton(1, lambda: self.step_page(1), "Página siguiente")
         side_column.addLayout(_row(prev_btn, self.prev_page, self.page_label, self.next_page, next_btn,
                                    1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
                                    _button("+", lambda: self.zoom(25))))
@@ -6890,7 +6897,7 @@ class TextEditor:
         self.text_zoom.setFixedWidth(140)
         self.text_zoom_label = _label("100 %", "muted")
         self.text_zoom.valueChanged.connect(self.set_text_zoom)
-        status_row = _row(self.status, self.note, 1,
+        status_row = self.status_row = _row(self.status, self.note, 1,
                           _button("−", lambda: self.text_zoom.setValue(self.text_zoom.value() - 10)),
                           self.text_zoom, _button("+", lambda: self.text_zoom.setValue(self.text_zoom.value() + 10)),
                           self.text_zoom_label, _button("Aceptar", self.save, "primary"),
@@ -6967,10 +6974,12 @@ class TextEditor:
         # Botones que se quedan en su icono si la cinta no cabe (compact_to): (botón, texto, texto corto o None
         # si se queda en su glifo, nivel)
         self.compact, self.ribbon_level, self.ribbon_rows = [], 0, []
+        self.glyphs = []  # (botón, glifo, tamaño): se vuelven a pintar al cambiar de tema (recolor)
         ink = self.colors["ink"]
 
         def big(button, icon):
             """Botón grande de Word: glifo arriba y nombre debajo."""
+            self.glyphs.append((button, theme.ICONS[icon], GLYPH))
             button.setIcon(_glyph_icon(theme.ICONS[icon], ink))
             button.setIconSize(QSize(GLYPH, GLYPH))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
@@ -6986,6 +6995,7 @@ class TextEditor:
             if icon:
                 big(button, icon)
             if glyph:
+                self.glyphs.append((button, theme.ICONS[glyph], SMALL_GLYPH))
                 button.setIcon(_glyph_icon(theme.ICONS[glyph], ink, SMALL_GLYPH))
                 button.setIconSize(QSize(SMALL_GLYPH, SMALL_GLYPH))
                 button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if text
@@ -7141,11 +7151,20 @@ class TextEditor:
         self.chapter_btn.clicked.connect(self.show_chapters)
         self.review_btn = tool("✓", "Marca el capítulo como revisado y pasa al siguiente sin revisar (Ctrl+Intro)",
                                self.toggle_reviewed, True)
-        column.addLayout(_row(tabs, 1, self.prev_chapter, self.chapter_btn, self.next_chapter, self.review_btn,
-                              spacing=2))
+        self.tabs_row = _row(tabs, 1, self.prev_chapter, self.chapter_btn, self.next_chapter, self.review_btn,
+                             spacing=2)
+        column.addLayout(self.tabs_row)
         column.addWidget(pages)
         self.chapters_popup()
         return bar
+
+    def recolor(self, dark):
+        """Tema cambiado con el editor abierto: los iconos de la cinta, dibujados con el color del texto, se
+        quedaban con el del tema anterior (apenas se veían)."""
+        self.colors = theme.colors(dark)
+        for button, glyph, size in self.glyphs:
+            if shiboken6.isValid(button):
+                button.setIcon(_glyph_icon(glyph, self.colors["ink"], size))
 
     def pin_ribbon(self, on):
         """Fija la cinta (on) o la deja en solo la fila de pestañas."""
@@ -7172,7 +7191,7 @@ class TextEditor:
             return
         self.ribbon_float.hide()
         self.ribbon_bar.layout().addWidget(self.ribbon_pages)
-        self.ribbon_pages.setVisible(self.ribbon_pinned)
+        self.ribbon_pages.setVisible(self.ribbon_pinned and not self.focused)  # pantalla completa: sin cinta
 
     def outside_ribbon(self, event):
         """Un clic fuera de la cinta flotante (y de sus pestañas) la oculta; los menús de sus botones son otra
@@ -7252,7 +7271,9 @@ class TextEditor:
         area = button.screen().availableGeometry()
         corner = button.mapToGlobal(button.rect().bottomRight())
         x = min(max(area.left(), corner.x() - pop.width()), area.right() - pop.width() - 8)  # sin tocar el borde
-        y = min(corner.y() + 2, area.bottom() - pop.height() - 8)
+        top = button.mapToGlobal(button.rect().topLeft()).y()
+        # bajo el botón; en la barra de abajo (pantalla completa), encima, sin taparlo
+        y = corner.y() + 2 if corner.y() + 2 + pop.height() <= area.bottom() - 8 else max(area.top(), top - pop.height() - 2)
         pop.move(x, y)
         pop.show()
         current = self.chapter_list.currentItem()
@@ -7294,7 +7315,8 @@ class TextEditor:
         close.setToolTip("Cerrar (Esc)")
         all_btn = _button("Todos", self.show_all_matches)
         all_btn.setToolTip("Lista de todos los resultados del libro")
-        bar.setLayout(_row(self.find_entry, _button("◀", lambda: self.find(-1)), _button("▶", lambda: self.find(1)),
+        bar.setLayout(_row(self.find_entry, qtk.ArrowButton(-1, lambda: self.find(-1), "Anterior"),
+                           qtk.ArrowButton(1, lambda: self.find(1), "Siguiente"),
                            all_btn, self.whole_box, self.case_box, self.regex_box,
                            self.replace_entry, _button("Reemplazar", self.replace_one),
                            _button("Reemplazar todo", self.replace_everywhere), self.find_info, 1, close,
@@ -7349,13 +7371,21 @@ class TextEditor:
             bar.hide()
 
     def toggle_focus(self):
-        """F11: modo concentración, solo la hoja a pantalla completa, sin cinta, barras ni paneles. Queda la fila
-        del capítulo (◀ capítulo ▶ y Revisado): sin ella no había cómo cambiar de capítulo. F11 o Esc vuelven
-        como estaba."""
+        """F11: modo concentración, solo la hoja a pantalla completa, sin cinta, barras ni paneles. Se cambia de
+        capítulo con dos flechas a los lados de la hoja, y el capítulo y Revisado pasan a la barra de abajo (sin
+        ellos no había cómo cambiar de capítulo). F11 o Esc vuelven como estaba."""
         self.focused = not self.focused
         self.drop_ribbon()
+        for button in (self.focus_prev, self.focus_next):
+            button.setVisible(self.focused)
         if self.focused:
-            self.before_focus = [w for w in (self.ribbon_tabs, self.ribbon_pages, self.side, self.nav, self.find_frame, self.link_frame,
+            self.status_row.insertWidget(2, self.chapter_btn)
+            self.status_row.insertWidget(3, self.review_btn)
+        else:  # a su sitio en la fila de las pestañas: tras ◀ y tras ▶
+            self.tabs_row.insertWidget(self.tabs_row.indexOf(self.prev_chapter) + 1, self.chapter_btn)
+            self.tabs_row.insertWidget(self.tabs_row.indexOf(self.next_chapter) + 1, self.review_btn)
+        if self.focused:
+            self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.find_frame, self.link_frame,
                                              self.split_frame, self.issue_frame, self.resume_frame, self.diff_frame)
                                  if not w.isHidden()]
             for widget in self.before_focus:

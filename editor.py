@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QSyntaxHighlighter, QTextBlockFormat,
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat)
 from PySide6.QtWidgets import QApplication, QTextEdit
 
@@ -599,9 +599,10 @@ class Sheet(QTextEdit):
         self.tags, self.unknown = {}, set()  # colores y palabras desconocidas de cada hoja nueva
         self.pictures, self.color = {}, "#888888"
         self.bars, self.bar_color = [], QColor("#2e9d4a")  # párrafos cambiados: barrita en el margen
-        # Fondo tenue del párrafo del cursor: el original lo recuadra, y en la hoja no se veía dónde se estaba
-        self.current_color = None  # TextEditor pone el del tema
-        self.cursorPositionChanged.connect(lambda: self.current_color and self.viewport().update())
+        # Fondo tenue del párrafo del cursor: el original lo recuadra, y en la hoja no se veía dónde se estaba.
+        # Del acento del tema, casi transparente: sigue al tema aunque cambie con el editor abierto
+        self.mark_current = False  # TextEditor lo enciende
+        self.cursorPositionChanged.connect(lambda: self.mark_current and self.viewport().update())
         self.origins = {}  # documento -> [(bloque, línea)] tal como se cargó
         self.known = {}  # documento -> {párrafo: (revisión, ¿cambiado?)} de changed_blocks, hasta que cambie
         self.set_zoom(100)
@@ -765,7 +766,7 @@ class Sheet(QTextEdit):
         self.viewport().update()
 
     def paintEvent(self, event):
-        if self.current_color:  # debajo del texto: antes de que QTextEdit lo pinte
+        if self.mark_current:  # debajo del texto: antes de que QTextEdit lo pinte
             block, doc = self.textCursor().block(), self.document()
             text = block.layout().boundingRect().translated(block.layout().position())  # el texto, sin márgenes
             margin = doc.documentMargin()
@@ -775,7 +776,9 @@ class Sheet(QTextEdit):
             under = QPainter(self.viewport())
             under.setRenderHint(QPainter.RenderHint.Antialiasing)
             under.setPen(Qt.PenStyle.NoPen)
-            under.setBrush(self.current_color)
+            tint = QColor(QApplication.palette().color(QPalette.ColorRole.Highlight))
+            tint.setAlpha(26)
+            under.setBrush(tint)
             under.drawRoundedRect(band, 4, 4)
             under.end()
         super().paintEvent(event)
