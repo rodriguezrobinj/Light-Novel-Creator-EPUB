@@ -21,12 +21,12 @@ LIGHT = {"bg": "#f3f3f3", "card": "#ffffff", "base": "#ffffff", "line": "#e1e1e1
          "muted": "#6b6b6b", "acc": "#2a62c8", "acc_hover": "#2353ab", "acc_ink": "#ffffff", "sel": "#dce8fc",
          "hover": "#ececec", "press": "#e2e2e2", "warn": "#c62828", "ok": "#2e7d32", "drop": "#f5f8fe",
          "drop_line": "#b9c8e8", "sheet": "#ffffff", "sheet_line": "#d4d4d4", "hint": "#9a9a9a",
-         "zebra": "#f5f6f8"}
+         "zebra": "#f5f6f8", "shine": "#f7f7f7"}
 DARK = {"bg": "#202020", "card": "#2b2b2b", "base": "#1f1f1f", "line": "#3d3d3d", "ink": "#ececec",
         "muted": "#a0a0a0", "acc": "#7099f5", "acc_hover": "#85a9f7", "acc_ink": "#111111", "sel": "#2f3d5c",
         "hover": "#353535", "press": "#3d3d3d", "warn": "#ff6b6b", "ok": "#7bc47f", "drop": "#262a33",
         "drop_line": "#4a5a7a", "sheet": "#1a1a1a", "sheet_line": "#3d3d3d", "hint": "#7a7a7a",
-        "zebra": "#313131"}
+        "zebra": "#313131", "shine": "#555555"}
 
 # Colores de los tipos de fila de la lista ("" = el del texto normal). Todo texto llega a 4,5:1 (WCAG AA)
 KINDS = {False: {"chapter": "", "subtitle": "#555555", "cut": "#737373", "image": "#2e7d32", "dropped": "#6a6a6a",

@@ -1680,6 +1680,43 @@ class Window(QMainWindow):
             self.on_drop(path)
 
 
+def _skeleton_rows(tree):
+    """Barras de la lista mientras se analiza: tipo, título de largo variado, lectura y página."""
+    def bars(width, height):
+        step, header = tree.fontMetrics().height() + 8, tree.header()
+        rects = []
+        for row in range(height // step):
+            y = row * step + step / 2 - 5
+            for n in range(4):
+                x, w = header.sectionPosition(n), header.sectionSize(n)
+                if n == 1:  # el título, alineado a la izquierda y de largo distinto en cada fila
+                    rects.append(QRectF(x + 8, y, (w - 16) * (0.4 + 0.12 * (row * 3 % 5)), 10))
+                else:
+                    rects.append(QRectF(x + w * 0.25, y, w * 0.5, 10))
+        return rects
+    return bars
+
+
+def _skeleton_page(view):
+    """Barras de una hoja de vista previa mientras se analiza: un título y párrafos de líneas."""
+    def bars(width, height):
+        w, h = view.size_
+        left = (width - w) / 2  # la hoja va centrada arriba (Preview)
+        rects, y, n = [QRectF(left + w * 0.25, h * 0.08, w * 0.5, 12)], h * 0.08 + 34, 0
+        while w and y + 8 < h * 0.94:
+            n += 1
+            rects.append(QRectF(left + w * 0.1, y, w * 0.8 * (0.55 if n % 6 == 0 else 1), 7))
+            y += 22 if n % 6 == 0 else 14
+        return rects
+    return bars
+
+
+def _skeleton_strip(width, height):
+    """Miniaturas de la tira mientras se analiza, donde irán las de verdad (Strip: márgenes 4, separación 6)."""
+    thumb = int(THUMB_HEIGHT * 0.71)
+    return [QRectF(4 + n * (thumb + 6), 4, thumb, THUMB_HEIGHT) for n in range(width // (thumb + 6) + 1)]
+
+
 def _row(*widgets, margins=(0, 0, 0, 0), spacing=6):
     """Fila horizontal; un número en widgets es un hueco elástico con ese peso."""
     box = QHBoxLayout()
@@ -2098,6 +2135,12 @@ class App:
         self.strip = qtk.Strip(THUMB_HEIGHT)
         self.strip.clicked.connect(self.jump)
         views.addWidget(self.strip)
+        # Mientras se analiza, lista, hojas y tira muestran su esqueleto: se ve que algo está cargando
+        self.loading = False
+        self.shimmers = (qtk.Shimmer(self.tree.viewport(), _skeleton_rows(self.tree)),
+                         qtk.Shimmer(self.pdf_view, _skeleton_page(self.pdf_view)),
+                         qtk.Shimmer(self.epub_view, _skeleton_page(self.epub_view)),
+                         qtk.Shimmer(self.strip.viewport(), _skeleton_strip))
 
         # Barra inferior: opciones del EPUB, estado, avisos y la acción principal
         bottom = QFrame(objectName="bar")
@@ -2114,13 +2157,19 @@ class App:
         self.pdf_btn.setToolTip("El libro maquetado en PDF, con las mismas opciones que el EPUB")
         self.gen_btn.setEnabled(False)
         self.pdf_btn.setEnabled(False)
-        self.options_row = QWidget()  # perfil, opciones del libro y «Generar»: solo con un libro abierto (update_chrome)
+        self.options_row = QWidget()  # perfil, aspecto y «Generar»: solo con un libro abierto (update_chrome)
         rows.addWidget(self.options_row)
-        # El resto de opciones vive en «Opciones»: aquí solo lo que más se cambia, el lector de destino
+        # Aquí lo que se cambia mirando la vista previa: el lector de destino y el aspecto. El resto, en
+        # Herramientas → Opciones
+        self.font_last = "Del lector"  # a la que se vuelve si «Otra…» no elige archivo
+        self.font_box = _combo(self.font_var, FONT_CHOICES, 8, changed=self.font_changed)
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
                                                                  changed=self.apply_profile),
-                            _button("Opciones del libro…", lambda: self.open_options("Perfil y formato", "book")),
-                            1, self.pdf_btn, self.gen_btn))
+                            _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
+                                                      changed=self.update_preview),
+                            _label("Separador:"), _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12,
+                                                         changed=self.update_preview),
+                            _label("Letra:"), self.font_box, 1, self.pdf_btn, self.gen_btn))
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setFixedWidth(160)
@@ -2359,6 +2408,14 @@ class App:
             widget.setVisible(has)
         self.bottom.setVisible(has or self.done is not None)
         self.cancel_btn.setVisible(self.done is not None)
+        loading = not has and self.done is not None and self.stack.currentIndex() == 1  # analizando un libro
+        if loading != self.loading:
+            self.loading = loading
+            self.idle_text = "" if loading else "Abre un PDF para ver la vista previa"  # sin aviso bajo las barras
+            self.redraw()
+            colors = theme.colors(self.dark)
+            for shimmer in self.shimmers:
+                shimmer.start(colors["line"], colors["shine"]) if loading else shimmer.stop()
         for action in self.book_actions:  # ocultas: en gris, en el tema oscuro parecían activas
             action.setVisible(has)
 
@@ -2987,6 +3044,10 @@ class App:
         self.status.setText(text)
         self.update_header()
         self.update_cover()
+        start = self.first_row()
+        if start and not self.tree.selection():  # la vista previa sale sola, sin esperar a que se elija un título
+            self.tree.selection_set(start)
+            self.tree.see(start)
 
     def fill_tree(self, rows):
         """Llena la lista con los títulos e ilustraciones del libro, en su orden. rows: {fila: (tipo,
@@ -3381,8 +3442,7 @@ class App:
 
     def option_choices(self):
         """Valores de las listas de «Opciones»."""
-        return {"profile": list(PROFILES), "style": list(convert.STYLES), "separator": convert.SEPARATOR_CHOICES,
-                "lang": LANGUAGES, "font": FONT_CHOICES, "pdf_size": list(convert.PDF_SIZES),
+        return {"profile": list(PROFILES), "lang": LANGUAGES, "pdf_size": list(convert.PDF_SIZES),
                 "theme": theme.CHOICES, "device": list(DEVICES)}
 
     def open_options(self, category=None, scope=None, on_close=None):
@@ -3435,6 +3495,23 @@ class App:
 
     def ask_font_file(self):
         return filedialog.askopenfilename(filetypes=[("Fuente", "*.ttf *.otf")])
+
+    def font_changed(self):
+        """«Otra…» pide un archivo de fuente; sin elegir ninguno, se queda la letra de antes."""
+        if self.font_var.get() == "Otra…":
+            path = self.ask_font_file()
+            if path:
+                self.font_file_var.set(path)
+                self.show_font(Path(path).name)
+            self.font_var.set(Path(path).name if path else self.font_last)
+        self.font_last = self.font_var.get()
+        self.update_preview()
+
+    def show_font(self, name):
+        """Pone la fuente propia en el combo, antes de «Otra…», y la deja elegida."""
+        if self.font_box.findText(name) < 0:
+            self.font_box.insertItem(self.font_box.count() - 1, name)
+        self.font_box.setCurrentText(name)
 
     def new_book_options(self):
         """Opciones con las que abre un libro sin revisión ni serie: «Libros nuevos» sobre los valores de fábrica."""
@@ -3648,10 +3725,17 @@ class App:
     def edit_text(self):
         """Abre el editor en la sección de la fila seleccionada (la de su título, si es una ilustración o un
         separador), con el cursor en esa fila."""
-        selected = self.tree.selection()
-        if not self.book or not selected:
+        if not self.book:
             return None
-        return TextEditor(self, selected[0], *self.section_bounds(int(selected[0])))
+        item = (self.tree.selection() or (self.first_row(),))[0]
+        if not item:
+            return None
+        return TextEditor(self, item, *self.section_bounds(int(item)))
+
+    def first_row(self):
+        """Fila con la que empieza la vista previa: el primer capítulo, o la primera fila si no hay ninguno."""
+        items = self.tree.get_children()
+        return next((i for i in items if self.is_title(i) and self.tree.set(i, "inc") == ON), items[0] if items else None)
 
     def section_heads(self):
         """Títulos que abren sección en el editor: los capítulos. Subtítulos, separadores («ªª») y lo quitado
@@ -4991,9 +5075,12 @@ class App:
             self.font_file_var.set("")
         font, path = self.font_var.get(), Path(self.font_file_var.get())
         if font not in FONT_CHOICES or font == "Otra…":
-            if not (self.font_file_var.get() and path.name == font and path.is_file()):
+            if self.font_file_var.get() and path.name == font and path.is_file():
+                self.show_font(font)
+            else:
                 self.font_var.set("Del lector")
                 self.status.setText(f"No se encontró la fuente {font}: se usa la del lector.")
+        self.font_last = self.font_var.get()
         try:
             self.replacements = [[str(a), str(b)] for a, b in state["replacements"]]
         except (KeyError, TypeError, ValueError):

@@ -19,7 +19,7 @@ import theme
 import translate
 
 BOOK, APP = "El libro", "La aplicación"
-CATEGORIES = {BOOK: ("Perfil y formato", "Aspecto", "Texto", "Ilustraciones", "PDF"),
+CATEGORIES = {BOOK: ("Perfil y formato", "Texto", "Ilustraciones", "PDF"),
               APP: ("Apariencia", "Vista previa", "Traducción", "Carpeta vigilada", "Informe de calidad")}
 Option = namedtuple("Option", "category key kind label help")
 OPTIONS = (
@@ -30,9 +30,6 @@ OPTIONS = (
            "El Kobo muestra páginas y estadísticas de lectura; el archivo acaba en .kepub.epub."),
     Option("Perfil y formato", "lang", "language", "Idioma del libro",
            "Decide cómo se parten las palabras, la voz de lectura y los avisos del informe."),
-    Option("Aspecto", "style", "choice", "Estilo", "Letra, párrafos e inicio de capítulo del EPUB."),
-    Option("Aspecto", "separator", "choice", "Separador de escena", "Cómo se ven los cambios de escena."),
-    Option("Aspecto", "font", "font", "Letra", "Tipografía incrustada en el EPUB; «Del lector» usa la del aparato."),
     Option("Texto", "typography", "check", "Limpieza tipográfica",
            "Comillas «», puntos suspensivos, raya de diálogo y espacios, al estilo RAE."),
     Option("Texto", "hyphenate", "check", "Partir palabras con guiones (Kindle)",
@@ -61,8 +58,9 @@ OPTIONS = (
     Option("Informe de calidad", "echoes", "check", "Buscar ecos (palabras repetidas cerca)",
            "Muchos avisos de estilo: solo si se piden."),
 )
-# Lo que se guarda por libro y en «Libros nuevos»; la ruta de la letra propia va con su nombre
-BOOK_KEYS = tuple(o.key for o in OPTIONS if o.category in CATEGORIES[BOOK]) + ("font_file",)
+# Lo que se guarda por libro y en «Libros nuevos». El aspecto (estilo, separador y letra, con la ruta de la propia)
+# está en la barra de abajo de la ventana: se cambia mirando la vista previa
+BOOK_KEYS = tuple(o.key for o in OPTIONS if o.category in CATEGORIES[BOOK]) + ("style", "separator", "font", "font_file")
 
 
 def fold(text):
@@ -155,7 +153,7 @@ class OptionsDialog:
                 listing.addItem(self.items[name])
         self.parts = {"list": listing, "search": search, "this_book": this_book, "new_books": new_books,
                       "widgets": {}, "notes": {}, "accept": self.accept, "cancel": self.cancel, "show": self.show,
-                      "put": self.put, "empty": empty, "copy": None, "font_error": None}
+                      "put": self.put, "empty": empty, "copy": None}
         search.textChanged.connect(lambda _: self.filter())
         listing.currentItemChanged.connect(lambda item, _: item and self.show(item.text().strip()))
         this_book.toggled.connect(lambda on: self.set_scope("book" if on else "new"))
@@ -232,7 +230,7 @@ class OptionsDialog:
         title = QLabel(category)
         title.setObjectName("title")
         layout.addWidget(title)
-        self.parts["widgets"], self.parts["notes"], self.parts["font_error"] = {}, {}, None
+        self.parts["widgets"], self.parts["notes"] = {}, {}
         for option in OPTIONS:
             if option.category == category:
                 self.add_option(layout, option)
@@ -240,7 +238,7 @@ class OptionsDialog:
         if self.is_book() and self.scope == "book":
             copy_btn = QPushButton("Usar también para libros nuevos")
             copy_btn.setToolTip("Copia los valores de esta página a «Libros nuevos»")
-            keys = [o.key for o in OPTIONS if o.category == category] + (["font_file"] if category == "Aspecto" else [])
+            keys = [o.key for o in OPTIONS if o.category == category]
             copy_btn.clicked.connect(lambda: self.defaults.update({k: self.owner.fields()[k].get() for k in keys}))
             layout.addWidget(copy_btn, 0, Qt.AlignmentFlag.AlignLeft)
             self.parts["copy"] = copy_btn
@@ -280,14 +278,12 @@ class OptionsDialog:
                 widget.valueChanged.connect(lambda n, key=key: self.put(key, n))
             else:
                 widget = QComboBox()
-                values = self.font_choices(value) if option.kind == "font" else list(self.choices.get(key, []))
+                values = list(self.choices.get(key, []))
                 widget.addItems(values)
                 widget.setEditable(option.kind == "language")
                 widget.setCurrentText(str(value))
                 widget.setMinimumContentsLength(18)
-                if option.kind == "font":
-                    widget.activated.connect(lambda _, w=widget: self.pick_font(w))
-                elif option.kind == "language":
+                if option.kind == "language":
                     widget.currentTextChanged.connect(lambda text, key=key: self.put(key, text.strip()))
                 else:
                     widget.activated.connect(lambda _, w=widget, key=key: self.put(key, w.currentText()))
@@ -309,13 +305,6 @@ class OptionsDialog:
             row.setStyleSheet(f"background: {theme.colors(self.owner.dark)['sel']};")
         layout.addWidget(row)
         layout.addWidget(note)
-        if option.kind == "font" and value not in self.choices["font"] and not Path(
-                str(self.get("font_file") or "")).is_file():
-            error = QLabel("No se encuentra el archivo de la letra: el EPUB usará la del lector.")
-            error.setObjectName("warn")
-            error.setWordWrap(True)
-            layout.addWidget(error)
-            self.parts["font_error"] = error
         if option.kind == "folder":
             self.parts["watch_error"] = None
             if value and not Path(value).is_dir():
@@ -467,24 +456,6 @@ class OptionsDialog:
         if folder:
             self.put(key, folder)
             self.show(self.category)
-
-    def font_choices(self, current):
-        """Letras incrustadas, la propia si la hay, y «Otra…» al final para elegir un archivo."""
-        values = [name for name in self.choices["font"] if name != "Otra…"]
-        if current and current not in values:
-            values.append(current)
-        return values + ["Otra…"]
-
-    def pick_font(self, widget):
-        """«Otra…» pide un archivo .ttf u .otf; sin elegir ninguno se queda la letra de antes."""
-        if widget.currentText() != "Otra…":
-            self.put("font", widget.currentText())
-            return
-        path = self.owner.ask_font_file()
-        if path:
-            self.store("font_file", path)
-            self.put("font", Path(path).name)
-        self.show(self.category)
 
     def accept(self):
         self.owner.accept_options(self.defaults, self.values)
