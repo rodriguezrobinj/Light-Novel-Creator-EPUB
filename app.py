@@ -37,7 +37,7 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QLockFile, QObject, QProcess, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QLockFile, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPainterPath,
                            QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -78,6 +78,7 @@ IMAGE_NEXT = {IMG: CUT, CUT: IMG, DROPPED: IMG}      # clic en una imagen: se qu
 SPLIT, ROTATED = "Dividida", "Girada"                # ilustración doble: en dos páginas o girada 90°
 WIDE_NEXT = {IMG: SPLIT, SPLIT: ROTATED, ROTATED: CUT, CUT: IMG, DROPPED: IMG}
 LAYOUT = {SPLIT: "split", ROTATED: "rotate"}         # tipo de la fila -> Block.layout
+COVER = "cover"  # fila fija de la portada, arriba de la lista: no es un bloque del libro
 KIND_TAG = {ON: "chapter", OFF: "subtitle", CUT: "cut", IMG: "image", DROPPED: "dropped",
             SPLIT: "image", ROTATED: "image", SEP: "separator"}  # estilo por tipo
 KEYS = {"c": ON, "s": OFF, "q": CUT, "i": IMG, "d": SPLIT, "g": ROTATED, "x": SEP}  # atajos de teclado en la lista
@@ -86,7 +87,7 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
-             "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes")
+             "contents", "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes")
 # De INHERITED, lo que es de toda la serie aunque el tomo ya tenga revisión: glosarios, diccionario y personajes
 SERIES_VOCAB = ("words", "glossary", "tr_glossary", "tr_notes")
 def _data_dir():
@@ -434,30 +435,46 @@ while ($null -ne ($line = [Console]::In.ReadLine())) { $s.Speak($line); [Console
 
 class Speaker(QObject):
     """Lee en voz alta con la voz de Windows, sin dependencias: un PowerShell que vive mientras se lee y recibe un
-    párrafo por línea. Parar lo cierra (la voz se calla en el acto); el siguiente «Leer» abre otro."""
+    párrafo por línea. Parar lo cierra (la voz se calla en el acto); el siguiente «Leer» abre otro. Con la tubería
+    de QProcess, PowerShell leía el primer párrafo y no veía los siguientes: una tubería normal y un hilo que
+    escucha sus «ok»."""
     done = Signal()       # acabó el párrafo
     failed = Signal(str)  # el motivo, para el usuario
+    heard = Signal(object, str)  # (proceso, línea), del hilo que escucha a la ventana
 
     def __init__(self):
         super().__init__()
         self.proc = None
+        self.heard.connect(self._heard)
 
     def say(self, text):
-        if self.proc is None:
-            self.proc = QProcess(self)
-            self.proc.readyReadStandardOutput.connect(self._read)
-            self.proc.errorOccurred.connect(lambda _: self._fail("No se pudo abrir la voz de Windows (PowerShell)."))
-            script = SPEECH_SCRIPT.encode("utf-16-le")  # -EncodedCommand: sin líos de comillas
-            self.proc.start(POWERSHELL, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                                           "-EncodedCommand", base64.b64encode(script).decode()])
-        self.proc.write((" ".join(text.split()) + "\n").encode("utf-8"))
+        try:
+            if self.proc is None:
+                script = SPEECH_SCRIPT.encode("utf-16-le")  # -EncodedCommand: sin líos de comillas
+                self.proc = subprocess.Popen(
+                    [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand",
+                     base64.b64encode(script).decode()], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                threading.Thread(target=self._listen, args=(self.proc,), daemon=True).start()
+            self.proc.stdin.write((" ".join(text.split()) + "\n").encode("utf-8"))
+            self.proc.stdin.flush()
+        except OSError:
+            self._fail("No se pudo abrir la voz de Windows (PowerShell).")
 
-    def _read(self):
-        for line in bytes(self.proc.readAllStandardOutput()).decode("utf-8", "replace").split():
-            if line == "ok":
-                self.done.emit()
-            elif line == "novoice":
-                self._fail(NO_VOICE)
+    def _listen(self, proc):
+        for raw in proc.stdout:  # termina al cerrarse el proceso
+            try:
+                self.heard.emit(proc, raw.decode("utf-8", "replace").strip())
+            except RuntimeError:  # el editor ya se cerró
+                return
+
+    def _heard(self, proc, line):
+        if proc is not self.proc:  # de una lectura ya parada
+            return
+        if line == "ok":
+            self.done.emit()
+        elif line == "novoice":
+            self._fail(NO_VOICE)
 
     def _fail(self, message):
         self.stop()
@@ -466,11 +483,10 @@ class Speaker(QObject):
     def stop(self):
         proc, self.proc = self.proc, None
         if proc is not None:
-            proc.readyReadStandardOutput.disconnect()
-            proc.errorOccurred.disconnect()  # matarlo no es un fallo
-            proc.kill()
-            proc.waitForFinished(1000)
-            proc.deleteLater()
+            with contextlib.suppress(OSError):
+                proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(1)
 
 
 def _render_thumbs(jobs):
@@ -573,7 +589,7 @@ def _write_options(state, breaks=()):
             "font": font if font in convert.FONTS
             else path if path and Path(path).name == font and Path(path).is_file() else "",
             "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
-            "hyphenate": bool(state.get("hyphenate")), "breaks": list(breaks),
+            "contents": bool(state.get("contents", True)), "hyphenate": bool(state.get("hyphenate")), "breaks": list(breaks),
             "alts": {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}}
 
 
@@ -987,7 +1003,7 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "separator": "Separadores", "font": "Fuente", "font_file": "Archivo de fuente", "profile": "Perfil",
                 "typography": "Limpieza tipográfica", "gray": "Imágenes en gris", "shrink": "Reducir imágenes",
                 "shrink_size": "Tamaño de las imágenes", "trim": "Recortar márgenes blancos",
-                "credits": "Página de créditos", "reading": "Minutos de lectura", "epub2": "EPUB 2",
+                "credits": "Página de créditos", "reading": "Minutos de lectura", "contents": "Índice", "epub2": "EPUB 2",
                 "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
                 "words": "Diccionario de la serie", "glossary": "Glosario", "tr_glossary": "Glosario de traducción",
@@ -1984,6 +2000,7 @@ class App:
         self.shrink_size_var = qtk.Var(convert.SHRINK)  # lado mayor de las imágenes reducidas
         self.trim_var, self.credits_var, self.reading_var = qtk.Var(False), qtk.Var(False), qtk.Var(False)
         self.epub2_var, self.kepub_var = qtk.Var(False), qtk.Var(False)
+        self.contents_var = qtk.Var(True)  # página «Contenido» tras la portada, con capítulos y subtítulos
         self.echoes_var = qtk.Var(False)  # ecos en el informe: muchos avisos de estilo, solo si se piden
         self.hyphenate_var = qtk.Var(False)  # guiones blandos: el Kindle apenas parte palabras en español
         self.whole_words_var = qtk.Var(False)  # PDF maquetado sin palabras partidas al final de línea
@@ -2163,13 +2180,15 @@ class App:
         # Herramientas → Opciones
         self.font_last = "Del lector"  # a la que se vuelve si «Otra…» no elige archivo
         self.font_box = _combo(self.font_var, FONT_CHOICES, 8, changed=self.font_changed)
+        index = qtk.Var.check(self.contents_var, QCheckBox("Índice"))
+        index.setToolTip("Página «Contenido» tras la portada, con los capítulos y sus subtítulos")
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
                                                                  changed=self.apply_profile),
                             _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
                                                       changed=self.update_preview),
                             _label("Separador:"), _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12,
                                                          changed=self.update_preview),
-                            _label("Letra:"), self.font_box, 1, self.pdf_btn, self.gen_btn))
+                            _label("Letra:"), self.font_box, index, 1, self.pdf_btn, self.gen_btn))
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setFixedWidth(160)
@@ -2557,6 +2576,9 @@ class App:
         """Vuelve a dibujar las vistas previas (al iniciar, al cargar un libro o al cambiar de tamaño)."""
         if self.closed:
             return
+        if self.book and self.tree.current() == COVER:
+            self.show_cover()
+            return
         if self.book and self.tree.selection():
             self.draw_pdf()
             self.draw_epub()
@@ -2587,8 +2609,39 @@ class App:
                     pix.copy(art, box)
         return qtk.qimage(pix), zoom
 
+    def cover_page(self):
+        """Página del PDF de donde sale la portada (desde 0): la elegida o la primera. None si no sale del PDF
+        (un archivo o la portada con título)."""
+        kind, value = self.cover_choice or ("", None)
+        if kind == "page":
+            return int(value)
+        if kind == "image" and self.book:
+            return self.book.blocks[int(value)].page - 1
+        return None if kind in ("file", "text") else 0
+
+    def cover_cell(self):
+        page = self.cover_page()
+        return "" if page is None else page + 1
+
+    def show_cover(self):
+        """Fila «Portada»: su página del PDF y la portada tal como abre el EPUB."""
+        self.pdf_page, self.highlight = self.cover_page() or 0, None
+        self.draw_pdf()
+        self.epub_cut, self.epub_pages = False, 0
+        image = QImage.fromData(self.book.cover) if self.book.cover else QImage()
+        if image.isNull():
+            self.blank(self.epub_view, "El EPUB llevará una portada con el título")
+        else:
+            width, height = self.box_size()
+            self.epub_view.show_image((width, height), image.scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio,
+                                                                     Qt.TransformationMode.SmoothTransformation))
+        self.epub_caption.setText("EPUB · portada")
+
     def update_preview(self, _=None):
         """Al seleccionar (o cambiar) un título: su página del PDF y su sección en el EPUB."""
+        if self.book and self.tree.current() == COVER:
+            self.show_cover()
+            return
         selected = self.tree.selection()
         if not selected or not self.book:
             return
@@ -2618,16 +2671,15 @@ class App:
                 part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [])
                 options = self.write_options([0] * (kind == SEP) + [k for k, v in inner.items() if v == SEP])
                 options["removed"] = [k for k, v in inner.items() if v == CUT]
-                options.update(shrink=False, trim=False, epub2=False, credits=False)  # rápido: solo lo que se ve
+                # rápido: solo lo que se ve; sin página de índice: el capítulo 1 es la sección
+                options.update(shrink=False, trim=False, epub2=False, credits=False, contents=False)
                 chapters = [(0, self.tree.set(item, "title"))] if kind == ON else []
                 options["fit"] = DEVICES[self.device_var.get()]  # ilustraciones que caben en la página de MuPDF
                 key = (self.book.title, self.book.cover, chapters, sorted(options.items()),
                        [(b.kind, b.page, b.html, b.image, b.layout, b.align, b.keep) for b in part_blocks])
                 if key != self.preview_key:  # lo mismo que ya está escrito y maquetado: no se rehace
                     self.preview_key, self.preview_doc = None, self.preview_doc and self.preview_doc[1].close()
-                    convert.write_epub(part, chapters, self.preview_path,
-                                       contents=False,  # sin página de índice: el capítulo 1 es la sección
-                                       **options)
+                    convert.write_epub(part, chapters, self.preview_path, **options)
                     self.preview_key = key
             except Exception:
                 self.epub_pages = -1  # no se pudo generar
@@ -2717,7 +2769,7 @@ class App:
                 items.append(i)
         here = int(selected[0]) if selected else None
         if here is None:
-            n = -1
+            n = 0 if delta > 0 and self.tree.current() == COVER else -1  # de la portada al libro
         elif selected[0] in items:
             n = items.index(selected[0]) + delta
         else:
@@ -3055,6 +3107,7 @@ class App:
         detectados como capítulo, los demás títulos ("El lado de…") como subtítulo, y las ilustraciones
         descartadas por el análisis (fondos de título, imágenes dentro del texto) como "Descartada"."""
         self.tree.delete(*self.tree.get_children())
+        self.tree.pin(COVER, ("Portada", "Portada", "", self.cover_cell(), ""), ("image",))
         blocks = self.book.blocks
         chapters = set(self.book.candidates)
         self.wide = {str(i) for i, b in enumerate(blocks) if b.kind == "image" and b.image and convert.is_wide(b.image)}
@@ -3108,6 +3161,8 @@ class App:
             self.on_click(event)
         if item and column == "#2":
             self.edit_title(item)
+        if self.tree.identify_row(event.y, pinned=True) == COVER:  # cambiarla, como «Portada…» de «Editar datos»
+            self.choose_cover()
 
     def shortcut(self, kind):
         """Atajo (KEYS) sobre la fila seleccionada; se ignora si ese tipo no vale para la fila (C en una
@@ -4428,6 +4483,8 @@ class App:
                   f"página {self.book.blocks[int(value)].page}", "file": lambda: f"Portada: {Path(value).name}",
                   "text": lambda: "Portada: con título"}
         self.cover_label.setText(labels[kind]())
+        if self.tree.exists(COVER):
+            self.tree.set(COVER, "page", self.cover_cell())
         self.update_cover()
         self.update_preview()
 
@@ -5030,6 +5087,7 @@ class App:
                 "typography": self.typography_var, "shrink": self.shrink_var, "shrink_size": self.shrink_size_var,
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
+                "contents": self.contents_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var,
                 "hyphenate": self.hyphenate_var, "whole_words": self.whole_words_var, "pdf_size": self.pdf_size_var}
 
@@ -6888,6 +6946,16 @@ class TextEditor:
         tabs.setDrawBase(False)
         tabs.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # la hoja se queda con el foco al cambiar de pestaña
         tabs.currentChanged.connect(pages.setCurrentIndex)
+        # Como Word: doble clic en una pestaña oculta la cinta (o la fija otra vez); oculta, un clic la muestra
+        # encima de la hoja hasta un clic fuera o hasta usar uno de sus botones
+        self.ribbon_pinned, self.pinned_at = True, 0.0
+        self.ribbon_float = QFrame(self.win, objectName="ribbon")
+        float_column = QVBoxLayout(self.ribbon_float)
+        float_column.setContentsMargins(10, 2, 10, 4)
+        self.ribbon_float.hide()
+        tabs.tabBarDoubleClicked.connect(lambda _: self.pin_ribbon(not self.ribbon_pinned))
+        tabs.tabBarClicked.connect(lambda _: self.ribbon_pinned or qtk.after(0, self.float_ribbon))
+        QApplication.instance().installEventFilter(editor._Filter(self.win, self.outside_ribbon))
         # Botones que se quedan en su icono si la cinta no cabe (compact_to): (botón, texto, texto corto o None
         # si se queda en su glifo, nivel)
         self.compact, self.ribbon_level, self.ribbon_rows = [], 0, []
@@ -6917,7 +6985,7 @@ class TextEditor:
             button.setCheckable(checkable)
             if font:
                 button.setFont(font)
-            button.clicked.connect(lambda: (action(), self.sheet.setFocus(), self.update_tools()))
+            button.clicked.connect(lambda: (self.drop_ribbon(), action(), self.sheet.setFocus(), self.update_tools()))
             return button
 
         def menu_tool(text, tip, items, icon=None):
@@ -6933,7 +7001,8 @@ class TextEditor:
                 if item is None:
                     menu.addSeparator()
                 else:
-                    menu.addAction(item[0], lambda fn=item[1]: (fn(), self.sheet.setFocus(), self.update_tools()))
+                    menu.addAction(item[0], lambda fn=item[1]: (self.drop_ribbon(), fn(), self.sheet.setFocus(),
+                                                                self.update_tools()))
             button.setMenu(menu)
             return button, menu
 
@@ -6956,8 +7025,9 @@ class TextEditor:
                 row.addWidget(line)
             box = QVBoxLayout()
             box.setSpacing(2)
-            for widgets in rows:
-                box.addLayout(_row(*widgets, 1, spacing=2))
+            box.addStretch(1)
+            for widgets in rows:  # centradas en el grupo, como en Word: alineadas a la izquierda parecía desordenado
+                box.addLayout(_row(1, *widgets, 1, spacing=2))
             box.addStretch(1)
             label = _label(caption, "muted")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -7066,6 +7136,47 @@ class TextEditor:
         self.chapters_popup()
         return bar
 
+    def pin_ribbon(self, on):
+        """Fija la cinta (on) o la deja en solo la fila de pestañas."""
+        self.ribbon_pinned, self.pinned_at = on, time.monotonic()
+        self.drop_ribbon()
+
+    def float_ribbon(self):
+        """Con la cinta oculta, un clic en una pestaña la muestra encima de la hoja, sin moverla."""
+        if self.ribbon_pinned or not shiboken6.isValid(self.ribbon_bar):
+            return
+        if time.monotonic() - self.pinned_at < QApplication.doubleClickInterval() / 1000:
+            return  # el clic del propio doble clic que acaba de ocultarla
+        frame, pages = self.ribbon_float, self.ribbon_pages
+        frame.layout().addWidget(pages)  # pasa de la cinta al recuadro flotante
+        pages.show()
+        top = self.ribbon_bar.mapTo(self.win, QPoint(0, self.ribbon_bar.height()))
+        frame.setGeometry(top.x(), top.y(), self.ribbon_bar.width(), frame.sizeHint().height())
+        frame.show()
+        frame.raise_()
+
+    def drop_ribbon(self):
+        """La cinta vuelve a su sitio: visible si está fijada, oculta si no."""
+        if not shiboken6.isValid(self.ribbon_float):
+            return
+        self.ribbon_float.hide()
+        self.ribbon_bar.layout().addWidget(self.ribbon_pages)
+        self.ribbon_pages.setVisible(self.ribbon_pinned)
+
+    def outside_ribbon(self, event):
+        """Un clic fuera de la cinta flotante (y de sus pestañas) la oculta; los menús de sus botones son otra
+        ventana y no cuentan."""
+        if (event.type() != QEvent.Type.MouseButtonPress or not shiboken6.isValid(self.ribbon_float)
+                or not self.ribbon_float.isVisible()):
+            return False
+        widget = QApplication.widgetAt(event.globalPosition().toPoint())
+        if widget is None or widget.window() is not self.win:
+            return False
+        if not (self.ribbon_float.isAncestorOf(widget) or widget is self.ribbon_float
+                or self.ribbon_tabs.isAncestorOf(widget) or widget is self.ribbon_tabs):
+            self.drop_ribbon()
+        return False
+
     def fit_ribbon(self):
         """Si la cinta no cabe (1366 px, o 1093 con el zoom de Windows al 125 %), quedan solo con su icono
         primero deshacer, insertar y buscar, luego párrafo y revisar, y al final el botón de capítulo se
@@ -7087,7 +7198,8 @@ class TextEditor:
                 self.show_counts()
                 # Los botones piden su tamaño nuevo más tarde (LayoutRequest): sin esto se medía el de antes
                 QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest.value)
-                if self.ribbon_bar.sizeHint().width() <= room:
+                # la cinta oculta no está dentro de ribbon_bar: se mide aparte
+                if max(self.ribbon_bar.sizeHint().width(), self.ribbon_pages.sizeHint().width() + 20) <= room:
                     break
         finally:
             column.setSizeConstraint(QLayout.SizeConstraint.SetDefaultConstraint)
