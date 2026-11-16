@@ -4991,6 +4991,36 @@ def test_editor_inserts_new_pictures():
     assert [b.kind for b in book.blocks] == ["heading", "p", "image", "p"] and book.blocks[2].image, edits
 
 
+def test_window_editor_copies_picture_for_other_programs():
+    """Copiar una ilustración (o una imagen nueva) de la hoja deja la imagen en el portapapeles: pegada en Paint o
+    en el historial de Windows salía vacía. Pegada en la hoja sigue siendo la misma ilustración, sin duplicarse."""
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtWidgets import QApplication
+
+    B = convert.Block
+    art = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 40), False)
+    art.clear_with(120)
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("image", 1, image=art.tobytes("jpg")),
+                                      B("p", 1, "Uno.")], [0])
+    sheet = editor.sheet
+    block = sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+    sheet.setTextCursor(c)
+    sheet.copy()
+    root.update()
+    formats = QApplication.clipboard().mimeData().formats()
+    image = QApplication.clipboard().image()
+    sheet.moveCursor(QTextCursor.MoveOperation.End)
+    sheet.paste()
+    content = sheet.content()
+    editor.win.done(0)
+    window.close()
+    QApplication.clipboard().clear()  # con la imagen dentro, el Qt de pruebas (offscreen) se cae al salir
+    assert (image.width(), image.height()) == (60, 40), (formats, image.size())
+    assert content == "# Capítulo 1\n\n[Ilustración 1]\n\nUno.", content
+
+
 def test_editor_changes_illustration():
     """Clic derecho en una ilustración: «Cambiar ilustración…» la cambia en el libro (App.replace_image) y la hoja
     muestra ya la nueva con su forma; el texto no cuenta como cambiado."""

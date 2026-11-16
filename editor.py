@@ -1483,6 +1483,17 @@ class Sheet(QTextEdit):
         mime.setData(MIME, dump(copy).encode("utf-8"))
         if cursor.selectedText().endswith("\u2029"):  # dump no guarda el último salto
             mime.setData(WHOLE, b"1")
+        # La imagen, para pegarla fuera (Paint, historial de Windows): solo con el texto salía vacía. Dentro de la
+        # hoja manda MIME, así que no se duplica
+        block = copy.firstBlock()
+        while block.isValid() and not mime.hasImage():
+            for name in objects_of(block):
+                n = name.split()[1]
+                picture = self.pictures.get(int(n) if n.isdigit() else n)
+                if isinstance(picture, QImage) and not picture.isNull():
+                    mime.setImageData(picture)
+                    break
+            block = block.next()
         return mime
 
     def canInsertFromMimeData(self, source):
