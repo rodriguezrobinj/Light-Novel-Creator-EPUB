@@ -5301,6 +5301,111 @@ def test_text_editor_ribbon_fits_the_screen():
     assert "Deshacer" in tip, tip
 
 
+def test_text_editor_ribbon_hides_on_double_click_like_word():
+    """Como Word: doble clic en una pestaña deja solo la fila de pestañas; un clic en una pestaña muestra la cinta
+    encima de la hoja, y un clic en la hoja o usar uno de sus botones la oculta otra vez; otro doble clic la fija."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Texto.")], [0])
+    editor.win.show()
+    root.update()
+    tabs, pages = editor.ribbon_tabs, editor.ribbon_pages
+    sheet_top = editor.sheet.mapTo(editor.win, editor.sheet.rect().topLeft()).y()
+    QTest.mouseDClick(tabs, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, tabs.tabRect(0).center())
+    root.update()  # el doble clic también es un clic: no debe sacarla flotante enseguida
+    hidden = not pages.isVisible(), editor.sheet.mapTo(editor.win, editor.sheet.rect().topLeft()).y() < sheet_top
+    editor.pinned_at = 0.0  # como un clic un rato después
+    tabs.tabBarClicked.emit(1)
+    root.update()
+    floating = editor.ribbon_float.isVisible() and pages.isVisible()
+    QTest.mouseClick(editor.sheet.viewport(), Qt.MouseButton.LeftButton)  # un clic fuera
+    root.update()
+    closed = not editor.ribbon_float.isVisible() and not pages.isVisible()
+    tabs.tabBarClicked.emit(0)
+    root.update()
+    editor.bold_btn.click()  # un botón de la cinta flotante: hace lo suyo y la cinta se va
+    root.update()
+    used = not editor.ribbon_float.isVisible()
+    tabs.tabBarDoubleClicked.emit(0)
+    root.update()
+    pinned = pages.isVisible() and pages.parentWidget() is not editor.ribbon_float
+    editor.win.done(0)
+    window.close()
+    assert all(hidden) and floating and closed, (hidden, floating, closed)
+    assert used and pinned, (used, pinned)
+
+
+def test_text_editor_ribbon_groups_centered():
+    """Los botones de cada grupo de la cinta van centrados en él, como en Word, no pegados a la izquierda."""
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Texto.")], [0])
+    editor.win.resize(1366, 700)
+    editor.win.show()
+    root.update()
+    group = editor.redo_btn.parentWidget()
+    undo, redo = editor.undo_btn.geometry(), editor.redo_btn.geometry()
+    gaps = (abs(undo.center().x() - redo.center().x()), )
+    editor.win.done(0)
+    window.close()
+    assert gaps[0] <= 2, (undo, redo, group)
+
+
+def test_text_editor_unlink_restores_text_color():
+    """Quitar un enlace deja el texto de su color: se quedaba azul hasta cerrar y abrir el editor."""
+    import editor as sheet_module
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "hola mundo")], [0])
+    sheet = editor.sheet
+    block = sheet.document().findBlockByNumber(1)
+    cursor = QTextCursor(block)
+    cursor.setPosition(block.position() + 4, QTextCursor.MoveMode.KeepAnchor)
+    sheet.setTextCursor(cursor)
+    sheet.set_link("https://teto.example")
+    linked = QTextCursor(block)
+    linked.setPosition(block.position() + 2)
+    blue = linked.charFormat().foreground().color().name()
+    sheet.setTextCursor(cursor)
+    sheet.set_link("")
+    after = QTextCursor(block)
+    after.setPosition(block.position() + 2)
+    f = after.charFormat()
+    content = sheet.content()
+    editor.win.done(0)
+    window.close()
+    assert blue == sheet_module.QColor(sheet_module.LINK_COLOR).name(), blue
+    assert not f.isAnchor() and not f.fontUnderline() and not f.hasProperty(f.Property.ForegroundBrush), f
+    assert "<a" not in content, content
+
+
+def test_speaker_reads_every_paragraph_with_powershell():
+    """La voz leía solo el primer párrafo: con la tubería de QProcess, PowerShell no veía las líneas siguientes.
+    Con el PowerShell de verdad (sin hablar), cada párrafo devuelve su «ok»."""
+    import os
+    import time
+    import app
+    import qtk
+    if os.name != "nt":
+        return
+    original = app.SPEECH_SCRIPT
+    app.SPEECH_SCRIPT = ("[Console]::InputEncoding = [Text.Encoding]::UTF8\n"
+                         "while ($null -ne ($line = [Console]::In.ReadLine())) { [Console]::Out.WriteLine('ok') }")
+    try:
+        speaker, heard = app.Speaker(), []
+        speaker.done.connect(lambda: heard.append(1))
+        for n in range(3):
+            speaker.say(f"Párrafo {n}.")
+            deadline = time.time() + 20
+            while len(heard) <= n and time.time() < deadline:
+                qtk.app().processEvents()
+                time.sleep(0.02)
+        speaker.stop()
+    finally:
+        app.SPEECH_SCRIPT = original
+    assert heard == [1, 1, 1], heard
+
+
 def test_text_editor_ribbon_tabs_like_word():
     """La cinta va en pestañas como Word (Inicio, Insertar, Revisar, Vista): cada botón está en una sola, el
     capítulo y ◀ ▶ se ven en todas, y «Mostrar cambios» de Vista va a la par con el del menú Cambios."""
@@ -8386,6 +8491,55 @@ def test_window_status_line_elides_and_gets_report_memos():
     window.close()
     assert shown.endswith("\u2026") and tip == long_text and text == long_text, (tip[-10:], text[-10:])
     assert seeded and memos["_facts"], (len(paragraphs), len(memos["_facts"]))
+
+
+def test_contents_subtitles_hang_from_chapter_and_sit_left():
+    """En «Contenido» los subtítulos cuelgan de su capítulo con una raya a la izquierda, como las flechas de la
+    lista de la ventana; en el texto van a la izquierda: centrados bajo un título centrado se confundían con él.
+    Sin la opción «Índice», no hay página «Contenido» (el índice del lector, nav, sigue)."""
+    B = convert.Block
+    book = convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1: Uno"), B("p", 1, "Texto."),
+                                          B("heading", 1, "Lado de la bruja"), B("p", 1, "Más.")], [0])
+    out = TMP / "contenido-subtitulos.epub"
+    convert.write_epub(book, [(0, "Capítulo 1: Uno")], out, style="Novela ligera")
+    css, page = epub_file(out, "OEBPS/style.css"), epub_file(out, "OEBPS/contents.xhtml")
+    bare = TMP / "sin-contenido.epub"
+    convert.write_epub(book, [(0, "Capítulo 1: Uno")], bare, contents=False)
+    with zipfile.ZipFile(bare) as z:
+        names = z.namelist()
+    assert re.search(r"ol\.toc ol \{[^}]*border-left", css) and re.search(r"\nh2 \{ text-align: left", css), css
+    assert "<ol><li><a" in page and "Lado de la bruja" in page, page
+    assert "OEBPS/contents.xhtml" not in names and "OEBPS/nav.xhtml" in names, names
+    assert convert.check_epub(out) == [] and convert.check_epub(bare) == []
+
+
+def test_window_cover_row_and_contents_option():
+    """La lista empieza por «Portada»: elegirla muestra su página del PDF y la portada del EPUB, y no cuenta como
+    fila del libro. La casilla «Índice» de la barra decide si el EPUB lleva la página «Contenido»."""
+    import app
+    from PySide6.QtWidgets import QCheckBox
+    root, window = visible_window()
+    window.pdf = TMP / f"portada-{time_ns()}.pdf"
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Uno", 20, "helv")])
+    doc.save(window.pdf)
+    cover = pymupdf.open(window.pdf)[0].get_pixmap(dpi=30).tobytes("jpg")
+    window.show_book(convert.Book("Libro", "", cover, [convert.Block("heading", 1, "Capítulo 1: Uno"),
+                                                      convert.Block("p", 1, "Texto.")], [0]))
+    first = window.tree.topLevelItem(0)
+    row = [first.text(n) for n in range(3)]
+    children = window.tree.get_children()
+    window.tree.setCurrentItem(first)
+    root.update()
+    shown = window.epub_caption.text(), window.pdf_page, window.tree.selection()
+    box = next(b for b in window.options_row.findChildren(QCheckBox) if b.text() == "Índice")
+    default = window.write_options()["contents"]
+    box.click()
+    off = window.write_options()["contents"]
+    window.close()
+    assert row == ["Portada", "Portada", ""] and app.COVER not in children and children[0] == "0", (row, children)
+    assert shown == ("EPUB · portada", 0, ()), shown
+    assert default is True and off is False, (default, off)
 
 
 def test_custom_font_is_embedded():

@@ -1057,7 +1057,23 @@ class Sheet(QTextEdit):
                     break
                 it += 1
         cursor.beginEditBlock()
-        cursor.mergeCharFormat(link_format(href))
+        if href:
+            cursor.mergeCharFormat(link_format(href))
+        else:  # mergeCharFormat no borra el color: quitado el enlace, el texto se quedaba azul
+            start, end = cursor.selectionStart(), cursor.selectionEnd()
+            piece = QTextCursor(self.document())
+            block = self.document().findBlock(start)
+            while block.isValid() and block.position() < end:
+                it = block.begin()
+                while not it.atEnd():
+                    fragment = it.fragment()
+                    a, b = max(start, fragment.position()), min(end, fragment.position() + fragment.length())
+                    if a < b:
+                        piece.setPosition(a)
+                        piece.setPosition(b, QTextCursor.MoveMode.KeepAnchor)
+                        piece.setCharFormat(link_format("", fragment.charFormat()))
+                    it += 1
+                block = block.next()
         cursor.endEditBlock()
 
     def insert_note(self):

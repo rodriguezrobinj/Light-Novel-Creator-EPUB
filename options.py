@@ -60,7 +60,8 @@ OPTIONS = (
 )
 # Lo que se guarda por libro y en «Libros nuevos». El aspecto (estilo, separador y letra, con la ruta de la propia)
 # está en la barra de abajo de la ventana: se cambia mirando la vista previa
-BOOK_KEYS = tuple(o.key for o in OPTIONS if o.category in CATEGORIES[BOOK]) + ("style", "separator", "font", "font_file")
+BOOK_KEYS = tuple(o.key for o in OPTIONS if o.category in CATEGORIES[BOOK]) + ("style", "separator", "font", "font_file",
+                                                                                    "contents")
 
 
 def fold(text):

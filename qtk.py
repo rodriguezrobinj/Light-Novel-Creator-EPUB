@@ -176,6 +176,9 @@ class RowList(QTreeWidget):
         super().__init__()
         self.columns = list(columns)
         self.rows = {}   # iid -> QTreeWidgetItem
+        # Filas fijas arriba (la portada): se ven y se eligen, pero no están en get_children, selection ni
+        # identify_row, así la lógica de la ventana, que va por bloques del libro, no las ve
+        self.pinned = set()
         self.looks = {}  # tag -> (fuente, color)
         self.branches = {}  # iid -> forma de su flecha de pertenencia (link)
         self.setColumnCount(len(columns))
@@ -346,8 +349,9 @@ class RowList(QTreeWidget):
         # Qt avisa del cambio de selección a mitad del borrado, con la fila a medio quitar: se avisa al final
         before = self.selection()
         self.blockSignals(True)
-        if len(iids) == len(self.rows):  # vaciar la lista: de golpe, no fila a fila
+        if len(iids) == len(self.rows) - len(self.pinned):  # vaciar la lista: de golpe, no fila a fila, y las fijas
             self.rows.clear()
+            self.pinned.clear()
             self.clear()
         else:
             for iid in iids:
@@ -357,7 +361,18 @@ class RowList(QTreeWidget):
             self.selected.emit()
 
     def get_children(self, _=""):
-        return tuple(self.topLevelItem(n).data(0, IID) for n in range(self.topLevelItemCount()))
+        rows = (self.topLevelItem(n).data(0, IID) for n in range(self.topLevelItemCount()))
+        return tuple(iid for iid in rows if iid not in self.pinned)
+
+    def pin(self, iid, values=(), tags=()):
+        """Fila fija al principio de la lista (ver pinned)."""
+        self.insert("", 0, iid, values, tags)
+        self.pinned.add(iid)
+
+    def current(self):
+        """La fila elegida, también si es una fija; "" sin ninguna."""
+        items = self.selectedItems()
+        return items[0].data(0, IID) if items else ""
 
     def exists(self, iid):
         return iid in self.rows
@@ -397,7 +412,7 @@ class RowList(QTreeWidget):
             item.setData(n, Qt.ItemDataRole.ForegroundRole, QColor(color) if color else None)
 
     def selection(self):
-        return tuple(item.data(0, IID) for item in self.selectedItems())
+        return tuple(item.data(0, IID) for item in self.selectedItems() if item.data(0, IID) not in self.pinned)
 
     def selection_set(self, iid):
         # Como Tk, sustituye la selección: con selección múltiple, Qt sumaría la fila si hay Ctrl pulsado
@@ -415,9 +430,10 @@ class RowList(QTreeWidget):
         rect, n = self.visualItemRect(self.rows[iid]), self.columns.index(column)
         return self.columnViewportPosition(n), rect.y(), self.columnWidth(n), rect.height()
 
-    def identify_row(self, y):
+    def identify_row(self, y, pinned=False):
         item = self.itemAt(QPoint(4, y))
-        return item.data(0, IID) if item else ""
+        iid = item.data(0, IID) if item else ""
+        return iid if pinned or iid not in self.pinned else ""
 
     def identify_column(self, x):
         n = self.header().logicalIndexAt(x)

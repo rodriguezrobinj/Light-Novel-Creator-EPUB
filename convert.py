@@ -3169,7 +3169,7 @@ BASE_CSS = """body { margin: 0 4%; line-height: 1.5; }
 p { margin: 0 0 0.4em; orphans: 2; widows: 2; -webkit-hyphens: auto; hyphens: auto; }
 h1, h2 { -webkit-hyphens: none; hyphens: none; page-break-after: avoid; }
 h1 .num, h1 .name { display: block; }
-h2 { text-align: center; font-size: 1.15em; margin: 1.5em 0 1em; }
+h2 { text-align: left; font-size: 1.15em; margin: 1.5em 0 1em; }  /* bajo un título centrado, se distingue de él */
 p.brk { text-indent: 0; text-align: center; margin: 1em 0; }
 hr.brk { border: 0; border-top: 1px solid #999999; width: 33%; margin: 1.2em auto; }
 div.brk-gap { height: 1.5em; }
@@ -3181,7 +3181,7 @@ div.img img { max-width: 100%; max-height: 95vh; }
 h1.toc { text-align: center; }
 ol.toc, ol.toc ol { list-style: none; margin: 0; }
 ol.toc { padding: 0; }
-ol.toc ol { padding-left: 1.5em; font-size: 0.9em; }
+ol.toc ol { padding-left: 1em; margin-left: 0.4em; border-left: 1px solid #999999; font-size: 0.9em; }  /* subtítulos colgados de su capítulo */
 ol.toc li { margin: 0.35em 0; }
 ol.toc a { text-decoration: none; color: inherit; }
 p.credits { text-indent: 0; text-align: center; margin: 0.6em 0; }
