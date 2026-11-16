@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pymupdf
-from PIL import Image, ImageOps
+from PIL import Image, ImageChops, ImageOps
 
 MEMO_SIZE = 50000  # resultados por función de _memo: de sobra para varios libros
 
@@ -374,12 +374,25 @@ def _norm(text):
 
 
 OCR_DIR = Path(__file__).parent / "tessdata"  # modelo de español de Tesseract (tessdata_fast); en el .exe, junto a los módulos
+OCR_SATURATION = 60  # de 255: por encima, letra de color; el gris de la sombra y el blanco del fondo quedan debajo
+OCR_BORDER = 20  # píxeles de blanco alrededor: pegado al borde, Tesseract leía «El Btague» por «El Ataque»
+OCR_SHADOW = 0.05  # gris oscuro por píxel de color: Mitsuha 4 a 6, 0,18 o más; Farming Life 2 y Oukoku, 0
 
 
 def _ocr(page, clip):
     """Texto de una zona de la página con el Tesseract que trae MuPDF, o "" si no se puede leer."""
     try:
-        pix = page.get_pixmap(dpi=300, clip=clip)
+        pix = page.get_pixmap(dpi=300, clip=clip, alpha=False)
+        # Mitsuha 4 a 6: letras doradas con sombra gris se leían «fircipreste», «Vegenerada». Con sombra, solo lo
+        # de color, en negro sobre blanco. Sin sombra se lee tal cual: así, Farming Life 2 perdía espacios
+        _, sat, value = Image.frombytes("RGB", (pix.width, pix.height), pix.samples).convert("HSV").split()
+        color = sat.point(lambda v: 255 if v > OCR_SATURATION else 0)
+        shadow = ImageChops.multiply(ImageChops.invert(color), value.point(lambda v: 255 if v < 200 else 0))
+        colored = color.histogram()[255]
+        if colored > 0.01 * pix.width * pix.height and shadow.histogram()[255] > OCR_SHADOW * colored:
+            mask = ImageOps.expand(ImageChops.invert(color), border=OCR_BORDER, fill=255)
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.Pixmap(pymupdf.csGRAY, mask.width, mask.height, mask.tobytes(),
+                                                               False))  # en gris, el OCR de MuPDF no lee nada
         with pymupdf.open("pdf", pix.pdfocr_tobytes(language="spa", tessdata=str(OCR_DIR))) as scan:
             return " ".join(scan[0].get_text().split())
     except Exception:  # sin modelo o sin OCR en este MuPDF: el título se queda sin leer, como antes
@@ -431,12 +444,21 @@ OCR_NUMBER = re.compile(r"(cap[ií]tulo\s+)(\d+)(\)?)", re.I)
 
 def _renumber(titles):
     """Arregla los números de capítulo que el OCR lee mal en letra decorativa (Mitsuha 4 a 6): «3)» es 31, y un
-    número entre dos que se siguen de dos en dos es el de en medio («39, 49, 41» -> 40)."""
-    titles = [OCR_NUMBER.sub(lambda m: m[1] + m[2] + ("1" if m[3] else ""), t, count=1) for t in titles]
+    número entre dos que se siguen de dos en dos es el de en medio («39, 49, 41» -> 40), y el 0 que lee 8 o 9 tras
+    el número de antes («49, 58» -> 50) si con lo que sigue no hace secuencia."""
+    # y la tilde que el OCR pierde en «Capitulo», como la pone la tipografía del EPUB
+    titles = [OCR_NUMBER.sub(lambda m: m[1] + m[2] + ("1" if m[3] else ""), LABEL_START.sub(_label_accent, t), count=1)
+              for t in titles]
     numbered = [(k, int(m[2])) for k, t in enumerate(titles) if (m := OCR_NUMBER.match(t))]
-    for (_, a), (k, n), (_, b) in zip(numbered, numbered[1:], numbered[2:]):
-        if b == a + 2 and n != a + 1:
-            titles[k] = OCR_NUMBER.sub(lambda m: m[1] + str(a + 1), titles[k], count=1)
+    for j in range(1, len(numbered)):
+        a, (k, n) = numbered[j - 1][1], numbered[j]
+        b = numbered[j + 1][1] if j + 1 < len(numbered) else None
+        want = a + 1
+        wrong = [(x, y) for x, y in zip(str(want), str(n)) if x != y]
+        zero = len(str(n)) == len(str(want)) and len(wrong) == 1 and wrong[0][0] == "0" and wrong[0][1] in "89"
+        if n != want and (b == a + 2 or zero and b != n + 1):
+            titles[k] = OCR_NUMBER.sub(lambda m: m[1] + str(want), titles[k], count=1)
+            numbered[j] = (k, want)
     return titles
 
 
@@ -2966,10 +2988,13 @@ def analyze(pdf_path, progress=None):
             chosen, inserted = set(), []
             for title, p in outline:
                 k = next((k for k, b in enumerate(blocks) if b.kind == "heading" and b.page == p), None)
-                if k is None:  # Strange Grief 10: el marcador apunta a la página en blanco de antes de su título
+                # Strange Grief 10: el marcador apunta a la página en blanco de antes de su título; en el 7, a la
+                # ilustración de antes, y el marcador («Bonus Story:») es solo el principio del título
+                if k is None and _key(title):
                     k = next((k for k, b in enumerate(blocks) if b.kind == "heading" and b.page == p + 1
-                              and _key(html.unescape(b.html)) and _key(title).startswith(_key(html.unescape(b.html)))),
-                             None)
+                              and _key(html.unescape(b.html))
+                              and (_key(title).startswith(_key(html.unescape(b.html)))
+                                   or _key(html.unescape(b.html)).startswith(_key(title)))), None)
                 # A doble espacio, la segunda línea del título queda lejos y era otro título («Capítulo Tres: La
                 # Batalla De Los» + «Dioses», Strange Grief 10): el marcador lo dice entero, y se unen
                 while (k is not None and k + 1 < len(blocks) and blocks[k + 1].kind == "heading"

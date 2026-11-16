@@ -783,6 +783,29 @@ def test_renumber_fixes_ocr_chapter_numbers():
                               "Capítulo Extra - E", "Capítulo 41 - F", "Palabras del autor"]) == [
         "Capítulo 31 - A", "Capítulo 32 - B", "Capítulo 39 - C", "Capítulo 40 - D", "Capítulo Extra - E",
         "Capítulo 41 - F", "Palabras del autor"]
+    # Mitsuha 5 y 6: el 0 de la letra dorada sale 8 al final o antes de otro mal leído; un salto real se queda
+    assert convert._renumber(["Capitulo 49 - A", "Capítulo 58 - B", "Capítulo Extra - C"]) == [
+        "Capítulo 49 - A", "Capítulo 50 - B", "Capítulo Extra - C"]
+    assert convert._renumber(["Capítulo 59 - A", "Capítulo 68 - B", "Capítulo 6) - C"]) == [
+        "Capítulo 59 - A", "Capítulo 60 - B", "Capítulo 61 - C"]
+    assert convert._renumber(["Capítulo 49 - A", "Capítulo 58 - B", "Capítulo 59 - C"]) == [
+        "Capítulo 49 - A", "Capítulo 58 - B", "Capítulo 59 - C"]
+
+
+def test_ocr_reads_gold_letters_without_their_shadow():
+    """Mitsuha 4 a 6: letras doradas con sombra gris debajo; el OCR leía «fircipreste», «Vegenerada». Se lee solo
+    lo de color. El texto negro, o de color sin sombra (Farming Life 2), se sigue leyendo tal cual."""
+    doc = pymupdf.open()
+    title = "Capítulo 39 - El Regreso de la Arcipreste"
+    for color, shadow in (((0.95, 0.75, 0.1), (1, 2, 3)), ((0, 0, 0), ()), ((0.2, 0.4, 0.7), ())):
+        p = doc.new_page(width=600, height=60)
+        for k in shadow:  # sombra gris gruesa, abajo a la derecha
+            p.insert_text((5 + k, 40 + k), title, fontsize=16, fontname="tibo", color=(0.55, 0.55, 0.55))
+        p.insert_text((5, 40), title, fontsize=16, fontname="tibo", color=color)
+    gold, black, blue = (convert._ocr(p, pymupdf.Rect(0, 20, 400, 50)) for p in doc)
+    assert gold == title, gold
+    assert "Regreso" in black, black
+    assert blue == title, blue  # Farming Life 2: de color sin sombra, tal cual
 
 
 def test_image_info_matches_pymupdf_xrefs():
@@ -3367,15 +3390,25 @@ def test_strange_grief_titles_bookmarks_and_patreon_page():
              + body(160, 4))
     add_page(doc, 6, [(89, 107, "Especial Agradecimiento a los Patreons:", 26, "helv")]
              + [(57, 152 + 19 * j, name, 8, "helv") for j, name in enumerate(("Carlos Ivan", "Marco Alvarez", "Pedro"))])
+    # Tomo 7: el marcador, solo «Bonus Story:», apunta a la ilustración de antes del título entero
+    p = add_page(doc, 7, [])
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 85), False)
+    pix.clear_with(180)
+    p.insert_image(p.rect, pixmap=pix, keep_proportion=False)
+    add_page(doc, 8, [(85, 60, "Bonus Story:", 18.6, "helv"), (85, 94, "La Columna de Consejos de Mil", 16, "helv"),
+                      (85, 111, "Trucos - Parte 2", 16, "helv")] + body(160, 5))
     doc.set_toc([[1, "Prologo: Divinidad", 1], [1, "Capitulo Tres: La Batalla De Los Dioses", 3],
-                 [1, "Capitulo Cuatro: El Regreso De «Absolute Shadow»", 4], [1, "Bonus Story: La Coleccion de Reliquias", 5]])
+                 [1, "Capitulo Cuatro: El Regreso De «Absolute Shadow»", 4], [1, "Bonus Story: La Coleccion de Reliquias", 5],
+                 [1, "Bonus Story:", 7]])
     path = TMP / "strange-grief.pdf"
     doc.save(path)
     book = convert.analyze(path)
     chapters = [html.unescape(book.blocks[k].html) for k in book.candidates]
     assert chapters == ["Prologo: Divinidad", "Capitulo Tres: La Batalla De Los Dioses",
-                        "Capitulo Cuatro: El Regreso De «Absolute Shadow»", "Bonus Story: La Coleccion de Reliquias"], chapters
+                        "Capitulo Cuatro: El Regreso De «Absolute Shadow»", "Bonus Story: La Coleccion de Reliquias",
+                        "Bonus Story: La Columna de Consejos de Mil Trucos - Parte 2"], chapters
     assert [b.kind for b in book.blocks if b.page == 6] == ["image"] and not book.skipped, (book.skipped, book.blocks[-1])
+    assert [b.kind for b in book.blocks if b.page == 7] == ["image"], [b for b in book.blocks if b.page == 7]
     assert convert._series_volume("Strange Grief Wants to Retire - Volumen SS1 [Astral Novel]", "") == (
         "Strange Grief Wants to Retire", "")
     assert convert._typography("Uhm...Esta bien, y …Ya.") == "Uhm… Esta bien, y …Ya."  # 76 veces en el tomo 2
