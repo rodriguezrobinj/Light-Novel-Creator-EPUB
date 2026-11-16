@@ -4903,31 +4903,39 @@ def test_editor_focus_mode():
 
 
 def test_editor_focus_mode_edges_drag_and_steady_bar():
-    """Pantalla completa: las flechas van en los bordes, lejos de la hoja; arrastrar el borde de la hoja la estrecha
-    (y no pasa del ancho de la página). En la barra de abajo, que salga o se vaya un aviso no mueve el capítulo."""
+    """Pantalla completa: las flechas van en los bordes, lejos de la hoja; arrastrar el borde de la hoja la ensancha
+    sin llegar a las flechas, y no la deja más estrecha que la página. Fuera de pantalla completa, arrastrar no hace
+    nada. En la barra de abajo, que salga o se vaya un aviso no mueve el capítulo."""
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtTest import QTest
     B = convert.Block
     root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
     editor.win.resize(1300, 700)
     editor.win.show()
+    editor.text_zoom.setValue(60)  # página estrecha: en la pantalla de las pruebas (800 px) hay sitio para ensanchar
+    root.update()
+    desk, sheet = editor.desk, editor.sheet
+
+    def drag(start, end):
+        y = desk.height() // 2
+        QTest.mousePress(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(start, y))
+        QTest.mouseMove(desk, QPoint(end, y))
+        QTest.mouseRelease(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(end, y))
+        root.update()
+        return sheet.width()
+
+    normal = sheet.width()
+    unchanged = drag(sheet.geometry().right() + 4, sheet.geometry().right() + 200)
     QTest.keyClick(editor.sheet, Qt.Key.Key_F11)
     root.update()
     desk, sheet = editor.desk, editor.sheet
     sheet_box = sheet.geometry()
     edges = (editor.focus_prev.geometry().left() < 40, desk.width() - editor.focus_next.geometry().right() < 40,
              sheet_box.left() - editor.focus_prev.geometry().right() > 20, editor.focus_prev.objectName() == "edge")
-    full, y = sheet.width(), desk.height() // 2
-    QTest.mousePress(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(sheet_box.right() + 4, y))
-    QTest.mouseMove(desk, QPoint(sheet_box.right() - 150, y))
-    QTest.mouseRelease(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(sheet_box.right() - 150, y))
-    root.update()
-    narrow = sheet.width()
-    QTest.mousePress(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(sheet.geometry().right() + 4, y))
-    QTest.mouseMove(desk, QPoint(desk.width() - 5, y))
-    QTest.mouseRelease(desk, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(desk.width() - 5, y))
-    root.update()
-    widest = sheet.width()
+    full = sheet.width()
+    narrow = drag(sheet_box.right() + 4, sheet_box.right() - 150)
+    widest = drag(sheet.geometry().right() + 4, desk.width() - 5)
+    gap = editor.focus_next.geometry().left() - sheet.geometry().right()
     editor.note.setText("Tipografía corregida en 3 párrafos de este capítulo")
     root.update()
     before = editor.chapter_btn.mapTo(editor.win, QPoint(0, 0)).x()
@@ -4937,7 +4945,8 @@ def test_editor_focus_mode_edges_drag_and_steady_bar():
     editor.win.done(0)
     window.close()
     assert all(edges), (edges, desk.size(), sheet_box, editor.focus_prev.geometry())
-    assert narrow < full - 200 and widest <= editor.page_width() and widest > narrow, (full, narrow, widest)
+    assert unchanged == normal and narrow == full and widest > full + 100 and gap >= 30, (normal, unchanged, full,
+                                                                                         narrow, widest, gap)
     assert before == after, (before, after)
 
 
@@ -4953,7 +4962,13 @@ def test_dropdowns_join_their_button():
     theme.apply(q, "Claro")
     sheet = q.styleSheet()
     menu = QMenu()
-    app._menu_button("Herramientas", menu)
+    menu.addAction("Una opción bastante más larga que el botón")
+    button = app._menu_button("Herramientas", menu)
+    button.resize(110, 30)
+    menu.popup(button.mapToGlobal(button.rect().bottomLeft()))
+    q.processEvents()
+    seam = menu.findChild(theme.QWidget, "seam").geometry()
+    menu.close()
     combo = QComboBox()
     combo.addItems([str(n) for n in range(40)])  # más alta que lo que queda debajo: se abre encima
     combo.resize(160, 28)
@@ -4965,9 +4980,11 @@ def test_dropdowns_join_their_button():
     combo.hidePopup()
     combo.close()
     assert menu.objectName() == "drop" and "QMenu#drop {{ border-top: 0; }}".replace("{{", "{").replace("}}", "}") in sheet
-    assert "QComboBox:on { border-bottom-color" in sheet and 'QComboBox[up="true"]:on' in sheet, sheet
+    assert "border-bottom-color" in sheet.split("QComboBox:on {")[1].split("}")[0] and 'QComboBox[up="true"]:on' in sheet, sheet
     assert theme.colors(False)["acc"] not in sheet.split("QComboBox QAbstractItemView")[1].split("}")[0]
     assert up is True, up
+    assert button.text() == "Herramientas" and button.objectName() == "menu", button.text()  # flecha de las listas
+    assert seam.left() == 109 and seam.right() == menu.width() - 1 and seam.height() == 1, (seam, menu.width())
 
 
 def test_editor_work_log():

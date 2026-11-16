@@ -1749,8 +1749,8 @@ def _row(*widgets, margins=(0, 0, 0, 0), spacing=6):
 
 
 def _menu_button(text, menu):
-    button = QToolButton()
-    button.setText(f"{text} ▾")
+    button = QToolButton(objectName="menu")  # con la flecha de las listas (QSS), no «▾» de texto
+    button.setText(text)
     button.setMenu(menu)
     button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
     _attach(button, menu)
@@ -1762,6 +1762,10 @@ def _attach(button, menu):
     como el botón que se despliega, no como otra ventana."""
     menu.setObjectName("drop")  # sin borde arriba: sigue al botón (QSS)
     menu.aboutToShow.connect(lambda: menu.setMinimumWidth(button.width()))
+    # Un menú más ancho que su botón lleva su borde de arriba solo donde el botón ya no lo tapa
+    seam = QFrame(menu, objectName="seam")
+    editor.watch(menu, lambda event: event.type() in (QEvent.Type.Show, QEvent.Type.Resize) and seam.setGeometry(
+        button.width() - 1, 0, max(0, menu.width() - button.width() + 1), 1) and False)
 
 
 def _combo(var, values, width, editable=False, changed=None):
@@ -7393,6 +7397,9 @@ class TextEditor:
         self.drop_ribbon()
         for button in (self.focus_prev, self.focus_next):
             button.setVisible(self.focused)
+        self.set_text_zoom(self.text_zoom.value())  # el ancho elegido en pantalla completa, solo en ella
+        if not self.focused:
+            self.desk.unsetCursor()
         if self.focused:  # tras los avisos, que tienen su sitio fijo: no se mueven al cambiar el texto
             self.status_row.insertWidget(2, self.chapter_btn)
             self.status_row.insertWidget(3, self.review_btn)
@@ -8520,14 +8527,16 @@ class TextEditor:
 
     def set_text_zoom(self, percent):
         self.sheet.set_zoom(percent)
-        self.sheet.setMaximumWidth(int(self.page_width(percent) * self.page_share))
+        share = self.page_share if self.focused else 1.0  # más ancha solo en pantalla completa
+        self.sheet.setMaximumWidth(int(self.page_width(percent) * share))
         self.text_zoom_label.setText(f"{percent} %")
 
     def on_desk_event(self, event):
-        """Arrastrar el borde de la hoja la estrecha o la ensancha, igual a los dos lados (va centrada), entre un
-        poco menos de la mitad y el ancho de la página."""
+        """En pantalla completa, arrastrar el borde de la hoja la ensancha (o la vuelve a estrechar), igual a los
+        dos lados (va centrada): desde el ancho de la página hasta poco antes de las flechas de los lados."""
         kind = event.type()
-        if kind not in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+        if not self.focused or kind not in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress,
+                                            QEvent.Type.MouseButtonRelease):
             return False
         x = event.position().x()
         sheet = self.sheet.geometry()
@@ -8540,7 +8549,8 @@ class TextEditor:
             return False
         if self.dragging:
             width = 2 * abs(x - self.desk.width() / 2)
-            self.page_share = min(1.0, max(0.45, width / self.page_width()))
+            room = self.desk.width() - 2 * (self.focus_prev.width() + 40)  # la hoja no llega a las flechas
+            self.page_share = max(1.0, min(width, room) / self.page_width())
             self.sheet.setMaximumWidth(int(self.page_width() * self.page_share))
             return True
         self.desk.setCursor(Qt.CursorShape.SizeHorCursor if near else Qt.CursorShape.ArrowCursor)
