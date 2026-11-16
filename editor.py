@@ -602,6 +602,7 @@ class Sheet(QTextEdit):
         # Fondo tenue del párrafo del cursor: el original lo recuadra, y en la hoja no se veía dónde se estaba.
         # Del acento del tema, casi transparente: sigue al tema aunque cambie con el editor abierto
         self.mark_current = False  # TextEditor lo enciende
+        self.foreign = None  # k -> bytes de la ilustración k si es de otro capítulo, o None (TextEditor), para adopt
         self.cursorPositionChanged.connect(lambda: self.mark_current and self.viewport().update())
         self.origins = {}  # documento -> [(bloque, línea)] tal como se cargó
         self.known = {}  # documento -> {párrafo: (revisión, ¿cambiado?)} de changed_blocks, hasta que cambie
@@ -1246,15 +1247,30 @@ class Sheet(QTextEdit):
         cursor.endEditBlock()
         self.setTextCursor(cursor)
 
-    def insert_picture(self, data):
-        """Imagen nueva (JPEG) como párrafo propio tras el del cursor. Se guarda en IMAGES con el nombre de su
-        contenido y va como [Imagen nombre]: al aceptar, edit_section la vuelve ilustración del libro."""
+    def store_picture(self, data):
+        """Guarda la imagen en IMAGES con el nombre de su contenido; devuelve el nombre de [Imagen nombre]."""
         name = hashlib.sha1(data).hexdigest()[:16] + ".jpg"
         path = Path(IMAGES) / name
         if not path.is_file():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         self.pictures[name] = QImage.fromData(data)
+        return name
+
+    def adopt(self, line):
+        """[Ilustración k] de otro capítulo (cortada allí, pegada aquí): su imagen como [Imagen nombre]. Al aceptar,
+        edit_section solo recupera las ilustraciones de su capítulo, y esta se quedaba como un párrafo con ese texto:
+        la ilustración se perdía al moverla de capítulo."""
+        m = convert.TOKEN.fullmatch(line)
+        if not m or m.group(1) != "Ilustración" or not self.foreign:
+            return line
+        data = self.foreign(int(m.group(2)))
+        return f"[Imagen {self.store_picture(data)}]" if data else line
+
+    def insert_picture(self, data):
+        """Imagen nueva (JPEG) como párrafo propio tras el del cursor. Se guarda en IMAGES con el nombre de su
+        contenido y va como [Imagen nombre]: al aceptar, edit_section la vuelve ilustración del libro."""
+        name = self.store_picture(data)
         cursor = self.textCursor()
         cursor.beginEditBlock()
         cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
@@ -1541,7 +1557,7 @@ class Sheet(QTextEdit):
         raw, objects = False, True
         if source.hasFormat(MIME):
             present = self.objects()
-            lines = [line for line in bytes(source.data(MIME)).decode("utf-8").split("\n\n")
+            lines = [self.adopt(line) for line in bytes(source.data(MIME)).decode("utf-8").split("\n\n")
                      if not (convert.TOKEN.fullmatch(line) and line[1:-1] in present)]
         elif source.hasHtml():
             outside = QTextDocument()
@@ -1564,6 +1580,10 @@ class Sheet(QTextEdit):
         cursor.beginEditBlock()
         cursor.removeSelectedText()
         whole = source.hasFormat(WHOLE)
+        objects_only = all(convert.TOKEN.fullmatch(line) or convert.PICTURE.fullmatch(line) for line in lines)
+        if objects_only and not cursor.atBlockStart():  # una ilustración soltada en medio de un párrafo: tras él
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+            whole = False
         before = whole and cursor.atBlockStart() and cursor.block().previous().isValid()
         if before:  # párrafos enteros al principio de uno: tras el de arriba, y este queda como estaba
             cursor.movePosition(QTextCursor.MoveOperation.PreviousCharacter)

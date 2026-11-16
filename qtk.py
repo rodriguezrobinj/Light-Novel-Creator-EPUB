@@ -662,6 +662,7 @@ class Strip(QScrollArea):
 
     def clear(self):
         for label in list(self.labels.values()) + self.blanks:
+            label.hide()  # deleteLater espera al bucle de eventos: mientras, se veían las del libro anterior
             label.deleteLater()
         self.labels, self.colors, self.current, self.blanks = {}, {}, None, []
 
