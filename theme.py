@@ -75,11 +75,14 @@ QWidget {{ font-family: "Segoe UI"; font-size: 9pt; color: {ink}; }}
 QMainWindow, QDialog {{ background: {bg}; }}
 QPushButton, QToolButton {{ border: 1px solid {edge}; border-radius: 6px; padding: 4px 12px; background: {card}; }}
 QPushButton:hover, QToolButton:hover {{ background: {hover}; }}
-QPushButton:open, QToolButton:open {{ border-bottom-color: {card}; border-bottom-left-radius: 0;
+QPushButton:open, QToolButton:open {{ background: {card}; border-bottom-color: {card}; border-bottom-left-radius: 0;
     border-bottom-right-radius: 0; }}
 QPushButton:pressed, QToolButton:pressed {{ background: {press}; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {hint}; }}
 QToolButton::menu-indicator {{ image: none; width: 0; }}
+QToolButton#menu {{ padding-right: 28px; }}
+QToolButton#menu::menu-indicator {{ image: url("{chevron}"); subcontrol-origin: padding; subcontrol-position: center right;
+    width: 12px; height: 12px; right: 9px; }}
 QPushButton#primary {{ background: {acc}; border-color: {acc}; color: {acc_ink}; font-weight: 600; padding: 6px 18px; }}
 QPushButton#primary:hover {{ background: {acc_hover}; }}
 QPushButton#primary:disabled {{ background: {line}; border-color: {line}; color: {hint}; }}
@@ -93,7 +96,7 @@ QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QListWidget {{ border: 1px solid
 QLineEdit, QComboBox, QSpinBox {{ padding: 3px 6px; }}
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus {{ border: 1px solid {acc}; }}
 QComboBox:hover {{ background: {hover}; }}
-QComboBox:on {{ border-bottom-color: {base}; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }}
+QComboBox:on {{ background: {base}; border-bottom-color: {base}; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }}
 QComboBox {{ combobox-popup: 0; }}
 QComboBox::drop-down {{ border: 0; background: transparent; width: 22px; }}
 QComboBoxPrivateContainer {{ border: 0; padding: 0; margin: 0; background: {base}; }}
@@ -125,6 +128,7 @@ QTabBar::tab {{ padding: 4px 12px; border: 0; border-bottom: 2px solid transpare
 QTabBar::tab:selected {{ color: {acc}; border-bottom-color: {acc}; font-weight: 600; }}
 QMenu {{ background: {card}; border: 1px solid {edge}; padding: 2px; }}
 QMenu#drop {{ border-top: 0; }}
+QFrame#seam {{ background: {edge}; }}
 QMenu::item {{ padding: 4px 24px 4px 22px; min-height: 16px; }}
 QMenu::item:selected {{ background: {sel}; color: {ink}; }}
 QMenu::separator {{ height: 1px; background: {line}; margin: 4px 8px; }}
