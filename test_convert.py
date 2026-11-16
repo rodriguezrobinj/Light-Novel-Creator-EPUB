@@ -5075,8 +5075,7 @@ def test_editor_inserts_new_pictures():
     saved = app.filedialog.askopenfilename
     try:
         app.filedialog.askopenfilename = lambda **kwargs: str(picture)
-        button = next(b for b in editor.win.findChildren(app.QToolButton) if b.text() == "Imagen")
-        button.click()
+        next(a for a in editor.picture_btn.menu().actions() if a.text() == "Desde un archivo…").trigger()
     finally:
         app.filedialog.askopenfilename = saved
     from_file = sheet.content().split("\n\n")
@@ -5178,6 +5177,62 @@ def test_editor_changes_illustration():
     window.close()
     assert "Cambiar ilustración…" in actions, actions
     assert before != 4.0 and after == 4.0 and not dirty, (before, after, dirty)
+
+
+def test_editor_illustration_moved_to_other_chapter_keeps_its_image():
+    """Una ilustración cortada en un capítulo y pegada en otro se perdía al aceptar: edit_section solo recupera las
+    de su capítulo y la dejaba como un párrafo «[Ilustración 1]». Ahora llega con su imagen, la del capítulo de
+    origen se va, y suelta en medio de un párrafo va tras él, sin partirlo."""
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    art = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 30, 40), False)
+    art.clear_with(90)
+    picture = art.tobytes("jpg")
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("image", 1, image=picture), B("p", 1, "Uno."),
+                                      B("heading", 2, "Capítulo 2"), B("p", 2, "Dos tres cuatro.")], [0, 3])
+    sheet = editor.sheet
+    doc = sheet.document()
+    cursor = QTextCursor(doc.findBlockByNumber(1))
+    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+    sheet.setTextCursor(cursor)
+    sheet.cut()
+    editor.step_section(1)
+    root.update()
+    target = QTextCursor(sheet.document().findBlockByNumber(1))
+    target.setPosition(target.position() + 4)  # en medio de «Dos tres cuatro.»
+    sheet.setTextCursor(target)
+    sheet.paste()
+    shown = sheet.content().split("\n\n")
+    editor.save()
+    root.update()
+    blocks = [(b.kind, b.html if b.kind != "image" else b.image == picture) for b in window.book.blocks]
+    window.close()
+    from PySide6.QtWidgets import QApplication
+    QApplication.clipboard().clear()  # con la imagen dentro, el Qt de pruebas (offscreen) se cae al salir
+    assert shown[1] == "Dos tres cuatro." and shown[2].startswith("[Imagen "), shown
+    assert blocks == [("heading", "Capítulo 1"), ("p", "Uno."), ("heading", "Capítulo 2"), ("p", "Dos tres cuatro."),
+                      ("image", True)], blocks
+
+
+def test_editor_page_as_image():
+    """«Imagen ▾ → Página del original…» (Insertar) pone la página del original que se ve a la derecha como imagen
+    tras el párrafo del cursor: créditos o saludos del grupo que como texto se pierden. Al aceptar es una ilustración."""
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos.")], [0])
+    from PySide6.QtGui import QTextCursor
+    action = next(a for a in editor.picture_btn.menu().actions() if a.text().startswith("Página del original"))
+    editor.sheet.setTextCursor(QTextCursor(editor.sheet.document().findBlockByNumber(1)))  # en «Uno.»
+    editor.page = 1
+    action.trigger()
+    root.update()
+    lines = editor.sheet.content().split("\n\n")
+    editor.save()
+    root.update()
+    kinds = [b.kind for b in window.book.blocks]
+    image = window.book.blocks[2].image if kinds[2:3] == ["image"] else b""
+    window.close()
+    assert lines[1] == "Uno." and lines[2].startswith("[Imagen "), lines
+    assert kinds == ["heading", "p", "image", "p"] and image[:3] == b"\xff\xd8\xff", kinds
 
 
 def test_synonyms():
@@ -6270,6 +6325,32 @@ def test_window_opens_on_first_chapter_and_edits_without_choosing():
     window.close()
     assert selected == ("1",) and message == "", (selected, message)
     assert opened == "1", opened
+
+
+def test_window_opening_another_book_clears_the_old_one():
+    """Abrir otro libro con uno abierto (Recientes): bajo el esqueleto quedaban las miniaturas, la leyenda del EPUB
+    («1/5») y el recuento de revisados del anterior."""
+    import time
+    root, window = visible_window()
+    first = TMP / f"uno-{time_ns()}.pdf"
+    make_novel().replace(first)
+    window.open_path(str(first))
+    deadline = time.time() + 60
+    while window.done and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    while window.thumb_job and not window.strip.labels and time.time() < deadline:
+        root.update()
+    had = bool(window.strip.labels)
+    window.open_path(str(make_novel()))
+    root.update()
+    during = (len(window.strip.labels), window.epub_caption.text(),
+              window.tree.headerItem().text(window.tree.columns.index("ok")))
+    while window.done and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    window.close()
+    assert had and during == (0, "EPUB", "✓"), (had, during)
 
 
 def test_window_skeleton_while_analyzing():

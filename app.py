@@ -2996,8 +2996,18 @@ class App:
         self.tabs.setTabText(0, self.source_name())
         self.pdf_caption.setText(self.source_name())
         self.tree.delete(*self.tree.get_children())
+        # Nada del libro anterior bajo el esqueleto: sus miniaturas, sus leyendas y su recuento de revisados
+        self.thumb_job += 1
+        self.strip.clear()
+        self.thumbs = {}
+        self.pdf_caption.setText(self.source_name())
+        self.epub_caption.setText("EPUB")
+        self.tree.headerItem().setText(self.tree.columns.index("ok"), "✓")
+        self.cover_thumb.clear()
+        self.book_title.setText(self.pdf.stem)  # los datos del libro anterior, no: los del nuevo llegan al analizar
+        self.book_line.setText("")
+        self.status.setText("Analizando…")  # el resumen del libro anterior no
         self.stack.setCurrentIndex(1)
-        self.update_header()
         self.run(_analyze, (path,), lambda result: self.show_book(*result), report=True)
 
     def show_book(self, book, twins=None, report=None, memos=None):
@@ -6827,6 +6837,9 @@ class TextEditor:
         self.sheet = sheet = editor.Sheet()
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
         sheet.mark_current = True
+        # Una ilustración pegada desde otro capítulo llega con su imagen (Sheet.adopt)
+        sheet.foreign = lambda k: (app.book.blocks[k].image if self.current and not self.current[0] <= k < self.current[1]
+                                   and 0 <= k < len(app.book.blocks) and app.book.blocks[k].kind == "image" else None)
         self.pages = {}  # (inicio, fin) -> {"doc", "look", "lines"} de cada sección visitada
         # Avisos del informe por bloque, tomados al abrir: la hoja los marca en los párrafos sin cambiar
         self.issues = {}
@@ -7119,8 +7132,12 @@ class TextEditor:
         group("Texto", [tool("Separador", "Separador de escena tras el párrafo", sheet.insert_break, icon="scene"),
                         tool("Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note,
                              icon="note")])
-        group("Ilustraciones", [tool("Imagen", "Imagen de un archivo del equipo tras el párrafo; también se pega una "
-                                     "copiada (Ctrl+V)", self.insert_image, icon="image")])
+        # Un botón con menú: dos botones grandes ensanchaban «Insertar» más que la pantalla de 1366 px
+        self.picture_btn, _ = menu_tool("Imagen ▾", "Imagen tras el párrafo del cursor; también se pega una copiada "
+                                        "(Ctrl+V)", [
+            ("Desde un archivo…", self.insert_image),
+            ("Página del original que se ve a la derecha", self.page_as_image)], icon="image")
+        group("Ilustraciones", [self.picture_btn])
         group("Vínculos", [tool("Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)",
                                 self.show_link_bar, icon="link")])
         group("Capítulo", [tool("Dividir\ncapítulo", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo "
@@ -8287,6 +8304,19 @@ class TextEditor:
             self.sheet.insert_picture(convert.load_cover(path))
         except ValueError as e:
             messagebox.showerror("Error", str(e), parent=self.win)
+
+    def page_as_image(self):
+        """La página del original que muestra el panel, como imagen tras el párrafo del cursor: créditos, saludos
+        del grupo o carteles que como texto se pierden. El texto de esa página se queda: se borra a mano si sobra."""
+        doc = self.app.pdf_doc
+        if not doc or not 0 <= self.page < doc.page_count:
+            messagebox.showinfo("Página como imagen", "No hay ninguna página del original a la vista.", parent=self.win)
+            return
+        page = doc[self.page]
+        zoom = min(4.0, 1600 / max(page.rect.width, page.rect.height))  # lado mayor ~1600 px, como «Reducir imágenes»
+        data = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("jpg", jpg_quality=88)
+        self.sheet.insert_picture(data)
+        self.tell(f"Página {self.page + 1} del original insertada como imagen")
 
     def change_picture(self, k):
         """Cambia la ilustración del bloque k por un archivo (App.replace_image) y la hoja la muestra ya."""
