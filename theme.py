@@ -1,7 +1,11 @@
 """Aspecto Fluent claro y oscuro. Fusion dibuja todos los controles él mismo: así la ventana se ve igual en
 Windows 10 y 11 (el estilo nativo de Qt en Windows 10 es el antiguo)."""
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont, QPalette
+import tempfile
+from pathlib import Path
+
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPalette, QPen
+from PySide6.QtWidgets import QProxyStyle, QStyle
 
 CHOICES = ("Sistema", "Claro", "Oscuro")
 
@@ -17,16 +21,18 @@ ICONS = {"warn": "▲", "ok": "✓", "close": "✕", "menu": "▾", "menu_open":
          "link": "↗", "doc": "🗎", "dot": "●", "minus": "−", "symbols": "Ω", "changes": "±", "stats": "Σ",
          "show": "◉", "image": "▣"}
 
-LIGHT = {"bg": "#f3f3f3", "card": "#ffffff", "base": "#ffffff", "line": "#e1e1e1", "ink": "#1b1b1b",
-         "muted": "#6b6b6b", "acc": "#2a62c8", "acc_hover": "#2353ab", "acc_ink": "#ffffff", "sel": "#dce8fc",
-         "hover": "#ececec", "press": "#e2e2e2", "warn": "#c62828", "ok": "#2e7d32", "drop": "#f5f8fe",
-         "drop_line": "#b9c8e8", "sheet": "#ffffff", "sheet_line": "#d4d4d4", "hint": "#9a9a9a",
-         "zebra": "#f5f6f8", "shine": "#f7f7f7"}
+# edge: borde de botones, campos y casillas; line: el de tarjetas y separadores. En claro, con el mismo gris
+# para los dos, los controles se perdían sobre el blanco (en oscuro se veían bien)
+LIGHT = {"bg": "#eef0f3", "card": "#ffffff", "base": "#ffffff", "line": "#d9dce1", "edge": "#9ea4ac",
+         "ink": "#16181b", "muted": "#545a63", "acc": "#0f5fc2", "acc_hover": "#0c4fa3", "acc_ink": "#ffffff",
+         "sel": "#d6e6fb", "hover": "#eef3fa", "press": "#dde7f5", "warn": "#c62828", "ok": "#2e7d32",
+         "drop": "#f3f7fd", "drop_line": "#9fb7dd", "sheet": "#ffffff", "sheet_line": "#c9cdd3", "hint": "#80868f",
+         "zebra": "#f4f6f9", "shine": "#f5f6f8", "current": "#f1f5fc"}
 DARK = {"bg": "#202020", "card": "#2b2b2b", "base": "#1f1f1f", "line": "#3d3d3d", "ink": "#ececec",
         "muted": "#a0a0a0", "acc": "#7099f5", "acc_hover": "#85a9f7", "acc_ink": "#111111", "sel": "#2f3d5c",
         "hover": "#353535", "press": "#3d3d3d", "warn": "#ff6b6b", "ok": "#7bc47f", "drop": "#262a33",
         "drop_line": "#4a5a7a", "sheet": "#1a1a1a", "sheet_line": "#3d3d3d", "hint": "#7a7a7a",
-        "zebra": "#313131", "shine": "#555555"}
+        "zebra": "#313131", "shine": "#555555", "edge": "#4a4a4a", "current": "#232833"}
 
 # Colores de los tipos de fila de la lista ("" = el del texto normal). Todo texto llega a 4,5:1 (WCAG AA)
 KINDS = {False: {"chapter": "", "subtitle": "#555555", "cut": "#737373", "image": "#2e7d32", "dropped": "#6a6a6a",
@@ -65,8 +71,9 @@ DIFF = {False: {"old": {"background": "#f8d7da", "foreground": "#8a1c1c", "overs
 QSS = """
 QWidget {{ font-family: "Segoe UI"; font-size: 9pt; color: {ink}; }}
 QMainWindow, QDialog {{ background: {bg}; }}
-QPushButton, QToolButton {{ border: 1px solid {line}; border-radius: 6px; padding: 4px 12px; background: {card}; }}
+QPushButton, QToolButton {{ border: 1px solid {edge}; border-radius: 6px; padding: 4px 12px; background: {card}; }}
 QPushButton:hover, QToolButton:hover {{ background: {hover}; }}
+QPushButton:open, QToolButton:open {{ background: {sel}; border-color: {acc}; }}
 QPushButton:pressed, QToolButton:pressed {{ background: {press}; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {hint}; }}
 QToolButton::menu-indicator {{ image: none; width: 0; }}
@@ -78,17 +85,18 @@ QPushButton#ok {{ color: {ok}; }}
 QPushButton#chip {{ border-radius: 12px; padding: 3px 12px; color: {muted}; }}
 QPushButton#chip:checked {{ background: {sel}; border-color: {acc}; color: {ink}; font-weight: 600; }}
 QPushButton#link {{ border: 0; background: transparent; color: {acc}; text-decoration: underline; padding: 0; }}
-QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QListWidget {{ border: 1px solid {line}; border-radius: 5px;
+QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QListWidget {{ border: 1px solid {edge}; border-radius: 5px;
     background: {base}; selection-background-color: {acc}; selection-color: {acc_ink}; }}
 QLineEdit, QComboBox, QSpinBox {{ padding: 3px 6px; }}
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus {{ border: 1px solid {acc}; }}
-QComboBox QAbstractItemView {{ background: {card}; border: 1px solid {line}; selection-background-color: {sel};
-    selection-color: {ink}; }}
-QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {muted}; border-radius: 3px; background: {base}; }}
-QCheckBox::indicator:checked {{ background: {acc}; border-color: {acc}; }}
-QRadioButton::indicator {{ width: 12px; height: 12px; border: 1px solid {muted}; border-radius: 7px; background: {base}; }}
-QRadioButton::indicator:checked {{ background: {acc}; border-color: {acc}; }}
-QRadioButton::indicator:disabled {{ border-color: {line}; }}
+QComboBox:hover {{ background: {hover}; }}
+QComboBox:on {{ border-color: {acc}; background: {base}; }}
+QComboBox {{ combobox-popup: 0; }}
+QComboBox::drop-down {{ border: 0; background: transparent; width: 22px; }}
+QComboBox::down-arrow {{ image: url("{chevron}"); width: 12px; height: 12px; }}
+QComboBox QAbstractItemView {{ background: {card}; border: 1px solid {acc}; padding: 2px; outline: 0;
+    selection-background-color: {sel}; selection-color: {ink}; }}
+QComboBox QAbstractItemView::item {{ min-height: 24px; padding: 0 6px; }}
 QFrame#card {{ background: {card}; border: 1px solid {line}; border-radius: 8px; }}
 QFrame#bar {{ background: {card}; border: 0; }}
 QFrame#drop {{ background: {drop}; border: 2px dashed {drop_line}; border-radius: 12px; }}
@@ -108,7 +116,7 @@ QHeaderView::section {{ background: {card}; border: 0; border-bottom: 1px solid 
 QTabBar::tab {{ padding: 4px 12px; border: 0; border-bottom: 2px solid transparent; color: {muted};
     background: transparent; }}
 QTabBar::tab:selected {{ color: {acc}; border-bottom-color: {acc}; font-weight: 600; }}
-QMenu {{ background: {card}; border: 1px solid {line}; padding: 4px; }}
+QMenu {{ background: {card}; border: 1px solid {edge}; padding: 4px; }}
 QMenu::item {{ padding: 5px 24px 5px 22px; border-radius: 4px; }}
 QMenu::item:selected {{ background: {sel}; color: {ink}; }}
 QMenu::separator {{ height: 1px; background: {line}; margin: 4px 8px; }}
@@ -185,6 +193,92 @@ def palette(dark):
     return pal
 
 
+class FluentStyle(QProxyStyle):
+    """Fusion con casillas, botones de opción y flechas como los de Windows 11. Con QSS solo, una casilla marcada
+    era un cuadro azul lleno, sin ✓ (dibujarla en QSS pide un archivo de imagen)."""
+    SIZE = 16
+
+    def __init__(self, dark=False):
+        super().__init__("Fusion")
+        self.c = colors(dark)
+
+    def pixelMetric(self, metric, option=None, widget=None):
+        if metric in (QStyle.PixelMetric.PM_IndicatorWidth, QStyle.PixelMetric.PM_IndicatorHeight,
+                      QStyle.PixelMetric.PM_ExclusiveIndicatorWidth, QStyle.PixelMetric.PM_ExclusiveIndicatorHeight):
+            return self.SIZE
+        return super().pixelMetric(metric, option, widget)
+
+    def drawPrimitive(self, element, option, painter, widget=None):
+        PE, State = QStyle.PrimitiveElement, QStyle.StateFlag
+        if element not in (PE.PE_IndicatorCheckBox, PE.PE_IndicatorRadioButton, PE.PE_IndicatorArrowDown):
+            return super().drawPrimitive(element, option, painter, widget)
+        c, state = self.c, option.state
+        enabled, on = bool(state & State.State_Enabled), bool(state & (State.State_On | State.State_NoChange))
+        painter.save()
+        painter.setRenderHint(painter.RenderHint.Antialiasing)
+        r = QRectF(option.rect)
+        if element == PE.PE_IndicatorArrowDown:  # chevron fino, como las listas de Windows 11
+            painter.setPen(QPen(QColor(c["muted"] if enabled else c["hint"]), 1.4, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            x, y = r.center().x(), r.center().y()
+            path = QPainterPath(QPointF(x - 4, y - 2))
+            path.lineTo(x, y + 2)
+            path.lineTo(x + 4, y - 2)
+            painter.drawPath(path)
+            painter.restore()
+            return
+        side = min(r.width(), r.height()) - 1
+        box = QRectF(r.x() + (r.width() - side) / 2, r.y() + (r.height() - side) / 2, side, side)
+        fill = QColor(c["acc"] if on and enabled else c["line"] if on else c["base"])
+        edge = QColor(c["acc"] if on and enabled else c["ink"] if state & State.State_MouseOver else c["edge"])
+        painter.setPen(Qt.PenStyle.NoPen if on else QPen(edge, 1))
+        painter.setBrush(fill)
+        mark = QColor(c["acc_ink"] if enabled else c["hint"])
+        if element == PE.PE_IndicatorRadioButton:
+            painter.drawEllipse(box.adjusted(0.5, 0.5, -0.5, -0.5))
+            if on:
+                painter.setBrush(mark)
+                painter.drawEllipse(box.center(), side * 0.2, side * 0.2)
+        else:
+            painter.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 3.5, 3.5)
+            if on:
+                painter.setPen(QPen(mark, 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                                    Qt.PenJoinStyle.RoundJoin))
+                if state & State.State_NoChange:  # a medias: una raya
+                    painter.drawLine(QPointF(box.left() + side * 0.28, box.center().y()),
+                                     QPointF(box.right() - side * 0.28, box.center().y()))
+                else:
+                    path = QPainterPath(QPointF(box.left() + side * 0.26, box.top() + side * 0.53))
+                    path.lineTo(box.left() + side * 0.43, box.top() + side * 0.70)
+                    path.lineTo(box.left() + side * 0.75, box.top() + side * 0.33)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawPath(path)
+        painter.restore()
+
+
+_style = None  # la aplicación no se queda con el estilo de Python: sin esta referencia se borraría
+
+
+def chevron(color):
+    """PNG de la flecha ▾ de las listas, del color dado: el QSS solo la pone con un archivo de imagen."""
+    path = Path(tempfile.gettempdir()) / "LightNovelCreator" / f"chevron-{color.lstrip('#')}.png"
+    if not path.exists():
+        image = QImage(24, 24, QImage.Format.Format_ARGB32)  # al doble: nítida con zoom de Windows
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(color), 2.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                            Qt.PenJoinStyle.RoundJoin))
+        path_ = QPainterPath(QPointF(5, 9))
+        path_.lineTo(12, 16)
+        path_.lineTo(19, 9)
+        painter.drawPath(path_)
+        painter.end()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(str(path))
+    return path.as_posix()
+
+
 def apply(app, choice):
     """Pone el tema elegido (CHOICES; otro valor, como un ajustes.json escrito a mano, es «Sistema»).
     Devuelve True si queda oscuro."""
@@ -197,10 +291,14 @@ def apply(app, choice):
     if app.property("theme_dark") == dark:  # rehacer el QSS repinta todas las ventanas: solo si cambia
         return dark
     app.setProperty("theme_dark", dark)
-    app.setStyle("Fusion")
+    global _style
+    if _style is None:  # uno solo: cambiar de estilo borra el de antes, que Python aún tendría
+        _style = FluentStyle(dark)
+        app.setStyle(_style)
+    _style.c = colors(dark)  # el QSS de abajo repinta todo con los colores nuevos
     app.setFont(QFont("Segoe UI", 9))
     app.setPalette(palette(dark))
-    app.setStyleSheet(QSS.format(**colors(dark)))
+    app.setStyleSheet(QSS.format(**colors(dark), chevron=chevron(colors(dark)["muted"])))
     return dark
 
 
