@@ -5,9 +5,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPalette, QPen
-from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle
+from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle, QWidget
 
 CHOICES = ("Sistema", "Claro", "Oscuro")
 
@@ -75,7 +75,8 @@ QWidget {{ font-family: "Segoe UI"; font-size: 9pt; color: {ink}; }}
 QMainWindow, QDialog {{ background: {bg}; }}
 QPushButton, QToolButton {{ border: 1px solid {edge}; border-radius: 6px; padding: 4px 12px; background: {card}; }}
 QPushButton:hover, QToolButton:hover {{ background: {hover}; }}
-QPushButton:open, QToolButton:open {{ background: {sel}; border-color: {acc}; }}
+QPushButton:open, QToolButton:open {{ border-bottom-color: {card}; border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0; }}
 QPushButton:pressed, QToolButton:pressed {{ background: {press}; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {hint}; }}
 QToolButton::menu-indicator {{ image: none; width: 0; }}
@@ -92,11 +93,15 @@ QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QListWidget {{ border: 1px solid
 QLineEdit, QComboBox, QSpinBox {{ padding: 3px 6px; }}
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus {{ border: 1px solid {acc}; }}
 QComboBox:hover {{ background: {hover}; }}
-QComboBox:on {{ border-color: {acc}; background: {base}; }}
+QComboBox:on {{ border-bottom-color: {base}; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }}
 QComboBox {{ combobox-popup: 0; }}
 QComboBox::drop-down {{ border: 0; background: transparent; width: 22px; }}
+QComboBoxPrivateContainer {{ border: 0; padding: 0; margin: 0; background: {base}; }}
+QComboBox[up="true"]:on {{ border-bottom-color: {edge}; border-bottom-left-radius: 5px; border-bottom-right-radius: 5px;
+    border-top-color: {base}; border-top-left-radius: 0; border-top-right-radius: 0; }}
+QComboBox[up="true"] QAbstractItemView {{ border-top: 1px solid {edge}; border-bottom: 0; }}
 QComboBox::down-arrow {{ image: url("{chevron}"); width: 12px; height: 12px; }}
-QComboBox QAbstractItemView {{ background: {card}; border: 1px solid {acc}; padding: 2px; outline: 0;
+QComboBox QAbstractItemView {{ background: {base}; border: 1px solid {edge}; border-top: 0; padding: 2px; outline: 0;
     selection-background-color: {sel}; selection-color: {ink}; }}
 QComboBox QAbstractItemView::item {{ min-height: 24px; padding: 0 6px; }}
 QFrame#card {{ background: {card}; border: 1px solid {line}; border-radius: 8px; }}
@@ -118,7 +123,8 @@ QHeaderView::section {{ background: {card}; border: 0; border-bottom: 1px solid 
 QTabBar::tab {{ padding: 4px 12px; border: 0; border-bottom: 2px solid transparent; color: {muted};
     background: transparent; }}
 QTabBar::tab:selected {{ color: {acc}; border-bottom-color: {acc}; font-weight: 600; }}
-QMenu {{ background: {card}; border: 1px solid {acc}; padding: 2px; }}
+QMenu {{ background: {card}; border: 1px solid {edge}; padding: 2px; }}
+QMenu#drop {{ border-top: 0; }}
 QMenu::item {{ padding: 4px 24px 4px 22px; min-height: 16px; }}
 QMenu::item:selected {{ background: {sel}; color: {ink}; }}
 QMenu::separator {{ height: 1px; background: {line}; margin: 4px 8px; }}
@@ -139,6 +145,8 @@ QToolButton#tool {{ border: 1px solid transparent; background: transparent; padd
 QToolButton#tool:hover {{ background: {hover}; border-color: {line}; }}
 QToolButton#tool:checked {{ background: {sel}; border-color: {acc}; }}
 QFrame#sep {{ background: {line}; }}
+QPushButton#edge {{ border: 0; background: transparent; border-radius: 8px; }}
+QPushButton#edge:hover {{ background: {hover}; }}
 """
 
 
@@ -261,6 +269,29 @@ class FluentStyle(QProxyStyle):
 _style = None  # la aplicación no se queda con el estilo de Python: sin esta referencia se borraría
 
 
+class _Shown(QObject):
+    """Cada ventana que se abre lleva la barra de título del tema: al arrancar la app salía la de Windows. Una
+    lista desplegable que no cabe debajo de su campo se abre encima: el campo se une a ella por arriba (up)."""
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.Show or not isinstance(obj, QWidget):
+            return False
+        if obj.windowType() in (Qt.WindowType.Window, Qt.WindowType.Dialog):
+            title_bar(obj, bool(QApplication.instance().property("theme_dark")))
+        elif obj.metaObject().className() == "QComboBoxPrivateContainer" and obj.parentWidget():
+            combo = obj.parentWidget()
+            up = obj.geometry().top() < combo.mapToGlobal(combo.rect().topLeft()).y()
+            if combo.property("up") != up:
+                combo.setProperty("up", up)
+                for widget in (combo, combo.view()):  # el QSS mira la propiedad al repulir
+                    widget.style().unpolish(widget)
+                    widget.style().polish(widget)
+        return False
+
+
+_shown = None
+
+
 def chevron(color):
     """PNG de la flecha ▾ de las listas, del color dado: el QSS solo la pone con un archivo de imagen."""
     path = Path(tempfile.gettempdir()) / "LightNovelCreator" / f"chevron-{color.lstrip('#')}.png"
@@ -297,6 +328,9 @@ def apply(app, choice):
     if _style is None:  # uno solo: cambiar de estilo borra el de antes, que Python aún tendría
         _style = FluentStyle(dark)
         app.setStyle(_style)
+        global _shown
+        _shown = _Shown()
+        app.installEventFilter(_shown)
     _style.c = colors(dark)  # el QSS de abajo repinta todo con los colores nuevos
     app.setFont(QFont("Segoe UI", 9))
     app.setPalette(palette(dark))

@@ -1760,6 +1760,7 @@ def _menu_button(text, menu):
 def _attach(button, menu):
     """El menú sale pegado al botón y al menos de su ancho, y el botón se queda marcado (:open en el QSS): se ve
     como el botón que se despliega, no como otra ventana."""
+    menu.setObjectName("drop")  # sin borde arriba: sigue al botón (QSS)
     menu.aboutToShow.connect(lambda: menu.setMinimumWidth(button.width()))
 
 
@@ -6848,17 +6849,25 @@ class TextEditor:
         desk_row = QHBoxLayout(desk)
         desk_row.setContentsMargins(16, 16, 16, 16)  # también abajo: sin él la hoja tocaba el borde
         # En modo concentración, de capítulo en capítulo con dos flechas grandes a los lados, como un lector
-        self.focus_prev = qtk.ArrowButton(-1, lambda: self.step_section(-1), "Capítulo anterior (Ctrl+RePág)", size=12)
-        self.focus_next = qtk.ArrowButton(1, lambda: self.step_section(1), "Capítulo siguiente (Ctrl+AvPág)", size=12)
+        # en los bordes de la pantalla y discretas (gris del texto desactivado, sin marco): no distraen de la hoja
+        self.focus_prev = qtk.ArrowButton(-1, lambda: self.step_section(-1), "Capítulo anterior (Ctrl+RePág)",
+                                          size=12, subtle=True)
+        self.focus_next = qtk.ArrowButton(1, lambda: self.step_section(1), "Capítulo siguiente (Ctrl+AvPág)",
+                                          size=12, subtle=True)
         for button in (self.focus_prev, self.focus_next):
-            button.setObjectName("tool")
-            button.setFixedSize(48, 96)
+            button.setObjectName("edge")
+            button.setFixedSize(40, 120)
             button.hide()
-        desk_row.addStretch(1)
         desk_row.addWidget(self.focus_prev, 0, Qt.AlignmentFlag.AlignVCenter)
-        desk_row.addWidget(sheet, 20)
-        desk_row.addWidget(self.focus_next, 0, Qt.AlignmentFlag.AlignVCenter)
         desk_row.addStretch(1)
+        desk_row.addWidget(sheet, 20)
+        desk_row.addStretch(1)
+        desk_row.addWidget(self.focus_next, 0, Qt.AlignmentFlag.AlignVCenter)
+        # El borde de la hoja se arrastra para estrecharla o ensancharla, hasta el ancho de la página (set_text_zoom)
+        self.page_share, self.dragging = 1.0, None  # parte del ancho máximo que ocupa la hoja
+        self.desk = desk
+        desk.setMouseTracking(True)
+        editor.watch(desk, self.on_desk_event)
         # Página del PDF a la derecha: se ajusta al ancho del panel y se amplía con el zoom
         self.canvas = qtk.Preview()
         self.scroll = QScrollArea()
@@ -6889,19 +6898,25 @@ class TextEditor:
         self.split.splitterMoved.connect(lambda *_: self.later("panel", 80, self.redraw))
         column.addWidget(self.split, 1)
         # Barra de estado como Word: dónde estás y el zoom del texto
-        self.status = _label("", "muted")
-        self.note = _label("", "muted")  # resultado de la última herramienta («Tipografía corregida en 3 párrafos»)
+        # Recortadas y con el sitio que sobra: un aviso que aparece o se va no mueve lo de la derecha
+        self.status = StatusLabel(objectName="muted")
+        self.note = StatusLabel(objectName="muted")  # resultado de la última herramienta («Tipografía corregida…»)
+        for label in (self.status, self.note):
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.text_zoom = QSlider(Qt.Orientation.Horizontal)
         self.text_zoom.setRange(50, 200)
         self.text_zoom.setValue(100)
         self.text_zoom.setFixedWidth(140)
         self.text_zoom_label = _label("100 %", "muted")
         self.text_zoom.valueChanged.connect(self.set_text_zoom)
-        status_row = self.status_row = _row(self.status, self.note, 1,
+        status_row = self.status_row = _row(self.status, self.note,
                           _button("−", lambda: self.text_zoom.setValue(self.text_zoom.value() - 10)),
                           self.text_zoom, _button("+", lambda: self.text_zoom.setValue(self.text_zoom.value() + 10)),
                           self.text_zoom_label, _button("Aceptar", self.save, "primary"),
                           _button("Cancelar", self.cancel), margins=(12, 8, 12, 0))
+        self.status.setMinimumWidth(260)  # «Página 74 del PDF · párrafo 4 de 63 · 1.806 palabras»
+        status_row.setStretchFactor(self.status, 1)
+        status_row.setStretchFactor(self.note, 1)
         column.addLayout(status_row)
         self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
         self.drawn = None  # source_key() del dibujo actual del panel
@@ -7378,7 +7393,7 @@ class TextEditor:
         self.drop_ribbon()
         for button in (self.focus_prev, self.focus_next):
             button.setVisible(self.focused)
-        if self.focused:
+        if self.focused:  # tras los avisos, que tienen su sitio fijo: no se mueven al cambiar el texto
             self.status_row.insertWidget(2, self.chapter_btn)
             self.status_row.insertWidget(3, self.review_btn)
         else:  # a su sitio en la fila de las pestañas: tras ◀ y tras ▶
@@ -8499,10 +8514,37 @@ class TextEditor:
                 found[k] = html.unescape(block.html).strip() or "❖"
         return found
 
+    def page_width(self, percent=None):
+        """Ancho máximo de la hoja: crece con la letra, como la página en Word."""
+        return int(820 * (percent or self.text_zoom.value()) / 100)
+
     def set_text_zoom(self, percent):
         self.sheet.set_zoom(percent)
-        self.sheet.setMaximumWidth(int(820 * percent / 100))  # la hoja crece con la letra, como la página en Word
+        self.sheet.setMaximumWidth(int(self.page_width(percent) * self.page_share))
         self.text_zoom_label.setText(f"{percent} %")
+
+    def on_desk_event(self, event):
+        """Arrastrar el borde de la hoja la estrecha o la ensancha, igual a los dos lados (va centrada), entre un
+        poco menos de la mitad y el ancho de la página."""
+        kind = event.type()
+        if kind not in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+            return False
+        x = event.position().x()
+        sheet = self.sheet.geometry()
+        near = abs(x - sheet.left()) <= 10 or abs(x - sheet.right()) <= 10
+        if kind == QEvent.Type.MouseButtonPress and near:
+            self.dragging = True
+            return True
+        if kind == QEvent.Type.MouseButtonRelease:
+            self.dragging = None
+            return False
+        if self.dragging:
+            width = 2 * abs(x - self.desk.width() / 2)
+            self.page_share = min(1.0, max(0.45, width / self.page_width()))
+            self.sheet.setMaximumWidth(int(self.page_width() * self.page_share))
+            return True
+        self.desk.setCursor(Qt.CursorShape.SizeHorCursor if near else Qt.CursorShape.ArrowCursor)
+        return False
 
     def later(self, name, ms, fn):
         """Ejecuta fn tras ms milisegundos sin otro aviso del mismo nombre: no repinta en cada tecla."""
