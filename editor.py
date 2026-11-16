@@ -599,6 +599,9 @@ class Sheet(QTextEdit):
         self.tags, self.unknown = {}, set()  # colores y palabras desconocidas de cada hoja nueva
         self.pictures, self.color = {}, "#888888"
         self.bars, self.bar_color = [], QColor("#2e9d4a")  # párrafos cambiados: barrita en el margen
+        # Fondo tenue del párrafo del cursor: el original lo recuadra, y en la hoja no se veía dónde se estaba
+        self.current_color = None  # TextEditor pone el del tema
+        self.cursorPositionChanged.connect(lambda: self.current_color and self.viewport().update())
         self.origins = {}  # documento -> [(bloque, línea)] tal como se cargó
         self.known = {}  # documento -> {párrafo: (revisión, ¿cambiado?)} de changed_blocks, hasta que cambie
         self.set_zoom(100)
@@ -762,6 +765,19 @@ class Sheet(QTextEdit):
         self.viewport().update()
 
     def paintEvent(self, event):
+        if self.current_color:  # debajo del texto: antes de que QTextEdit lo pinte
+            block, doc = self.textCursor().block(), self.document()
+            text = block.layout().boundingRect().translated(block.layout().position())  # el texto, sin márgenes
+            margin = doc.documentMargin()
+            width = doc.textWidth() if doc.textWidth() > 0 else self.viewport().width()
+            band = QRectF(margin - 10 - self.horizontalScrollBar().value(),
+                          text.top() - 3 - self.verticalScrollBar().value(), width - 2 * margin + 20, text.height() + 6)
+            under = QPainter(self.viewport())
+            under.setRenderHint(QPainter.RenderHint.Antialiasing)
+            under.setPen(Qt.PenStyle.NoPen)
+            under.setBrush(self.current_color)
+            under.drawRoundedRect(band, 4, 4)
+            under.end()
         super().paintEvent(event)
         painter = QPainter(self.viewport())
         layout, doc = self.document().documentLayout(), self.document()

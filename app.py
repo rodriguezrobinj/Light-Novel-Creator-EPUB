@@ -1753,7 +1753,14 @@ def _menu_button(text, menu):
     button.setText(f"{text} ▾")
     button.setMenu(menu)
     button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    _attach(button, menu)
     return button
+
+
+def _attach(button, menu):
+    """El menú sale pegado al botón y al menos de su ancho, y el botón se queda marcado (:open en el QSS): se ve
+    como el botón que se despliega, no como otra ventana."""
+    menu.aboutToShow.connect(lambda: menu.setMinimumWidth(button.width()))
 
 
 def _combo(var, values, width, editable=False, changed=None):
@@ -6814,6 +6821,7 @@ class TextEditor:
         editor.LINK_COLOR = self.colors["acc"]  # el azul fijo apenas se leía sobre la hoja oscura (3:1)
         self.sheet = sheet = editor.Sheet()
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
+        sheet.current_color = QColor(self.colors["current"])
         self.pages = {}  # (inicio, fin) -> {"doc", "look", "lines"} de cada sección visitada
         # Avisos del informe por bloque, tomados al abrir: la hoja los marca en los párrafos sin cambiar
         self.issues = {}
@@ -7004,6 +7012,7 @@ class TextEditor:
                     menu.addAction(item[0], lambda fn=item[1]: (self.drop_ribbon(), fn(), self.sheet.setFocus(),
                                                                 self.update_tools()))
             button.setMenu(menu)
+            _attach(button, menu)
             return button, menu
 
         def page(name):
@@ -7123,8 +7132,10 @@ class TextEditor:
             row.addStretch(1)
 
         # A la derecha de las pestañas, como «Compartir» en Word: dónde estás y a dónde ir, en cualquier pestaña
-        self.prev_chapter = tool("", "Capítulo anterior", lambda: self.step_section(-1), glyph="prev")
-        self.next_chapter = tool("", "Capítulo siguiente", lambda: self.step_section(1), glyph="next")
+        self.prev_chapter = tool("", "Capítulo anterior (Ctrl+RePág)", lambda: self.step_section(-1), glyph="prev")
+        self.next_chapter = tool("", "Capítulo siguiente (Ctrl+AvPág)", lambda: self.step_section(1), glyph="next")
+        QShortcut(QKeySequence("Ctrl+PgUp"), self.win, lambda: self.step_section(-1))
+        QShortcut(QKeySequence("Ctrl+PgDown"), self.win, lambda: self.step_section(1))
         self.chapter_btn = QToolButton(objectName="tool")
         self.chapter_btn.setToolTip("Ir a otro capítulo")
         self.chapter_btn.clicked.connect(self.show_chapters)
@@ -7338,11 +7349,13 @@ class TextEditor:
             bar.hide()
 
     def toggle_focus(self):
-        """F11: modo concentración, solo la hoja a pantalla completa, sin cinta, barras ni paneles. F11 o Esc
-        vuelven como estaba."""
+        """F11: modo concentración, solo la hoja a pantalla completa, sin cinta, barras ni paneles. Queda la fila
+        del capítulo (◀ capítulo ▶ y Revisado): sin ella no había cómo cambiar de capítulo. F11 o Esc vuelven
+        como estaba."""
         self.focused = not self.focused
+        self.drop_ribbon()
         if self.focused:
-            self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.find_frame, self.link_frame,
+            self.before_focus = [w for w in (self.ribbon_tabs, self.ribbon_pages, self.side, self.nav, self.find_frame, self.link_frame,
                                              self.split_frame, self.issue_frame, self.resume_frame, self.diff_frame)
                                  if not w.isHidden()]
             for widget in self.before_focus:

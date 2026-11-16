@@ -3806,6 +3806,30 @@ def _contents_numbers(pdf, toc, font):
             current, rects = next(entries, None), []
 
 
+def _stranded_subtitles(pdf, toc, fontsize, done=()):
+    """Subtítulos (nivel 2 del índice) al pie de una página llena, con menos de 3 líneas debajo: el lector los
+    veía colgando solos (Maryoku 1, pág. 74). {ancla: hueco hasta el pie}, el primero de cada capítulo: al pasar
+    uno a la página siguiente, lo que sigue en su capítulo cambia de sitio. done: los ya empujados."""
+    bottom = max((b[3] for page in pdf for b in page.get_text("blocks")), default=0)  # pie del texto
+    found = {}
+    for level, title, number, *rest in toc:
+        anchor = next((k for k in (rest[0] if rest else {}) if isinstance(k, str) and "#" in k), None)
+        chapter = anchor.split("#")[0] if anchor else ""
+        if (level < 2 or not anchor or anchor.split("#", 1)[1] in done or not 0 < number <= pdf.page_count
+                or chapter in {a.split("#")[0] for a in found}):
+            continue
+        page = pdf[number - 1]
+        hits = page.search_for(" ".join(title.split()[:4]))
+        lines = [line["bbox"] for b in page.get_text("dict")["blocks"] for line in b.get("lines", [])]
+        if not hits or not lines:
+            continue
+        below = [box for box in lines if box[1] >= hits[0].y1 - 1]
+        full = max(box[3] for box in lines) >= bottom - 2 * fontsize  # si no, el capítulo acaba en esta página
+        if full and len(below) < 3:
+            found[anchor] = bottom - hits[0].y0 + fontsize
+    return {a.split("#", 1)[1]: gap for a, gap in found.items()}
+
+
 def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     """PDF maquetado: el mismo libro que write_epub (con sus opciones), compuesto por MuPDF al tamaño de
     PDF_SIZES, con el índice como marcadores, título y autor en las propiedades y número de página al pie
@@ -3814,14 +3838,25 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     progress(hechos, 100): por etapas; maquetar con MuPDF es una sola llamada y salta de 40 a 70."""
     step = progress or (lambda done, total: None)
     width, height, fontsize = PDF_SIZES[size]
+    pushed = {}  # ancla de un subtítulo -> relleno que lo pasa a la página siguiente
     with tempfile.TemporaryDirectory(prefix="lnepub-pdf-") as tmp:
         epub = Path(tmp) / "libro.epub"
-        write_epub(book, chapters, epub, **{**options, "kepub": False, "epub2": False, "css_extra": PDF_CSS},
-                   progress=lambda done, total: step(done * 40 // total, 100))
-        with pymupdf.open(epub) as source:
-            source.layout(width=width, height=height, fontsize=fontsize)
-            toc = source.get_toc()
-            laid = pymupdf.open("pdf", source.convert_to_pdf())
+        for attempt in range(4):  # cada vuelta, el primer subtítulo colgado de cada capítulo; casi siempre basta 1
+            # MuPDF no hace caso de page-break-before: un relleno arriba del alto que queda lo empuja, y en la
+            # página nueva el relleno que sobra no se ve
+            css = PDF_CSS + "".join(f"#{a} {{ padding-top: {gap:.0f}px; }}\n" for a, gap in pushed.items())
+            write_epub(book, chapters, epub, **{**options, "kepub": False, "epub2": False, "css_extra": css},
+                       progress=lambda done, total: step(done * 40 // total, 100) if not attempt else None)
+            with pymupdf.open(epub) as source:
+                source.layout(width=width, height=height, fontsize=fontsize)
+                toc = source.get_toc(simple=False)
+                laid = pymupdf.open("pdf", source.convert_to_pdf())
+            more = _stranded_subtitles(laid, toc, fontsize, pushed)
+            if not more or attempt == 3:
+                break
+            pushed.update(more)
+            laid.close()
+    toc = [[level, title, page] for level, title, page, *_ in toc]
     step(70, 100)
     pdf = laid
     moved = _full_page_images(pdf)

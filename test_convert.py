@@ -2538,6 +2538,29 @@ def test_write_pdf_small_caps_keep_their_letters():
     assert titles == ["Chapter 3: Becoming a Witch"], titles
 
 
+def test_write_pdf_moves_subtitle_left_at_page_foot():
+    """Maryoku 1, pág. 74: «Lado del trío de aventureros» al pie de la página con una línea debajo. Un subtítulo
+    con menos de 3 líneas debajo pasa arriba de la página siguiente; uno con sitio se queda donde está."""
+    B = convert.Block
+
+    def place(words):
+        blocks = [B("heading", 1, "Capítulo 1: Uno"), B("p", 1, "Texto " * words), B("heading", 1, "Lado de la bruja"),
+                  B("p", 1, "Más palabras " * 300)]
+        out = TMP / f"subtitulo-pie-{words}.pdf"
+        convert.write_pdf(convert.Book("Libro", "", b"", blocks, [0]), [(0, "Capítulo 1: Uno")], out, "A5",
+                          contents=False)
+        with pymupdf.open(out) as pdf:
+            for n, page in enumerate(pdf):
+                hit = page.search_for("Lado de la bruja")
+                if hit:
+                    lines = [l["bbox"] for b in page.get_text("dict")["blocks"] for l in b.get("lines", [])]
+                    return n, round(hit[0].y0), sum(1 for box in lines if box[1] >= hit[0].y1 - 1)
+
+    stranded, roomy = place(692), place(560)  # sin arreglo: 1 línea debajo (el número de página); 12 líneas
+    assert stranded[1] < 60 and stranded[2] > 3, stranded
+    assert roomy[1] > 300 and roomy[2] > 3, roomy
+
+
 def test_write_pdf_whole_words_never_splits_a_word():
     """PDF maquetado: el CSS pide hyphens: auto y MuPDF parte «mu-jer», «cue-ro» al final de línea. Con
     whole_words la palabra que no cabe pasa entera a la línea siguiente; sin la opción se sigue partiendo.
@@ -4839,29 +4862,39 @@ def test_editor_sheet_changes_in_a_loaded_empty_paragraph():
 
 
 def test_editor_focus_mode():
-    """F11 deja solo la hoja: sin cinta ni panel del PDF. Esc vuelve a como estaba sin preguntar si se descartan
-    los cambios, y el editor sigue abierto con ellos."""
+    """F11 deja solo la hoja y la fila del capítulo: sin pestañas, cinta ni panel del PDF, pero con ◀ capítulo ▶
+    (sin ella no había cómo cambiar de capítulo); Ctrl+AvPág pasa al siguiente. Esc vuelve a como estaba sin
+    preguntar si se descartan los cambios, y el editor sigue abierto con ellos."""
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     import app
 
     B = convert.Block
-    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("heading", 2, "Capítulo 2"),
+                                      B("p", 2, "Dos.")], [0, 2])
+    editor.win.show()
     editor.sheet.textCursor().insertText("Cambio. ")
     asked = []
     saved = app.messagebox.askyesno
     app.messagebox.askyesno = lambda *a, **kw: asked.append(a) or False
     try:
         QTest.keyClick(editor.sheet, Qt.Key.Key_F11)
-        focused = editor.ribbon_bar.isHidden() and editor.side.isHidden() and not editor.sheet.isHidden()
+        root.update()
+        focused = (editor.ribbon_pages.isHidden() and editor.ribbon_tabs.isHidden() and editor.side.isHidden()
+                   and not editor.sheet.isHidden())
+        nav = editor.next_chapter.isVisible() and editor.chapter_btn.isVisible()
+        QTest.keyClick(editor.sheet, Qt.Key.Key_PageDown, Qt.KeyboardModifier.ControlModifier)
+        root.update()
+        moved = editor.current
         QTest.keyClick(editor.win, Qt.Key.Key_Escape)
-        back = not editor.ribbon_bar.isHidden() and not editor.side.isHidden() and editor.win.isVisible()
+        back = not editor.ribbon_pages.isHidden() and not editor.side.isHidden() and editor.win.isVisible()
         kept = editor.dirty()
     finally:
         app.messagebox.askyesno = saved
         editor.win.done(0)
         window.close()
-    assert focused and back and kept and not asked, (focused, back, kept, asked)
+    assert focused and nav and back and kept and not asked, (focused, nav, back, kept, asked)
+    assert moved == (2, 4), moved
 
 
 def test_editor_work_log():
@@ -9089,6 +9122,85 @@ def test_qtk_textbox_closed_before_painting_its_tags():
     finally:
         sys.excepthook = hook
     assert errors == [], errors
+
+
+def test_theme_controls_check_marks_and_attached_popups():
+    """Tema claro: los bordes de botones y campos se distinguen del blanco (con el gris de las tarjetas se perdían).
+    Una casilla marcada lleva su ✓ blanco sobre el acento (era un cuadro azul lleno). Las listas desplegables salen
+    debajo de su campo y del mismo ancho, y el menú de un botón ▾ es al menos tan ancho como el botón: se ven como
+    el control que se abre, no como otra ventana."""
+    import app
+    import qtk
+    import theme
+    from PySide6.QtWidgets import QCheckBox, QComboBox, QMenu
+
+    def luminance(color):
+        r, g, b = (int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        f = lambda v: v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+
+    light = theme.colors(False)
+    edge = (luminance(light["card"]) + 0.05) / (luminance(light["edge"]) + 0.05)
+    q = qtk.app()
+    theme.apply(q, "Claro")
+    box = QCheckBox("Índice")
+    box.setChecked(True)
+    box.resize(box.sizeHint())
+    shot = box.grab().toImage()
+    size = theme.FluentStyle.SIZE
+    top = (shot.height() - size) // 2
+    pixels = [shot.pixelColor(x, y).name() for x in range(size) for y in range(top, top + size)]
+    combo = QComboBox()
+    combo.addItems(["Uno", "Dos", "Tres"])
+    combo.resize(160, 28)
+    combo.show()
+    combo.showPopup()
+    q.processEvents()
+    popup = combo.view().window().geometry()
+    below = popup.top() >= combo.mapToGlobal(combo.rect().bottomLeft()).y() - 1, popup.width() >= combo.width()
+    combo.hidePopup()
+    combo.close()
+    menu = QMenu()
+    menu.addAction("Corto")
+    button = app._menu_button("Herramientas largas", menu)
+    button.resize(220, 30)
+    menu.aboutToShow.emit()
+    wide = menu.minimumWidth()
+    assert edge >= 2.2, edge
+    assert light["acc"] in pixels and light["acc_ink"] in pixels, set(pixels)
+    assert all(below), (popup, combo.geometry())
+    assert wide == 220, wide
+
+
+def test_editor_marks_cursor_paragraph():
+    """La hoja marca con un fondo tenue el párrafo del cursor, como el recuadro del original: se sabía dónde se
+    estaba en el PDF pero no en la hoja. Sigue al cursor."""
+    from PySide6.QtGui import QColor, QTextCursor
+    import theme
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos."),
+                                      B("p", 1, "Tres.")], [0])
+    editor.win.show()
+    sheet = editor.sheet
+    doc = sheet.document()
+
+    def tint(n):
+        box = doc.documentLayout().blockBoundingRect(doc.findBlockByNumber(n))
+        y = int(box.center().y()) - sheet.verticalScrollBar().value()
+        return sheet.viewport().grab().toImage().pixelColor(int(doc.documentMargin()) - 5, y).name()
+
+    sheet.setTextCursor(QTextCursor(doc.findBlockByNumber(1)))
+    root.update()
+    first = tint(1), tint(2)
+    sheet.setTextCursor(QTextCursor(doc.findBlockByNumber(2)))
+    root.update()
+    second = tint(1), tint(2)
+    colors = theme.colors(window.dark)
+    editor.win.done(0)
+    window.close()
+    current = QColor(colors["current"]).name()
+    assert first[0] == current and first[1] != current, (first, current)
+    assert second[1] == current and second[0] != current, (second, current)
 
 
 def test_theme_text_is_readable():
