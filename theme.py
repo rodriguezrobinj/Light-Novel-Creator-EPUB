@@ -1,11 +1,13 @@
 """Aspecto Fluent claro y oscuro. Fusion dibuja todos los controles él mismo: así la ventana se ve igual en
 Windows 10 y 11 (el estilo nativo de Qt en Windows 10 es el antiguo)."""
+import ctypes
+import sys
 import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPalette, QPen
-from PySide6.QtWidgets import QProxyStyle, QStyle
+from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle
 
 CHOICES = ("Sistema", "Claro", "Oscuro")
 
@@ -27,12 +29,12 @@ LIGHT = {"bg": "#eef0f3", "card": "#ffffff", "base": "#ffffff", "line": "#d9dce1
          "ink": "#16181b", "muted": "#545a63", "acc": "#0f5fc2", "acc_hover": "#0c4fa3", "acc_ink": "#ffffff",
          "sel": "#d6e6fb", "hover": "#eef3fa", "press": "#dde7f5", "warn": "#c62828", "ok": "#2e7d32",
          "drop": "#f3f7fd", "drop_line": "#9fb7dd", "sheet": "#ffffff", "sheet_line": "#c9cdd3", "hint": "#80868f",
-         "zebra": "#f4f6f9", "shine": "#f5f6f8", "current": "#f1f5fc"}
+         "zebra": "#f4f6f9", "shine": "#f5f6f8"}
 DARK = {"bg": "#202020", "card": "#2b2b2b", "base": "#1f1f1f", "line": "#3d3d3d", "ink": "#ececec",
         "muted": "#a0a0a0", "acc": "#7099f5", "acc_hover": "#85a9f7", "acc_ink": "#111111", "sel": "#2f3d5c",
         "hover": "#353535", "press": "#3d3d3d", "warn": "#ff6b6b", "ok": "#7bc47f", "drop": "#262a33",
         "drop_line": "#4a5a7a", "sheet": "#1a1a1a", "sheet_line": "#3d3d3d", "hint": "#7a7a7a",
-        "zebra": "#313131", "shine": "#555555", "edge": "#4a4a4a", "current": "#232833"}
+        "zebra": "#313131", "shine": "#555555", "edge": "#4a4a4a"}
 
 # Colores de los tipos de fila de la lista ("" = el del texto normal). Todo texto llega a 4,5:1 (WCAG AA)
 KINDS = {False: {"chapter": "", "subtitle": "#555555", "cut": "#737373", "image": "#2e7d32", "dropped": "#6a6a6a",
@@ -116,8 +118,8 @@ QHeaderView::section {{ background: {card}; border: 0; border-bottom: 1px solid 
 QTabBar::tab {{ padding: 4px 12px; border: 0; border-bottom: 2px solid transparent; color: {muted};
     background: transparent; }}
 QTabBar::tab:selected {{ color: {acc}; border-bottom-color: {acc}; font-weight: 600; }}
-QMenu {{ background: {card}; border: 1px solid {edge}; padding: 4px; }}
-QMenu::item {{ padding: 5px 24px 5px 22px; border-radius: 4px; }}
+QMenu {{ background: {card}; border: 1px solid {acc}; padding: 2px; }}
+QMenu::item {{ padding: 4px 24px 4px 22px; min-height: 16px; }}
 QMenu::item:selected {{ background: {sel}; color: {ink}; }}
 QMenu::separator {{ height: 1px; background: {line}; margin: 4px 8px; }}
 QProgressBar {{ border: 0; background: {line}; border-radius: 3px; max-height: 6px; min-height: 6px; }}
@@ -299,7 +301,23 @@ def apply(app, choice):
     app.setFont(QFont("Segoe UI", 9))
     app.setPalette(palette(dark))
     app.setStyleSheet(QSS.format(**colors(dark), chevron=chevron(colors(dark)["muted"])))
+    for effect in (Qt.UIEffect.UI_AnimateCombo, Qt.UIEffect.UI_AnimateMenu, Qt.UIEffect.UI_FadeMenu):
+        QApplication.setEffectEnabled(effect, False)  # las listas y menús se abren de golpe, sin deslizarse
+    for window in app.topLevelWidgets():
+        if window.isVisible():
+            title_bar(window, dark)
     return dark
+
+
+def title_bar(window, dark):
+    """Barra de título clara u oscura al momento: Windows no la repintaba hasta que la ventana perdía el foco."""
+    if sys.platform != "win32" or QApplication.platformName() != "windows":
+        return
+    hwnd, value = int(window.winId()), ctypes.c_int(1 if dark else 0)
+    ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))  # modo oscuro
+    active = window.isActiveWindow()
+    ctypes.windll.user32.SendMessageW(hwnd, 0x0086, int(not active), 0)  # WM_NCACTIVATE: repinta la barra
+    ctypes.windll.user32.SendMessageW(hwnd, 0x0086, int(active), 0)
 
 
 def follow(app, callback):
