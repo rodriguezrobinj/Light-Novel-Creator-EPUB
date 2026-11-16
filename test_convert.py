@@ -737,6 +737,46 @@ def test_title_made_of_images_is_read_with_ocr():
     assert "Palabras del autor" not in [book.blocks[k].html for k in book.candidates]
 
 
+def test_section_number_at_top_band_is_not_a_page_number():
+    """Oukoku 1, págs. 26 y 146: el apartado «3» cae arriba del todo, en la franja de cabecera. Los números de
+    página van abajo: el número suelto de arriba es el apartado, no se quita."""
+    doc = pymupdf.open()
+    text = [(92, y, line("Un parrafo cualquiera de la escena", 57), 11, "cour") for y in range(300, 700, 30)]
+    for n in range(1, 7):
+        section = {1: [(72, 150, "Capitulo 1: Inicio", 20, "helv"), (72, 250, "1", 14, "hebo")],
+                   4: [(72, 70, "2", 14, "hebo")]}.get(n, [])
+        add_page(doc, n, section + text + [(540, 800, str(n), 11, "helv")])
+    path = TMP / "apartado-arriba.pdf"
+    doc.save(path)
+    blocks = convert.analyze(path).blocks
+    heads = [(b.page, b.html) for b in blocks if b.kind == "heading"]
+    assert heads == [(1, "Capitulo 1: Inicio"), (1, "1"), (4, "2")], heads
+    assert not any(b.html.strip() in "23456" for b in blocks if b.kind == "p"), "número de página en el texto"
+
+
+def test_title_made_of_images_at_left_margin_mid_page():
+    """Farming Life 2: el título hecho imagen va pegado al margen izquierdo, a media página entre párrafos, y el de
+    dos líneas deja un renglón vacío entre ellas. El guion suelto del título cae centrado y no es un adorno."""
+    doc = pymupdf.open()
+    para = [(92, 0, line("Un parrafo cualquiera de la escena", 57), 11, "cour"), (72, 14, "fin uno.", 11, "cour")]
+    add_page(doc, 1, [(x, 90 + y, t, s, f) for x, y, t, s, f in para] + [(x, 250 + y, t, s, f) for x, y, t, s, f in para])
+    for row, parts in enumerate([["1 - El largo viaje del viejo rey", "-", "otra vez"], ["y su vuelta"]]):
+        x, y = 72, 150 + row * 34
+        for t in parts:
+            pix, w, h = text_image(t)
+            if t == "-":
+                assert abs(x + w / 2 - 595 / 2) < 50, x  # el guion, centrado como en la pág. 199
+            doc[-1].insert_image(pymupdf.Rect(x, y, x + w, y + h), pixmap=pix)
+            x += w - 2
+    add_page(doc, 2, [(x, 90 + y, t, s, f) for x, y, t, s, f in para])
+    path = TMP / "titulo-imagen-izquierda.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    titles = [(book.blocks[k].page, book.blocks[k].html) for k in book.candidates]
+    assert titles == [(1, "1 - El largo viaje del viejo rey - otra vez y su vuelta")], titles
+    assert not any(b.kind == "break" for b in book.blocks), [b.page for b in book.blocks if b.kind == "break"]
+
+
 def test_renumber_fixes_ocr_chapter_numbers():
     """Mitsuha 4 a 6: en la letra dorada el OCR lee «3)» por 31 y 49 por 40; la secuencia los delata."""
     assert convert._renumber(["Capítulo 3) - A", "Capítulo 32 - B", "Capítulo 39 - C", "Capítulo 49 - D",
@@ -6257,6 +6297,8 @@ def test_blank_gap_between_paragraphs_is_a_scene_break():
     # 3: ficha de estado tras un hueco (Maryoku) y la firma del autor al final del epílogo (Eminence 7): no
     add_page(doc, 3, para(150, "Mire mi pantalla de estado") + [(72, 250, "NOMBRE: Chise (Reencarnador)", 11, "cour")]
              + para(350, "Ultimo parrafo del epilogo") + [(300, 450, "Autor Ejemplo", 11, "cour")])
+    for n in range(4, 9):  # texto corrido: un libro de verdad no tiene un hueco por página
+        add_page(doc, n, [row for y in range(150, 700, 44) for row in para(y, "Texto corrido sin huecos")])
     path = TMP / "hueco-escena.pdf"
     doc.save(path)
     blocks = convert.analyze(path).blocks
@@ -6272,6 +6314,38 @@ def test_blank_gap_between_paragraphs_is_a_scene_break():
     doc.save(TMP / "huecos-estilo.pdf")
     styled = [b.kind for b in convert.analyze(TMP / "huecos-estilo.pdf").blocks]
     assert "break" not in styled, styled
+    # Farming Life 1: uno o dos por página (1,5 de media) agrupan párrafos de la misma escena. Mitsuha 3, el libro con
+    # más escenas, llega a 0,9 por página
+    doc = pymupdf.open()
+    for n in range(1, 5):
+        ys = (150, 194, 284, 328, 418, 462) if n % 2 else (150, 194, 284, 328, 372, 416)
+        add_page(doc, n, [(72, 100, f"Capitulo {n}: Otro", 20, "helv")]
+                 + [row for y in ys for row in para(y, "Parrafo de la misma escena")])
+    doc.save(TMP / "huecos-estilo-2.pdf")
+    styled = [b.kind for b in convert.analyze(TMP / "huecos-estilo-2.pdf").blocks]
+    assert "break" not in styled, styled
+
+
+def test_blank_line_alone_is_not_a_break_when_symbols_are_padded():
+    """Oukoku 2 a 4: la escena cambia con «◇◇◇◇◇» entre dos líneas en blanco; una línea en blanco sola es una pausa,
+    no un separador (salían 40 a 70 de más por tomo). Dos líneas en blanco sí: la escena sin su «◇»."""
+    para = lambda y, t: [(92, y, line(t, 57), 11, "cour"), (72, y + 14, line("sigue el parrafo", 60), 11, "cour"),
+                         (72, y + 28, "fin.", 11, "cour")]
+    doc = pymupdf.open()
+    for n in range(1, 13):
+        rows = para(150, "Primer parrafo de la pagina")
+        if n in (2, 4, 6):  # separador entre líneas en blanco
+            rows += [(280, 224, "* * *", 11, "cour")] + para(270, "Otra escena empieza aqui")
+        elif n in (3, 5, 7):  # línea en blanco sola
+            rows += para(224, "Sigue la misma escena")
+        elif n == 8:  # dos líneas en blanco: escena sin su símbolo (Oukoku 2, pág. 94)
+            rows += para(254, "Otra escena sin simbolo")
+        else:
+            rows += para(194, "Sigue la misma escena")
+        add_page(doc, n, ([(72, 100, "Capitulo 1: Inicio", 20, "helv")] if n == 1 else []) + rows)
+    doc.save(TMP / "huecos-con-simbolo.pdf")
+    breaks = [(b.page, b.html) for b in convert.analyze(TMP / "huecos-con-simbolo.pdf").blocks if b.kind == "break"]
+    assert breaks == [(2, "* * *"), (4, "* * *"), (6, "* * *"), (8, "")], breaks
 
 
 def test_blank_line_after_bold_subtitle_is_not_a_scene_break():

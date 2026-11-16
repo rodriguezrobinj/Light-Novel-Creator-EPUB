@@ -389,11 +389,14 @@ def _ocr(page, clip):
 def _image_lines(page, rows, infos, body):
     """Dónde puede haber un título hecho imagen (Oukoku e Tsuzuku Michi 3 y 4: texto rojo pasado a imagen, en
     trozos de una franja sobre el texto, sin texto ni marcador): la línea de imágenes de alto de un renglón
-    grande, ancha, centrada y por encima del texto. No ilustraciones ni adornos."""
+    grande, ancha, centrada y por encima del texto; o a media página pegada al margen izquierdo del texto, como
+    un párrafo más (Farming Life 2). No ilustraciones ni adornos, que van centrados."""
     width = page.rect.width
-    first = min((r.y for r in rows if abs(r.size - body) < 0.5), default=None)
-    if first is None:
+    text = [r for r in rows if abs(r.size - body) < 0.5]
+    if not text:
         return []
+    first = min(r.y for r in text)
+    left = min(r.x0 for r in text)
     lines = []
     for b in sorted((pymupdf.Rect(i["bbox"]) for i in infos), key=lambda b: b.y0):
         # Mismo alto y misma altura: la misma línea. La barra de la cabecera de Oukoku 4 cruza el título y no es él
@@ -403,10 +406,11 @@ def _image_lines(page, rows, infos, body):
             lines.append(pymupdf.Rect(b))
     found = []
     for b in lines:
-        if (b.y1 < first and body <= b.height <= 3 * body and b.width >= 3 * b.height
-                and abs((b.x0 + b.x1) / 2 - width / 2) < 0.15 * width
+        if (body <= b.height <= 3 * body and b.width >= 3 * b.height
+                and (b.y1 < first and abs((b.x0 + b.x1) / 2 - width / 2) < 0.15 * width or abs(b.x0 - left) < 0.5 * body)
                 and not any(b.y0 - r.size < r.y < b.y1 + r.size for r in rows)):  # el texto no la pisa
-            if found and b.y0 - found[-1].y1 < 0.6 * b.height:  # Mitsuha 5: título de dos o tres líneas
+            # Mitsuha 5: título de dos o tres líneas; Farming Life 2 deja un renglón vacío entre ellas
+            if found and b.y0 - found[-1].y1 < 1.1 * b.height:
                 found[-1] |= b
             else:
                 found.append(b)
@@ -446,9 +450,11 @@ def _strip_margins(pages, heights):
 
     counts, loose_counts = collections.Counter(), collections.Counter()
     sizes = collections.defaultdict(collections.Counter)  # texto -> tamaños con que sale en las franjas
+    numbers = collections.Counter()  # franja (True: la de arriba) -> páginas con un número suelto en ella
     for rows, h in zip(pages, heights):
         band = [r for r in rows if in_band(r, h)]
         counts.update({_norm(r.text) for r in band})
+        numbers.update({r.y < h / 2 for r in band if _norm(r.text) == "#"})
         loose_counts.update({loose(r.text) for r in band})
         for r in band:
             sizes[_norm(r.text)][round(r.size)] += 1
@@ -463,13 +469,18 @@ def _strip_margins(pages, heights):
     # ("Einherjar Project Palabras del autor | 230") sale en pocas páginas, pero empieza igual.
     loose_repeated = tuple(k for k, n in loose_counts.items() if n >= least and len(k) >= 6)
 
+    def page_number(r, h):
+        # Oukoku 1, págs. 26 y 146: el apartado «3» cae arriba, en la franja, y la página se numera abajo
+        top = r.y < h / 2
+        return _norm(r.text) == "#" and not (numbers[top] < least <= numbers[not top])
+
     def margin(r, h):
         if not in_band(r, h):
             return False
         # La clave suelta solo para líneas con número de página que no abren con "Capítulo…": un título
         # de capítulo en la franja superior también se queda en pocas palabras repetidas
         footer = re.search(r"\d", r.text) and not KEYWORDS.match(r.text.strip(LABEL_DECOR))
-        return (_norm(r.text) == "#" or (_norm(r.text) in repeated and not big(r))  # "#": números de página sueltos
+        return (page_number(r, h) or (_norm(r.text) in repeated - {"#"} and not big(r))
                 or bool(footer and loose_repeated and loose(r.text).startswith(loose_repeated)))
 
     return [[r for r in rows if not margin(r, h)] for rows, h in zip(pages, heights)]
@@ -2678,6 +2689,9 @@ def analyze(pdf_path, progress=None):
         for (i, b, _), text in zip(found, _renumber([text for *_, text in found])):
             pages[i] = sorted(pages[i] + [Row(text, html.escape(text), b.x0, b.x1, b.y1, round(body * 1.5, 1), True)],
                               key=lambda r: r.y)
+            # Sus trozos ya son texto: el guion centrado del título de dos líneas de Farming Life 2 (pág. 199) pasaba
+            # por adorno de escena
+            page_infos[i] = [info for info in page_infos[i] if not b.contains(pymupdf.Rect(info["bbox"]))]
         gaps = collections.Counter()
         indents = total = 0
         for rows in pages:
@@ -2700,8 +2714,17 @@ def analyze(pdf_path, progress=None):
             spaced.update(round(b.y - a.y) for a, b in zip(normal, normal[1:]) if b.y - a.y > step * 1.15)
         paragraph_gap = max((g for g in spaced if g < 3 * step), key=spaced.get, default=step)
         scene_gap = max(SCENE_GAP * step, 1.8 * paragraph_gap)
-        if sum(count for gap, count in spaced.items() if gap > scene_gap) > 2 * n:  # Megami 4: 4 por página
+        # Megami 4: 4 por página; Farming Life 1 y 2: 1,7, agrupan párrafos. Mitsuha 3 (GambaTrans), escenas: 0,9
+        if sum(count for gap, count in spaced.items() if gap > scene_gap) > 1.25 * n:
             scene_gap = None
+        # Oukoku 2 a 4: la escena cambia con «◇◇◇◇◇» entre dos líneas en blanco; una línea en blanco sola es una
+        # pausa, y dos (Oukoku 2, pág. 94) una escena sin su «◇». Kage 7 (World Project) pone su «☆» a un párrafo
+        # y sus líneas en blanco sí cambian de escena
+        pads = sorted(min(r.y - rows[k - 1].y, rows[k + 1].y - r.y)
+                      for rows in pages for k, r in enumerate(rows[1:-1], 1) if SCENE_BREAK.fullmatch(r.text))
+        pads = [p for p in pads if p > 1.5 * paragraph_gap]
+        if len(pads) >= 3 and scene_gap:
+            scene_gap = max(scene_gap, 1.25 * pads[len(pads) // 2])
 
         # Título por tamaño o negrita, o porque el PDF lo marca: hay subtítulos del tamaño del texto
         # ("El lado de la bruja") que solo se distinguen por su marcador de nivel 2.
