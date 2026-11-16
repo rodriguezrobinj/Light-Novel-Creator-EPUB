@@ -350,11 +350,16 @@ def _framed_thumb(data):
     return framed
 
 
+def _images():
+    """Carpeta de las imágenes elegidas o pegadas, junto a las preferencias: las revisiones apuntan ahí."""
+    return SETTINGS.parent / "ilustraciones"
+
+
 def _store_image(path):
     """Copia la imagen elegida junto a las preferencias y devuelve esa ruta: la revisión la guarda, y la del usuario
     (una carpeta de exportación) puede borrarse; entonces, al reabrir, el cambio se perdía."""
     data = Path(path).read_bytes()
-    dest = SETTINGS.parent / "ilustraciones" / (hashlib.sha1(data).hexdigest()[:16] + Path(path).suffix.lower())
+    dest = _images() / (hashlib.sha1(data).hexdigest()[:16] + Path(path).suffix.lower())
     if not dest.is_file():
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
@@ -376,7 +381,7 @@ def _font_file(path):
 
 def _stored_image(path):
     """La ruta es de la carpeta de ilustraciones del programa (_store_image), la única que escribe la ventana."""
-    folder = os.path.normcase(str(SETTINGS.parent / "ilustraciones")) + os.sep
+    folder = os.path.normcase(str(_images())) + os.sep
     return not _network_path(path) and os.path.normcase(os.path.normpath(str(path))).startswith(folder)
 
 
@@ -914,7 +919,7 @@ def _migrate_review(state, book):
                 if any(start < s + n and end > s for s, n in where):
                     raise LookupError
                 edits.append([new(start, where), new(end, where), edit[2]])
-                convert.edit_section(work, start, end, str(edit[2]))
+                convert.edit_section(work, start, end, str(edit[2]), _images())
         where = spans()
         rows = {}
         for item, row in state["rows"].items():
@@ -1265,7 +1270,7 @@ def _replay(book, state):
                 break
         except (TypeError, ValueError, IndexError):
             break  # el .json se puede editar a mano
-        convert.edit_section(book, start, end, text)
+        convert.edit_section(book, start, end, text, _images())
         done.append([start, end, text])
     return done
 
@@ -3731,7 +3736,7 @@ class App:
         rows = {k: [v[0], titles[k], *v[2:]] if titles and k in titles else v for k, v in rows.items()}
         rows = {k: [retype[k], *v[1:]] if retype and k in retype else v for k, v in rows.items()}
         for n, edit in enumerate(edits):
-            mapping = convert.edit_section(self.book, *edit)
+            mapping = convert.edit_section(self.book, *edit, _images())
             self.edits.append(list(edit))
             rows = {str(mapping[int(k)]): v for k, v in rows.items() if int(k) in mapping}
             if kinds and kinds[n]:  # títulos escritos en el editor: con el tipo elegido en la cinta
@@ -6660,6 +6665,7 @@ class TextEditor:
         QShortcut(QKeySequence("F11"), win, self.toggle_focus)  # también con el foco fuera de la hoja
         self.reading, self.speaker = None, None  # párrafo que se lee en voz alta (QTextBlock) y la voz (Speaker)
         self.colors = theme.colors(app.dark)
+        editor.IMAGES = _images()
         editor.LINK_COLOR = self.colors["acc"]  # el azul fijo apenas se leía sobre la hoja oscura (3:1)
         self.sheet = sheet = editor.Sheet()
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
@@ -6918,6 +6924,8 @@ class TextEditor:
         group("Texto", [tool("Separador", "Separador de escena tras el párrafo", sheet.insert_break, icon="scene"),
                         tool("Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note,
                              icon="note")])
+        group("Ilustraciones", [tool("Imagen", "Imagen de un archivo del equipo tras el párrafo; también se pega una "
+                                     "copiada (Ctrl+V)", self.insert_image, icon="image")])
         group("Vínculos", [tool("Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)",
                                 self.show_link_bar, icon="link")])
         group("Capítulo", [tool("Dividir\ncapítulo", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo "
@@ -8005,6 +8013,16 @@ class TextEditor:
             else:
                 menu.addAction(item[0], item[1]).setEnabled(item[2])
         return menu
+
+    def insert_image(self):
+        """Imagen de un archivo tras el párrafo del cursor: al aceptar, una ilustración nueva del libro."""
+        path = filedialog.askopenfilename(filetypes=IMAGE_TYPES, parent=self.win)
+        if not path:
+            return
+        try:
+            self.sheet.insert_picture(convert.load_cover(path))
+        except ValueError as e:
+            messagebox.showerror("Error", str(e), parent=self.win)
 
     def change_picture(self, k):
         """Cambia la ilustración del bloque k por un archivo (App.replace_image) y la hoja la muestra ya."""

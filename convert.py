@@ -1012,8 +1012,16 @@ def load_cover(path):
     """Imagen de portada desde un archivo, en JPEG: el EPUB declara la portada como cover.jpg."""
     try:
         data = Path(path).read_bytes()
-        if data[:3] == b"\xff\xd8\xff":
-            return data
+    except OSError as e:
+        raise ValueError(f"No se pudo abrir la imagen: {e}") from e
+    return to_jpeg(data)
+
+
+def to_jpeg(data):
+    """La imagen (JPEG, PNG, WebP…) en JPEG, como van las ilustraciones del libro."""
+    if data[:3] == b"\xff\xd8\xff":
+        return data
+    try:
         pix = pymupdf.Pixmap(data)
     except Exception as e:
         raise ValueError(f"No se pudo abrir la imagen: {e}") from e
@@ -1208,6 +1216,9 @@ def replace_text(book, find, new, word=False, blocks=None):
 
 
 TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
+# Imagen añadida en el editor: su archivo (hash del contenido) en la carpeta de ilustraciones del programa. Solo el
+# nombre, sin ruta: una revisión ajena no hace abrir otra carpeta ni una ruta de red
+PICTURE = re.compile(r"\[(Imagen) ([0-9a-f]{16}\.jpg)\]")
 INLINE = re.compile(r"&lt;(/?)(i|b|sup|sc)&gt;")
 # nota al pie en el editor de texto; puede llevar corchetes dentro («[Nota: ver [Arco 2].]»)
 NOTE_MARK = re.compile(r"\[Nota: ((?:[^\[\]]|\[[^\[\]]*\])+)\]")
@@ -1276,10 +1287,10 @@ def _inline(text):
     return ICON_MARK.sub(r"<\1>", out).replace("<sc>", SC_OPEN).replace("</sc>", SC_CLOSE)
 
 
-def edit_section(book, start, end, text):
+def edit_section(book, start, end, text, folder=None):
     """Cambia los bloques start..end-1 por el texto editado (formato de section_text). Las marcas
     recuperan su ilustración o separador; "# Título" crea un título; una línea de solo símbolos
-    ("* * *") crea un separador. Ajusta book.candidates y devuelve {índice viejo: índice nuevo} de los
+    ("* * *") crea un separador; "[Imagen nombre]", una ilustración nueva con ese archivo de folder. Ajusta book.candidates y devuelve {índice viejo: índice nuevo} de los
     bloques que siguen en el libro (los párrafos se sustituyen: no están)."""
     old = book.blocks
     page = old[start - 1].page if start else 1
@@ -1303,6 +1314,12 @@ def edit_section(book, start, end, text):
     for j, line in enumerate(lines):
         m = TOKEN.fullmatch(line)
         k = int(m.group(2)) if m else -1
+        picture = PICTURE.fullmatch(line)
+        if picture:  # sin su archivo, descartada: el bloque sigue ahí y los cambios de después cuadran
+            path = Path(folder) / picture[2] if folder else None
+            new.append(Block("image", page, image=path.read_bytes()) if path and path.is_file()
+                       else Block("image", page, keep=False))
+            continue
         if m and start <= k < end and k not in kept and old[k].kind == ("image" if m.group(1) == "Ilustración" else "break"):
             kept[k] = start + len(new)
             new.append(old[k])
