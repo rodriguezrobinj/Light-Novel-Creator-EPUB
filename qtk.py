@@ -7,8 +7,8 @@ from contextlib import contextmanager
 import pymupdf
 from PySide6.QtCore import (QEasingCurve, QEvent, QItemSelectionModel, QPoint, QPointF, QRectF, Qt, QTimer,
                             QVariantAnimation, Signal)
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QPen, QPixmap, QPolygonF,
-                           QTextCharFormat, QTextCursor, QTextFormat)
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPalette,
+                           QPen, QPixmap, QPolygonF, QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
                                QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTextEdit, QToolTip, QTreeWidget, QTreeWidgetItem, QWidget)
@@ -198,7 +198,7 @@ class RowList(QTreeWidget):
         # Arrastre de una fila (la ventana pone drag_iid al pulsar en su título): sin guía no se veía hacia
         # dónde iba. Una línea marca dónde caerá, delante de drop_iid, y se desliza de una fila a otra
         self.drag_iid = self.drop_iid = None
-        self.press_at = None
+        self.press_at = self.drag_pos = None
         self.slide = QVariantAnimation(self, duration=120, easingCurve=QEasingCurve.Type.OutCubic)
         self.slide.valueChanged.connect(lambda _: self.viewport().update())
 
@@ -252,6 +252,8 @@ class RowList(QTreeWidget):
         if self.drop_iid is None and (pos - (self.press_at or pos)).manhattanLength() < QApplication.startDragDistance():
             return  # un clic que tiembla no es un arrastre
         self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+        self.drag_pos = pos
+        self.viewport().update()  # la tarjeta sigue al ratón aunque la raya no cambie de fila
         bar, row = self.verticalScrollBar(), self.visualItemRect(self.rows[self.drag_iid]).height() or 20
         if pos.y() < row:  # cerca del borde: la lista se desplaza para llegar a las filas que no se ven
             bar.setValue(bar.value() - 1)
@@ -282,7 +284,7 @@ class RowList(QTreeWidget):
         super().mouseReleaseEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self.released.emit(self.Event(event.position().toPoint()))
-            self.drag_iid = self.drop_iid = self.press_at = None
+            self.drag_iid = self.drop_iid = self.press_at = self.drag_pos = None
             self.slide.stop()
             self.viewport().unsetCursor()
             self.viewport().update()
@@ -291,31 +293,38 @@ class RowList(QTreeWidget):
         super().paintEvent(event)
         if not (self.drop_iid in self.rows and self.drag_iid in self.rows):
             return
-        # el acento del tema (Link): el Highlight de la lista es el azul apagado de la selección y no se distinguía
-        accent = QApplication.palette().color(QPalette.ColorRole.Link)
+        # Como las listas de Windows 11: la fila se levanta (queda tenue en su sitio) y una tarjeta con su título
+        # sigue al ratón; una raya fina del acento marca dónde caerá
+        pal = QApplication.palette()
+        accent, card = pal.color(QPalette.ColorRole.Link), pal.color(QPalette.ColorRole.AlternateBase)
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        source = QRectF(self.visualItemRect(self.rows[self.drag_iid])).adjusted(1, 1, -1, -1)
-        tint = QColor(accent)
-        tint.setAlpha(45)
-        painter.fillRect(source, tint)  # la fila que se mueve
-        painter.setPen(QPen(accent, 1, Qt.PenStyle.DashLine))
-        painter.drawRect(source)
+        source = self.visualItemRect(self.rows[self.drag_iid])
+        veil = QColor(card)
+        veil.setAlpha(170)
+        painter.fillRect(source, veil)
         running = self.slide.state() == QVariantAnimation.State.Running
         y = self.slide.currentValue() if running else self.visualItemRect(self.rows[self.drop_iid]).top()
         width = self.viewport().width()
-        painter.setPen(QPen(accent, 3))
-        painter.drawLine(QPointF(6, y), QPointF(width - 6, y))
-        painter.setBrush(accent)
-        painter.drawEllipse(QPointF(6, y), 4, 4)
-        # el título que se mueve, en una etiqueta sobre la línea
-        title = self.rows[self.drag_iid].text(self.columns.index(self.stretch))
-        metrics = QFontMetrics(self.font())
-        title = metrics.elidedText(title, Qt.TextElideMode.ElideRight, max(80, width // 2))
-        box = QRectF(18, y - metrics.height() / 2 - 3, metrics.horizontalAdvance(title) + 16, metrics.height() + 6)
+        painter.setPen(QPen(accent, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(QPointF(8, y), QPointF(width - 8, y))
+        item = self.rows[self.drag_iid]
+        title_col = self.columns.index(self.stretch)
+        metrics = QFontMetrics(item.font(title_col))
+        title = metrics.elidedText(item.text(title_col), Qt.TextElideMode.ElideRight, max(80, width // 2))
+        pos = self.drag_pos or QPoint(0, int(y))
+        box = QRectF(0, 0, metrics.horizontalAdvance(title) + 24, source.height() + 8)
+        box.moveTo(min(pos.x() + 14, width - box.width() - 4), pos.y() + 10)  # al lado del puntero, sin taparlo
+        shadow = QColor(0, 0, 0, 40)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(box, box.height() / 2, box.height() / 2)
-        painter.setPen(QApplication.palette().color(QPalette.ColorRole.HighlightedText))
+        painter.setBrush(shadow)
+        painter.drawRoundedRect(box.translated(0, 2), 6, 6)
+        painter.setBrush(card)
+        painter.setPen(QPen(pal.color(QPalette.ColorRole.Mid), 1))
+        painter.drawRoundedRect(box, 6, 6)
+        painter.setFont(item.font(title_col))
+        painter.setPen(item.foreground(title_col).color() if item.foreground(title_col).style() != Qt.BrushStyle.NoBrush
+                       else pal.color(QPalette.ColorRole.Text))
         painter.drawText(box, Qt.AlignmentFlag.AlignCenter, title)
         painter.end()
 
@@ -492,6 +501,55 @@ def qimage(pix, ink=None):
         pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
     form = QImage.Format.Format_Grayscale8 if pix.n == 1 else QImage.Format.Format_RGB888
     return QImage(pix.samples, pix.width, pix.height, pix.stride, form).copy()
+
+
+class Shimmer(QWidget):
+    """Esqueleto de carga encima de un widget: barras grises con un brillo que las recorre, para que se vea que
+    algo llega. bars(ancho, alto) da los rectángulos que se pintan."""
+
+    def __init__(self, target, bars):
+        super().__init__(target)
+        self.bars, self.phase, self.colors = bars, 0.0, (QColor(), QColor())
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.timer = QTimer(self, interval=40)
+        self.timer.timeout.connect(self.tick)
+        target.installEventFilter(self)
+        self.hide()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            self.setGeometry(obj.rect())
+        return False
+
+    def start(self, base, shine):
+        self.colors = QColor(base), QColor(shine)
+        self.setGeometry(self.parentWidget().rect())
+        self.raise_()
+        self.show()
+        self.timer.start()
+
+    def stop(self):
+        self.timer.stop()
+        self.hide()
+
+    def tick(self):
+        self.phase = (self.phase + 0.025) % 1.6  # pasa y descansa un momento fuera de la vista
+        self.update()
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        base, shine = self.colors
+        x, band = (self.phase - 0.3) * self.width(), max(80, self.width() * 0.25)
+        glow = QLinearGradient(x - band, 0, x + band, 0)  # fuera de la franja queda el gris de base
+        glow.setColorAt(0, base)
+        glow.setColorAt(0.5, shine)
+        glow.setColorAt(1, base)
+        path = QPainterPath()
+        for rect in self.bars(self.width(), self.height()):
+            path.addRoundedRect(rect, 4, 4)
+        painter.fillPath(path, glow)
+        painter.end()
 
 
 class Preview(QLabel):

@@ -1945,6 +1945,7 @@ def test_window_separator_reaches_preview_and_epub():
     default = window.separator_var.get()
     window.separator_var.set("✦")
     window.tree.selection_set(first_title(window))
+    window.update_preview()  # como al elegirlo en la barra: el primer capítulo ya estaba elegido al abrir
     root.update()
     preview = epub_text(window.preview_path)
     out = TMP / "separador-desde-ventana.epub"
@@ -5857,11 +5858,10 @@ def test_window_new_books_use_saved_defaults():
 
 
 def test_window_options_this_book_live_and_cancel():
-    """Opciones en «Este libro»: el estilo cambia el libro y la vista previa al momento; Cancelar lo deja todo
-    como estaba. Aceptar lo guarda en la revisión. «Opciones del libro…» abre en «Perfil y formato»."""
+    """Opciones en «Este libro»: la limpieza tipográfica cambia el libro y la vista previa al momento; Cancelar lo
+    deja todo como estaba. Aceptar lo guarda en la revisión."""
     import json
     import app
-    from PySide6.QtWidgets import QPushButton
     root, window = visible_window()
     window.pdf = TMP / f"opciones-{time_ns()}.pdf"
     doc = pymupdf.open()
@@ -5870,28 +5870,23 @@ def test_window_options_this_book_live_and_cancel():
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1: Uno"),
                                                     convert.Block("p", 1, "Texto.")], [0]))
     redrawn = []
-    window.update_preview = lambda _=None: redrawn.append(window.style_var.get())
-    before = window.style_var.get()
-    other = next(s for s in convert.STYLES if s != before)
+    window.update_preview = lambda _=None: redrawn.append(window.typography_var.get())
+    before = window.typography_var.get()
     dialog = window.open_options()
     first = dialog.scope
-    dialog.parts["show"]("Aspecto")
-    dialog.parts["put"]("style", other)
-    live = window.style_var.get()
+    dialog.parts["show"]("Texto")
+    dialog.parts["put"]("typography", not before)
+    live = window.typography_var.get()
     dialog.parts["cancel"]()
-    cancelled, redrawn_after_cancel = window.style_var.get(), redrawn[-1]
-    book_button = next(b for b in window.options_row.findChildren(QPushButton) if b.text() == "Opciones del libro…")
-    book_button.click()
-    root.update()
-    dialog = window.options_window
-    opened = dialog.category
-    dialog.parts["show"]("Aspecto")
-    dialog.parts["put"]("style", other)
+    cancelled, redrawn_after_cancel = window.typography_var.get(), redrawn[-1]
+    dialog = window.open_options()
+    dialog.parts["show"]("Texto")
+    dialog.parts["put"]("typography", not before)
     dialog.parts["accept"]()
-    saved = json.loads(app._review_path(window.pdf).read_text(encoding="utf-8"))["style"]
+    saved = json.loads(app._review_path(window.pdf).read_text(encoding="utf-8"))["typography"]
     window.close()
-    assert first == "book" and live == other and redrawn_after_cancel == before, (first, live, redrawn)
-    assert cancelled == before and opened == "Perfil y formato" and saved == other, (cancelled, opened, saved)
+    assert first == "book" and live is not before and redrawn_after_cancel == before, (first, live, redrawn)
+    assert cancelled == before and saved is not before, (cancelled, saved)
 
 
 def test_window_options_new_books_without_book():
@@ -5915,8 +5910,7 @@ def test_window_options_new_books_without_book():
 
 def test_window_options_search_profile_and_missing_font():
     """Buscar «guion» deja Texto y PDF y resalta la opción; sin coincidencias, un aviso. El perfil Kindle marca los
-    guiones con su nota; desmarcarlos pasa a «Personalizado». «Usar también para libros nuevos» copia la página.
-    Una letra propia sin archivo avisa en rojo en la página, sin ventana."""
+    guiones con su nota; desmarcarlos pasa a «Personalizado». «Usar también para libros nuevos» copia la página."""
     root, window = visible_window()
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
     dialog = window.open_options("Perfil y formato", "book")
@@ -5934,16 +5928,11 @@ def test_window_options_search_profile_and_missing_font():
     profile = window.profile_var.get()
     dialog.parts["copy"].click()
     copied = dialog.defaults["hyphenate"]
-    window.font_file_var.set(str(TMP / "no-existe.ttf"))
-    window.font_var.set("no-existe.ttf")
-    dialog.parts["show"]("Aspecto")
-    error = dialog.parts["font_error"]
-    error_text = error.text() if error else ""
     dialog.parts["cancel"]()
     window.close()
     assert shown == ["EL LIBRO", "Texto", "PDF"] and page == "Texto", (shown, page)
     assert empty and "Fijada por el perfil Kindle" in note and profile == "Personalizado", (empty, note, profile)
-    assert copied is False and "No se encuentra" in error_text, (copied, error_text)
+    assert copied is False, copied
 
 
 def test_window_options_app_pages():
@@ -6013,6 +6002,68 @@ def test_window_options_translation_page():
     assert "DeepSeek" in summary and used == ("DeepSeek", "sk-nueva") and stored == "sk-nueva", (summary, used, stored)
 
 
+def test_window_bar_style_changes_preview_at_once():
+    """Estilo y Separador de la barra de abajo cambian el libro y rehacen la vista previa, sin abrir Opciones."""
+    from PySide6.QtWidgets import QComboBox
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Cap 1"),
+                                                    convert.Block("p", 1, "Texto.")], [0]))
+    redrawn = []
+    window.draw_pdf = lambda: redrawn.append((window.style_var.get(), window.separator_var.get()))  # la llama update_preview
+    style, separator = window.options_row.findChildren(QComboBox)[1:3]
+    other = next(n for n in range(style.count()) if style.itemText(n) != window.style_var.get())
+    style.setCurrentIndex(other)
+    style.activated.emit(other)
+    last = separator.count() - 1
+    separator.setCurrentIndex(last)
+    separator.activated.emit(last)
+    got = (window.style_var.get(), window.separator_var.get())
+    window.close()
+    assert got == (style.itemText(other), separator.itemText(last)) and redrawn[-1] == got, (got, redrawn)
+
+
+def test_window_opens_on_first_chapter_and_edits_without_choosing():
+    """Al abrir un libro la lista ya tiene elegido el primer capítulo y las vistas previas lo muestran, sin
+    «Selecciona un título». «Editar texto…» sin fila elegida abre ese capítulo en vez de no hacer nada."""
+    root, window = visible_window()
+    window.pdf = TMP / f"primero-{time_ns()}.pdf"
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Uno", 20, "helv")])
+    doc.save(window.pdf)
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Prólogo."),
+                                                    convert.Block("heading", 1, "Capítulo 1: Uno"),
+                                                    convert.Block("p", 1, "Texto.")], [1]))
+    root.update()
+    selected, message = window.tree.selection(), window.pdf_view.message
+    window.tree.clearSelection()
+    editor = window.edit_text()
+    opened = editor and editor.item
+    editor and editor.win.done(0)
+    window.close()
+    assert selected == ("1",) and message == "", (selected, message)
+    assert opened == "1", opened
+
+
+def test_window_skeleton_while_analyzing():
+    """Mientras se analiza un PDF, lista, vistas previas y tira muestran su esqueleto animado; al terminar se va
+    y la vista previa enseña el primer capítulo."""
+    import time
+    root, window = visible_window()
+    window.open_path(str(make_novel()))
+    root.update()
+    during = [s.isVisible() and s.timer.isActive() for s in window.shimmers]
+    hint = window.pdf_view.message
+    deadline = time.time() + 60
+    while window.done and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    after = [s.isVisible() for s in window.shimmers]
+    selected = window.tree.selection()
+    window.close()
+    assert all(during) and hint == "", (during, hint)
+    assert not any(after) and selected, (after, selected)
+
+
 def test_window_pdf_menu_puts_preferred_size_first():
     """El tamaño preferido en Opciones sale primero en «PDF ▾», con «(preferido)»."""
     root, window = visible_window()
@@ -6024,20 +6075,25 @@ def test_window_pdf_menu_puts_preferred_size_first():
 
 
 def test_window_options_are_only_in_options():
-    """Los ajustes ya no están repartidos: la barra deja Perfil, «Opciones del libro…», PDF y Generar; no hay menú
-    «Opciones ▾», ni Tema en Herramientas, ni idioma en «Editar datos». El informe lleva a sus opciones."""
-    from PySide6.QtWidgets import QComboBox, QPushButton, QToolButton
+    """La barra deja Perfil, Estilo, Separador y Letra (se cambian mirando la vista previa), PDF y Generar; Opciones
+    solo en Herramientas, sin «Opciones del libro…» ni página Aspecto; ni Tema en Herramientas, ni idioma en «Editar
+    datos». El informe lleva a sus opciones."""
+    from PySide6.QtWidgets import QAbstractButton, QComboBox, QPushButton, QToolButton
     root, window = visible_window()
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
-    bar = [b.text() for b in window.options_row.findChildren(QToolButton)]
-    combos = window.options_row.findChildren(QComboBox)
+    bar = [b.text() for b in window.options_row.findChildren(QAbstractButton)]
+    combos = [c.currentText() for c in window.options_row.findChildren(QComboBox)]
+    dialog = window.open_options()
+    pages = [dialog.parts["list"].item(n).text().strip() for n in range(dialog.parts["list"].count())]
+    dialog.parts["cancel"]()
     menus = [a.text() for b in window.root.findChildren(QToolButton) if b.menu() for a in b.menu().actions()]
     data_combos = window.data_panel.findChildren(QComboBox)
     window.quality()
     report = root.dialogs()[-1]
     link = [b.text() for b in report.findChildren(QPushButton) if b.text() == "Opciones del informe…"]
     window.close()
-    assert "Opciones ▾" not in bar and len(combos) == 1, (bar, len(combos))
+    assert "Opciones ▾" not in bar and "Opciones del libro…" not in bar and len(combos) == 4, (bar, combos)
+    assert window.style_var.get() in combos and "Aspecto" not in pages, (combos, pages)
     assert "Tema" not in menus and "Opciones…  (Ctrl+,)" in menus, menus
     assert not data_combos and link, (data_combos, link)
 
@@ -8349,20 +8405,16 @@ def test_custom_font_is_embedded():
     root, window = visible_window()
     window.show_book(book)
     window.apply_state({"font": "Mi Letra.ttf", "font_file": str(font)})
-    dialog = window.open_options("Aspecto", "book")
-    shown, option = dialog.parts["widgets"]["font"].currentText(), window.write_options()["font"]
-    dialog.parts["cancel"]()
+    box = window.font_box  # la «Letra:» de la barra de abajo
+    shown, option = box.currentText(), window.write_options()["font"]
     window.apply_state({"font": "Otra.ttf", "font_file": str(TMP / "Otra.ttf")})
     fallback, status = window.font_var.get(), window.status.text()
     picked = []
-    dialog = window.open_options("Aspecto", "book")
     for answer in (str(font), ""):  # elegir el archivo; después, cancelar: se queda la anterior
         window.ask_font_file = lambda: answer
-        box = dialog.parts["widgets"]["font"]
         box.setCurrentText("Otra…")
         box.activated.emit(box.currentIndex())
-        picked.append((window.font_var.get(), dialog.parts["widgets"]["font"].currentText()))
-    dialog.parts["cancel"]()
+        picked.append((window.font_var.get(), box.currentText()))
     window.close()
     assert picked == [("Mi Letra.ttf", "Mi Letra.ttf")] * 2, picked
     assert shown == "Mi Letra.ttf" and option == str(font), (shown, option)
