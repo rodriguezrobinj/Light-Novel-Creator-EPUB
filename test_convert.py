@@ -783,6 +783,29 @@ def test_renumber_fixes_ocr_chapter_numbers():
                               "Capítulo Extra - E", "Capítulo 41 - F", "Palabras del autor"]) == [
         "Capítulo 31 - A", "Capítulo 32 - B", "Capítulo 39 - C", "Capítulo 40 - D", "Capítulo Extra - E",
         "Capítulo 41 - F", "Palabras del autor"]
+    # Mitsuha 5 y 6: el 0 de la letra dorada sale 8 al final o antes de otro mal leído; un salto real se queda
+    assert convert._renumber(["Capitulo 49 - A", "Capítulo 58 - B", "Capítulo Extra - C"]) == [
+        "Capítulo 49 - A", "Capítulo 50 - B", "Capítulo Extra - C"]
+    assert convert._renumber(["Capítulo 59 - A", "Capítulo 68 - B", "Capítulo 6) - C"]) == [
+        "Capítulo 59 - A", "Capítulo 60 - B", "Capítulo 61 - C"]
+    assert convert._renumber(["Capítulo 49 - A", "Capítulo 58 - B", "Capítulo 59 - C"]) == [
+        "Capítulo 49 - A", "Capítulo 58 - B", "Capítulo 59 - C"]
+
+
+def test_ocr_reads_gold_letters_without_their_shadow():
+    """Mitsuha 4 a 6: letras doradas con sombra gris debajo; el OCR leía «fircipreste», «Vegenerada». Se lee solo
+    lo de color. El texto negro, o de color sin sombra (Farming Life 2), se sigue leyendo tal cual."""
+    doc = pymupdf.open()
+    title = "Capítulo 39 - El Regreso de la Arcipreste"
+    for color, shadow in (((0.95, 0.75, 0.1), (1, 2, 3)), ((0, 0, 0), ()), ((0.2, 0.4, 0.7), ())):
+        p = doc.new_page(width=600, height=60)
+        for k in shadow:  # sombra gris gruesa, abajo a la derecha
+            p.insert_text((5 + k, 40 + k), title, fontsize=16, fontname="tibo", color=(0.55, 0.55, 0.55))
+        p.insert_text((5, 40), title, fontsize=16, fontname="tibo", color=color)
+    gold, black, blue = (convert._ocr(p, pymupdf.Rect(0, 20, 400, 50)) for p in doc)
+    assert gold == title, gold
+    assert "Regreso" in black, black
+    assert blue == title, blue  # Farming Life 2: de color sin sombra, tal cual
 
 
 def test_image_info_matches_pymupdf_xrefs():
