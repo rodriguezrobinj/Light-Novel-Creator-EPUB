@@ -450,9 +450,11 @@ def _strip_margins(pages, heights):
 
     counts, loose_counts = collections.Counter(), collections.Counter()
     sizes = collections.defaultdict(collections.Counter)  # texto -> tamaños con que sale en las franjas
+    numbers = collections.Counter()  # franja (True: la de arriba) -> páginas con un número suelto en ella
     for rows, h in zip(pages, heights):
         band = [r for r in rows if in_band(r, h)]
         counts.update({_norm(r.text) for r in band})
+        numbers.update({r.y < h / 2 for r in band if _norm(r.text) == "#"})
         loose_counts.update({loose(r.text) for r in band})
         for r in band:
             sizes[_norm(r.text)][round(r.size)] += 1
@@ -467,13 +469,18 @@ def _strip_margins(pages, heights):
     # ("Einherjar Project Palabras del autor | 230") sale en pocas páginas, pero empieza igual.
     loose_repeated = tuple(k for k, n in loose_counts.items() if n >= least and len(k) >= 6)
 
+    def page_number(r, h):
+        # Oukoku 1, págs. 26 y 146: el apartado «3» cae arriba, en la franja, y la página se numera abajo
+        top = r.y < h / 2
+        return _norm(r.text) == "#" and not (numbers[top] < least <= numbers[not top])
+
     def margin(r, h):
         if not in_band(r, h):
             return False
         # La clave suelta solo para líneas con número de página que no abren con "Capítulo…": un título
         # de capítulo en la franja superior también se queda en pocas palabras repetidas
         footer = re.search(r"\d", r.text) and not KEYWORDS.match(r.text.strip(LABEL_DECOR))
-        return (_norm(r.text) == "#" or (_norm(r.text) in repeated and not big(r))  # "#": números de página sueltos
+        return (page_number(r, h) or (_norm(r.text) in repeated - {"#"} and not big(r))
                 or bool(footer and loose_repeated and loose(r.text).startswith(loose_repeated)))
 
     return [[r for r in rows if not margin(r, h)] for rows, h in zip(pages, heights)]
@@ -2710,6 +2717,14 @@ def analyze(pdf_path, progress=None):
         # Megami 4: 4 por página; Farming Life 1 y 2: 1,7, agrupan párrafos. Mitsuha 3 (GambaTrans), escenas: 0,9
         if sum(count for gap, count in spaced.items() if gap > scene_gap) > 1.25 * n:
             scene_gap = None
+        # Oukoku 2 a 4: la escena cambia con «◇◇◇◇◇» entre dos líneas en blanco; una línea en blanco sola es una
+        # pausa, y dos (Oukoku 2, pág. 94) una escena sin su «◇». Kage 7 (World Project) pone su «☆» a un párrafo
+        # y sus líneas en blanco sí cambian de escena
+        pads = sorted(min(r.y - rows[k - 1].y, rows[k + 1].y - r.y)
+                      for rows in pages for k, r in enumerate(rows[1:-1], 1) if SCENE_BREAK.fullmatch(r.text))
+        pads = [p for p in pads if p > 1.5 * paragraph_gap]
+        if len(pads) >= 3 and scene_gap:
+            scene_gap = max(scene_gap, 1.25 * pads[len(pads) // 2])
 
         # Título por tamaño o negrita, o porque el PDF lo marca: hay subtítulos del tamaño del texto
         # ("El lado de la bruja") que solo se distinguen por su marcador de nivel 2.
