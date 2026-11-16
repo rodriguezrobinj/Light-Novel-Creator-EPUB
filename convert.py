@@ -2966,10 +2966,13 @@ def analyze(pdf_path, progress=None):
             chosen, inserted = set(), []
             for title, p in outline:
                 k = next((k for k, b in enumerate(blocks) if b.kind == "heading" and b.page == p), None)
-                if k is None:  # Strange Grief 10: el marcador apunta a la página en blanco de antes de su título
+                # Strange Grief 10: el marcador apunta a la página en blanco de antes de su título; en el 7, a la
+                # ilustración de antes, y el marcador («Bonus Story:») es solo el principio del título
+                if k is None and _key(title):
                     k = next((k for k, b in enumerate(blocks) if b.kind == "heading" and b.page == p + 1
-                              and _key(html.unescape(b.html)) and _key(title).startswith(_key(html.unescape(b.html)))),
-                             None)
+                              and _key(html.unescape(b.html))
+                              and (_key(title).startswith(_key(html.unescape(b.html)))
+                                   or _key(html.unescape(b.html)).startswith(_key(title)))), None)
                 # A doble espacio, la segunda línea del título queda lejos y era otro título («Capítulo Tres: La
                 # Batalla De Los» + «Dioses», Strange Grief 10): el marcador lo dice entero, y se unen
                 while (k is not None and k + 1 < len(blocks) and blocks[k + 1].kind == "heading"

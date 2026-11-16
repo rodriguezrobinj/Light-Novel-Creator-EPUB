@@ -3367,15 +3367,25 @@ def test_strange_grief_titles_bookmarks_and_patreon_page():
              + body(160, 4))
     add_page(doc, 6, [(89, 107, "Especial Agradecimiento a los Patreons:", 26, "helv")]
              + [(57, 152 + 19 * j, name, 8, "helv") for j, name in enumerate(("Carlos Ivan", "Marco Alvarez", "Pedro"))])
+    # Tomo 7: el marcador, solo «Bonus Story:», apunta a la ilustración de antes del título entero
+    p = add_page(doc, 7, [])
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 85), False)
+    pix.clear_with(180)
+    p.insert_image(p.rect, pixmap=pix, keep_proportion=False)
+    add_page(doc, 8, [(85, 60, "Bonus Story:", 18.6, "helv"), (85, 94, "La Columna de Consejos de Mil", 16, "helv"),
+                      (85, 111, "Trucos - Parte 2", 16, "helv")] + body(160, 5))
     doc.set_toc([[1, "Prologo: Divinidad", 1], [1, "Capitulo Tres: La Batalla De Los Dioses", 3],
-                 [1, "Capitulo Cuatro: El Regreso De «Absolute Shadow»", 4], [1, "Bonus Story: La Coleccion de Reliquias", 5]])
+                 [1, "Capitulo Cuatro: El Regreso De «Absolute Shadow»", 4], [1, "Bonus Story: La Coleccion de Reliquias", 5],
+                 [1, "Bonus Story:", 7]])
     path = TMP / "strange-grief.pdf"
     doc.save(path)
     book = convert.analyze(path)
     chapters = [html.unescape(book.blocks[k].html) for k in book.candidates]
     assert chapters == ["Prologo: Divinidad", "Capitulo Tres: La Batalla De Los Dioses",
-                        "Capitulo Cuatro: El Regreso De «Absolute Shadow»", "Bonus Story: La Coleccion de Reliquias"], chapters
+                        "Capitulo Cuatro: El Regreso De «Absolute Shadow»", "Bonus Story: La Coleccion de Reliquias",
+                        "Bonus Story: La Columna de Consejos de Mil Trucos - Parte 2"], chapters
     assert [b.kind for b in book.blocks if b.page == 6] == ["image"] and not book.skipped, (book.skipped, book.blocks[-1])
+    assert [b.kind for b in book.blocks if b.page == 7] == ["image"], [b for b in book.blocks if b.page == 7]
     assert convert._series_volume("Strange Grief Wants to Retire - Volumen SS1 [Astral Novel]", "") == (
         "Strange Grief Wants to Retire", "")
     assert convert._typography("Uhm...Esta bien, y …Ya.") == "Uhm… Esta bien, y …Ya."  # 76 veces en el tomo 2
