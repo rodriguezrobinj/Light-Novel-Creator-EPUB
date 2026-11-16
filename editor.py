@@ -3,10 +3,12 @@ convert.section_text (un párrafo por línea con <i>/<b>, "# " delante de un tí
 separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda convert.edit_section."""
 import base64
 import difflib
+import hashlib
 import html
 import re
+from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QBuffer, QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat)
 from PySide6.QtWidgets import QApplication, QTextEdit
@@ -36,6 +38,8 @@ NOTE = re.compile(r"\[Nota: [^\]]*\]")
 THUMB = 160  # alto de las miniaturas de ilustración en la hoja, en píxeles
 SPACE = 10  # píxeles entre párrafos, como el espaciado de Word (no se guarda)
 FONT_SIZE = 12  # puntos del texto a 100 %
+IMAGES = None  # carpeta de las imágenes nuevas ([Imagen nombre]); TextEditor pone la del programa (app.IMAGES)
+PICTURE_FILES = (".jpg", ".jpeg", ".png", ".webp")  # archivos copiados en el Explorador que se pegan como imagen
 
 
 def _plain_format():
@@ -126,7 +130,10 @@ def _symbol(text, color, height=28, width=420):
 
 
 def _insert_object(cursor, kind, n, pictures, color):
-    """[Ilustración N] / [Separador N]: su imagen (o el texto del separador, o la marca si falta) como objeto."""
+    """[Ilustración N] / [Separador N] / [Imagen nombre]: su imagen (o el texto del separador, o la marca si falta)
+    como objeto."""
+    if kind == "Imagen" and n not in pictures and IMAGES:  # borrador de otra sesión: la imagen está en su archivo
+        pictures[n] = QImage(str(Path(IMAGES) / n))
     picture = pictures.get(n)
     if not isinstance(picture, QImage) or picture.isNull():
         picture = _symbol(picture if isinstance(picture, str) and picture else f"[{kind} {n}]", color)
@@ -192,7 +199,7 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
     frames = {} if raw else _frame_runs(list(lines))
     for i, (k, line) in enumerate(lines):
         bare = line.strip()
-        token = None if raw or not objects else convert.TOKEN.fullmatch(bare)
+        token = None if raw or not objects else convert.TOKEN.fullmatch(bare) or convert.PICTURE.fullmatch(bare)
         heading = not raw and line.startswith("# ")
         centered = not raw and line.startswith(convert.CENTER)
         right = not raw and line.startswith(convert.RIGHT)
@@ -219,7 +226,8 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
                     f.setProperty(LEVEL, levels[k])
             cursor.setBlockFormat(f)
         if token:
-            _insert_object(cursor, token.group(1), int(token.group(2)), pictures, color)
+            n = token.group(2)
+            _insert_object(cursor, token.group(1), int(n) if n.isdigit() else n, pictures, color)
         elif raw:
             cursor.insertText(line, _plain_format())
         else:
@@ -354,7 +362,7 @@ def original_of(block):
 
 def source_of(block):
     """Bloque del libro del que viene el párrafo: el de su objeto, o el que recuerda su formato."""
-    objects = objects_of(block)
+    objects = [name for name in objects_of(block) if name.split()[1].isdigit()]  # una imagen nueva no es del libro
     if objects:
         return int(objects[0].split()[1])
     value = block.blockFormat().property(SOURCE)
@@ -1203,6 +1211,40 @@ class Sheet(QTextEdit):
         cursor.endEditBlock()
         self.setTextCursor(cursor)
 
+    def insert_picture(self, data):
+        """Imagen nueva (JPEG) como párrafo propio tras el del cursor. Se guarda en IMAGES con el nombre de su
+        contenido y va como [Imagen nombre]: al aceptar, edit_section la vuelve ilustración del libro."""
+        name = hashlib.sha1(data).hexdigest()[:16] + ".jpg"
+        path = Path(IMAGES) / name
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        self.pictures[name] = QImage.fromData(data)
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        insert_lines(cursor, [(self.current_source(cursor.block()), f"[Imagen {name}]")], self.pictures,
+                     color=self.color)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    @staticmethod
+    def pasted_pictures(source):
+        """Imágenes (JPEG) de lo pegado: archivos de imagen copiados en el Explorador, o una imagen (captura, «Copiar
+        imagen» del navegador) si no trae texto. [] si no hay o no se pueden leer."""
+        files = [url.toLocalFile() for url in source.urls() if url.isLocalFile()] if source.hasUrls() else []
+        try:
+            if files and all(f.lower().endswith(PICTURE_FILES) for f in files):
+                return [convert.load_cover(f) for f in files]
+            if source.hasImage():
+                buffer = QBuffer()
+                buffer.open(QBuffer.OpenModeFlag.WriteOnly)
+                QImage(source.imageData()).save(buffer, "PNG")  # PNG siempre está en Qt; JPEG lo hace MuPDF
+                return [convert.to_jpeg(bytes(buffer.data()))]
+        except ValueError:
+            pass
+        return []
+
     # Símbolos y tipografía
     def insert_symbol(self, text):
         """Inserta text en el cursor (en lugar de lo elegido), con el formato de ahí: un paso de deshacer."""
@@ -1444,7 +1486,7 @@ class Sheet(QTextEdit):
         return mime
 
     def canInsertFromMimeData(self, source):
-        return source.hasFormat(MIME) or source.hasHtml() or source.hasText()
+        return source.hasFormat(MIME) or source.hasHtml() or source.hasText() or source.hasImage() or source.hasUrls()
 
     def insertFromMimeData(self, source):
         """De la hoja: con su formato, sin repetir una ilustración que ya está. De Word, Google Docs o la web
@@ -1461,6 +1503,15 @@ class Sheet(QTextEdit):
             lines, objects = [line for line in dump(outside).split("\n\n") if line.strip()], False
         else:
             lines, raw = [line.strip() for line in source.text().splitlines() if line.strip()], True
+        if not source.hasFormat(MIME) and (not lines or source.hasUrls()):
+            pictures = self.pasted_pictures(source)
+            if pictures:
+                group = self.textCursor()
+                group.beginEditBlock()  # varias imágenes: un solo Ctrl+Z
+                for data in pictures:
+                    self.insert_picture(data)
+                group.endEditBlock()
+                return
         if not lines:
             return
         cursor = self.textCursor()

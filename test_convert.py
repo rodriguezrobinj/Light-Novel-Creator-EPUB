@@ -3330,6 +3330,29 @@ def test_edit_section_moves_images_and_adds_titles():
     assert book.candidates == [0, 7], book.candidates
 
 
+def test_edit_section_adds_new_pictures():
+    """«[Imagen nombre]» del editor (imagen pegada o de un archivo) es una ilustración nueva con ese archivo de la
+    carpeta, y sale en el EPUB. Sin el archivo, una descartada en su sitio: los cambios de después cuadran."""
+    folder = TMP / f"imagenes-{time_ns()}"
+    folder.mkdir()
+    (folder / "0123456789abcdef.jpg").write_bytes(JPEG)
+    B = convert.Block
+    book = convert.Book("Libro", "", b"", [B("heading", 1, "Cap 1"), B("p", 3, "Uno."), B("p", 4, "Dos.")], [0])
+    convert.edit_section(book, 1, 3, "Uno.\n\n[Imagen 0123456789abcdef.jpg]\n\n[Imagen fedcba9876543210.jpg]\n\n"
+                                     "[Imagen ../ajustes.jpg]\n\nDos.", folder)
+    kinds = [(b.kind, b.page, b.keep, b.image == JPEG) for b in book.blocks]
+    assert kinds == [("heading", 1, True, False), ("p", 3, True, False), ("image", 3, True, True),
+                     ("image", 3, False, False), ("p", 3, True, False), ("p", 4, True, False)], kinds
+    assert book.blocks[4].html == "[Imagen ../ajustes.jpg]"  # con ruta no es una marca: se queda como texto
+    out = TMP / f"imagen-nueva-{time_ns()}.epub"
+    convert.write_epub(book, [(0, "Cap 1")], out)
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+    assert "OEBPS/img/b00002.jpg" in names and "OEBPS/img/b00003.jpg" not in names, names
+    assert convert.to_jpeg(pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False).tobytes("png"))[:3] \
+        == b"\xff\xd8\xff"
+
+
 def test_name_variants_finds_names_written_two_ways():
     text = ["Vio a Greg-sama y luego a Greg sama.", "Dijo que Tino y Tiño eran la misma.", "Él vio el mar.",
             "Utilizó la llave.", "Utilizo la llave.", "Lo saludó Claire."]
@@ -4907,6 +4930,65 @@ def test_editor_work_log():
     assert "Tu trabajo" in stats and "Párrafos cambiados" in stats and "2 min" in stats, stats
     assert summary == [("Hoy", 10, 2, 0), ("Últimos 7 días", 60, 2, 1), ("Total del libro", 65, 2, 1)], summary
     assert app._duration(65) == "1 h 05 min" and app._duration(45) == "45 min"
+
+
+def test_editor_inserts_new_pictures():
+    """«Imagen» de la cinta (Insertar) y Ctrl+V de una imagen copiada o de archivos de imagen del Explorador ponen
+    una imagen tras el párrafo; un Ctrl+Z la quita. Al aceptar es una ilustración nueva del libro, con su fila en la
+    lista, y la revisión la recupera al reabrir el PDF (_replay); texto pegado sigue siendo texto."""
+    import app
+    from PySide6.QtCore import QMimeData, QUrl
+    from PySide6.QtGui import QImage, QTextCursor
+
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos.")], [0])
+    sheet = editor.sheet
+    png = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 30, 20), False)
+    png.clear_with(90)
+    picture = TMP / f"dibujo-{time_ns()}.png"
+    picture.write_bytes(png.tobytes("png"))
+    sheet.goto_source(1)
+    saved = app.filedialog.askopenfilename
+    try:
+        app.filedialog.askopenfilename = lambda **kwargs: str(picture)
+        button = next(b for b in editor.win.findChildren(app.QToolButton) if b.text() == "Imagen")
+        button.click()
+    finally:
+        app.filedialog.askopenfilename = saved
+    from_file = sheet.content().split("\n\n")
+    sheet.moveCursor(QTextCursor.MoveOperation.End)
+    copied = QMimeData()
+    copied.setImageData(QImage(12, 8, QImage.Format.Format_RGB32))
+    sheet.insertFromMimeData(copied)
+    pasted = sheet.content().split("\n\n")
+    sheet.undo()
+    undone = sheet.content().split("\n\n")
+    files = QMimeData()
+    files.setUrls([QUrl.fromLocalFile(str(picture)), QUrl.fromLocalFile(str(picture))])
+    sheet.insertFromMimeData(files)
+    two = sheet.content().split("\n\n")
+    sheet.undo()
+    text = QMimeData()
+    text.setText("Tres.")
+    text.setImageData(QImage(12, 8, QImage.Format.Format_RGB32))  # Word también pone una imagen de lo copiado
+    sheet.insertFromMimeData(text)
+    words = sheet.content().split("\n\n")
+    editor.save()
+    kinds = [(b.kind, b.keep, bool(b.image)) for b in window.book.blocks]
+    rows = [window.tree.set(i, "inc") for i in window.tree.get_children()]
+    edits = list(window.edits)
+    window.close()
+    name = from_file[2][len("[Imagen "):-1]
+    assert from_file == ["# Capítulo 1", "Uno.", f"[Imagen {name}]", "Dos."], from_file
+    assert (app._images() / name).read_bytes()[:3] == b"\xff\xd8\xff", name  # guardada en JPEG
+    assert len(pasted) == 5 and pasted[-1].startswith("[Imagen ") and undone == from_file, (pasted, undone)
+    assert two[-2:] == [f"[Imagen {name}]"] * 2 and len(two) == 6, two
+    assert words[-1] == "Dos.Tres.", words
+    assert kinds == [("heading", True, False), ("p", True, False), ("image", True, True), ("p", True, False)], kinds
+    assert rows == [app.ON, app.IMG], rows
+    book = convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos.")], [0])
+    app._replay(book, {"edits": edits})
+    assert [b.kind for b in book.blocks] == ["heading", "p", "image", "p"] and book.blocks[2].image, edits
 
 
 def test_editor_changes_illustration():
