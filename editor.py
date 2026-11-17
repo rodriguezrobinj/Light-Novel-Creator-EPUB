@@ -155,6 +155,20 @@ def _insert_object(cursor, kind, n, pictures, color):
     cursor.insertImage(f)
 
 
+def _insert_title(cursor, picture, text, k):
+    """El dibujo de un título como objeto del ancho de la hoja; ICON guarda su texto para dump."""
+    name = f"titulo:{k}"
+    cursor.document().addResource(QTextDocument.ResourceType.ImageResource, QUrl(name), picture)
+    f = QTextImageFormat()
+    f.setName(name)
+    scale = min(1.0, 420 / max(picture.width(), 1))
+    f.setWidth(picture.width() * scale)
+    f.setHeight(picture.height() * scale)
+    f.setProperty(ICON, text)
+    f.setToolTip(html.unescape(convert.TAGS.sub("", text)))
+    cursor.insertImage(f)
+
+
 def _strip(line):
     """La línea sin su prefijo de section_text: "# ", "<center>", "<marco>" o "<derecha>"."""
     return convert.split_prefix(line)[1]
@@ -270,9 +284,12 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
             else:
                 cursor.createList(LISTS[listed])
         before = listed
+        drawn = pictures.get(f"título {k}") if heading and k is not None else None
         if token:
             n = token.group(2)
             _insert_object(cursor, token.group(1), int(n) if n.isdigit() else n, pictures, color)
+        elif drawn is not None:  # título dibujado (Witch 1): se ve el dibujo y vuelve a section_text como su texto
+            _insert_title(cursor, drawn, _strip(line), k)
         elif raw:
             cursor.insertText(line, _plain_format())
         else:

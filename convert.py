@@ -398,6 +398,111 @@ def _ocr(page, clip):
         return ""
 
 
+def _title_words(pix):
+    """Líneas de palabras que el OCR lee en el dibujo de un título: [(caja en píxeles, texto)] por línea. Solo
+    las seguidas desde la izquierda: el muñeco de al lado (Witch 1) se leía «5», «EE»."""
+    with pymupdf.open("pdf", pix.pdfocr_tobytes(language="spa", tessdata=str(OCR_DIR))) as scan:
+        scale = pix.width / scan[0].rect.width
+        words = [(pymupdf.Rect(w[:4]) * scale, w[4]) for w in scan[0].get_text("words")]
+    if not words:
+        return []
+    tall = sorted(box.height for box, _ in words)[len(words) // 2] * 0.6
+    lines = []
+    for box, text in sorted((w for w in words if w[0].height >= tall), key=lambda w: (w[0].y0, w[0].x0)):
+        if lines and abs(box.y0 - lines[-1][-1][0].y0) < box.height / 2:
+            lines[-1].append((box, text))
+        else:
+            lines.append([(box, text)])
+    runs = []
+    for line in lines:
+        line.sort(key=lambda w: w[0].x0)
+        run = line[:1]
+        for box, text in line[1:]:
+            if box.x0 - run[-1][0].x1 > 2 * box.height:  # tras un hueco grande, el dibujo
+                break
+            run.append((box, text))
+        runs.append(run)
+    # Las líneas que empiezan dentro del ancho de la de más a la izquierda (Witch 1, cap. 2: dos líneas)
+    first = min(runs, key=lambda run: run[0][0].x0)
+    return [run for run in runs if run[0][0].x0 < first[-1][0].x1]
+
+
+TITLE_FONTS = ("arial.ttf", "arialbd.ttf")  # letra de palo, como los títulos dibujados; sin Arial, la del EPUB
+
+
+@functools.lru_cache(maxsize=64)
+def title_picture(image, title):
+    """El dibujo de un título (Witch 1) con su texto: el original si dice title; si no (traducido o corregido),
+    el mismo dibujo con el texto del OCR tapado con el fondo y title escrito en su sitio, la etiqueta
+    («Capítulo 1») en negrita. Sin texto que leer, el dibujo tal cual."""
+    from PIL import ImageDraw, ImageFont
+    try:
+        pix = _rgb(pymupdf.Pixmap(image))
+        lines = _title_words(pix)
+    except Exception:
+        return image
+    loose = lambda text: re.sub(r"\W", "", text.lower())
+    read = " ".join(text for line in lines for _, text in line)
+    if not lines or difflib.SequenceMatcher(None, loose(read), loose(title)).ratio() >= 0.75:
+        return image
+    picture = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    area = pymupdf.Rect(lines[0][0][0])
+    for line in lines:
+        for box, _ in line:
+            area |= box
+    height = area.height / len(lines)
+    inside = picture.crop(tuple(round(v) for v in area))
+    ink = min(inside.getdata(), key=sum)  # el color de la letra: lo más oscuro
+    ring = area + (-4, -4, 4, 4)
+    edge = [picture.getpixel((round(x), round(y))) for x in range(int(ring.x0), int(ring.x1), 2)
+            for y in (ring.y0, ring.y1) if 0 <= x < pix.width and 0 <= y < pix.height]
+    paper = collections.Counter(edge).most_common(1)[0][0] if edge else (255, 255, 255)
+    draw = ImageDraw.Draw(picture)
+    draw.rectangle(tuple(round(v) for v in area + (-2, -2, 2, 2)), fill=paper)
+
+    def font(bold, size):
+        try:
+            return ImageFont.truetype(TITLE_FONTS[bold], size)
+        except OSError:
+            return ImageFont.truetype(str(FONT_DIR / f"bitter-{700 if bold else 400}-normal.ttf"), size)
+
+    # (palabra, negrita, espacios detrás): tras la etiqueta, dos, como en el dibujo
+    label, _, name = title.partition(": ")
+    if name and CHAPTER_LABEL.fullmatch(label):
+        words = [(w, True, 1) for w in label.split()] + [(w, False, 1) for w in name.split()]
+        words[len(label.split()) - 1] = (words[len(label.split()) - 1][0], True, 2)
+    else:
+        words = [(w, True, 1) for w in title.split()]
+
+    def advance(word, size):
+        text, bold, gap = word
+        return draw.textlength(text + " " * gap, font=font(bold, size))
+
+    size = round(height * 0.8)
+    while True:  # en tantas líneas como el original como mucho; si no cabe, letra menor
+        # las siguientes van bajo el nombre, como en el dibujo (Witch 1, cap. 2)
+        indent = sum(advance(w, size) for w in words if w[1]) if not words[-1][1] else 0
+        rows, row = [], []
+        for word in words:
+            if row and (indent if rows else 0) + sum(advance(w, size) for w in row) + advance(word, size) > area.width:
+                rows.append(row)
+                row = []
+            row.append(word)
+        rows.append(row)
+        if len(rows) <= len(lines) or size <= 8:
+            break
+        size -= 2
+    top = area.y0 + (area.height - len(rows) * height) / 2
+    for n, row in enumerate(rows):
+        x = area.x0 + (indent if n else 0)
+        for word in row:
+            draw.text((x, top + n * height + height / 2), word[0], fill=ink, font=font(word[1], size), anchor="lm")
+            x += advance(word, size)
+    out = io.BytesIO()
+    picture.save(out, "PNG" if image[:4] == b"\x89PNG" else "JPEG", quality=92)
+    return out.getvalue()
+
+
 def _image_lines(page, rows, infos, body):
     """Dónde puede haber un título hecho imagen (Oukoku e Tsuzuku Michi 3 y 4: texto rojo pasado a imagen, en
     trozos de una franja sobre el texto, sin texto ni marcador): la línea de imágenes de alto de un renglón
@@ -3017,7 +3122,7 @@ def analyze(pdf_path, progress=None):
                                if info.get("xref") and uses[info["xref"]] <= 2 and info["bbox"][3] <= text_top  # EPUB: sin xref
                                and info["bbox"][2] - info["bbox"][0] > where.rect.width * 0.3), None)
                 if banner:
-                    title.image = _extract(doc, banner["xref"])
+                    title.image, title.rect = _extract(doc, banner["xref"]), tuple(banner["bbox"])
                     # la misma imagen, apuntada como ilustración de la página, sobraría
                     blocks[:] = [b for b in blocks if not (b.kind == "image" and b.page == title.page
                                                            and b.image == title.image)]
@@ -3411,6 +3516,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         parts = [_chapter_heading(heading)] if is_chapter else []
         if n in drawn:  # el dibujo del PDF en lugar del texto; el nombre queda para el índice y los lectores de voz
             k, data = drawn[n]
+            data = title_picture(data, title)  # traducido o corregido: el dibujo dice el título de ahora
             src = f"img/t{k:05d}.{'png' if data[:4] == b'\x89PNG' else 'jpg'}"
             images[src] = data
             parts = [f'<h1 class="imagen"><img src="{src}" alt="{html.escape(title)}"/></h1>']

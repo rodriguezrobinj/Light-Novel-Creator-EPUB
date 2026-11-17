@@ -6927,11 +6927,12 @@ class TextEditor:
         self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)  # más pequeña que el panel: en el medio
         # Solo lectura: un clic lleva la hoja al párrafo; Ctrl+C y el clic derecho copian su texto o una imagen
         self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.canvas.setCursor(Qt.CursorShape.PointingHandCursor)
         editor.watch(self.canvas, self.on_canvas_event)
-        # Título que en el PDF es un dibujo: su texto lo leyó el OCR y puede traer faltas
-        self.source_note = _label("En el PDF este título es una imagen: compruébalo con el original.", "warn")
-        self.source_note.setWordWrap(True)
+        # Título que en el PDF es un dibujo: aviso abajo, como un botón que no tapa nada; al pulsarlo, lo explica
+        self.source_note = _button("Título en imagen", lambda: self.note.setText(
+            "El EPUB usa este dibujo con el texto del título"),
+            "warn")
+        self.source_note.setToolTip("En el PDF este título es una imagen: compruébalo con el original")
         self.source_note.hide()
         self.page_label = _label("", "muted")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -6942,7 +6943,6 @@ class TextEditor:
         side = self.side = QWidget()
         side_column = QVBoxLayout(side)
         side_column.setContentsMargins(8, 8, 8, 0)
-        side_column.addWidget(self.source_note)
         side_column.addWidget(self.scroll, 1)
         # Fuera, de capítulo en capítulo (hojear página a página era lento para cruzar el libro); dentro, de página
         # ◀◀ y no los de saltar pista: Windows los dibuja como emoji azules
@@ -6973,7 +6973,7 @@ class TextEditor:
         self.text_zoom.setFixedWidth(140)
         self.text_zoom_label = _label("100 %", "muted")
         self.text_zoom.valueChanged.connect(self.set_text_zoom)
-        status_row = self.status_row = _row(self.status, self.note,
+        status_row = self.status_row = _row(self.status, self.note, self.source_note,
                           _button("−", lambda: self.text_zoom.setValue(self.text_zoom.value() - 10)),
                           self.text_zoom, _button("+", lambda: self.text_zoom.setValue(self.text_zoom.value() + 10)),
                           # En pantalla completa, Aceptar y Cancelar vuelven al editor: no lo cierran
@@ -8618,6 +8618,8 @@ class TextEditor:
                     pass  # imagen que MuPDF no lee: queda su marca
             elif block.kind == "break":
                 found[k] = html.unescape(block.html).strip() or "❖"
+            elif block.kind == "heading" and block.image:  # título dibujado: con el texto de ahora (traducido)
+                found[f"título {k}"] = QImage.fromData(convert.title_picture(block.image, convert._plain(block)))
         return found
 
     def page_width(self, percent=None):

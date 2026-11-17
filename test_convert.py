@@ -4343,9 +4343,12 @@ def test_text_editor_pdf_click_syncs_and_copies():
 
 def test_text_editor_warns_title_is_an_image():
     """Un título que en el PDF es un dibujo (lo leyó el OCR, o lo puso el marcador del PDF sin estar en el texto)
-    avisa en el panel al ponerse en él; en un párrafo, el aviso se va. El indicador de página no cambia de ancho
-    entre una ilustración y una página: los botones de los lados no se mueven."""
+    avisa con un botón en la barra de abajo al ponerse en él; en un párrafo, el aviso se va. En la hoja, el título
+    dibujado se ve como su dibujo. El indicador de página no cambia de ancho entre una ilustración y una página: los
+    botones de los lados no se mueven. El panel del PDF deja el puntero normal: no es un enlace."""
     from time import time_ns
+
+    from PySide6.QtCore import Qt
 
     doc = pymupdf.open()
     page = add_page(doc, 1, [(72, 200, "Un parrafo de prueba.", 11, "cour"), (72, 240, "Otro parrafo.", 11, "cour")])
@@ -4356,7 +4359,8 @@ def test_text_editor_warns_title_is_an_image():
     doc.save(path)
     root, window = visible_window()
     window.pdf = path
-    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1", rect=(72, 90, 400, 130)),
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1", rect=(72, 90, 400, 130),
+                                                                   image=pix.tobytes("png")),
                                                      convert.Block("p", 1, "Un parrafo de prueba."),
                                                      convert.Block("heading", 1, "El lado de la bruja"),
                                                      convert.Block("p", 1, "Otro parrafo."),
@@ -4371,7 +4375,12 @@ def test_text_editor_warns_title_is_an_image():
         root.update()
         shown.append((editor.source_note.isVisibleTo(editor.win), editor.next_page.x()))
     text = editor.source_note.text()
+    # El título dibujado se ve como su dibujo en la hoja y se guarda como su texto
+    drawn = editor.sheet.document().firstBlock().text() == "￼" and editor.sheet.content().startswith("# Capítulo 1\n")
+    hand = editor.canvas.cursor().shape() != Qt.CursorShape.ArrowCursor  # el panel no es un enlace
+    bottom = editor.source_note.parentWidget() is editor.status.parentWidget()
     window.close()
+    assert drawn and not hand and bottom, (drawn, hand, bottom, editor.sheet.content()[:40])
     assert [on for on, _ in shown] == [True, False, True, False, False] and "imagen" in text, (shown, text)
     assert len({x for _, x in shown}) == 1, shown  # la ilustración (k = 4) no mueve el botón
 
@@ -7499,11 +7508,40 @@ def test_bookmarked_title_drawn_as_image():
     convert.edit_section(book, k, k + 2, "# Capítulo 2: Fuera de casa\n\nNo puedo creer que me hayan echado.")
     renamed = book.blocks[k]
     assert pictured == {"Capitulo 1: Dentro": False, "Capitulo 2: Fuera": True}, pictured
+    box = [round(v) for v in heads["Capitulo 2: Fuera"].rect]
+    assert box == [72, 99, 523, 234], box  # el panel del editor recuadra el dibujo
     assert not kept, kept
     assert '<h1 class="imagen"><img src="img/' in second and 'alt="Capitulo 2: Fuera"' in second, second
     assert "Capitulo 2: Fuera" in nav, nav
     assert convert.check_epub(out) == [], convert.check_epub(out)
     assert convert._plain(renamed) == "Capítulo 2: Fuera de casa" and renamed.image, renamed
+
+
+def test_title_picture_writes_translated_title():
+    """El dibujo de un título con su texto (Witch 1): si el título dice lo mismo, queda tal cual; traducido, el OCR
+    encuentra el texto, se tapa con el fondo y se escribe el título nuevo en su sitio, sin tocar el dibujo de al
+    lado. Sin texto que leer, queda tal cual."""
+    import io
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    picture = Image.new("RGB", (900, 160), (210, 210, 210))
+    draw = ImageDraw.Draw(picture)
+    draw.rectangle((40, 30, 860, 130), fill="white", outline="black", width=3)
+    draw.text((70, 80), "Chapter 1  The Forest", fill="black", anchor="lm",
+              font=ImageFont.truetype(str(convert.FONT_DIR / "bitter-700-normal.ttf"), 44))
+    draw.rectangle((760, 50, 830, 110), fill=(40, 40, 40))  # el dibujo de al lado
+    out = io.BytesIO()
+    picture.save(out, "PNG")
+    data = out.getvalue()
+    same = convert.title_picture(data, "Chapter 1: The Forest")
+    new = Image.open(io.BytesIO(convert.title_picture(data, "Capítulo 1: El bosque"))).convert("RGB")
+    blank = io.BytesIO()
+    Image.new("RGB", (300, 80), "white").save(blank, "PNG")
+    assert same is data
+    assert new.size == picture.size and new.getpixel((795, 80)) == (40, 40, 40)  # el dibujo sigue
+    assert new.crop((60, 50, 700, 110)).tobytes() != picture.crop((60, 50, 700, 110)).tobytes()  # otro texto
+    assert convert.title_picture(blank.getvalue(), "Capítulo 1") == blank.getvalue()
 
 
 def test_numbered_chapter_titles():
