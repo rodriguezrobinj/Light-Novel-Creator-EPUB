@@ -4284,6 +4284,78 @@ def test_text_editor_steps_pdf_pages():
     assert at_start and at_end and back == pages[-2], (at_start, at_end, back)
 
 
+def test_text_editor_pdf_click_syncs_and_copies():
+    """Clic en un párrafo del PDF del panel: la hoja va a él (abriendo su capítulo) y queda recuadrado; Ctrl+C
+    copia su texto tal como está en el PDF. Clic derecho: copiar el texto o la imagen bajo el puntero."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    first = next(i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON)
+    window.tree.selection_set(first)
+    editor = window.edit_text()
+    root.update()
+    blocks = window.book.blocks
+    said = next(k for k, b in enumerate(blocks) if convert._plain(b).startswith("Dijo"))
+    in_first = editor.current[0] <= said < editor.current[1]
+    editor.show_page(blocks[said].page - 1)  # página 4 a la vista, con la hoja aún en el capítulo 1
+    root.update()
+    zoom = editor.canvas.width() / window.pdf_doc[blocks[said].page - 1].rect.width
+    QTest.mouseClick(editor.canvas, Qt.MouseButton.LeftButton, pos=QPoint(int(130 * zoom), int(214 * zoom)))
+    root.update()
+    synced = editor.sheet.current_source() == said and editor.current[0] <= said < editor.current[1]
+    boxed = editor.box is not None and editor.box.contains(pymupdf.Point(130, 214))
+    QTest.keyClick(editor.canvas, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    copied = QApplication.clipboard().text()
+    menu = editor.source_menu(QPoint(int(130 * zoom), int(214 * zoom)))
+    labels = [a.text() for a in menu.actions() if a.text()]
+    editor.show_page(1)  # la ilustración a página completa
+    menu = editor.source_menu(QPoint(20, 20))
+    next(a for a in menu.actions() if a.text() == "Copiar imagen").trigger()
+    image = QApplication.clipboard().image()
+    QApplication.clipboard().clear()  # con la imagen dentro, el Qt de pruebas (offscreen) se cae al salir
+    window.close()
+    assert not in_first and synced and boxed, (in_first, synced, boxed)
+    assert copied == "Dijo hola, y se fue.", copied
+    assert "Copiar texto del párrafo\tCtrl+C" in labels and "Copiar texto de la página" in labels, labels
+    assert not image.isNull(), image.size()
+
+
+def test_text_editor_warns_title_is_an_image():
+    """Un título que en el PDF es un dibujo (lo leyó el OCR) avisa en el panel al ponerse en él; en un párrafo,
+    el aviso se va."""
+    from time import time_ns
+
+    doc = pymupdf.open()
+    page = add_page(doc, 1, [(72, 200, "Un parrafo de prueba.", 11, "cour")])
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 30), False)
+    pix.clear_with(90)
+    page.insert_image(pymupdf.Rect(72, 90, 400, 130), pixmap=pix, keep_proportion=False)
+    path = TMP / f"titulo-imagen-{time_ns()}.pdf"
+    doc.save(path)
+    root, window = visible_window()
+    window.pdf = path
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1", rect=(72, 90, 400, 130)),
+                                                     convert.Block("p", 1, "Un parrafo de prueba.")], [0]))
+    window.tree.selection_set(window.tree.get_children()[0])
+    editor = window.edit_text()
+    root.update()
+    editor.sheet.goto_source(0)
+    editor.draw_source()
+    on_title = editor.source_note.isVisibleTo(editor.win), editor.source_note.text()
+    editor.sheet.goto_source(1)
+    editor.draw_source()
+    on_text = editor.source_note.isVisibleTo(editor.win)
+    window.close()
+    assert on_title[0] and "imagen" in on_title[1], on_title
+    assert not on_text
+
+
 def test_text_editor_chapter_list_is_a_small_popup():
     """Con muchos capítulos (Mitsuha 1: 34) la lista ocupaba toda la pantalla en columnas: es un desplegable
     pequeño con scroll bajo el botón, que se filtra escribiendo y se cierra al elegir."""

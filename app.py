@@ -6923,12 +6923,21 @@ class TextEditor:
         self.scroll = QScrollArea()
         self.scroll.setWidget(self.canvas)
         self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)  # más pequeña que el panel: en el medio
+        # Solo lectura: un clic lleva la hoja al párrafo; Ctrl+C y el clic derecho copian su texto o una imagen
+        self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.canvas.setCursor(Qt.CursorShape.PointingHandCursor)
+        editor.watch(self.canvas, self.on_canvas_event)
+        # Título que en el PDF es un dibujo: su texto lo leyó el OCR y puede traer faltas
+        self.source_note = _label("En el PDF este título es una imagen: su texto se leyó con OCR, compruébalo.", "warn")
+        self.source_note.setWordWrap(True)
+        self.source_note.hide()
         self.page_label = _label("", "muted")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.zoom_label = _label("100 %", "muted")
         side = self.side = QWidget()
         side_column = QVBoxLayout(side)
         side_column.setContentsMargins(8, 8, 8, 0)
+        side_column.addWidget(self.source_note)
         side_column.addWidget(self.scroll, 1)
         # Fuera, de capítulo en capítulo (hojear página a página era lento para cruzar el libro); dentro, de página
         # ◀◀ y no los de saltar pista: Windows los dibuja como emoji azules
@@ -8562,9 +8571,11 @@ class TextEditor:
         es otro) y el panel la dibuja. Las páginas sin nada del libro se saltan: no hay qué mostrar en la hoja."""
         here, starts = self.app.book.blocks[self.source_block()].page, self.page_starts()
         pages = [p for p in starts if (p > here if delta > 0 else p < here)]
-        if not pages:
-            return
-        k = starts[min(pages) if delta > 0 else max(pages)]
+        if pages:
+            self.go_block(starts[min(pages) if delta > 0 else max(pages)])
+
+    def go_block(self, k):
+        """La hoja al párrafo del bloque k, abriendo su capítulo si es otro, y el panel lo dibuja."""
         bounds = next(s[1:3] for s in self.sections if s[1] <= k < s[2])
         if bounds != self.current:
             self.open_section(*bounds)
@@ -8753,6 +8764,8 @@ class TextEditor:
             self.update_status()
             return
         self.drawn = key
+        self.source_note.setVisible(bool(self.app.pdf_doc is not None and block.kind == "heading" and block.rect and not self.app.pdf_doc[
+            block.page - 1].get_text("text", clip=pymupdf.Rect(block.rect)).strip()))
         if block.kind == "image" and block.image:
             pix = pymupdf.Pixmap(block.image)
             scale = min(self.panel_width() * self.pdf_zoom / pix.width, 1.5)
@@ -8783,7 +8796,7 @@ class TextEditor:
         """Dibuja la página index (desde 0) del PDF al ancho del panel por el zoom, con self.box recuadrado."""
         page = self.app.pdf_doc[index]
         self.page, self.shown = index, ("page", index + 1)
-        zoom = self.panel_width() / page.rect.width * self.pdf_zoom
+        zoom = self.page_zoom = self.panel_width() / page.rect.width * self.pdf_zoom
         marks = []
         if self.box:
             box = self.box * zoom
@@ -8799,6 +8812,88 @@ class TextEditor:
         image = qtk.qimage(pix)
         self.canvas.setFixedSize(image.width(), image.height())
         self.canvas.show_image((image.width(), image.height()), image, marks)
+
+    def on_canvas_event(self, event):
+        """Clic en la página del panel: la hoja va a ese párrafo; Ctrl+C copia el recuadrado; clic derecho, el menú."""
+        kind = event.type()
+        if kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            self.pick_source(event.position().toPoint())
+        elif kind == QEvent.Type.ContextMenu:
+            self.pick_source(event.pos())
+            self.source_menu(event.pos()).popup(event.globalPos())
+            return True
+        elif kind == QEvent.Type.KeyPress and event.matches(QKeySequence.StandardKey.Copy):
+            if self.shown and self.shown[0] == "image":
+                self.copy_image(pymupdf.Pixmap(self.app.book.blocks[self.shown[1]].image))
+            elif self.box:
+                self.copy_text(self.box_text(self.box))
+            return True
+        return False
+
+    def source_point(self, pos):
+        """Punto de la página del PDF bajo pos del panel; None si el panel no muestra una página."""
+        if not self.shown or self.shown[0] != "page":
+            return None
+        return pymupdf.Point(pos.x() / self.page_zoom, pos.y() / self.page_zoom)
+
+    def pick_source(self, pos):
+        """La hoja al párrafo o título del libro bajo pos, si lo hay en la página mostrada."""
+        point = self.source_point(pos)
+        if point is None:
+            return
+        page, blocks = self.app.pdf_doc[self.page], self.app.book.blocks
+        for _, start, end, _ in self.sections:
+            for k in range(start, end):
+                block = blocks[k]
+                if block.page == self.page + 1 and block.kind in ("p", "heading"):
+                    box = pymupdf.Rect(block.rect) if block.rect else self.find_box(page, block)
+                    if box and (box + (-4, -4, 4, 4)).contains(point):
+                        self.go_block(k)
+                        return
+
+    def box_text(self, box):
+        """Texto del PDF en la franja de box (a lo ancho de la página: la primera línea del párrafo puede ser más
+        corta que las demás), en una línea y sin los guiones de partición."""
+        page = self.app.pdf_doc[self.page]
+        clip = pymupdf.Rect(0, box.y0 - 1, page.rect.width, box.y1 + 1)
+        return " ".join(page.get_text("text", clip=clip, flags=pymupdf.TEXTFLAGS_TEXT | pymupdf.TEXT_DEHYPHENATE).split())
+
+    def source_menu(self, pos):
+        """Menú del clic derecho en el panel: copiar, nunca cambiar, el texto o la imagen del original."""
+        menu = QMenu(self.canvas)
+        if self.shown and self.shown[0] == "image":
+            menu.addAction("Copiar imagen", lambda: self.copy_image(
+                pymupdf.Pixmap(self.app.book.blocks[self.shown[1]].image)))
+            return menu
+        point = self.source_point(pos)
+        if point is None:
+            return menu
+        page = self.app.pdf_doc[self.page]
+        text = self.box_text(self.box) if self.box else ""
+        copy = menu.addAction("Copiar texto del párrafo\tCtrl+C", lambda: self.copy_text(text))
+        copy.setEnabled(bool(text))
+        menu.addAction("Copiar texto de la página", lambda: self.copy_text(page.get_text("text").strip()))
+        # La imagen bajo el puntero; en un título hecho imagen, su recuadro
+        spot = next((pymupdf.Rect(info["bbox"]) for info in page.get_image_info()
+                     if pymupdf.Rect(info["bbox"]).contains(point)), None)
+        if spot is None and self.box and not text:
+            spot = self.box
+        menu.addSeparator()
+        if spot is not None:
+            spot = spot & page.rect  # nuevo Rect: &= cambiaría self.box
+            menu.addAction("Copiar imagen", lambda: self.copy_image(page.get_pixmap(matrix=pymupdf.Matrix(3, 3),
+                                                                                     clip=spot)))
+        menu.addAction("Copiar la página como imagen",
+                       lambda: self.copy_image(page.get_pixmap(matrix=pymupdf.Matrix(2, 2))))
+        return menu
+
+    def copy_text(self, text):
+        QApplication.clipboard().setText(text)
+        self.note.setText("Texto del original copiado")
+
+    def copy_image(self, pix):
+        QApplication.clipboard().setImage(qtk.qimage(pix))
+        self.note.setText("Imagen del original copiada")
 
     @staticmethod
     def find_box(page, block):
