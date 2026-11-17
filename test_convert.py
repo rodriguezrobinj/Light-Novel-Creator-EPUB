@@ -4314,6 +4314,18 @@ def test_text_editor_pdf_click_syncs_and_copies():
     copied = QApplication.clipboard().text()
     menu = editor.source_menu(QPoint(int(130 * zoom), int(214 * zoom)))
     labels = [a.text() for a in menu.actions() if a.text()]
+    # Párrafo partido entre las páginas 3 y 4: la 4 va debajo, recuadrada también, y se copia entero
+    split = next(k for k, b in enumerate(blocks) if convert._plain(b).startswith("Parte de mi"))
+    editor.go_block(split)
+    root.update()
+    below, marks = editor.below, len(editor.canvas.marks)
+    QTest.keyClick(editor.canvas, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    whole = QApplication.clipboard().text()
+    editor.go_block(said)
+    editor.show_page(blocks[split].page)  # la página 4 sola: clic en el final del párrafo que viene de la 3
+    QTest.mouseClick(editor.canvas, Qt.MouseButton.LeftButton, pos=QPoint(int(100 * zoom), int(96 * zoom)))
+    root.update()
+    tail_click = editor.sheet.current_source()
     editor.show_page(1)  # la ilustración a página completa
     menu = editor.source_menu(QPoint(20, 20))
     next(a for a in menu.actions() if a.text() == "Copiar imagen").trigger()
@@ -4323,16 +4335,20 @@ def test_text_editor_pdf_click_syncs_and_copies():
     assert not in_first and synced and boxed, (in_first, synced, boxed)
     assert copied == "Dijo hola, y se fue.", copied
     assert "Copiar texto del párrafo\tCtrl+C" in labels and "Copiar texto de la página" in labels, labels
+    assert below and below[0] == blocks[split].page and marks == 2, (below, marks)
+    assert whole.startswith("Parte de mi") and whole.endswith("pagina siguiente sin problemas."), whole
+    assert tail_click == split, (tail_click, split)
     assert not image.isNull(), image.size()
 
 
 def test_text_editor_warns_title_is_an_image():
-    """Un título que en el PDF es un dibujo (lo leyó el OCR) avisa en el panel al ponerse en él; en un párrafo,
-    el aviso se va."""
+    """Un título que en el PDF es un dibujo (lo leyó el OCR, o lo puso el marcador del PDF sin estar en el texto)
+    avisa en el panel al ponerse en él; en un párrafo, el aviso se va. El indicador de página no cambia de ancho
+    entre una ilustración y una página: los botones de los lados no se mueven."""
     from time import time_ns
 
     doc = pymupdf.open()
-    page = add_page(doc, 1, [(72, 200, "Un parrafo de prueba.", 11, "cour")])
+    page = add_page(doc, 1, [(72, 200, "Un parrafo de prueba.", 11, "cour"), (72, 240, "Otro parrafo.", 11, "cour")])
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 30), False)
     pix.clear_with(90)
     page.insert_image(pymupdf.Rect(72, 90, 400, 130), pixmap=pix, keep_proportion=False)
@@ -4341,19 +4357,23 @@ def test_text_editor_warns_title_is_an_image():
     root, window = visible_window()
     window.pdf = path
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1", rect=(72, 90, 400, 130)),
-                                                     convert.Block("p", 1, "Un parrafo de prueba.")], [0]))
+                                                     convert.Block("p", 1, "Un parrafo de prueba."),
+                                                     convert.Block("heading", 1, "El lado de la bruja"),
+                                                     convert.Block("p", 1, "Otro parrafo."),
+                                                     convert.Block("image", 1, image=pix.tobytes("jpeg"))], [0]))
     window.tree.selection_set(window.tree.get_children()[0])
     editor = window.edit_text()
     root.update()
-    editor.sheet.goto_source(0)
-    editor.draw_source()
-    on_title = editor.source_note.isVisibleTo(editor.win), editor.source_note.text()
-    editor.sheet.goto_source(1)
-    editor.draw_source()
-    on_text = editor.source_note.isVisibleTo(editor.win)
+    shown = []
+    for k in range(5):
+        editor.sheet.goto_source(k)
+        editor.draw_source()
+        root.update()
+        shown.append((editor.source_note.isVisibleTo(editor.win), editor.next_page.x()))
+    text = editor.source_note.text()
     window.close()
-    assert on_title[0] and "imagen" in on_title[1], on_title
-    assert not on_text
+    assert [on for on, _ in shown] == [True, False, True, False, False] and "imagen" in text, (shown, text)
+    assert len({x for _, x in shown}) == 1, shown  # la ilustración (k = 4) no mueve el botón
 
 
 def test_text_editor_chapter_list_is_a_small_popup():
@@ -6531,7 +6551,8 @@ def test_window_opening_another_book_clears_the_old_one():
     had = bool(window.strip.labels)
     window.open_path(str(make_novel()))
     root.update()
-    during = (len(window.strip.labels), window.epub_caption.text(),
+    window.redraw()  # como al cambiar de tamaño: los rectángulos tenues de la tira vacía salían bajo el esqueleto
+    during = (len(window.strip.labels) + len(window.strip.blanks), window.epub_caption.text(),
               window.tree.headerItem().text(window.tree.columns.index("ok")))
     while window.done and time.time() < deadline:
         root.update()
@@ -7380,6 +7401,12 @@ def test_editor_sheet_aligns_inside_frames_and_makes_lists():
     assert sheet.list_style() == "decimal"
     sheet.split_here()  # Intro en el vacío: fuera de la lista
     assert sheet.list_style() is None and sheet.content() == "\n\n".join(line for _, line in lines), sheet.content()
+    sheet.moveCursor(QTextCursor.MoveOperation.End)
+    sheet.split_here()
+    sheet.set_list("decimal")  # como Word: la lista se empieza en el párrafo vacío y luego se escribe
+    started = sheet.list_style()
+    sheet.textCursor().insertText("Nuevo")
+    assert started == "decimal" and sheet.content().endswith("Después.\n\n<lista decimal>Nuevo"), (started, sheet.content())
 
 
 def test_epub_keeps_frame_alignment_and_lists():
@@ -7408,7 +7435,9 @@ def test_epub_keeps_frame_alignment_and_lists():
 def test_bookmarked_page_starts_new_paragraph_without_indent():
     """The World's Strongest Witch 1 (EPUB, pág. 204): el Afterword lleva el título solo en una imagen y su primera
     línea va sin sangría; con párrafos marcados por sangría se unía al último párrafo del capítulo anterior, antes
-    del título. Una página que el índice marca empieza párrafo; una página sin marca sigue el párrafo abierto."""
+    del título. Una página que el índice marca empieza párrafo; una página sin marca sigue el párrafo abierto.
+    Witch 1, pág. 11: también si el párrafo anterior acaba sin punto (los créditos, «…chat with»): la primera línea
+    del capítulo se iba con él."""
     doc = pymupdf.open()
     body = [(92, 140 + 20 * n, line("Una linea de texto con sangria", 60), 11, "cour") for n in range(3)]
     add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv")] + body
@@ -7416,8 +7445,11 @@ def test_bookmarked_page_starts_new_paragraph_without_indent():
                 (92, 240, line("Ultimo parrafo del capitulo que sigue", 60), 11, "cour")])
     add_page(doc, 2, [(72, 140, "en la pagina siguiente y acaba.", 11, "cour")])
     add_page(doc, 3, [(72, 300, "Hola, me llamo Autor.", 11, "cour"),
-                      (92, 320, line("Gracias por leer esta historia", 60), 11, "cour")])
-    doc.set_toc([[1, "Capitulo 1: Inicio", 1], [1, "Epilogo", 3]])
+                      (92, 320, line("Gracias por leer esta historia", 60), 11, "cour"),
+                      (92, 340, line("Unete a nuestro grupo y charla con", 60), 11, "cour")])
+    add_page(doc, 4, [(72, 300, "No puedo creer que me hayan echado.", 11, "cour"),
+                      (92, 320, line("Para ir al grano: Lorna estaba sola", 60), 11, "cour")])
+    doc.set_toc([[1, "Capitulo 1: Inicio", 1], [1, "Epilogo", 3], [1, "Capitulo 2: Fuera", 4]])
     path = TMP / "marcador-sin-sangria.pdf"
     doc.save(path)
     book = convert.analyze(path)
@@ -7426,6 +7458,8 @@ def test_bookmarked_page_starts_new_paragraph_without_indent():
     assert last.endswith("en la pagina siguiente y acaba."), text  # sin marca: sigue el párrafo
     k = next(k for k, (kind, t) in enumerate(text) if t == "Epilogo")
     assert text[k + 1] == ("p", "Hola, me llamo Autor.") and "Hola" not in last, text
+    k = next(k for k, (kind, t) in enumerate(text) if t == "Capitulo 2: Fuera")
+    assert text[k + 1] == ("p", "No puedo creer que me hayan echado."), text
 
 
 def test_numbered_chapter_titles():
