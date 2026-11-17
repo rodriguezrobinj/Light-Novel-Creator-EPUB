@@ -2584,6 +2584,33 @@ def test_write_pdf_moves_subtitle_left_at_page_foot():
     assert roomy[1] > 300 and roomy[2] > 3, roomy
 
 
+def test_write_pdf_frame_split_across_pages_stays_in_text_area():
+    """Witch 1 (e-reader 6″, págs. 45-46): un recuadro de estado que no cabe en la página seguía por el pie (pasaba
+    por el número de página) y empezaba en el borde de arriba de la siguiente. Se corta al final del texto, con su
+    borde cerrado, y sigue abajo del margen de la siguiente, también cerrado."""
+    B = convert.Block
+    blocks = ([B("heading", 1, "Capítulo 1: Uno"), B("p", 1, "Texto " * 300)]
+              + [B("p", 1, f"Dato {n}: {n * 7}", align="frame") for n in range(40)] + [B("p", 1, "Fin del capítulo.")])
+    out = TMP / "recuadro-partido.pdf"
+    convert.write_pdf(convert.Book("Libro", "", b"", blocks, [0]), [(0, "Capítulo 1: Uno")], out, "e-reader 6″",
+                      contents=False)
+    found = []
+    with pymupdf.open(out) as pdf:
+        for page in pdf:
+            boxes = [d["rect"] for d in page.get_drawings() if d.get("fill") and d["rect"].width < 3
+                     and d["rect"].height > 10]  # los lados del recuadro
+            if not boxes:
+                continue
+            text = [b for b in page.get_text("blocks") if b[4].strip() and not b[4].strip().isdigit()]
+            pix = page.get_pixmap(dpi=72)
+            side = round(min(box.x0 for box in boxes)) + 1
+            found.append((page.number, pix.pixel(side, 3), pix.pixel(side, round(page.rect.height) - 3),
+                          min(b[1] for b in text), max(b[3] for b in text)))
+    assert len(found) >= 2, found  # partido entre páginas
+    for number, top, bottom, *_ in found:
+        assert top[:3] == (255, 255, 255) and bottom[:3] == (255, 255, 255), (number, top, bottom)  # márgenes limpios
+
+
 def test_write_pdf_whole_words_never_splits_a_word():
     """PDF maquetado: el CSS pide hyphens: auto y MuPDF parte «mu-jer», «cue-ro» al final de línea. Con
     whole_words la palabra que no cabe pasa entera a la línea siguiente; sin la opción se sigue partiendo.
@@ -4343,8 +4370,8 @@ def test_text_editor_pdf_click_syncs_and_copies():
 
 def test_text_editor_warns_title_is_an_image():
     """Un título que en el PDF es un dibujo (lo leyó el OCR, o lo puso el marcador del PDF sin estar en el texto)
-    avisa con un botón en la barra de abajo al ponerse en él; en un párrafo, el aviso se va. En la hoja, el título
-    dibujado se ve como su dibujo. El indicador de página no cambia de ancho entre una ilustración y una página: los
+    avisa con un botón junto a ◀ ▶ del panel al ponerse en él (no en pantalla completa); en un párrafo, el aviso se va. En la hoja, el título
+    dibujado se ve como su dibujo, centrado. El zoom de la hoja no cambia de ancho entre «100 %» y «90 %». El indicador de página no cambia de ancho entre una ilustración y una página: los
     botones de los lados no se mueven. El panel del PDF deja el puntero normal: no es un enlace."""
     from time import time_ns
 
@@ -4378,11 +4405,22 @@ def test_text_editor_warns_title_is_an_image():
     # El título dibujado se ve como su dibujo en la hoja y se guarda como su texto
     drawn = editor.sheet.document().firstBlock().text() == "￼" and editor.sheet.content().startswith("# Capítulo 1\n")
     hand = editor.canvas.cursor().shape() != Qt.CursorShape.ArrowCursor  # el panel no es un enlace
-    bottom = editor.source_note.parentWidget() is editor.status.parentWidget()
+    centered = bool(editor.sheet.document().firstBlock().blockFormat().alignment() & Qt.AlignmentFlag.AlignHCenter)
+    beside = editor.source_note.parentWidget() is editor.next_page.parentWidget()  # junto a ◀ ▶ del panel
+    editor.toggle_focus()  # pantalla completa: sin el aviso
+    root.update()
+    focused = editor.source_note.isVisible()
+    editor.toggle_focus()
+    root.update()
+    slider = editor.text_zoom.x()
+    editor.text_zoom.setValue(90)  # «100 %» -> «90 %»: la barra no se mueve
+    root.update()
+    still = editor.text_zoom.x() == slider
     window.close()
-    assert drawn and not hand and bottom, (drawn, hand, bottom, editor.sheet.content()[:40])
+    assert drawn and centered and not hand and beside and not focused and still, (
+        drawn, centered, hand, beside, focused, still, editor.sheet.content()[:40])
     assert [on for on, _ in shown] == [True, False, True, False, False] and "imagen" in text, (shown, text)
-    assert len({x for _, x in shown}) == 1, shown  # la ilustración (k = 4) no mueve el botón
+    assert len({x for on, x in shown if not on}) == 1, shown  # la ilustración (k = 4) no mueve el botón
 
 
 def test_text_editor_chapter_list_is_a_small_popup():
