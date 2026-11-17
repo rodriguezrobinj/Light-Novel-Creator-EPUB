@@ -1365,6 +1365,8 @@ def edit_section(book, start, end, text, folder=None):
             page = new[-1].page = origin[j].page
             new[-1].rect = origin[j].rect
             was, now = origin[j], new[-1]
+            if was.kind == now.kind == "heading":
+                now.image = was.image  # el título dibujado (Witch 1) sigue con su nombre corregido o traducido
             # Traducido sin la marca (revisiones de antes de los recuadros, o la IA la quitó): sigue en su recuadro
             # y con su viñeta. Quitar solo el recuadro deja el mismo texto, y eso no se toca.
             if (was.kind == now.kind == "p" and was.align == "frame" and not now.align
@@ -3005,6 +3007,20 @@ def analyze(pdf_path, progress=None):
                 if after is None or (after.kind == "heading" and id(after) in chosen):
                     del blocks[k]
                     chosen.discard(id(title))
+                    continue
+                # Witch 1: el título es un dibujo encima del texto de su página (el marcador da el nombre). Va con
+                # el título y el EPUB lo muestra en su lugar; un logo de todas las páginas no cuenta
+                # Una página solo de ilustración («Insert», «Title Page») no: su imagen es la ilustración
+                where, rows = doc[title.page - 1], pages[title.page - 1]
+                text_top = min((r.y - r.size for r in rows), default=0)
+                banner = next((info for info in where.get_image_info(xrefs=True)
+                               if info.get("xref") and uses[info["xref"]] <= 2 and info["bbox"][3] <= text_top  # EPUB: sin xref
+                               and info["bbox"][2] - info["bbox"][0] > where.rect.width * 0.3), None)
+                if banner:
+                    title.image = _extract(doc, banner["xref"])
+                    # la misma imagen, apuntada como ilustración de la página, sobraría
+                    blocks[:] = [b for b in blocks if not (b.kind == "image" and b.page == title.page
+                                                           and b.image == title.image)]
             # Marcadores incompletos: un título de capítulo en una página sin ningún marcador también cuenta.
             marked = {p for _, _, p in doc.get_toc()}
             chosen |= {id(b) for b in blocks if b.kind == "heading" and b.page not in marked
@@ -3148,6 +3164,8 @@ div.brk-img img { height: 1.4em; }
 h1 + p, h2 + p, p.brk + p, hr.brk + p, div.brk-gap + p, div.brk-img + p, div.img + p { text-indent: 0; }
 div.img { text-align: center; margin: 0; page-break-before: always; page-break-after: always; }
 div.img img { max-width: 100%; max-height: 95vh; }
+h1.imagen { border: 0; padding: 0; text-align: center; }
+h1.imagen img { max-width: 100%; }
 h1.toc { text-align: center; }
 ol.toc, ol.toc ol { list-style: none; margin: 0; }
 ol.toc { padding: 0; }
@@ -3361,11 +3379,14 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     if book.blocks[j].kind == "heading" and (j in starts or not chapter)), len(book.blocks))
         skip.update(range(k, end))
     sections = []  # [título, es_capítulo, [(índice, bloque)]]
+    drawn = {}  # número de sección -> (bloque, imagen) de su título dibujado (Witch 1)
     for k, b in enumerate(book.blocks):
         if k in skip or (b.kind == "image" and not b.keep):  # sección quitada o imagen descartada
             continue
         if k in starts:
             sections.append([starts[k], True, []])
+            if b.kind == "heading" and b.image:
+                drawn[len(sections)] = k, b.image
         else:
             if not sections:
                 sections.append(["Inicio", False, []])
@@ -3388,6 +3409,11 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         # quote=False: la limpieza tipográfica ve las comillas («"Hola"» -> «“Hola”»), no &quot;
         heading = fix(html.escape(title, quote=False))
         parts = [_chapter_heading(heading)] if is_chapter else []
+        if n in drawn:  # el dibujo del PDF en lugar del texto; el nombre queda para el índice y los lectores de voz
+            k, data = drawn[n]
+            src = f"img/t{k:05d}.{'png' if data[:4] == b'\x89PNG' else 'jpg'}"
+            images[src] = data
+            parts = [f'<h1 class="imagen"><img src="{src}" alt="{html.escape(title)}"/></h1>']
         pending = None  # página que empieza en este tramo: su marca va en el siguiente párrafo o título
         notes = []  # (número, html) de las notas de esta sección: van al final, tras el texto
 
