@@ -1762,10 +1762,31 @@ def _attach(button, menu):
     como el botón que se despliega, no como otra ventana."""
     menu.setObjectName("drop")  # sin borde arriba: sigue al botón (QSS)
     menu.aboutToShow.connect(lambda: menu.setMinimumWidth(button.width()))
-    # Un menú más ancho que su botón lleva su borde de arriba solo donde el botón ya no lo tapa
-    seam = QFrame(menu, objectName="seam")
-    editor.watch(menu, lambda event: event.type() in (QEvent.Type.Show, QEvent.Type.Resize) and seam.setGeometry(
-        button.width() - 1, 0, max(0, menu.width() - button.width() + 1), 1) and False)
+    # Un menú más ancho que su botón lleva su borde de arriba solo donde el botón ya no lo tapa: a la derecha y, si
+    # no cabe en la pantalla y se corre a la izquierda, también a la izquierda del botón
+    seam, left = QFrame(menu, objectName="seam"), QFrame(menu, objectName="seam")
+
+    def place(event):
+        if event.type() in (QEvent.Type.Show, QEvent.Type.Resize):
+            # Sin sitio debajo (barra de abajo en pantalla completa) se abre encima: la unión va arriba (up)
+            up = menu.y() < button.mapToGlobal(QPoint(0, 0)).y()
+            if menu.property("up") != up:
+                for widget in (menu, button):
+                    widget.setProperty("up", up)
+                    widget.style().unpolish(widget)
+                    widget.style().polish(widget)
+            dx, y = button.mapToGlobal(QPoint(0, 0)).x() - menu.x(), menu.height() - 1 if up else 0
+            seam.setGeometry(dx + button.width() - 1, y, max(0, menu.width() - dx - button.width() + 1), 1)
+            left.setGeometry(0, y, max(0, dx), 1)
+        return False
+
+    editor.watch(menu, place)
+    # El clic en el botón que cierra el menú no lo vuelve a abrir: tras cerrar otra lista con Esc, Qt repetía ese
+    # clic sobre el botón, ya en otra vuelta de eventos (de ahí el plazo y no un aviso inmediato)
+    closed = [0.0]
+    menu.aboutToHide.connect(lambda: closed.__setitem__(0, time.monotonic()))
+    editor.watch(button, lambda event: event.type() == QEvent.Type.MouseButtonPress
+                 and time.monotonic() - closed[0] < 0.25)
 
 
 def _combo(var, values, width, editable=False, changed=None):
@@ -2279,7 +2300,7 @@ class App:
         inner.addStretch(1)
         icon = _label("🗎")
         icon.setStyleSheet("font-size: 40pt;")
-        for widget in (icon, _label("Suelta aquí un PDF de novela ligera", "big"), _label("o", "muted"),
+        for widget in (icon, _label("Suelta aquí un PDF o EPUB de novela ligera", "big"), _label("o", "muted"),
                        _button("Abrir PDF o EPUB…", self.open_pdf, "primary"),
                        _button("¿Muchos tomos? Convertir una carpeta entera", self.convert_folder, "link")):
             inner.addWidget(widget, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -2293,6 +2314,17 @@ class App:
         self.recent_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.recent_list.customContextMenuRequested.connect(self.recent_context)
         column.addWidget(self.recent_list, 1)
+        # Sin recientes, un aviso en el medio del panel: una línea gris arriba de la lista vacía apenas se veía
+        self.recent_empty = QWidget()
+        hint = _label("Los PDF y EPUB que abras saldrán aquí con su portada, para volver a ellos con un clic.", "muted")
+        hint.setWordWrap(True)
+        hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        empty_column = QVBoxLayout(self.recent_empty)
+        empty_column.addStretch(1)
+        empty_column.addWidget(_label("Aún no hay libros recientes", "title"), 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_column.addWidget(hint)
+        empty_column.addStretch(1)
+        column.addWidget(self.recent_empty, 1)
         page.setLayout(_row(drop, recent, margins=(16, 16, 16, 16), spacing=16))
         page.layout().setStretch(0, 3)
         page.layout().setStretch(1, 2)
@@ -3624,11 +3656,10 @@ class App:
             self.recent_thumbs = _start_thumbs(missing)
             if self.recent_thumbs:
                 qtk.after(300, self.wait_thumbs)
+        self.recent_list.setVisible(bool(recent))
+        self.recent_empty.setVisible(not recent)
         if not recent:
             self.recent_menu.addAction("(ninguno)").setEnabled(False)
-            item = QListWidgetItem("Aún no has abierto ningún PDF")
-            item.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.recent_list.addItem(item)
 
     def recent_card(self, path):
         """Tarjeta de un tomo reciente. La portada es la miniatura guardada al abrirlo (save_thumb): abrir cada PDF
@@ -6884,6 +6915,8 @@ class TextEditor:
         self.page_share, self.dragging = 1.0, None  # parte del ancho máximo que ocupa la hoja
         self.desk = desk
         desk.setMouseTracking(True)
+        # La barra de scroll de la hoja heredaba del escritorio la flecha de ensanchar al pasar del borde a ella
+        sheet.verticalScrollBar().setCursor(Qt.CursorShape.ArrowCursor)
         editor.watch(desk, self.on_desk_event)
         # Página del PDF a la derecha: se ajusta al ancho del panel y se amplía con el zoom
         self.canvas = qtk.Preview()
@@ -6929,8 +6962,11 @@ class TextEditor:
         status_row = self.status_row = _row(self.status, self.note,
                           _button("−", lambda: self.text_zoom.setValue(self.text_zoom.value() - 10)),
                           self.text_zoom, _button("+", lambda: self.text_zoom.setValue(self.text_zoom.value() + 10)),
-                          self.text_zoom_label, _button("Aceptar", self.save, "primary"),
-                          _button("Cancelar", self.cancel), margins=(12, 8, 12, 0))
+                          # En pantalla completa, Aceptar y Cancelar vuelven al editor: no lo cierran
+                          self.text_zoom_label,
+                          _button("Aceptar", lambda: self.toggle_focus() if self.focused else self.save(), "primary"),
+                          _button("Cancelar", lambda: self.toggle_focus() if self.focused else self.cancel()),
+                          margins=(12, 8, 12, 0))
         self.status.setMinimumWidth(260)  # «Página 74 del PDF · párrafo 4 de 63 · 1.806 palabras»
         status_row.setStretchFactor(self.status, 1)
         status_row.setStretchFactor(self.note, 1)
@@ -7109,13 +7145,26 @@ class TextEditor:
         self.style.setMinimumWidth(110)
         self.style.activated.connect(lambda n: (sheet.set_heading(STYLE_LEVELS[n]), sheet.setFocus(),
                                                 self.update_tools()))
-        self.center_btn = tool("Centrar", "Centrar el párrafo: cartas, carteles (Ctrl+E)", sheet.toggle_center, True,
-                               level=2, glyph="center")
+        # Las tres alineaciones, también dentro de un recuadro; sin texto: son tres y la cinta no da para más
+        self.left_btn = tool("", "Alinear el párrafo a la izquierda", lambda: sheet.set_align(None), True,
+                             glyph="left")
+        self.center_btn = tool("", "Centrar el párrafo: cartas, carteles (Ctrl+E)", sheet.toggle_center, True,
+                               glyph="center")
         self.frame_btn = tool("Recuadro", "Meter los párrafos elegidos en un recuadro, como las ventanas de estado, "
                               "o sacarlos de él", sheet.toggle_frame, True, level=2, glyph="frame")
-        self.right_btn = tool("Derecha", "Alinear el párrafo a la derecha: firmas y fechas de cartas (Ctrl+D)",
-                              sheet.toggle_right, True, level=2, glyph="right")
-        group("Párrafo", [self.style, self.center_btn, self.right_btn], [self.frame_btn,
+        self.right_btn = tool("", "Alinear el párrafo a la derecha: firmas y fechas de cartas (Ctrl+D)",
+                              sheet.toggle_right, True, glyph="right")
+        self.list_btn, _ = menu_tool("Lista ▾", "Lista de viñetas o numerada con los párrafos elegidos, como en Word. "
+                                     "Intro en un elemento vacío sale de la lista", [
+            ("●  Viñetas", lambda: sheet.set_list("disc")), ("○  Viñetas huecas", lambda: sheet.set_list("circle")),
+            ("■  Viñetas cuadradas", lambda: sheet.set_list("square")), None,
+            ("1.  Numerada", lambda: sheet.set_list("decimal")),
+            ("a.  Letras minúsculas", lambda: sheet.set_list("lower-alpha")),
+            ("A.  Letras mayúsculas", lambda: sheet.set_list("upper-alpha")),
+            ("i.  Romanos en minúsculas", lambda: sheet.set_list("lower-roman")),
+            ("I.  Romanos", lambda: sheet.set_list("upper-roman")), None,
+            ("Quitar la lista", lambda: sheet.set_list(None))])
+        group("Párrafo", [self.style, self.left_btn, self.center_btn, self.right_btn], [self.frame_btn, self.list_btn,
               tool("Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
                    sheet.join_next, level=2, glyph="join")])
         group("Edición", [tool("Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
@@ -7177,18 +7226,15 @@ class TextEditor:
         for row in self.ribbon_rows:
             row.addStretch(1)
 
-        # A la derecha de las pestañas, como «Compartir» en Word: dónde estás y a dónde ir, en cualquier pestaña
-        self.prev_chapter = tool("", "Capítulo anterior (Ctrl+RePág)", lambda: self.step_section(-1), glyph="prev")
-        self.next_chapter = tool("", "Capítulo siguiente (Ctrl+AvPág)", lambda: self.step_section(1), glyph="next")
+        # A la derecha de las pestañas, como «Compartir» en Word: dónde estás y a dónde ir, en cualquier pestaña.
+        # Sin ◀ ▶: ya están bajo la página del PDF (◀◀ ▶▶) y con Ctrl+RePág y Ctrl+AvPág
         QShortcut(QKeySequence("Ctrl+PgUp"), self.win, lambda: self.step_section(-1))
         QShortcut(QKeySequence("Ctrl+PgDown"), self.win, lambda: self.step_section(1))
-        self.chapter_btn = QToolButton(objectName="tool")
+        self.chapter_btn = QToolButton(objectName="menu")  # ▾ como los demás botones con menú
         self.chapter_btn.setToolTip("Ir a otro capítulo")
-        self.chapter_btn.clicked.connect(self.show_chapters)
         self.review_btn = tool("✓", "Marca el capítulo como revisado y pasa al siguiente sin revisar (Ctrl+Intro)",
                                self.toggle_reviewed, True)
-        self.tabs_row = _row(tabs, 1, self.prev_chapter, self.chapter_btn, self.next_chapter, self.review_btn,
-                             spacing=2)
+        self.tabs_row = _row(tabs, 1, self.chapter_btn, self.review_btn, spacing=6)
         column.addLayout(self.tabs_row)
         column.addWidget(pages)
         self.chapters_popup()
@@ -7280,12 +7326,13 @@ class TextEditor:
                                           else Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
 
     def chapters_popup(self):
-        """Lista de capítulos bajo el botón: pequeña, con scroll y un filtro. Un QMenu con 34 capítulos
-        (Mitsuha 1) se repartía en columnas por toda la pantalla y tapaba el editor."""
-        pop = self.chapter_popup = QFrame(self.win, Qt.WindowType.Popup)
-        pop.setObjectName("card")
-        column = QVBoxLayout(pop)
-        column.setContentsMargins(8, 8, 8, 8)
+        """Lista de capítulos bajo el botón: pequeña, con scroll y un filtro. Un menú de una acción por capítulo
+        (Mitsuha 1: 34) se repartía en columnas por toda la pantalla: es un menú con la lista dentro, del botón
+        como los demás ▾. Como ventana suelta, el clic en el botón para cerrarla la volvía a abrir."""
+        pop = self.chapter_popup = QMenu(self.win)
+        box = QWidget()
+        column = QVBoxLayout(box)
+        column.setContentsMargins(6, 6, 6, 6)
         self.chapter_filter = QLineEdit()
         self.chapter_filter.setPlaceholderText("Buscar capítulo")
         self.chapter_filter.textChanged.connect(self.filter_chapters)
@@ -7297,25 +7344,27 @@ class TextEditor:
         self.chapter_list.itemActivated.connect(self.pick_chapter)
         column.addWidget(self.chapter_filter)
         column.addWidget(self.chapter_list, 1)
-        pop.resize(460, 380)
+        box.setFixedSize(460, 380)
+        action = QWidgetAction(pop)
+        action.setDefaultWidget(box)
+        pop.addAction(action)
+        pop.aboutToShow.connect(self.show_chapters)
+        self.chapter_btn.setMenu(pop)
+        self.chapter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        _attach(self.chapter_btn, pop)  # bajo el botón, o encima en la barra de abajo (pantalla completa)
 
     def show_chapters(self):
-        """Abre la lista bajo el botón del capítulo, dentro de la pantalla y con el de ahora a la vista."""
+        """Al abrirse la lista: sin filtro, con «•» en los cambiados y el capítulo de ahora a la vista."""
         self.mark_changed()
         self.chapter_filter.clear()
-        pop, button = self.chapter_popup, self.chapter_btn
-        area = button.screen().availableGeometry()
-        corner = button.mapToGlobal(button.rect().bottomRight())
-        x = min(max(area.left(), corner.x() - pop.width()), area.right() - pop.width() - 8)  # sin tocar el borde
-        top = button.mapToGlobal(button.rect().topLeft()).y()
-        # bajo el botón; en la barra de abajo (pantalla completa), encima, sin taparlo
-        y = corner.y() + 2 if corner.y() + 2 + pop.height() <= area.bottom() - 8 else max(area.top(), top - pop.height() - 2)
-        pop.move(x, y)
-        pop.show()
-        current = self.chapter_list.currentItem()
-        if current:
-            self.chapter_list.scrollToItem(current, QListWidget.ScrollHint.PositionAtCenter)
-        self.chapter_filter.setFocus()
+
+        def ready():  # ya visible: antes no se desplaza ni toma el foco
+            current = self.chapter_list.currentItem()
+            if current:
+                self.chapter_list.scrollToItem(current, QListWidget.ScrollHint.PositionAtCenter)
+            self.chapter_filter.setFocus()
+
+        qtk.after(0, lambda: shiboken6.isValid(self.chapter_list) and ready())
 
     def filter_chapters(self, text):
         for n in range(self.chapter_list.count()):
@@ -7396,7 +7445,10 @@ class TextEditor:
     def on_command(self, name):
         """Atajos de la hoja que abren una barra: Ctrl+Alt+K enlace, Ctrl+F buscar, Ctrl+H reemplazar."""
         actions = {"link": self.show_link_bar, "reviewed": self.toggle_reviewed, "next_change": self.next_change,
-                   "next_issue": self.next_issue, "nav": self.toggle_nav, "focus": self.toggle_focus}
+                   "next_issue": self.next_issue, "nav": self.toggle_nav, "focus": self.toggle_focus,
+                   # Ctrl+Mayús+F12 con un hueco a la vista: guarda pantalla, memoria y maquetación para hallar la causa
+                   "diagnose": lambda: messagebox.showinfo("Diagnóstico de la hoja", "Guardado en:\n" + str(
+                       self.sheet.diagnose(_data_dir() / "diagnostico" / time.strftime("%Y%m%d-%H%M%S"))))}
         if name in actions:
             actions[name]()
         else:
@@ -7420,9 +7472,9 @@ class TextEditor:
         if self.focused:  # tras los avisos, que tienen su sitio fijo: no se mueven al cambiar el texto
             self.status_row.insertWidget(2, self.chapter_btn)
             self.status_row.insertWidget(3, self.review_btn)
-        else:  # a su sitio en la fila de las pestañas: tras ◀ y tras ▶
-            self.tabs_row.insertWidget(self.tabs_row.indexOf(self.prev_chapter) + 1, self.chapter_btn)
-            self.tabs_row.insertWidget(self.tabs_row.indexOf(self.next_chapter) + 1, self.review_btn)
+        else:  # a su sitio en la fila de las pestañas: tras las pestañas y el espacio
+            self.tabs_row.insertWidget(2, self.chapter_btn)
+            self.tabs_row.insertWidget(3, self.review_btn)
         if self.focused:
             self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.find_frame, self.link_frame,
                                              self.split_frame, self.issue_frame, self.resume_frame, self.diff_frame)
@@ -8355,6 +8407,7 @@ class TextEditor:
         self.style.setCurrentIndex(0 if level is None else 1 if level == ON else 2)
         self.sup_btn.setChecked(self.sheet.is_sup())
         self.caps_btn.setChecked(self.sheet.is_small_caps())
+        self.left_btn.setChecked(not self.sheet.is_centered() and not self.sheet.is_right())
         self.center_btn.setChecked(self.sheet.is_centered())
         self.right_btn.setChecked(self.sheet.is_right())
         self.frame_btn.setChecked(self.sheet.is_framed())
@@ -8476,7 +8529,7 @@ class TextEditor:
             messagebox.showinfo("Recuperar cambios", f"{lost} {what}: el libro cambió desde entonces.", parent=self.win)
 
     def show_chapter(self, row):
-        """Indicador de la cinta: «☰ Capítulo 3 de 31 · Título ▾», y ◀ ▶ activos si hay a dónde ir."""
+        """Indicador de la cinta: «☰ Capítulo 3 de 31 · Título ▾»."""
         chapters = sum(1 for s in self.sections if s[0] != FRONT)
         number = sum(1 for s in self.sections[:row + 1] if s[0] != FRONT) if row is not None else 0
         title = self.sections[row][0] if row is not None else self.app.tree.set(self.item, "title")
@@ -8484,12 +8537,11 @@ class TextEditor:
         text = f"☰  {where} · {title}" if title != FRONT else f"☰  {FRONT}"
         # Ancho fijo con «…»: un título largo ensanchaba la cinta más que la pantalla (1366 px)
         width = CHAPTER_WIDTHS[self.ribbon_level]
+        # ▾ del QSS (botón «menu»): el texto deja sitio a sus márgenes (12 + 28 px)
         self.chapter_btn.setText(self.chapter_btn.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight,
-                                                                           width - 30) + "  ▾")
+                                                                           width - 44))
         self.chapter_btn.setToolTip(f"{where}: {title}. Clic para ir a otro capítulo")
         self.chapter_btn.setFixedWidth(width)
-        self.prev_chapter.setEnabled(row is not None and row > 0)
-        self.next_chapter.setEnabled(row is not None and row < len(self.sections) - 1)
         self.update_review()  # la lista de capítulos («•» en los cambiados) se rehace al abrirla
 
     def step_section(self, delta):

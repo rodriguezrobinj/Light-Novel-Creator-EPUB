@@ -47,7 +47,6 @@ def _memo(fn):
 
 
 BAND = 0.12     # franja superior/inferior (fracción de la altura) donde viven encabezados y pies
-SCENE_GAP = 2.5  # hueco mínimo entre dos líneas del texto (en interlíneas) que separa escenas (Mitsuha GambaTrans: 3,3)
 REPEAT = 0.30   # fracción de páginas en que una línea debe repetirse para ser encabezado o pie
 KEYWORDS = re.compile(
     r"(cap[ií]tulo|pr[oó]logo|ep[ií]logo|interludio|historia paralela|palabras de cierre"
@@ -1249,7 +1248,12 @@ LINK_MARK = re.compile(r'&lt;a href="(https?://[^"\s<>]+)"&gt;(.*?)&lt;/a&gt;')
 CENTER = "<center>"  # al principio de una línea del editor: párrafo centrado (carta, cartel)
 FRAME = "<marco>"  # al principio de una línea del editor: párrafo dentro de un recuadro (ventana de estado)
 RIGHT = "<derecha>"  # al principio de una línea del editor: párrafo a la derecha (firma de una carta)
-ALIGN_PREFIX = {"center": CENTER, "frame": FRAME, "right": RIGHT}  # alineación de Block -> prefijo de su línea
+# Estilos de lista del editor, con su nombre de CSS (list-style-type): viñetas y numeradas, como en Word
+LIST_STYLES = ("disc", "circle", "square", "decimal", "lower-alpha", "upper-alpha", "lower-roman", "upper-roman")
+# alineación de Block -> prefijo de su línea. Un recuadro puede ir centrado o a la derecha; un elemento de lista
+# lleva el estilo de su lista ("list-decimal")
+ALIGN_PREFIX = ({"center": CENTER, "frame": FRAME, "right": RIGHT, "frame-center": "<marco centro>",
+                 "frame-right": "<marco derecha>"} | {f"list-{style}": f"<lista {style}>" for style in LIST_STYLES})
 
 
 def partial_path(out_path):
@@ -2742,29 +2746,6 @@ def analyze(pdf_path, progress=None):
                 indents += sum(r.x0 > left + body * 0.8 for r in normal)
         line_gap = gaps.most_common(1)[0][0] if gaps else body * 1.2
         indent_style = indents > total * 0.05  # los párrafos se marcan con sangría
-        # Hueco que separa escenas (Mitsuha GambaTrans: 3,3 líneas): bastante más que el espacio entre párrafos, y
-        # raro. Si sale en casi cada página es el estilo del libro (Megami 4: una línea en blanco entre párrafos)
-        # Con diálogos de una línea, el paso entre párrafos sale más que el de línea (Kage 7, World Project: 25 pt
-        # frente a 17) y el hueco de escena, una línea en blanco, no llegaba: se mide desde el paso de línea
-        step = min((g for g, c in gaps.items() if c >= 0.3 * gaps[line_gap]), default=line_gap)
-        spaced = collections.Counter()
-        for rows in pages:
-            normal = [r for r in rows if r.size == body]
-            spaced.update(round(b.y - a.y) for a, b in zip(normal, normal[1:]) if b.y - a.y > step * 1.15)
-        paragraph_gap = max((g for g in spaced if g < 3 * step), key=spaced.get, default=step)
-        scene_gap = max(SCENE_GAP * step, 1.8 * paragraph_gap)
-        # Megami 4: 4 por página; Farming Life 1 y 2: 1,7, agrupan párrafos. Mitsuha 3 (GambaTrans), escenas: 0,9
-        if sum(count for gap, count in spaced.items() if gap > scene_gap) > 1.25 * n:
-            scene_gap = None
-        # Oukoku 2 a 4: la escena cambia con «◇◇◇◇◇» entre dos líneas en blanco; una línea en blanco sola es una
-        # pausa, y dos (Oukoku 2, pág. 94) una escena sin su «◇». Kage 7 (World Project) pone su «☆» a un párrafo
-        # y sus líneas en blanco sí cambian de escena
-        pads = sorted(min(r.y - rows[k - 1].y, rows[k + 1].y - r.y)
-                      for rows in pages for k, r in enumerate(rows[1:-1], 1) if SCENE_BREAK.fullmatch(r.text))
-        pads = [p for p in pads if p > 1.5 * paragraph_gap]
-        if len(pads) >= 3 and scene_gap:
-            scene_gap = max(scene_gap, 1.25 * pads[len(pads) // 2])
-
         # Título por tamaño o negrita, o porque el PDF lo marca: hay subtítulos del tamaño del texto
         # ("El lado de la bruja") que solo se distinguen por su marcador de nivel 2.
         bookmarks = collections.defaultdict(set)
@@ -2894,7 +2875,6 @@ def analyze(pdf_path, progress=None):
             right = max((r.x1 for r in normal), default=0)
             prev = None
             ornaments = _ornaments(page, rows, infos + drawn, before)  # adornos-separador, de arriba abajo
-            boxes = [info["bbox"] for info in infos + drawn]  # imágenes, recuadros y adornos: no son un hueco
             for r in rows:
                 while ornaments and ornaments[0][0] < r.y:  # el adorno queda por encima de esta línea
                     info = ornaments.pop(0)[1]
@@ -2902,22 +2882,8 @@ def analyze(pdf_path, progress=None):
                         blocks.append(Block("break", num, image=_ornament_image(doc, page, info),
                                             rect=tuple(info["bbox"])))  # rect: el editor lo recuadra en la página
                     para = None
-                # Mitsuha (GambaTrans): la escena cambia con un hueco de unas tres líneas en blanco, sin símbolo ni
-                # adorno. Solo entre dos líneas del texto, sin nada en medio (ilustración, recuadro, título); no
-                # antes de una firma centrada o a la derecha (el autor al final del epílogo, Eminence 7) ni alrededor
-                # de una ficha de estado («NOMBRE: Chise», Maryoku)
-                if (prev is not None and scene_gap and r.y - prev.y > scene_gap and not prev.heading and not r.heading
-                        and abs(prev.size - body) < 0.5 and abs(r.size - body) < 0.5
-                        and not prev.bold  # Maryoku 1: subtítulo en negrita del tamaño del texto; es su aire
-                        and id(prev) not in inside and id(r) not in inside
-                        and not any(prev.y < (box[1] + box[3]) / 2 < r.y for box in boxes)
-                        and blocks and blocks[-1].kind == "p"
-                        and max(prev.x0, r.x0) < left + (right - left) / 4  # la sangría de Re Zero 7 es de 35 pt
-                        and not LABEL.match(r.text.strip()) and not LABEL.match(_plain(blocks[-1]))
-                        and not r.text.rstrip().endswith(":")):  # «Protector de la Tierra:» presenta una ficha
-                    # sin imagen ni texto: en el EPUB, el del estilo. Su rect, el hueco entre las dos líneas
-                    blocks.append(Block("break", num, rect=(left, prev.y + prev.size * 0.3, right, r.y - r.size)))
-                    para = None
+                # Las líneas en blanco nunca son separador de escena, en ningún libro: en Maryoku 2 el aire de un
+                # subtítulo salía como ❖. Solo cuentan los símbolos y los adornos
                 if SCENE_BREAK.fullmatch(r.text):  # solo símbolos: separador aunque vaya en letra de título (Mitsuha 6)
                     blocks.append(Block("break", num, r.html, rect=_rect([r])))  # guarda el texto original ("☆", "* * *")
                     para = None
@@ -3191,7 +3157,11 @@ small.sc { font-size: 1em; font-variant: small-caps; }
 img.icono { height: 1em; vertical-align: -0.15em; }
 div.marco { border: 3px double #777777; padding: 0.5em 0.9em; margin: 1em 0; font-family: sans-serif;
   font-size: 0.95em; }
-div.marco p { text-indent: 0; margin: 0; text-align: left; }
+div.marco p { text-indent: 0; margin: 0.3em 0; text-align: left; }
+div.marco p.center { text-align: center; }
+div.marco p.right { text-align: right; }
+.lista { margin: 0.6em 0; padding-left: 1.8em; }
+.lista li { text-indent: 0; margin: 0.2em 0; }
 div.marco p.sub { padding-left: 1.3em; }
 div.marco p.head { margin-top: 0.6em; }
 p.status { text-indent: 0; text-align: center; font-family: sans-serif; font-size: 0.9em; margin: 0.8em 8%;
@@ -3432,7 +3402,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             pages.append((name, page))
             return f'<span epub:type="pagebreak" role="doc-pagebreak" id="pg{page}" title="{page}"></span>'
 
-        framed = [b.kind == "p" and b.align == "frame" for _, b in blocks]
+        framed = [b.kind == "p" and b.align.startswith("frame") for _, b in blocks]
+        # estilo de la lista de cada párrafo ("" si no es de una): los seguidos del mismo estilo son una lista
+        listed = [b.align[5:] if b.kind == "p" and b.align.startswith("list-") else "" for _, b in blocks]
         # Con viñetas en el recuadro, las líneas sin viñeta son sus datos y van sangradas (Witch 1: «HP: 10/10»)
         bulleted, run = set(), []
         for at, inside in enumerate(framed):
@@ -3448,6 +3420,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 pending = b.page
             if framed[at] and (at == 0 or not framed[at - 1]):
                 parts.append('<div class="marco">')
+            if listed[at] and (at == 0 or listed[at - 1] != listed[at]):
+                tag = "ul" if listed[at] in LIST_STYLES[:3] else "ol"
+                parts.append(f'<{tag} class="lista" style="list-style-type: {listed[at]}">')
             if b.kind == "image":
                 alt = (alts or {}).get(image_key(b.image)) or (f"Ilustración de «{title}»" if is_chapter else "Ilustración")
                 for i, data in enumerate(_spread(b.image, b.layout) if b.layout else [b.image]):
@@ -3467,12 +3442,18 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     bullet = _plain(b)[:1] in BULLETS  # un apartado nuevo del recuadro («◆ Equipment») se separa
                     css = ("sub" if at in bulleted and not bullet else "head" if bullet and at and framed[at - 1]
                            else "")
+                    css = f"{css} {b.align[6:]}".strip()  # "frame-center": centrado dentro del recuadro
+                elif listed[at]:
+                    css = ""
                 else:
                     css = ("status" if STATUS.fullmatch(_plain(b)) else "right" if b.align == "right"
                            else "center" if b.align else "")
                 attr = f' class="{css}"' if css else ""
                 body = NOTE.sub(noteref, ICON.sub(icon_file, fix(b.html, dashes=not framed[at])))  # la nota sale del párrafo: no se parte
-                parts.append(f"<p{attr}>{mark()}{_hyphenate(body) if hyphenate else body}</p>")
+                item = "li" if listed[at] else "p"
+                parts.append(f"<{item}{attr}>{mark()}{_hyphenate(body) if hyphenate else body}</{item}>")
+            if listed[at] and (at == len(blocks) - 1 or listed[at + 1] != listed[at]):
+                parts.append("</ul>" if listed[at] in LIST_STYLES[:3] else "</ol>")
             if framed[at] and (at == len(blocks) - 1 or not framed[at + 1]):
                 parts.append("</div>")
         # Los lectores con notas emergentes (Kobo, Kindle, Apple Books) ocultan el aside y lo muestran

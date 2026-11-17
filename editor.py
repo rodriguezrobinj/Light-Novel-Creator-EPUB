@@ -2,6 +2,7 @@
 convert.section_text (un párrafo por línea con <i>/<b>, "# " delante de un título, las ilustraciones y los
 separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda convert.edit_section."""
 import base64
+import collections
 import difflib
 import hashlib
 import html
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QSyntaxHighlighter, QTextBlockFormat,
-                           QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat)
+                           QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat, QTextListFormat)
 from PySide6.QtWidgets import QApplication, QTextEdit
 
 import convert
@@ -27,6 +28,7 @@ CENTERED = _USER + 7  # párrafo centrado (carta, cartel): vuelve a section_text
 FRAMED = _USER + 8    # párrafo dentro de un recuadro (ventana de estado): vuelve con <marco> delante
 RIGHTED = _USER + 9   # párrafo a la derecha (firma de una carta): vuelve con <derecha> delante
 FRAME_PAD = 16        # píxeles entre el recuadro y su texto
+FRAME_GAP = 5         # píxeles entre los párrafos de un recuadro: pegados del todo costaba leerlos
 SUB = 18              # sangría de una línea sin viñeta en un recuadro con viñetas («HP: 10/10» bajo «■ Lorna»)
 MIME = "application/x-lnc-hoja"  # copiar y pegar dentro de la hoja conserva formato e ilustraciones
 WHOLE = MIME + "-parrafos"  # lo copiado acaba en un salto de párrafo: se pegan párrafos enteros
@@ -40,6 +42,11 @@ SPACE = 10  # píxeles entre párrafos, como el espaciado de Word (no se guarda)
 FONT_SIZE = 12  # puntos del texto a 100 %
 IMAGES = None  # carpeta de las imágenes nuevas ([Imagen nombre]); TextEditor pone la del programa (app.IMAGES)
 PICTURE_FILES = (".jpg", ".jpeg", ".png", ".webp")  # archivos copiados en el Explorador que se pegan como imagen
+# Estilos de lista (convert.LIST_STYLES, nombres de CSS) y el de Qt con que se ven en la hoja
+LISTS = dict(zip(convert.LIST_STYLES, (
+    QTextListFormat.Style.ListDisc, QTextListFormat.Style.ListCircle, QTextListFormat.Style.ListSquare,
+    QTextListFormat.Style.ListDecimal, QTextListFormat.Style.ListLowerAlpha, QTextListFormat.Style.ListUpperAlpha,
+    QTextListFormat.Style.ListLowerRoman, QTextListFormat.Style.ListUpperRoman)))
 
 
 def _plain_format():
@@ -165,14 +172,43 @@ def align_format(f, how=None):
     return f
 
 
+def align_of(line):
+    """Alineación de una línea de section_text, como Block.align: "", "center", "frame-right", "list-decimal"…"""
+    prefix = convert.split_prefix(line)[0]
+    return next((a for a, p in convert.ALIGN_PREFIX.items() if p == prefix), "")
+
+
+def side_of(align):
+    """"center", "right" o None (izquierda) de una alineación, también dentro de un recuadro ("frame-center")."""
+    return next((side for side in ("center", "right") if align.endswith(side)), None)
+
+
+def list_style(block):
+    """Estilo (nombre de CSS) de la lista del párrafo, o None si no está en una."""
+    group = block.textList()
+    if group is None:
+        return None
+    style = group.format().style()
+    return next((name for name, qt in LISTS.items() if qt == style), "disc")  # pegada de fuera, con otro estilo
+
+
 def frame_format(f, first=False, last=False, sub=False):
-    """Formato de un párrafo en recuadro: juntos, sin el espacio entre párrafos, y con sitio para el borde."""
+    """Formato de un párrafo en recuadro: cerca unos de otros y con sitio para el borde. Conserva su alineación."""
     f.setProperty(FRAMED, True)
-    align_format(f)
     f.setLeftMargin(FRAME_PAD + (SUB if sub else 0))
     f.setRightMargin(FRAME_PAD)
-    f.setTopMargin(FRAME_PAD if first else 0)
+    f.setTopMargin(FRAME_PAD if first else FRAME_GAP)
     f.setBottomMargin(FRAME_PAD + SPACE if last else 0)
+    return f
+
+
+def unframe_format(f):
+    """Saca el párrafo del recuadro: sus márgenes de párrafo normal."""
+    f.clearProperty(FRAMED)
+    f.setLeftMargin(0)
+    f.setRightMargin(0)
+    f.setTopMargin(0)
+    f.setBottomMargin(SPACE)
     return f
 
 
@@ -180,13 +216,13 @@ def _frame_runs(lines):
     """{posición en lines: (primera de su recuadro, última, sangrada)} de las líneas con <marco>."""
     out, run = {}, []
     for i, (_, line) in enumerate(lines + [(None, "")]):
-        if line.startswith(convert.FRAME):
+        if align_of(line).startswith("frame"):
             run.append(i)
             continue
-        bulleted = any(lines[j][1][len(convert.FRAME):].lstrip()[:1] in convert.BULLETS for j in run)
+        bulleted = any(_strip(lines[j][1]).lstrip()[:1] in convert.BULLETS for j in run)
         for j in run:
             out[j] = (j == run[0], j == run[-1],
-                      bulleted and lines[j][1][len(convert.FRAME):].lstrip()[:1] not in convert.BULLETS)
+                      bulleted and _strip(lines[j][1]).lstrip()[:1] not in convert.BULLETS)
         run = []
     return out
 
@@ -197,15 +233,17 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
     del editor, cada párrafo recuerda su línea. raw: texto de fuera, sin leer marcas. levels: {bloque: tipo
     de su fila} de los títulos. objects=False: "[Ilustración N]" queda como texto (pegado de fuera)."""
     frames = {} if raw else _frame_runs(list(lines))
+    before = None  # estilo de lista de la línea anterior: las seguidas del mismo estilo son una sola lista
     for i, (k, line) in enumerate(lines):
         bare = line.strip()
         token = None if raw or not objects else convert.TOKEN.fullmatch(bare) or convert.PICTURE.fullmatch(bare)
         heading = not raw and line.startswith("# ")
-        centered = not raw and line.startswith(convert.CENTER)
-        right = not raw and line.startswith(convert.RIGHT)
+        align = "" if raw else align_of(line)
+        centered, right = side_of(align) == "center", side_of(align) == "right"
+        listed = align[5:] if align.startswith("list-") else None
         framed = i in frames
         scene = not raw and not token and bool(bare) and bool(convert.SCENE_BREAK.fullmatch(bare))
-        special = bool(token or heading or scene or centered or framed or right)
+        special = bool(token or heading or scene or centered or framed or right or listed)
         if i or (special and cursor.block().length() > 1):
             cursor.insertBlock(QTextBlockFormat(), _plain_format())
         if i or special or remember:
@@ -225,6 +263,13 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
                 if levels and levels.get(k):
                     f.setProperty(LEVEL, levels[k])
             cursor.setBlockFormat(f)
+        if listed:
+            group = cursor.block().previous().textList() if listed == before else None
+            if group is not None:
+                group.add(cursor.block())
+            else:
+                cursor.createList(LISTS[listed])
+        before = listed
         if token:
             n = token.group(2)
             _insert_object(cursor, token.group(1), int(n) if n.isdigit() else n, pictures, color)
@@ -282,8 +327,10 @@ def _lines(block):
     """Líneas de section_text de un párrafo de la hoja: su texto con marcas, y cada objeto en su línea."""
     f = block.blockFormat()
     heading = bool(f.property(HEADING))
-    prefix = ("# " if heading else convert.CENTER if f.property(CENTERED) else convert.FRAME if f.property(FRAMED)
-              else convert.RIGHT if f.property(RIGHTED) else "")
+    side = "center" if f.property(CENTERED) else "right" if f.property(RIGHTED) else ""
+    align = (f"frame-{side}".rstrip("-") if f.property(FRAMED) else f"list-{list_style(block)}" if block.textList()
+             else side)
+    prefix = "# " if heading else convert.ALIGN_PREFIX.get(align, "")
     out, runs = [], []
 
     def flush():
@@ -462,6 +509,20 @@ def added_spans(before, after):
             difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes() if op in ("replace", "insert")]
 
 
+def settle(document):
+    """Maqueta la hoja entera ya. Qt lo hace a trozos, y pageCount() (que debería acabarla) deja párrafos sin
+    líneas si a mitad cambia el ancho (aparece la barra de desplazamiento) o llega otro cambio: huecos con el texto
+    «debajo» hasta ensanchar la hoja (Nageki 1: 319 de 361 párrafos al pasar de capítulo). Si queda alguno, se
+    maqueta todo de nuevo, que no va a trozos."""
+    document.pageCount()
+    block = document.firstBlock()
+    while block.isValid():
+        if block.length() > 1 and not block.layout().lineCount():
+            document.markContentsDirty(0, document.characterCount())
+            return
+        block = block.next()
+
+
 class Look(QSyntaxHighlighter):
     """Aspecto que no se guarda: títulos grandes, notas en gris, separadores escritos y palabras desconocidas
     subrayadas. Solo pinta: no cambia el texto ni entra en deshacer."""
@@ -505,6 +566,7 @@ class Look(QSyntaxHighlighter):
         de un capítulo sin traducir, de golpe, la congelaban 1 s. Una llamada nueva a set_unknown cancela esta."""
         if job != self.job:
             return
+        settle(self.document())  # maquetada entera antes de tocar unos párrafos (ver Sheet.changeEvent)
         for block in blocks[:REPAINT_BATCH]:
             if block.isValid():  # borrado mientras tanto: ya no hay nada que pintar
                 self.rehighlightBlock(block)
@@ -606,6 +668,7 @@ class Sheet(QTextEdit):
         self.cursorPositionChanged.connect(lambda: self.mark_current and self.viewport().update())
         self.origins = {}  # documento -> [(bloque, línea)] tal como se cargó
         self.known = {}  # documento -> {párrafo: (revisión, ¿cambiado?)} de changed_blocks, hasta que cambie
+        self.paints = collections.deque(maxlen=60)  # últimos repintados (zona, desplazamiento), para diagnose
         self.set_zoom(100)
 
     def set_content(self, lines, pictures, color="#888888", levels=None):
@@ -635,7 +698,7 @@ class Sheet(QTextEdit):
         look = self.look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
         look.tags = self.tags
         look.set_unknown(self.unknown)
-        document.pageCount()  # maqueta la hoja entera ya: Qt lo hace a trozos y pintaba con ella a medias
+        settle(document)  # maqueta la hoja entera ya: Qt lo hace a trozos y pintaba con ella a medias
         self.moveCursor(QTextCursor.MoveOperation.Start)
         return document, look
 
@@ -744,7 +807,7 @@ class Sheet(QTextEdit):
         self.setDocument(document)
         document.setDefaultFont(self.font())
         self.look = look
-        document.pageCount()  # maquetada entera, como al cargarla
+        settle(document)  # maquetada entera, como al cargarla
 
     def scrollContentsBy(self, dx, dy):
         """Al desplazarse Qt mueve lo ya pintado y solo dibuja la franja nueva: si la maquetación cambió entre
@@ -752,9 +815,18 @@ class Sheet(QTextEdit):
         super().scrollContentsBy(dx, dy)
         self.viewport().update()
 
+    def changeEvent(self, event):
+        """Un cambio de letra o de estilo (tema, pantalla completa, un menú que se repinta) hace que Qt maquete la
+        hoja otra vez, a trozos. Si antes de acabar llega un cambio de unos párrafos (el subrayado del corrector),
+        Qt da la maquetación por terminada y los que faltaban se quedan sin líneas: huecos con el texto «debajo»
+        hasta cambiar el ancho de la hoja (Nageki 1, epílogo: 61 párrafos de 110). Se maqueta entera al momento."""
+        super().changeEvent(event)
+        settle(self.document())
+        self.viewport().update()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.document().pageCount()  # otro ancho, otra maquetación: entera, no a trozos
+        settle(self.document())  # otro ancho, otra maquetación: entera, no a trozos
         self.viewport().update()
 
     def content(self):
@@ -766,7 +838,33 @@ class Sheet(QTextEdit):
         self.bars, self.bar_color = list(blocks), QColor(color)
         self.viewport().update()
 
+    def diagnose(self, folder):
+        """Guarda en folder lo que hay en la pantalla, lo que la hoja pinta en memoria y su maquetación: los huecos
+        de la hoja (párrafos que no se ven hasta cambiar su ancho) no se han podido reproducir fuera de la pantalla
+        del usuario. Devuelve la carpeta."""
+        folder = Path(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        window, view, doc = self.window(), self.viewport(), self.document()
+        window.screen().grabWindow(window.winId()).save(str(folder / "pantalla.png"))
+        view.grab().save(str(folder / "memoria.png"))
+        bar, layout = self.verticalScrollBar(), doc.documentLayout()
+        out = [f"hoja {self.geometry().getRect()} vista {view.geometry().getRect()} visible {view.isVisible()} "
+               f"repinta {view.updatesEnabled()} ventana {window.windowState()} escala {view.devicePixelRatioF()}",
+               f"desplazamiento {bar.value()} de {bar.maximum()} · documento {doc.size().toTuple()} ancho "
+               f"{doc.textWidth()} párrafos {doc.blockCount()}", "repintados (zona, desplazamiento):"]
+        out += [f"  {rect} {scroll}" for rect, scroll in self.paints]
+        out.append("párrafos (y, alto, líneas, y del texto, principio):")
+        block = doc.firstBlock()
+        while block.isValid():
+            box = layout.blockBoundingRect(block)
+            out.append(f"  {box.top():.0f} {box.height():.0f} {block.layout().lineCount()} "
+                       f"{block.layout().position().y():.0f} {block.text()[:25]!r}")
+            block = block.next()
+        (folder / "hoja.txt").write_text("\n".join(out), encoding="utf-8")
+        return folder
+
     def paintEvent(self, event):
+        self.paints.append((event.rect().getRect(), self.verticalScrollBar().value()))
         if self.mark_current:  # debajo del texto: antes de que QTextEdit lo pinte
             block, doc = self.textCursor().block(), self.document()
             text = block.layout().boundingRect().translated(block.layout().position())  # el texto, sin márgenes
@@ -834,7 +932,7 @@ class Sheet(QTextEdit):
         # En la hoja de estilo: la QSS de la ventana (9 pt para todo) pisaría un setFont o la fuente del documento
         self.setStyleSheet(f"QTextEdit#sheet {{ font-family: 'Segoe UI'; font-size: {FONT_SIZE * percent / 100:.1f}pt; }}")
         self.document().setDefaultFont(self.font())
-        self.document().pageCount()  # otra letra, otra maquetación: entera
+        settle(self.document())  # otra letra, otra maquetación: entera
         self.viewport().update()
 
     def goto_source(self, k):
@@ -974,10 +1072,8 @@ class Sheet(QTextEdit):
             f.setProperty(HEADING, True)
             f.setProperty(LEVEL, level)
             if f.property(FRAMED):  # un título no va en recuadro
-                f.clearProperty(FRAMED)
-                f.setLeftMargin(0)
-                f.setRightMargin(0)
-                f.setBottomMargin(SPACE)
+                unframe_format(f)
+            f.setObjectIndex(-1)  # ni en una lista
             align_format(f)
         else:
             f.clearProperty(HEADING)
@@ -989,22 +1085,83 @@ class Sheet(QTextEdit):
     def toggle_heading(self):
         self.set_heading(None if self.heading_level() else "Capítulo")
 
-    def _toggle_align(self, how, prop):
-        cursor = self.textCursor()
-        block = cursor.block()
-        if not _is_text(block) or block.blockFormat().property(FRAMED):  # el recuadro va siempre a la izquierda
+    def _selected_text_blocks(self):
+        """Párrafos de texto que no son título de la selección (o el del cursor), en orden."""
+        cursor, doc = self.textCursor(), self.document()
+        block, last = doc.findBlock(cursor.selectionStart()), doc.findBlock(cursor.selectionEnd())
+        blocks = []
+        while block.isValid():
+            if _is_text(block):
+                blocks.append(block)
+            if block == last:
+                break
+            block = block.next()
+        return blocks
+
+    def set_align(self, how):
+        """Alinea los párrafos elegidos: "center", "right" o None (izquierda); también dentro de un recuadro. Un
+        elemento de lista que se centra o va a la derecha sale de ella (la lista va a la izquierda). Un deshacer."""
+        blocks = self._selected_text_blocks()
+        if not blocks:
             QApplication.beep()
             return
-        f = cursor.blockFormat()
-        cursor.setBlockFormat(align_format(f, None if f.property(prop) else how))
+        edit = QTextCursor(self.document())
+        edit.beginEditBlock()
+        for block in blocks:
+            f = align_format(block.blockFormat(), how)
+            if how:
+                f.setObjectIndex(-1)
+            edit.setPosition(block.position())
+            edit.setBlockFormat(f)
+        edit.endEditBlock()
 
     def toggle_center(self):
         """Ctrl+E: centra el párrafo (carta, cartel) o lo devuelve a su sitio. Solo párrafos de texto."""
-        self._toggle_align("center", CENTERED)
+        self.set_align(None if self.is_centered() else "center")
 
     def toggle_right(self):
         """Ctrl+D, como Word en español: el párrafo a la derecha (firma, fecha de una carta) o a su sitio."""
-        self._toggle_align("right", RIGHTED)
+        self.set_align(None if self.is_right() else "right")
+
+    def list_style(self):
+        """Estilo de la lista del párrafo del cursor ("disc", "decimal"…) o None."""
+        return list_style(self.textCursor().block())
+
+    def set_list(self, style):
+        """Pone los párrafos elegidos en una lista de viñetas o numerada (style de convert.LIST_STYLES), como en
+        Word, o los saca (None, o el estilo que ya tienen). Se unen a la lista vecina del mismo estilo: la
+        numeración sigue. Un elemento de lista no va en recuadro ni alineado. Un solo deshacer.
+        shortcut: dos listas del mismo estilo que quedan pegadas al borrar lo de en medio se numeran aparte en la
+        hoja y seguidas en el EPUB; unirlas aquí si molesta."""
+        blocks = self._selected_text_blocks()
+        if not blocks:
+            QApplication.beep()
+            return
+        if style == list_style(blocks[0]):
+            style = None
+        edit = QTextCursor(self.document())
+        edit.beginEditBlock()
+        group = None
+        for block in blocks:
+            f = block.blockFormat()
+            f.setObjectIndex(-1)
+            if style:
+                align_format(f)
+                if f.property(FRAMED):
+                    unframe_format(f)
+            edit.setPosition(block.position())
+            edit.setBlockFormat(f)
+            if style and group is None:
+                near = [n for n in (block.previous(), blocks[-1].next()) if n.isValid() and list_style(n) == style]
+                if near:
+                    group = near[0].textList()
+                    group.add(block)
+                else:
+                    group = edit.createList(LISTS[style])
+            elif style:
+                group.add(block)
+        edit.endEditBlock()
+        self.viewport().update()
 
     def is_centered(self):
         return bool(self.textCursor().blockFormat().property(CENTERED))
@@ -1033,17 +1190,13 @@ class Sheet(QTextEdit):
         for n, block in enumerate(blocks):
             f = block.blockFormat()
             if on:
-                align_format(f)
                 f.clearProperty(HEADING)
                 f.clearProperty(LEVEL)
+                f.setObjectIndex(-1)  # un elemento de lista sale de ella
                 frame_format(f, n == 0 and not block.previous().blockFormat().property(FRAMED),
                              n == len(blocks) - 1 and not block.next().blockFormat().property(FRAMED))
             else:
-                f.clearProperty(FRAMED)
-                f.setLeftMargin(0)
-                f.setRightMargin(0)
-                f.setTopMargin(0)
-                f.setBottomMargin(SPACE)
+                unframe_format(f)
             edit.setPosition(block.position())
             edit.setBlockFormat(f)
         edit.endEditBlock()
@@ -1234,7 +1387,12 @@ class Sheet(QTextEdit):
         """Enter: parte el párrafo; el nuevo hereda su origen (el PDF sigue mostrando su página)."""
         cursor = self.textCursor()
         cursor.beginEditBlock()
-        cursor.insertBlock()
+        if cursor.block().textList() is not None and not cursor.block().text().strip():
+            f = cursor.blockFormat()  # Intro en un elemento vacío sale de la lista, como en Word
+            f.setObjectIndex(-1)
+            cursor.setBlockFormat(f)
+        else:
+            cursor.insertBlock()
         cursor.endEditBlock()
         self.setTextCursor(cursor)
 
@@ -1387,8 +1545,8 @@ class Sheet(QTextEdit):
     def restore(self, block):
         """Devuelve el párrafo a su línea original (título, centrado y texto): un paso de deshacer."""
         original = original_of(block)
-        heading, centered = original.startswith("# "), original.startswith(convert.CENTER)
-        framed, right = original.startswith(convert.FRAME), original.startswith(convert.RIGHT)
+        heading, align = original.startswith("# "), align_of(original)
+        framed = align.startswith("frame")
         cursor = QTextCursor(self.document())
         cursor.setPosition(block.position())
         cursor.beginEditBlock()
@@ -1398,17 +1556,20 @@ class Sheet(QTextEdit):
         else:
             f.clearProperty(HEADING)
             f.clearProperty(LEVEL)
-        align_format(f, "center" if centered else "right" if right else None)
+        align_format(f, side_of(align))
         if framed:
             frame_format(f, not block.previous().blockFormat().property(FRAMED),
                          not block.next().blockFormat().property(FRAMED))
         elif f.property(FRAMED):
-            f.clearProperty(FRAMED)
-            f.setLeftMargin(0)
-            f.setRightMargin(0)
-            f.setTopMargin(0)
-            f.setBottomMargin(SPACE)
+            unframe_format(f)
+        f.setObjectIndex(-1)
         cursor.setBlockFormat(f)
+        if align.startswith("list-"):  # vuelve a su lista: la del vecino del mismo estilo o una nueva
+            near = [n for n in (block.previous(), block.next()) if n.isValid() and list_style(n) == align[5:]]
+            if near:
+                near[0].textList().add(block)
+            else:
+                cursor.createList(LISTS[align[5:]])
         self._set_block_text(block, _strip(original))
         cursor.endEditBlock()
         self.look.rehighlightBlock(block)
@@ -1513,6 +1674,8 @@ class Sheet(QTextEdit):
             self.command.emit("nav")
         elif key == Qt.Key.Key_F11:
             self.command.emit("focus")
+        elif key == Qt.Key.Key_F12 and ctrl and mods & Qt.KeyboardModifier.ShiftModifier:
+            self.command.emit("diagnose")
         elif ctrl and not alt and key in (Qt.Key.Key_Equal, Qt.Key.Key_Plus) and mods & Qt.KeyboardModifier.ShiftModifier:
             self.toggle_sup()  # Ctrl+Mayús+= de Word; en el teclado español «=» es Mayús+0
         elif ctrl and not alt and key in actions:
