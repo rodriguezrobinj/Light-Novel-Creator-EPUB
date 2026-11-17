@@ -7462,6 +7462,50 @@ def test_bookmarked_page_starts_new_paragraph_without_indent():
     assert text[k + 1] == ("p", "No puedo creer que me hayan echado."), text
 
 
+def test_bookmarked_title_drawn_as_image():
+    """The World's Strongest Witch 1: el título de cada capítulo es un dibujo encima del texto y el marcador del PDF
+    da su nombre. El título lleva esa imagen y el EPUB la muestra en su lugar (con el nombre de texto alternativo);
+    el índice sigue con el texto. Corregir el nombre en el editor no la pierde. Un logo repetido en cada página no
+    es título."""
+    import zipfile
+
+    doc = pymupdf.open()
+    banner = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 300, 90), False)
+    banner.clear_with(200)
+    logo = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40), False)
+    logo.clear_with(60)
+    for n, first in ((1, "Primera linea del libro."), (2, "No puedo creer que me hayan echado.")):
+        page = add_page(doc, n, [(72, 300, first, 11, "cour"),
+                                 (92, 320, line("Para ir al grano: Lorna estaba sola", 60), 11, "cour"),
+                                 (72, 334, "y sin nada.", 11, "cour")])
+        page.insert_image(pymupdf.Rect(500, 50, 540, 90), pixmap=logo)  # el logo de todas las páginas
+        if n == 2:
+            page.insert_image(pymupdf.Rect(72, 94, 523, 239), pixmap=banner)
+    doc.set_toc([[1, "Capitulo 1: Dentro", 1], [1, "Capitulo 2: Fuera", 2]])
+    path = TMP / "titulo-dibujado.pdf"
+    doc.save(path)
+    book = convert.analyze(path)
+    heads = {convert._plain(b): b for b in book.blocks if b.kind == "heading"}
+    pictured = {name: bool(b.image) for name, b in heads.items()}
+    kept = [b for b in book.blocks if b.kind == "image" and b.keep]
+    out = TMP / "titulo-dibujado.epub"
+    chapters = [(k, convert._plain(book.blocks[k])) for k in book.candidates]
+    convert.write_epub(book, chapters, out)
+    with zipfile.ZipFile(out) as z:
+        pages = [z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml")]
+    second = next(p for p in pages if "No puedo creer" in p)
+    nav = next(p for p in pages if 'epub:type="toc"' in p)
+    k = next(k for k, b in enumerate(book.blocks) if b is heads["Capitulo 2: Fuera"])
+    convert.edit_section(book, k, k + 2, "# Capítulo 2: Fuera de casa\n\nNo puedo creer que me hayan echado.")
+    renamed = book.blocks[k]
+    assert pictured == {"Capitulo 1: Dentro": False, "Capitulo 2: Fuera": True}, pictured
+    assert not kept, kept
+    assert '<h1 class="imagen"><img src="img/' in second and 'alt="Capitulo 2: Fuera"' in second, second
+    assert "Capitulo 2: Fuera" in nav, nav
+    assert convert.check_epub(out) == [], convert.check_epub(out)
+    assert convert._plain(renamed) == "Capítulo 2: Fuera de casa" and renamed.image, renamed
+
+
 def test_numbered_chapter_titles():
     cases = {"Capítulo Uno: Las luchas": "Capítulo 1: Las luchas", "Capítulo IV: ¡Mi nombre!": "Capítulo 4: ¡Mi nombre!",
              "Capitulo 3": "Capítulo 3", "CAPITULO DOS: FIN": "CAPÍTULO 2: FIN", "Prologo: Un sueño": "Prólogo: Un sueño",
