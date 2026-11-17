@@ -2916,8 +2916,12 @@ def analyze(pdf_path, progress=None):
                         new = True
                     elif prev is None:  # primera línea de la página: ¿sigue el párrafo anterior?
                         # Witch 1: el Afterword (título solo en imagen) empieza sin sangría en una página que el
-                        # índice marca; unido, quedaba al final del capítulo anterior
-                        new = last_text.endswith(END_PUNCT) and (not indent_style or bool(bookmarks.get(num - 1)))
+                        # índice marca; unido, quedaba al final del capítulo anterior. Witch 1, pág. 11: con el título
+                        # solo en imagen, el capítulo empieza arriba aunque lo anterior (créditos, «…chat with») acabe
+                        # sin punto; con título de texto, lo de antes de él sí puede seguir el párrafo
+                        marked = bool(bookmarks.get(num - 1))
+                        new = (last_text.endswith(END_PUNCT) and (not indent_style or marked)
+                               or marked and not any(x.heading for x in rows))
                     else:
                         new = r.y - prev.y > line_gap * 1.3
                     # Una minúscula sigue la frase; también tras «¡Gran escritor!"» (Psychology of Harem 2, pág. 300)

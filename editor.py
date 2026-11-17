@@ -1134,6 +1134,10 @@ class Sheet(QTextEdit):
         shortcut: dos listas del mismo estilo que quedan pegadas al borrar lo de en medio se numeran aparte en la
         hoja y seguidas en el EPUB; unirlas aquí si molesta."""
         blocks = self._selected_text_blocks()
+        here = self.textCursor().block()
+        if not blocks and not self.textCursor().hasSelection() and not here.text() and not here.blockFormat().property(
+                HEADING):
+            blocks = [here]  # como Word: la lista se empieza en el párrafo vacío y luego se escribe en ella
         if not blocks:
             QApplication.beep()
             return

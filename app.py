@@ -119,6 +119,7 @@ APP_NAME = "Light Novel Creator"  # nombre visible; el .exe y la carpeta de ajus
 KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro, theme.kind_colors(True)
 PREVIEW_BOX = (480, 640)  # ancho y alto máximos de cada vista previa, en píxeles
 PREVIEW_CHROME = 40       # alto de la fila ◀ leyenda ▶ de cada vista previa
+PAGE_GAP = 8              # píxeles entre la página y la siguiente en el panel del editor
 DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
 THUMB_HEIGHT = 64         # alto de las miniaturas del PDF, en píxeles
 THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe congelaría la ventana
@@ -2629,7 +2630,8 @@ class App:
             return
         self.blank(self.pdf_view, self.idle_text)
         self.blank(self.epub_view, self.idle_text)
-        if not self.thumbs:  # tira vacía: rectángulos tenues en lugar de un hueco
+        # Tira vacía: rectángulos tenues en lugar de un hueco; analizando no, que va el esqueleto y salían dobles
+        if not self.thumbs and not self.loading:
             self.strip.placeholders(20, int(THUMB_HEIGHT * 0.71), theme.colors(self.dark)["line"])
 
     def on_resize(self):
@@ -6928,11 +6930,14 @@ class TextEditor:
         self.canvas.setCursor(Qt.CursorShape.PointingHandCursor)
         editor.watch(self.canvas, self.on_canvas_event)
         # Título que en el PDF es un dibujo: su texto lo leyó el OCR y puede traer faltas
-        self.source_note = _label("En el PDF este título es una imagen: su texto se leyó con OCR, compruébalo.", "warn")
+        self.source_note = _label("En el PDF este título es una imagen: compruébalo con el original.", "warn")
         self.source_note.setWordWrap(True)
         self.source_note.hide()
         self.page_label = _label("", "muted")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Del ancho del texto más largo: al pasar de una ilustración a una página, los botones no se movían de sitio
+        self.page_label.setMinimumWidth(max(self.page_label.fontMetrics().horizontalAdvance(text) for text in
+                                            ("Página 8888 de 8888", "Ilustración · pág. 8888")) + 8)
         self.zoom_label = _label("100 %", "muted")
         side = self.side = QWidget()
         side_column = QVBoxLayout(side)
@@ -6981,6 +6986,7 @@ class TextEditor:
         status_row.setStretchFactor(self.note, 1)
         column.addLayout(status_row)
         self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
+        self.more, self.below = None, None  # trozo del párrafo en la página siguiente y dónde va esa página
         self.drawn = None  # source_key() del dibujo actual del panel
         self.pending, self.closed = {}, False  # trabajo diferido: nombre -> temporizador
         self.set_text_zoom(100)
@@ -8764,18 +8770,17 @@ class TextEditor:
             self.update_status()
             return
         self.drawn = key
-        self.source_note.setVisible(bool(self.app.pdf_doc is not None and block.kind == "heading" and block.rect and not self.app.pdf_doc[
-            block.page - 1].get_text("text", clip=pymupdf.Rect(block.rect)).strip()))
+        self.source_note.setVisible(self.pictured(block))
         if block.kind == "image" and block.image:
             pix = pymupdf.Pixmap(block.image)
             scale = min(self.panel_width() * self.pdf_zoom / pix.width, 1.5)
             if scale != 1:
                 pix = pymupdf.Pixmap(pix, max(1, round(pix.width * scale)), max(1, round(pix.height * scale)), None)
-            self.shown, self.box, self.page = ("image", k), None, block.page - 1
+            self.shown, self.box, self.more, self.page = ("image", k), None, None, block.page - 1
             self.put(pix)
             self.page_label.setText(f"Ilustración · pág. {block.page}")
         elif self.app.pdf_doc is None:
-            self.shown, self.box = None, None
+            self.shown, self.box, self.more = None, None, None
             size = (self.panel_width(), int(self.panel_width() * 1.4))
             self.canvas.setFixedSize(*size)
             self.canvas.show_blank(size, "Sin el PDF original no se puede mostrar la página",
@@ -8789,19 +8794,76 @@ class TextEditor:
             self.box = boxes[0] if boxes else None
             for box in boxes[1:]:
                 self.box |= box
+            # El párrafo que sigue en la página siguiente (Backstabbed 1, pág. 96): esa página va debajo y su
+            # trozo también se recuadra
+            more = self.continuation(([block] + [blocks[j] for j in joined])[-1])
+            self.more = (block.page, more) if more else None
             self.show_page(block.page - 1)
         self.update_status()
 
+    def continuation(self, block):
+        """Recuadro de lo que el párrafo block sigue en la página siguiente, o None si acaba en la suya."""
+        doc, words = self.app.pdf_doc, convert._plain(block).split()
+        if block.kind != "p" or len(words) < 6 or block.page >= doc.page_count:
+            return None
+        # Seis palabras del final; si lo que sigue es más corto, tres (las seis cruzan de página y no se hallan)
+        hits = next((hits for tail in (" ".join(words[-6:]), " ".join(words[-3:]))
+                     if (hits := doc[block.page].search_for(tail)) and not doc[block.page - 1].search_for(tail)), None)
+        if not hits:
+            return None
+        end = max(r.y1 for r in hits if r.y0 < hits[0].y1 + 2 * hits[0].height)  # el final puede ir en dos líneas
+        known, box = {w.lower() for w in words}, None
+        lines = [line for b in doc[block.page].get_text("dict")["blocks"] if b["type"] == 0 for line in b["lines"]]
+        for line in sorted(lines, key=lambda line: line["bbox"][1]):
+            rect = pymupdf.Rect(line["bbox"])
+            if rect.y0 > end:
+                break
+            # Desde la primera línea con las palabras del párrafo: la cabecera de la página no
+            text = "".join(span["text"] for span in line["spans"]).lower().split()
+            if box is None and not (text and sum(w in known for w in text) >= 0.8 * len(text)):
+                continue
+            box = rect if box is None else box | rect
+        return box
+
+    def pictured(self, block):
+        """¿En el PDF el título es una imagen? Su recuadro no tiene texto (lo leyó el OCR) o, sin recuadro (lo
+        puso el marcador del PDF, Witch 1), su texto no está en la página y la página lleva imágenes."""
+        if self.app.pdf_doc is None or block.kind != "heading":
+            return False
+        page = self.app.pdf_doc[block.page - 1]
+        if block.rect:
+            return not page.get_text("text", clip=pymupdf.Rect(block.rect)).strip()
+        words = convert._plain(block).split()[:4]
+        return bool(words and page.get_images() and not page.search_for(" ".join(words)))
+
     def show_page(self, index):
-        """Dibuja la página index (desde 0) del PDF al ancho del panel por el zoom, con self.box recuadrado."""
+        """Dibuja la página index (desde 0) del PDF al ancho del panel por el zoom, con self.box recuadrado; si el
+        párrafo sigue en la siguiente (self.more), esa va debajo con su trozo recuadrado."""
         page = self.app.pdf_doc[index]
         self.page, self.shown = index, ("page", index + 1)
         zoom = self.page_zoom = self.panel_width() / page.rect.width * self.pdf_zoom
-        marks = []
-        if self.box:
-            box = self.box * zoom
-            marks.append((QRectF(box.x0 - 3, box.y0 - 3, box.width + 6, box.height + 6), MARK_COLORS["current"]))
-        self.put(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)), marks)
+        matrix = pymupdf.Matrix(zoom, zoom)
+
+        def mark(box, top=0):
+            box = box * zoom
+            return QRectF(box.x0 - 3, top + box.y0 - 3, box.width + 6, box.height + 6), MARK_COLORS["current"]
+
+        marks = [mark(self.box)] if self.box else []
+        image = qtk.qimage(page.get_pixmap(matrix=matrix))
+        self.below = None  # (página de debajo, dónde empieza en píxeles)
+        if self.more and self.more[0] == index + 1:
+            second = qtk.qimage(self.app.pdf_doc[index + 1].get_pixmap(matrix=matrix))
+            top = image.height() + PAGE_GAP
+            both = QImage(max(image.width(), second.width()), top + second.height(), QImage.Format.Format_ARGB32)
+            both.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(both)
+            painter.drawImage(0, 0, image)
+            painter.drawImage(0, top, second)
+            painter.end()
+            image, self.below = both, (index + 1, top)
+            marks.append(mark(self.more[1], top))
+        self.canvas.setFixedSize(image.width(), image.height())
+        self.canvas.show_image((image.width(), image.height()), image, marks)
         if self.box:  # el párrafo a la vista aunque la página no quepa
             self.scroll.ensureVisible(int(self.box.x0 * zoom), int((self.box.y0 + self.box.y1) / 2 * zoom), 40,
                                       self.scroll.viewport().height() // 3)
@@ -8809,7 +8871,7 @@ class TextEditor:
 
     def put(self, pix, marks=()):
         """Dibuja el pixmap en el panel, a su tamaño (con scroll si no cabe)."""
-        image = qtk.qimage(pix)
+        image, self.below = qtk.qimage(pix), None
         self.canvas.setFixedSize(image.width(), image.height())
         self.canvas.show_image((image.width(), image.height()), image, marks)
 
@@ -8826,37 +8888,56 @@ class TextEditor:
             if self.shown and self.shown[0] == "image":
                 self.copy_image(pymupdf.Pixmap(self.app.book.blocks[self.shown[1]].image))
             elif self.box:
-                self.copy_text(self.box_text(self.box))
+                self.copy_text(self.source_text())
             return True
         return False
 
     def source_point(self, pos):
-        """Punto de la página del PDF bajo pos del panel; None si el panel no muestra una página."""
+        """(página desde 0, punto en ella) bajo pos del panel; None si el panel no muestra una página."""
         if not self.shown or self.shown[0] != "page":
             return None
-        return pymupdf.Point(pos.x() / self.page_zoom, pos.y() / self.page_zoom)
+        index, y = self.page, pos.y()
+        if self.below and y >= self.below[1]:
+            index, y = self.below[0], y - self.below[1]
+        return index, pymupdf.Point(pos.x() / self.page_zoom, y / self.page_zoom)
 
     def pick_source(self, pos):
-        """La hoja al párrafo o título del libro bajo pos, si lo hay en la página mostrada."""
-        point = self.source_point(pos)
-        if point is None:
+        """La hoja al párrafo o título del libro bajo pos, si lo hay en la página mostrada; también el que viene de
+        la página anterior y sigue arriba de esta."""
+        spot = self.source_point(pos)
+        if spot is None:
             return
-        page, blocks = self.app.pdf_doc[self.page], self.app.book.blocks
+        index, point = spot
+        page, blocks = self.app.pdf_doc[index], self.app.book.blocks
+        last = None  # último párrafo de la página anterior: puede seguir en esta
         for _, start, end, _ in self.sections:
             for k in range(start, end):
                 block = blocks[k]
-                if block.page == self.page + 1 and block.kind in ("p", "heading"):
+                if block.page == index and block.kind == "p":
+                    last = k
+                if block.page == index + 1 and block.kind in ("p", "heading"):
                     box = pymupdf.Rect(block.rect) if block.rect else self.find_box(page, block)
                     if box and (box + (-4, -4, 4, 4)).contains(point):
                         self.go_block(k)
                         return
+        if last is not None:
+            box = self.continuation(blocks[last])
+            if box and (box + (-4, -4, 4, 4)).contains(point):
+                self.go_block(last)
 
-    def box_text(self, box):
-        """Texto del PDF en la franja de box (a lo ancho de la página: la primera línea del párrafo puede ser más
-        corta que las demás), en una línea y sin los guiones de partición."""
-        page = self.app.pdf_doc[self.page]
+    def box_text(self, index, box):
+        """Texto del PDF en la franja de box de la página index (a lo ancho de la página: la primera línea del
+        párrafo puede ser más corta que las demás), en una línea y sin los guiones de partición."""
+        page = self.app.pdf_doc[index]
         clip = pymupdf.Rect(0, box.y0 - 1, page.rect.width, box.y1 + 1)
         return " ".join(page.get_text("text", clip=clip, flags=pymupdf.TEXTFLAGS_TEXT | pymupdf.TEXT_DEHYPHENATE).split())
+
+    def source_text(self):
+        """Texto del párrafo recuadrado, con lo que sigue en la página siguiente."""
+        parts = [(self.page, self.box)] if self.box else []
+        if self.below and self.more:
+            parts.append(self.more)
+        return " ".join(self.box_text(index, box) for index, box in parts)
 
     def source_menu(self, pos):
         """Menú del clic derecho en el panel: copiar, nunca cambiar, el texto o la imagen del original."""
@@ -8865,18 +8946,19 @@ class TextEditor:
             menu.addAction("Copiar imagen", lambda: self.copy_image(
                 pymupdf.Pixmap(self.app.book.blocks[self.shown[1]].image)))
             return menu
-        point = self.source_point(pos)
-        if point is None:
+        spot = self.source_point(pos)
+        if spot is None:
             return menu
-        page = self.app.pdf_doc[self.page]
-        text = self.box_text(self.box) if self.box else ""
+        index, point = spot
+        page = self.app.pdf_doc[index]
+        text = self.source_text()
         copy = menu.addAction("Copiar texto del párrafo\tCtrl+C", lambda: self.copy_text(text))
         copy.setEnabled(bool(text))
         menu.addAction("Copiar texto de la página", lambda: self.copy_text(page.get_text("text").strip()))
         # La imagen bajo el puntero; en un título hecho imagen, su recuadro
         spot = next((pymupdf.Rect(info["bbox"]) for info in page.get_image_info()
                      if pymupdf.Rect(info["bbox"]).contains(point)), None)
-        if spot is None and self.box and not text:
+        if spot is None and self.box and not text and index == self.page:
             spot = self.box
         menu.addSeparator()
         if spot is not None:
