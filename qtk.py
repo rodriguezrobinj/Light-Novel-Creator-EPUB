@@ -365,9 +365,9 @@ class RowList(QTreeWidget):
         rows = (self.topLevelItem(n).data(0, IID) for n in range(self.topLevelItemCount()))
         return tuple(iid for iid in rows if iid not in self.pinned)
 
-    def pin(self, iid, values=(), tags=()):
-        """Fila fija al principio de la lista (ver pinned)."""
-        self.insert("", 0, iid, values, tags)
+    def pin(self, iid, values=(), tags=(), index=0):
+        """Fila fija al principio de la lista (ver pinned); index: su sitio entre las fijas."""
+        self.insert("", index, iid, values, tags)
         self.pinned.add(iid)
 
     def current(self):
@@ -938,3 +938,108 @@ class TextBox(QPlainTextEdit):
                 selection.cursor, selection.format = cursor, look
                 selections.append(selection)
         self.setExtraSelections(selections)
+
+
+# Barra de título propia (Windows). La de Windows 10 solo sabe ser negra o blanca: no casaba con el gris del tema
+CAPTION = 32  # alto de la barra, en píxeles lógicos
+_HT = {"caption": 2, "top": 12, "topleft": 13, "topright": 14}  # respuestas a WM_NCHITTEST
+
+
+class Caption(QWidget):
+    """Icono, título y minimizar, maximizar y cerrar con los colores del tema, encima de la ventana. El marco sigue
+    siendo de Windows (caption_event): arrastrar, ajustar a los bordes, doble clic, el menú del sistema, la sombra
+    y los bordes para cambiar el tamaño son los suyos."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.setObjectName("caption")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.window_ = window
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 0, 0, 0)
+        row.setSpacing(8)
+        self.icon = QLabel()
+        self.title = QLabel(window.windowTitle(), objectName="captionTitle")
+        self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # largo: se recorta
+        row.addWidget(self.icon)
+        row.addWidget(self.title, 1)
+        flags = window.windowFlags()
+        self.buttons = {}
+        for name, glyph, tip, action, shown in (
+                ("min", "", "Minimizar", window.showMinimized, flags & Qt.WindowType.WindowMinimizeButtonHint),
+                ("max", "", "Maximizar", self.toggle, flags & Qt.WindowType.WindowMaximizeButtonHint),
+                ("close", "", "Cerrar", window.close, True)):
+            button = QPushButton(glyph, objectName="captionClose" if name == "close" else "captionButton")
+            button.setFont(QFont("Segoe MDL2 Assets", 8))  # los glifos de Windows 10 y 11
+            button.setFixedSize(46, CAPTION)
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(action)
+            button.setVisible(bool(shown))
+            row.addWidget(button)
+            self.buttons[name] = button
+        window.windowTitleChanged.connect(self.title.setText)
+        window.windowIconChanged.connect(self.set_icon)
+        self.set_icon(window.windowIcon())
+        window.installEventFilter(self)
+        margins = window.contentsMargins()
+        window.setContentsMargins(margins.left(), margins.top() + CAPTION, margins.right(), margins.bottom())
+        self.setGeometry(0, 0, window.width(), CAPTION)
+        self.raise_()
+        self.show()  # creada al mostrarse la ventana: un hijo nuevo de una ventana visible nace oculto
+
+    def set_icon(self, icon):
+        self.icon.setPixmap(icon.pixmap(16, 16) if not icon.isNull() else QPixmap())
+
+    def toggle(self):
+        self.window_.showNormal() if self.window_.isMaximized() else self.window_.showMaximized()
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind == QEvent.Type.Resize:
+            self.setGeometry(0, 0, obj.width(), CAPTION)
+            self.raise_()
+        elif kind == QEvent.Type.WindowStateChange:
+            maximized = obj.isMaximized()
+            self.buttons["max"].setText("" if maximized else "")
+            self.buttons["max"].setToolTip("Restaurar" if maximized else "Maximizar")
+        elif kind == QEvent.Type.ActivationChange:  # inactiva, el título en gris, como Windows
+            self.title.setEnabled(obj.isActiveWindow())
+        return False
+
+
+def caption_event(window, kind, message):
+    """nativeEvent de una ventana con Caption: (atendido, resultado). Quita la barra de Windows (WM_NCCALCSIZE) sin
+    quitar el marco, y dice a Windows qué es la barra propia y el borde de arriba (WM_NCHITTEST)."""
+    caption = getattr(window, "caption", None)
+    if kind != b"windows_generic_MSG" or caption is None:
+        return False, 0
+    import ctypes
+    from ctypes import wintypes
+    msg = wintypes.MSG.from_address(int(message))
+    user32 = ctypes.windll.user32
+    if msg.message == 0x0083 and msg.wParam:  # WM_NCCALCSIZE: el área de la ventana menos los bordes, sin barra
+        dpi = user32.GetDpiForWindow(msg.hWnd)
+        pad = user32.GetSystemMetricsForDpi(92, dpi)  # SM_CXPADDEDBORDER
+        side, foot = user32.GetSystemMetricsForDpi(32, dpi) + pad, user32.GetSystemMetricsForDpi(33, dpi) + pad
+        rect = ctypes.cast(msg.lParam, ctypes.POINTER(wintypes.RECT)).contents  # NCCALCSIZE_PARAMS.rgrc[0]
+        rect.left += side
+        rect.right -= side
+        rect.bottom -= foot
+        if window.isMaximized():  # maximizada, Windows la saca un borde de la pantalla también por arriba
+            rect.top += foot
+        return True, 0
+    if msg.message == 0x0084:  # WM_NCHITTEST
+        from PySide6.QtGui import QCursor
+        pos = window.mapFromGlobal(QCursor.pos())
+        if not window.isMaximized() and pos.y() < 5 and window.minimumSize() != window.maximumSize():
+            return True, _HT["topleft" if pos.x() < 16 else "topright" if pos.x() > window.width() - 16 else "top"]
+        if 0 <= pos.y() < CAPTION and not isinstance(caption.childAt(caption.mapFrom(window, pos)), QPushButton):
+            return True, _HT["caption"]
+    return False, 0
+
+
+def use_caption(window):
+    """Pone la barra propia a window (en Windows; sin pantalla, en las pruebas, sigue la del sistema)."""
+    if QApplication.platformName() == "windows" and getattr(window, "caption", None) is None:
+        window.caption = Caption(window)

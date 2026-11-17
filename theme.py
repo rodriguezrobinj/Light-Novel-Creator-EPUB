@@ -29,12 +29,12 @@ LIGHT = {"bg": "#eef0f3", "card": "#ffffff", "base": "#ffffff", "line": "#d9dce1
          "ink": "#16181b", "muted": "#545a63", "acc": "#0f5fc2", "acc_hover": "#0c4fa3", "acc_ink": "#ffffff",
          "sel": "#d6e6fb", "hover": "#eef3fa", "press": "#dde7f5", "warn": "#c62828", "ok": "#2e7d32",
          "drop": "#f3f7fd", "drop_line": "#9fb7dd", "sheet": "#ffffff", "sheet_line": "#c9cdd3", "hint": "#80868f",
-         "zebra": "#f4f6f9", "shine": "#f5f6f8"}
+         "zebra": "#f4f6f9", "shine": "#f5f6f8", "close": "#c42b1c", "close_ink": "#ffffff"}
 DARK = {"bg": "#202020", "card": "#2b2b2b", "base": "#1f1f1f", "line": "#3d3d3d", "ink": "#ececec",
         "muted": "#a0a0a0", "acc": "#7099f5", "acc_hover": "#85a9f7", "acc_ink": "#111111", "sel": "#2f3d5c",
         "hover": "#353535", "press": "#3d3d3d", "warn": "#ff6b6b", "ok": "#7bc47f", "drop": "#262a33",
         "drop_line": "#4a5a7a", "sheet": "#1a1a1a", "sheet_line": "#3d3d3d", "hint": "#7a7a7a",
-        "zebra": "#313131", "shine": "#555555", "edge": "#4a4a4a"}
+        "zebra": "#313131", "shine": "#555555", "edge": "#4a4a4a", "close": "#c42b1c", "close_ink": "#ffffff"}
 
 # Colores de los tipos de fila de la lista ("" = el del texto normal). Todo texto llega a 4,5:1 (WCAG AA)
 KINDS = {False: {"chapter": "", "subtitle": "#555555", "cut": "#737373", "image": "#2e7d32", "dropped": "#6a6a6a",
@@ -145,6 +145,14 @@ QLabel#big {{ font-size: 13pt; font-weight: 600; }}
 QSplitter::handle {{ background: transparent; }}
 QScrollArea {{ border: 0; background: transparent; }}
 QFrame#desk {{ background: {line}; }}
+QWidget#caption {{ background: {bg}; }}
+QLabel#captionTitle {{ color: {ink}; }}
+QLabel#captionTitle:disabled {{ color: {muted}; }}
+QPushButton#captionButton, QPushButton#captionClose {{ border: 0; border-radius: 0; background: transparent;
+    color: {ink}; padding: 0; min-height: 0; }}
+QPushButton#captionButton:hover {{ background: {hover}; }}
+QPushButton#captionButton:pressed {{ background: {press}; }}
+QPushButton#captionClose:hover, QPushButton#captionClose:pressed {{ background: {close}; color: {close_ink}; }}
 QTextEdit#sheet {{ background: {sheet}; border: 1px solid {sheet_line}; selection-background-color: {acc};
     selection-color: {acc_ink}; }}
 QFrame#ribbon {{ background: {card}; border-bottom: 1px solid {line}; }}
