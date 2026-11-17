@@ -257,6 +257,7 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
         listed = align[5:] if align.startswith("list-") else None
         framed = i in frames
         scene = not raw and not token and bool(bare) and bool(convert.SCENE_BREAK.fullmatch(bare))
+        drawn = pictures.get(f"título {k}") if heading and k is not None else None
         special = bool(token or heading or scene or centered or framed or right or listed)
         if i or (special and cursor.block().length() > 1):
             cursor.insertBlock(QTextBlockFormat(), _plain_format())
@@ -273,6 +274,8 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
                 frame_format(f, *frames[i])
             if heading:
                 f.setProperty(HEADING, True)
+                if drawn is not None:  # el dibujo del título va centrado, como en el libro
+                    f.setAlignment(Qt.AlignmentFlag.AlignHCenter)
                 f.setTopMargin(SPACE * 2)
                 if levels and levels.get(k):
                     f.setProperty(LEVEL, levels[k])
@@ -284,7 +287,6 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
             else:
                 cursor.createList(LISTS[listed])
         before = listed
-        drawn = pictures.get(f"título {k}") if heading and k is not None else None
         if token:
             n = token.group(2)
             _insert_object(cursor, token.group(1), int(n) if n.isdigit() else n, pictures, color)

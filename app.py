@@ -6928,7 +6928,8 @@ class TextEditor:
         # Solo lectura: un clic lleva la hoja al párrafo; Ctrl+C y el clic derecho copian su texto o una imagen
         self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         editor.watch(self.canvas, self.on_canvas_event)
-        # Título que en el PDF es un dibujo: aviso abajo, como un botón que no tapa nada; al pulsarlo, lo explica
+        # Título que en el PDF es un dibujo: un botón junto a ◀ ▶ del panel, que no tapa la página (ni sale en
+        # pantalla completa, sin panel); al pulsarlo, lo explica
         self.source_note = _button("Título en imagen", lambda: self.note.setText(
             "El EPUB usa este dibujo con el texto del título"),
             "warn")
@@ -6951,7 +6952,7 @@ class TextEditor:
         self.prev_page = qtk.ArrowButton(-1, lambda: self.step_page(-1), "Página anterior")
         self.next_page = qtk.ArrowButton(1, lambda: self.step_page(1), "Página siguiente")
         side_column.addLayout(_row(prev_btn, self.prev_page, self.page_label, self.next_page, next_btn,
-                                   1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
+                                   self.source_note, 1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
                                    _button("+", lambda: self.zoom(25))))
         self.split = QSplitter()
         self.split.addWidget(self.nav_panel())
@@ -6972,8 +6973,12 @@ class TextEditor:
         self.text_zoom.setValue(100)
         self.text_zoom.setFixedWidth(140)
         self.text_zoom_label = _label("100 %", "muted")
+        # Del ancho de «200 %»: al pasar de 100 % a 90 % la barra cambiaba de ancho y los botones se movían
+        for label in (self.text_zoom_label, self.zoom_label):
+            label.setMinimumWidth(label.fontMetrics().horizontalAdvance("300 %") + 4)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.text_zoom.valueChanged.connect(self.set_text_zoom)
-        status_row = self.status_row = _row(self.status, self.note, self.source_note,
+        status_row = self.status_row = _row(self.status, self.note,
                           _button("−", lambda: self.text_zoom.setValue(self.text_zoom.value() - 10)),
                           self.text_zoom, _button("+", lambda: self.text_zoom.setValue(self.text_zoom.value() + 10)),
                           # En pantalla completa, Aceptar y Cancelar vuelven al editor: no lo cierran

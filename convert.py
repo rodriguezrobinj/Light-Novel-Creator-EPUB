@@ -3948,6 +3948,35 @@ def _contents_numbers(pdf, toc, font):
             current, rects = next(entries, None), []
 
 
+def _cut_split_frames(pdf):
+    """Witch 1: MuPDF dibuja entero un recuadro que no cabe en la página y la página solo lo recorta: el borde
+    pasaba por el pie (y el número) y empezaba en el borde de arriba de la siguiente. Se tapa lo que sale del
+    área del texto y se cierra el recuadro en el corte con sus mismas líneas, en las dos páginas."""
+    text = [b for page in pdf for b in page.get_text("blocks") if b[4].strip()]
+    if not text:
+        return
+    top, bottom = min(b[1] for b in text) - 4, max(b[3] for b in text) + 4
+    for page in pdf:
+        drawings = [d for d in page.get_drawings() if d.get("fill")]
+        height = page.rect.height
+        for over, cut in ((lambda r: r.y1 > height + 0.5, bottom), (lambda r: r.y0 < -0.5, top)):
+            parts = [d for d in drawings if over(d["rect"])]
+            if not parts:
+                continue
+            box = pymupdf.Rect(parts[0]["rect"])
+            for d in parts[1:]:
+                box |= d["rect"]
+            down = cut == bottom  # el recuadro sigue en la página siguiente
+            page.draw_rect(pymupdf.Rect(box.x0 - 1, cut, box.x1 + 1, height + 1) if down
+                           else pymupdf.Rect(box.x0 - 1, -1, box.x1 + 1, cut), color=None, fill=(1, 1, 1))
+            for d in parts:  # las líneas de su borde de abajo (o de arriba), llevadas al corte
+                r = d["rect"]
+                if r.height > 4 or (r.y0 < box.y1 - 10 if down else r.y1 > box.y0 + 10):
+                    continue
+                shift = cut - box.y1 if down else cut - box.y0
+                page.draw_rect(pymupdf.Rect(r.x0, r.y0 + shift, r.x1, r.y1 + shift), color=None, fill=d["fill"])
+
+
 def _stranded_subtitles(pdf, toc, fontsize, done=()):
     """Subtítulos (nivel 2 del índice) al pie de una página llena, con menos de 3 líneas debajo: el lector los
     veía colgando solos (Maryoku 1, pág. 74). {ancla: hueco hasta el pie}, el primero de cada capítulo: al pasar
@@ -4001,6 +4030,7 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     toc = [[level, title, page] for level, title, page, *_ in toc]
     step(70, 100)
     pdf = laid
+    _cut_split_frames(pdf)  # antes de los números de página: si no, el texto llegaría hasta el pie
     moved = _full_page_images(pdf)
     step(80, 100)
     toc = [[level, title, moved[page - 1] + 1, *rest] for level, title, page, *rest in toc]
