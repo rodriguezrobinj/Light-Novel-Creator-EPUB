@@ -114,6 +114,9 @@ class Book:
     # [(índice de la ilustración, [bloques que sustituye], [cuáles de ellos eran capítulo])] de
     # _credit_pages_as_images: con ellos una revisión hecha antes sobre esos bloques se traslada (uncredited)
     credit_pages: list = field(default_factory=list)
+    # [(índice en el análisis de antes, título)] de los títulos de solo ilustraciones que ya no se ponen (Witch 1:
+    # «Insert»): con ellos una revisión hecha antes se traslada (app._migrate_dropped)
+    dropped_titles: list = field(default_factory=list)
 
 
 VOLUME = re.compile(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*0*(\d+(?:[.,]\d+)?)", re.I)
@@ -3078,6 +3081,7 @@ def analyze(pdf_path, progress=None):
 
         # un marcador sin destino (página -1) haría un capítulo falso al principio
         outline = [(title, p) for level, title, p in doc.get_toc() if level == 1 and 1 <= p <= n]
+        untitled = []  # (título quitado por no tener texto, bloque que lo seguía)
         if outline:
             chosen, inserted = set(), []
             for title, p in outline:
@@ -3109,7 +3113,13 @@ def analyze(pdf_path, progress=None):
             for title in inserted:
                 k = next(k for k, b in enumerate(blocks) if b is title)
                 after = blocks[k + 1] if k + 1 < len(blocks) else None
-                if after is None or (after.kind == "heading" and id(after) in chosen):
+                # Witch 1: «Insert» y «Title Page» solo tienen ilustraciones: como capítulo, una página vacía con su
+                # nombre; las ilustraciones se quedan donde están
+                end = next((j for j in range(k + 1, len(blocks)) if blocks[j].kind == "heading"), len(blocks))
+                if (after is None or (after.kind == "heading" and id(after) in chosen)
+                        or not any(b.kind == "p" for b in blocks[k + 1:end])):
+                    if after is not None and after.kind == "image":  # antes era capítulo: se recuerda dónde
+                        untitled.append((title, after))
                     del blocks[k]
                     chosen.discard(id(title))
                     continue
@@ -3178,6 +3188,12 @@ def analyze(pdf_path, progress=None):
                     proofreader=credits.get("proofreader", ""), editor=credits.get("editor", ""), skipped=skipped,
                     toc=contents)
         _credit_pages_as_images(book, doc)
+        before = list(book.blocks)  # el análisis de antes: cada título quitado, delante de lo que lo seguía
+        for title, after in untitled:
+            at = next((i for i, b in enumerate(before) if b is after), None)
+            if at is not None:
+                before.insert(at, title)
+        book.dropped_titles = [(i, b) for i, b in enumerate(before) if any(b is t for t, _ in untitled)]
         return book
 
 
@@ -3867,10 +3883,16 @@ def _full_page_images(pdf):
     return moved
 
 
+PAGE_FOOT = 4  # margen de abajo del PDF maquetado, en em: el número de página va en su mitad
+
+
 # Making Magic: con la letra por defecto de MuPDF (Charis SIL) las versalitas quedan en el PDF como «CƒĵǙǵŧǡ 3»;
 # releído, «Chapter 3» no era etiqueta, y copiar o buscar fallaba. Mayúsculas algo menores: se ven casi igual
 PDF_CSS = ("h1 .num, small.sc { font-variant: normal; text-transform: uppercase; }\nsmall.sc { font-size: 0.8em; }\n"
-           "ol.toc { padding-right: 2.5em; }\n")  # el hueco del número de página en «Contenido» (_contents_numbers)
+           "ol.toc { padding-right: 2.5em; }\n"  # el hueco del número de página en «Contenido» (_contents_numbers)
+           # Witch 1, pág. 79: con el margen de MuPDF el texto llegaba al número de página y un recuadro cortado
+           # lo tapaba. Arriba y a los lados, los de MuPDF; abajo, sitio para el número (solo vale la forma corta)
+           f"@page {{ margin: 3em 2em {PAGE_FOOT}em 2em; }}\n")
 PAGE_GRAY = (0.45, 0.45, 0.45)
 
 
@@ -3952,21 +3974,24 @@ def _cut_split_frames(pdf):
     """Witch 1: MuPDF dibuja entero un recuadro que no cabe en la página y la página solo lo recorta: el borde
     pasaba por el pie (y el número) y empezaba en el borde de arriba de la siguiente. Se tapa lo que sale del
     área del texto y se cierra el recuadro en el corte con sus mismas líneas, en las dos páginas."""
-    text = [b for page in pdf for b in page.get_text("blocks") if b[4].strip()]
-    if not text:
-        return
-    top, bottom = min(b[1] for b in text) - 4, max(b[3] for b in text) + 4
     for page in pdf:
         drawings = [d for d in page.get_drawings() if d.get("fill")]
         height = page.rect.height
-        for over, cut in ((lambda r: r.y1 > height + 0.5, bottom), (lambda r: r.y0 < -0.5, top)):
-            parts = [d for d in drawings if over(d["rect"])]
+        for down in (True, False):  # sigue en la página siguiente / viene de la anterior
+            parts = [d for d in drawings if (d["rect"].y1 > height + 0.5 if down else d["rect"].y0 < -0.5)]
             if not parts:
                 continue
             box = pymupdf.Rect(parts[0]["rect"])
             for d in parts[1:]:
                 box |= d["rect"]
-            down = cut == bottom  # el recuadro sigue en la página siguiente
+            # Pegado a su texto en esta página, con el aire de su relleno: al final del área del texto quedaba
+            # encima del número de página (Witch 1, pág. 79)
+            inside = [b for b in page.get_text("blocks") if b[4].strip() and box.x0 <= b[0] and b[2] <= box.x1
+                      and (b[1] >= box.y0 if down else b[3] <= box.y1)]
+            if not inside:
+                continue
+            air = min(b[3] - b[1] for b in inside) * 0.6
+            cut = max(b[3] for b in inside) + air if down else min(b[1] for b in inside) - air
             page.draw_rect(pymupdf.Rect(box.x0 - 1, cut, box.x1 + 1, height + 1) if down
                            else pymupdf.Rect(box.x0 - 1, -1, box.x1 + 1, cut), color=None, fill=(1, 1, 1))
             for d in parts:  # las líneas de su borde de abajo (o de arriba), llevadas al corte
@@ -4044,7 +4069,9 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
         step(80 + n * 15 // len(pdf), 100)
         if n == 0 or (not page.get_text().strip() and page.get_images()):  # portada, ilustración a página completa
             continue
-        _write_number(page, font, str(n + 1), width / 2, height - 17, fontsize * 0.75)
+        # En la mitad del margen de abajo: a 17 pt del borde quedaba pegado al texto y a los recuadros
+        _write_number(page, font, str(n + 1), width / 2, height - PAGE_FOOT * fontsize / 2 + fontsize * 0.5,
+                      fontsize * 0.75)
     partial = partial_path(out_path)
     pdf.save(partial, garbage=3, deflate=True)
     pdf.close()

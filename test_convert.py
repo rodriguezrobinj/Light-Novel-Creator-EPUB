@@ -1185,7 +1185,9 @@ def test_design_like_page_after_first_chapter_is_unchanged():
 
 
 def test_outline_bookmarks_choose_chapters():
-    """Si el PDF tiene marcadores, los de primer nivel mandan sobre los títulos detectados."""
+    """Si el PDF tiene marcadores, los de primer nivel mandan sobre los títulos detectados. Uno que solo marca
+    ilustraciones, sin texto en la página («Insert», «Title Page» de Witch 1), no es capítulo: era una página vacía
+    con su nombre antes de las ilustraciones."""
     doc = pymupdf.open(make_novel())
     doc.set_toc([[1, "Ilustraciones", 2], [1, "Capitulo 1: Inicio", 3], [2, "Seccion", 3]])
     path = TMP / "marcadores.pdf"
@@ -1193,8 +1195,8 @@ def test_outline_bookmarks_choose_chapters():
     book = convert.analyze(path)
     titles = [plain(book.blocks[i].html) for i in book.candidates]
     # "Capitulo 2: Final" no tiene marcador, pero es un capítulo: se añade (hay PDF con marcadores incompletos)
-    assert titles == ["Ilustraciones", "Capitulo 1: Inicio", "Capitulo 2: Final"], titles
-    assert book.blocks[0].kind == "heading" and book.blocks[1].kind == "image"
+    assert titles == ["Capitulo 1: Inicio", "Capitulo 2: Final"], titles
+    assert book.blocks[0].kind == "image" and "Ilustraciones" not in [plain(b.html) for b in book.blocks]
 
 
 def test_outline_bookmark_without_page_is_not_a_chapter():
@@ -2602,13 +2604,17 @@ def test_write_pdf_frame_split_across_pages_stays_in_text_area():
             if not boxes:
                 continue
             text = [b for b in page.get_text("blocks") if b[4].strip() and not b[4].strip().isdigit()]
+            number = [b[1] for b in page.get_text("blocks") if b[4].strip().isdigit()]
             pix = page.get_pixmap(dpi=72)
             side = round(min(box.x0 for box in boxes)) + 1
+            lines = [d["rect"].y1 for d in page.get_drawings() if d.get("fill") and d["rect"].height < 3
+                     and 0 < d["rect"].y1 < page.rect.height]  # las líneas de arriba y abajo del recuadro
             found.append((page.number, pix.pixel(side, 3), pix.pixel(side, round(page.rect.height) - 3),
-                          min(b[1] for b in text), max(b[3] for b in text)))
+                          max(lines) if lines else 0, min(number) if number else page.rect.height))
     assert len(found) >= 2, found  # partido entre páginas
-    for number, top, bottom, *_ in found:
+    for number, top, bottom, closing, foot in found:
         assert top[:3] == (255, 255, 255) and bottom[:3] == (255, 255, 255), (number, top, bottom)  # márgenes limpios
+        assert foot - closing >= 8, (number, closing, foot)  # el borde de abajo, lejos del número (pág. 79)
 
 
 def test_write_pdf_whole_words_never_splits_a_word():
@@ -3572,6 +3578,45 @@ def test_group_credits_page_becomes_an_illustration():
     assert [convert._plain(book.blocks[k]) for k in convert.link_sections(book)] == ["Agradecimientos", "Epilogo 1"]
 
 
+def test_review_from_before_dropped_illustration_titles_is_carried_over():
+    """Witch 1: «Insert» (marcador de una página solo de ilustración) ya no es capítulo, y la revisión guardada
+    tenía un bloque más. Se traslada: el texto editado, los títulos renombrados y la posición del editor siguen, y
+    la fila del título quitado se va."""
+    import json
+
+    import app
+
+    doc = pymupdf.open(make_novel())
+    doc.set_toc([[1, "Insert", 2], [1, "Capitulo 1: Inicio", 3], [1, "Capitulo 2: Final", 4]])
+    pdf = TMP / "revision-con-insert.pdf"
+    doc.save(pdf)
+    book = convert.analyze(pdf)
+    (mark, title), = book.dropped_titles
+    raw = list(book.blocks)
+    raw.insert(mark, title)  # el análisis de antes, con «Insert»
+    find = lambda text: next(k for k, b in enumerate(raw) if convert._plain(b).startswith(text))
+    para, second = find("Ella penso"), find("Capitulo 2: Final")
+    old = {"pdf": app._fingerprint(pdf), "blocks": len(raw), "edits": [[para, para + 1, "Ella penso que era pronto."]],
+           "rows": {str(mark): [app.ON, "Insert"], str(second): [app.ON, "Capítulo 2: El final"]},
+           "editor_at": para, "title": "Mi libro revisado"}
+    app._write_json(app._review_path(pdf), old)
+    root, window = visible_window()
+    window.pdf = pdf
+    window.show_book(convert.analyze(pdf))
+    status = window.status.text()
+    titles = [window.tree.set(i, "title") for i in window.tree.get_children() if window.is_title(i)]
+    texts = [convert._plain(b) for b in window.book.blocks]
+    at = window.editor_at
+    window.close()
+    saved = json.loads(app._review_path(pdf).read_text(encoding="utf-8"))
+    assert convert._plain(title) == "Insert" and status.startswith("Revisión anterior recuperada"), status
+    assert "Capítulo 2: El final" in titles and "Insert" not in titles, titles
+    assert "Ella penso que era pronto." in texts and texts[at] == "Ella penso que era pronto.", (at, texts)
+    assert saved["blocks"] == len(window.book.blocks), saved["blocks"]
+    # Un cambio de texto antes de «Insert» lo movería: no se traslada (va a un .bak, como antes)
+    assert app._migrate_dropped({**old, "edits": [[0, 1, "Otro"]]}, book) is None
+
+
 def test_review_from_before_credit_pages_is_carried_over():
     """Las revisiones guardadas cuentan bloques: con la página del grupo en una ilustración, la de Easygoing 1
     (o Eminence 7, con su traducción) dejaba de coincidir y sus cambios iban a un .bak. Se trasladan: el texto
@@ -4277,6 +4322,38 @@ def test_text_editor_navigates_chapters_and_saves_only_changes():
     assert undone
 
 
+def test_text_editor_contents_page_renames_titles():
+    """En el editor, «Contenido» va primero en la lista de capítulos: su hoja tiene los capítulos y subtítulos de la
+    lista, uno por línea. Cambiar uno lo renombra en la lista (y en su capítulo); una línea añadida ahí no toca el
+    libro."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    first = next(i for i in window.tree.get_children() if window.tree.set(i, "inc") == app.ON)
+    window.tree.selection_set(first)
+    blocks_before = [(b.kind, b.html) for b in window.book.blocks]
+    editor = window.edit_text()
+    root.update()
+    listed = editor.sections[0][0]
+    editor.open_section(-1, -1)
+    lines = editor.sheet.content().split(2 * chr(10))
+    ribbon = editor.chapter_btn.toolTip()  # el texto del botón se recorta con «…»
+    editor.sheet.document().find("Capitulo 1: Inicio").insertText("Capítulo 1: El inicio")
+    cursor = editor.sheet.textCursor()
+    cursor.movePosition(cursor.MoveOperation.End)
+    cursor.insertText(chr(10) + "Una línea suelta")
+    editor.save()
+    title = window.tree.set(first, "title")
+    blocks_after = [(b.kind, b.html) for b in window.book.blocks]
+    window.close()
+    assert listed == "Contenido" and "Contenido" in ribbon, (listed, ribbon)
+    assert lines[:2] == ["# Capitulo 1: Inicio", "# Capitulo 2: Final"], lines
+    assert title == "Capítulo 1: El inicio", title
+    assert blocks_after == blocks_before  # solo el nombre de la fila
+
+
 def test_text_editor_steps_pdf_pages():
     """◀ ▶ bajo el PDF pasan de página (◀◀ ▶▶, de capítulo): la hoja va al primer párrafo de la página, cruzando
     al capítulo siguiente si hace falta, y el panel la dibuja. En la primera y la última página se apagan."""
@@ -4416,7 +4493,12 @@ def test_text_editor_warns_title_is_an_image():
     editor.text_zoom.setValue(90)  # «100 %» -> «90 %»: la barra no se mueve
     root.update()
     still = editor.text_zoom.x() == slider
+    editor.cancel()
+    window.images_dialog()  # el dibujo del título también está entre las ilustraciones
+    listing = window.images_window.parts["list"]
+    pictures = [listing.item(n).text().split(chr(10))[0] for n in range(listing.count())]
     window.close()
+    assert pictures == ["Ilustración 1 · pág. 1 · título de «Capítulo 1»", "Ilustración 2 · pág. 1 · Capítulo 1"], pictures
     assert drawn and centered and not hand and beside and not focused and still, (
         drawn, centered, hand, beside, focused, still, editor.sheet.content()[:40])
     assert [on for on, _ in shown] == [True, False, True, False, False] and "imagen" in text, (shown, text)
@@ -9176,17 +9258,33 @@ def test_contents_subtitles_hang_from_chapter_and_sit_left():
 
 def test_window_cover_row_and_contents_option():
     """La lista empieza por «Portada»: elegirla muestra su página del PDF y la portada del EPUB, y no cuenta como
-    fila del libro. La casilla «Índice» de la barra decide si el EPUB lleva la página «Contenido»."""
+    fila del libro. La casilla «Índice» de la barra decide si el EPUB lleva la página «Contenido». Bajo la portada,
+    la fila «Contenido»: muestra el índice impreso del PDF y la página del EPUB con los títulos de la lista, y un
+    clic en su tipo la pone o la quita, como la casilla."""
     import app
     from PySide6.QtWidgets import QCheckBox
     root, window = visible_window()
     window.pdf = TMP / f"portada-{time_ns()}.pdf"
     doc = pymupdf.open()
     add_page(doc, 1, [(72, 100, "Capitulo 1: Uno", 20, "helv")])
+    add_page(doc, 2, [(72, 100, "Contents", 20, "helv"), (72, 140, "Capitulo 1: Uno ..... 1", 11, "helv")])
     doc.save(window.pdf)
     cover = pymupdf.open(window.pdf)[0].get_pixmap(dpi=30).tobytes("jpg")
     window.show_book(convert.Book("Libro", "", cover, [convert.Block("heading", 1, "Capítulo 1: Uno"),
                                                       convert.Block("p", 1, "Texto.")], [0]))
+    window.tree.set("0", "title", "Capítulo 1: El comienzo")  # renombrado en la lista: así va al índice
+    toc = window.tree.topLevelItem(1)
+    toc_row = [toc.text(n) for n in range(4)]
+    window.tree.setCurrentItem(toc)
+    root.update()
+    toc_shown = window.pdf_page, window.epub_caption.text()
+    with pymupdf.open(window.preview_path) as epub:
+        epub.layout(width=300, height=500)
+        toc_text = epub.load_page((1, 0)).get_text()
+    window.contents_var.set(False)  # la casilla: la fila pasa a «Quitar»
+    root.update()
+    toc_off, toc_epub = toc.text(0), window.epub_view.message
+    window.contents_var.set(True)
     first = window.tree.topLevelItem(0)
     row = [first.text(n) for n in range(3)]
     children = window.tree.get_children()
@@ -9201,6 +9299,9 @@ def test_window_cover_row_and_contents_option():
     assert row == ["Portada", "Portada", ""] and app.COVER not in children and children[0] == "0", (row, children)
     assert shown == ("EPUB · portada", 0, ()), shown
     assert default is True and off is False, (default, off)
+    assert toc_row == ["Índice", "Contenido", "", "2"] and app.CONTENTS not in children, toc_row
+    assert toc_shown[0] == 1 and "Contenido" in toc_text and "El comienzo" in toc_text, (toc_shown, toc_text)
+    assert toc_off == "Quitar" and "sin" in toc_epub, (toc_off, toc_epub)
 
 
 def test_custom_font_is_embedded():

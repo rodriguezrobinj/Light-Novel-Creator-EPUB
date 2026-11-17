@@ -69,6 +69,7 @@ SEP = "Separador"                                   # título que se escribe com
 STYLES = ["Normal", "Capítulo", "Subtítulo"]          # estilos de párrafo en la cinta del editor de texto
 STYLE_LEVELS = [None, "Capítulo", "Subtítulo"]
 FRONT = "Inicio del libro"                           # lo que va antes del primer capítulo, en el editor
+TOC_PAGE = "Contenido"  # en el editor, la página de títulos: cambiar uno renombra su capítulo (sección -1..-1)
 CHAPTER_WIDTHS = (300, 180, 170, 140)  # botón de capítulo del editor en cada nivel de la cinta (fit_ribbon)
 GLYPH = 24                                           # px del glifo de un botón grande de la cinta, como en Word
 SMALL_GLYPH = 16                                     # px del glifo de un botón pequeño de la cinta
@@ -79,7 +80,10 @@ SPLIT, ROTATED = "Dividida", "Girada"                # ilustración doble: en do
 WIDE_NEXT = {IMG: SPLIT, SPLIT: ROTATED, ROTATED: CUT, CUT: IMG, DROPPED: IMG}
 LAYOUT = {SPLIT: "split", ROTATED: "rotate"}         # tipo de la fila -> Block.layout
 COVER = "cover"  # fila fija de la portada, arriba de la lista: no es un bloque del libro
-KIND_TAG = {ON: "chapter", OFF: "subtitle", CUT: "cut", IMG: "image", DROPPED: "dropped",
+CONTENTS = "contents"  # fila fija de la página «Contenido» del EPUB, bajo la portada
+INDEX = "Índice"  # tipo de la fila «Contenido» cuando el EPUB la lleva (si no, CUT)
+TOC_TITLES = ("contents", "table of contents", "contenido", "contenidos", "índice", "indice")  # índice impreso
+KIND_TAG = {ON: "chapter", OFF: "subtitle", CUT: "cut", IMG: "image", DROPPED: "dropped", INDEX: "chapter",
             SPLIT: "image", ROTATED: "image", SEP: "separator"}  # estilo por tipo
 KEYS = {"c": ON, "s": OFF, "q": CUT, "i": IMG, "d": SPLIT, "g": ROTATED, "x": SEP}  # atajos de teclado en la lista
 LANGUAGES = ["es", "en", "pt", "fr", "it", "ja"]     # idioma del EPUB: lo usan la partición de palabras y la voz
@@ -950,14 +954,47 @@ def _migrate_review(state, book):
     return {**state, "blocks": len(book.blocks), "edits": edits, "rows": rows, "editor_at": at}
 
 
+def _migrate_dropped(state, book):
+    """Revisión hecha cuando los títulos de solo ilustraciones (Witch 1: «Insert», «Title Page») aún eran
+    capítulos, trasladada: cada índice se cuenta sin ellos y sus filas se van. None si no es de ese análisis o si
+    algún cambio de texto los tocaba."""
+    marks = [i for i, _ in book.dropped_titles]  # dónde estaban, en el análisis de antes
+    if not marks or state.get("blocks") != len(book.blocks) + len(marks):
+        return None
+
+    def new(i):
+        if i in marks:
+            raise LookupError
+        return i - sum(1 for m in marks if m < i)
+
+    try:
+        edits = []
+        for edit in state.get("edits", []):
+            if edit[0] == "image":
+                edits.append(["image", new(int(edit[1])), edit[2]])
+            elif edit[0] == "move" or int(edit[0]) <= max(marks):
+                raise LookupError  # mover, o reescribir antes de ellos (cambia dónde quedan): ya no se puede contar
+            else:
+                edits.append([new(int(edit[0])), new(int(edit[1])), edit[2]])
+        rows = {str(new(int(item))): row for item, row in state["rows"].items() if int(item) not in marks}
+        at = state.get("editor_at")
+        at = new(at) if isinstance(at, int) and at not in marks else None
+    except (LookupError, ValueError, TypeError, IndexError, KeyError):
+        return None
+    return {**state, "blocks": len(book.blocks), "edits": edits, "rows": rows, "editor_at": at}
+
+
 def _review_for(pdf, book):
-    """La revisión guardada de pdf para este análisis: la suya o, si se hizo con la página del grupo como texto,
-    trasladada (_migrate_review). None si no hay o es de otro análisis."""
+    """La revisión guardada de pdf para este análisis: la suya o, si se hizo con la página del grupo como texto o
+    con los títulos de solo ilustraciones, trasladada (_migrate_review, _migrate_dropped). None si no hay o es de
+    otro análisis."""
     state = _read_review(pdf, len(book.blocks))
-    if state or not book.credit_pages:
+    if state or not (book.credit_pages or book.dropped_titles):
         return state
     old = _read_review(pdf)
-    return _migrate_review(old, book) if old else None
+    if not old:
+        return None
+    return (_migrate_review(old, book) if book.credit_pages else None) or _migrate_dropped(old, book)
 
 
 def _fit_review(pdf, book):
@@ -1266,7 +1303,7 @@ def _replay(book, state):
         try:
             if edit[0] == "image":
                 k, path = int(edit[1]), str(edit[2])
-                if not (0 <= k < len(book.blocks) and book.blocks[k].kind == "image"):
+                if not (0 <= k < len(book.blocks) and book.blocks[k].kind in ("image", "heading")):  # o un título dibujado
                     break
                 try:
                     if _stored_image(path):  # otra ruta (de red, de una revisión ajena) no se abre
@@ -1680,6 +1717,15 @@ class Window(QMainWindow):
         qtk.app()  # sin QApplication, Qt aborta el proceso al crear la ventana, sin decir nada
         super().__init__()
         self.setAcceptDrops(True)
+        self.caption = None
+
+    def showEvent(self, event):
+        qtk.use_caption(self)  # barra de título del tema (la de Windows 10 era negra)
+        super().showEvent(event)
+
+    def nativeEvent(self, kind, message):
+        handled, result = qtk.caption_event(self, kind, message)
+        return (handled, result) if handled else super().nativeEvent(kind, message)
 
     def closeEvent(self, event):
         if self.on_close:  # App.close decide; si sigue adelante, vuelve a cerrar sin on_close
@@ -2035,6 +2081,7 @@ class App:
         self.trim_var, self.credits_var, self.reading_var = qtk.Var(False), qtk.Var(False), qtk.Var(False)
         self.epub2_var, self.kepub_var = qtk.Var(False), qtk.Var(False)
         self.contents_var = qtk.Var(True)  # página «Contenido» tras la portada, con capítulos y subtítulos
+        self.contents_var.listeners.append(lambda: self.book is not None and self.contents_row())  # su fila
         self.echoes_var = qtk.Var(False)  # ecos en el informe: muchos avisos de estilo, solo si se piden
         self.hyphenate_var = qtk.Var(False)  # guiones blandos: el Kindle apenas parte palabras en español
         self.whole_words_var = qtk.Var(False)  # PDF maquetado sin palabras partidas al final de línea
@@ -2624,6 +2671,9 @@ class App:
         if self.book and self.tree.current() == COVER:
             self.show_cover()
             return
+        if self.book and self.tree.current() == CONTENTS:
+            self.show_contents()
+            return
         if self.book and self.tree.selection():
             self.draw_pdf()
             self.draw_epub()
@@ -2683,10 +2733,65 @@ class App:
                                                                      Qt.TransformationMode.SmoothTransformation))
         self.epub_caption.setText("EPUB · portada")
 
+    def toc_page(self):
+        """Página del índice impreso del PDF (desde 0), entre las primeras; None si no lo tiene."""
+        for n in range(min(30, self.pdf_doc.page_count if self.pdf_doc else 0)):
+            if any(line.strip().lower() in TOC_TITLES for line in self.pdf_doc[n].get_text().splitlines()):
+                return n
+        return None
+
+    def contents_row(self):
+        """La fila «Contenido» como va: «Índice» si el EPUB la lleva, «Quitar» si no; con la página del índice
+        impreso del PDF."""
+        on = self.contents_var.get()
+        page = self.toc_page()
+        values = (INDEX if on else CUT, "Contenido", "", "" if page is None else page + 1, "")
+        if self.tree.exists(CONTENTS):
+            for column, value in zip(self.tree.columns, values):
+                self.tree.set(CONTENTS, column, value)
+            self.tree.item(CONTENTS, tags=(KIND_TAG[values[0]],))
+        else:
+            self.tree.pin(CONTENTS, values, (KIND_TAG[values[0]],), index=1)
+        if self.tree.current() == CONTENTS:
+            self.show_contents()
+
+    def show_contents(self):
+        """Fila «Contenido»: el índice impreso del PDF y la página «Contenido» del EPUB, con los capítulos y
+        subtítulos de la lista como irán (renombrados, sin los quitados)."""
+        page = self.toc_page()
+        self.pdf_page, self.highlight = page or 0, None
+        if page is None:
+            self.blank(self.pdf_view, "El PDF no tiene índice impreso")
+        else:
+            self.draw_pdf()
+        self.epub_page, self.epub_pages = 0, 0
+        self.epub_cut, self.epub_message = not self.contents_var.get(), "El EPUB irá sin «Contenido»"
+        if not self.epub_cut:
+            rows = [(self.tree.set(i, "inc"), self.tree.set(i, "title"), self.book.blocks[int(i)].page)
+                    for i in self.tree.get_children() if self.is_title(i) and self.tree.set(i, "inc") in (ON, OFF)]
+            # Solo los títulos: escribir el libro entero para una página de nombres tardaba
+            part = convert.Book(self.book.title, "", self.book.cover,
+                                [convert.Block("heading", page, html.escape(title)) for _, title, page in rows], [])
+            chapters = [(n, title) for n, (kind, title, _) in enumerate(rows) if kind == ON]
+            options = self.write_options([])
+            options.update(shrink=False, trim=False, epub2=False, credits=False, contents=True, reading=False)
+            key = ("contents", chapters, rows, sorted(options.items()))
+            try:
+                if key != self.preview_key:  # «Contenido» va justo tras la portada: el capítulo 1 del EPUB
+                    self.preview_key, self.preview_doc = None, self.preview_doc and self.preview_doc[1].close()
+                    convert.write_epub(part, chapters, self.preview_path, **options)
+                    self.preview_key = key
+            except Exception:
+                self.epub_pages = -1
+        self.draw_epub()
+
     def update_preview(self, _=None):
         """Al seleccionar (o cambiar) un título: su página del PDF y su sección en el EPUB."""
         if self.book and self.tree.current() == COVER:
             self.show_cover()
+            return
+        if self.book and self.tree.current() == CONTENTS:
+            self.show_contents()
             return
         selected = self.tree.selection()
         if not selected or not self.book:
@@ -2815,7 +2920,7 @@ class App:
                 items.append(i)
         here = int(selected[0]) if selected else None
         if here is None:
-            n = 0 if delta > 0 and self.tree.current() == COVER else -1  # de la portada al libro
+            n = 0 if delta > 0 and self.tree.current() in (COVER, CONTENTS) else -1  # de la portada al libro
         elif selected[0] in items:
             n = items.index(selected[0]) + delta
         else:
@@ -3164,6 +3269,7 @@ class App:
         descartadas por el análisis (fondos de título, imágenes dentro del texto) como "Descartada"."""
         self.tree.delete(*self.tree.get_children())
         self.tree.pin(COVER, ("Portada", "Portada", "", self.cover_cell(), ""), ("image",))
+        self.contents_row()
         blocks = self.book.blocks
         chapters = set(self.book.candidates)
         self.wide = {str(i) for i, b in enumerate(blocks) if b.kind == "image" and b.image and convert.is_wide(b.image)}
@@ -3203,6 +3309,8 @@ class App:
     def on_click(self, event):
         item = self.tree.identify_row(event.y)
         column = self.tree.identify_column(event.x)
+        if column == "#1" and self.tree.identify_row(event.y, pinned=True) == CONTENTS:  # como la casilla «Índice»
+            self.contents_var.set(not self.contents_var.get())
         if item and column == "#1" and self.tree.set(item, "inc") in self.cycle(item):
             self.set_kind(item, self.cycle(item)[self.tree.set(item, "inc")])
             self.update_reviewed()
@@ -4231,7 +4339,8 @@ class App:
         self.update_preview()
 
     def image_blocks(self):
-        return [k for k, b in enumerate(self.book.blocks) if b.kind == "image" and b.image]
+        """Ilustraciones y títulos dibujados (Witch 1): en «Ilustraciones…», aunque los títulos no son filas de imagen."""
+        return [k for k, b in enumerate(self.book.blocks) if b.kind in ("image", "heading") and b.image]
 
     def image_name(self, n, k):
         """Nombre del archivo exportado de la ilustración número n (desde 1): «Reemplazar desde carpeta» lo busca."""
@@ -4243,6 +4352,8 @@ class App:
         chapter = (self.tree.set(str(start), "title") if start in self.section_heads() and self.tree.exists(str(start))
                    else "Inicio del libro")
         dropped = self.tree.exists(str(k)) and self.tree.set(str(k), "inc") == DROPPED
+        if self.book.blocks[k].kind == "heading":
+            return f"Ilustración {n} · pág. {self.book.blocks[k].page} · título de «{chapter}»"
         return f"Ilustración {n} · pág. {self.book.blocks[k].page} · {chapter}" + (" (descartada)" if dropped else "")
 
     def confirm_image(self, k, new, batch=False, parent=None):
@@ -6821,8 +6932,14 @@ class Dialog(QDialog):
     """QDialog que pregunta a on_reject antes de cerrarse con Esc o con la X de la ventana, y que al
     abrirse cabe en la pantalla (con el zoom de Windows a 125 % en 1366x768 solo quedan 1093x582)."""
     on_reject = None
+    caption = None
+
+    def nativeEvent(self, kind, message):
+        handled, result = qtk.caption_event(self, kind, message)
+        return (handled, result) if handled else super().nativeEvent(kind, message)
 
     def showEvent(self, event):
+        qtk.use_caption(self)  # barra de título del tema, con los botones que tenga la ventana
         super().showEvent(event)
         if self.windowState() & Qt.WindowState.WindowMaximized:  # moverla la sacaría de maximizada
             return
@@ -8435,7 +8552,7 @@ class TextEditor:
     def outline(self):
         """Secciones del libro para el panel de navegación: [(título, inicio, fin, sangría)], una por capítulo.
         Lo de antes del primero es «Inicio del libro»."""
-        blocks, found = self.app.book.blocks, []
+        blocks, found = self.app.book.blocks, [(TOC_PAGE, -1, -1, False)]
         heads = self.app.section_heads() + [len(blocks)]
         if heads[0] > 0:
             found.append((FRONT, 0, heads[0], False))
@@ -8478,8 +8595,13 @@ class TextEditor:
 
     def section_lines(self, start, end):
         """Líneas de la sección como se cargan en la hoja, [(bloque, línea)], y {bloque: tipo} de sus títulos. Un
-        título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas)."""
+        título se ve con el nombre de su fila: el que irá al EPUB (renombrado, mayúsculas corregidas). La sección
+        -1..-1 es «Contenido»: los capítulos y subtítulos de la lista, un título por línea."""
         book, tree = self.app.book, self.app.tree
+        if start < 0:
+            heads = [i for i in tree.get_children() if book.blocks[int(i)].kind == "heading"
+                     and tree.set(i, "inc") in (ON, OFF)]
+            return [(int(i), "# " + tree.set(i, "title")) for i in heads], {int(i): tree.set(i, "inc") for i in heads}
         lines = [(k, "# " + tree.set(str(k), "title") if book.blocks[k].kind == "heading" and tree.exists(str(k))
                   else convert.section_text(book, k, k + 1)) for k in range(start, end)]
         levels = {k: tree.set(str(k), "inc") for k in range(start, end)
@@ -8494,6 +8616,8 @@ class TextEditor:
         path = _draft_path(self.app.pdf)
         pages = []
         for (start, end), page in self.pages.items():
+            if start < 0:  # «Contenido» no va al borrador: sus cambios son nombres de la lista
+                continue
             text = editor.dump(page["doc"])  # una vez: page_dirty la volcaba otra
             if self.page_dirty(page, text):
                 pages.append({"start": start, "end": end, "lines": [line for _, line in page["lines"]], "text": text})
@@ -8550,11 +8674,12 @@ class TextEditor:
 
     def show_chapter(self, row):
         """Indicador de la cinta: «☰ Capítulo 3 de 31 · Título ▾»."""
-        chapters = sum(1 for s in self.sections if s[0] != FRONT)
-        number = sum(1 for s in self.sections[:row + 1] if s[0] != FRONT) if row is not None else 0
+        chapters = sum(1 for s in self.sections if s[1] >= 0 and s[0] != FRONT)
+        number = sum(1 for s in self.sections[:row + 1] if s[1] >= 0 and s[0] != FRONT) if row is not None else 0
         title = self.sections[row][0] if row is not None else self.app.tree.set(self.item, "title")
-        where = FRONT if title == FRONT else f"Capítulo {number} de {chapters}"
-        text = f"☰  {where} · {title}" if title != FRONT else f"☰  {FRONT}"
+        special = row is not None and (title == FRONT or self.sections[row][1] < 0)  # «Inicio», «Contenido»
+        where = title if special else f"Capítulo {number} de {chapters}"
+        text = f"☰  {where}" if special else f"☰  {where} · {title}"
         # Ancho fijo con «…»: un título largo ensanchaba la cinta más que la pantalla (1366 px)
         width = CHAPTER_WIDTHS[self.ribbon_level]
         # ▾ del QSS (botón «menu»): el texto deja sitio a sus márgenes (12 + 28 px)
@@ -9030,21 +9155,24 @@ class TextEditor:
         edits, titles, kinds, retype = [], {}, {}, {}
         for (start, _), page in self.pages.items():
             old = [line for _, line in page["lines"]]
+            source = [k for k, _ in page["lines"]]  # bloque de cada línea cargada (en «Contenido», salteados)
             pairs = editor.dump_levels(page["doc"])  # [(línea, tipo de título o None)]
             new = [line for line, _ in pairs]
             for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
-                k = str(start + i1)
+                k = str(source[i1]) if i1 < len(source) else str(start + i1)
                 if tag == "equal":  # un título igual puede haber cambiado de tipo (capítulo ↔ subtítulo)
                     for n in range(i2 - i1):
-                        level, was = pairs[j1 + n][1], page["levels"].get(start + i1 + n)
+                        level, was = pairs[j1 + n][1], page["levels"].get(source[i1 + n])
                         if level in (ON, OFF) and was is not None and level != was:
-                            retype[str(start + i1 + n)] = level
+                            retype[str(source[i1 + n])] = level
                     continue
                 if (tag == "replace" and i2 - i1 == j2 - j1 == 1 and old[i1].startswith("# ")
                         and new[j1].startswith("# ") and self.app.tree.exists(k)):
                     titles[k] = new[j1][2:].strip()
                     if pairs[j1][1] in (ON, OFF):
                         retype[k] = pairs[j1][1]
+                elif start < 0:  # en «Contenido» solo se renombra: añadir o quitar líneas no toca el libro
+                    continue
                 else:
                     edits.append([start + i1, start + i2, "\n\n".join(new[j1:j2])])
                     kinds[start + i1] = [level for line, level in pairs[j1:j2] if line.startswith("# ")]
