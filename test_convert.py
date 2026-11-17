@@ -3635,9 +3635,10 @@ def test_point_of_view_names_are_subtitles_and_underscores_a_scene_break():
     assert all(len(r) == 4 and 60 < r[0] < r[2] and 200 < r[1] < r[3] < 400 for r in rects), rects
 
 
-def test_blank_line_scene_break_in_short_dialogue_book():
-    """Kage 7 (World Project): diálogos de una línea, así que el paso entre párrafos (25 pt) sale más que el de línea
-    (17 pt), y la escena cambia con una línea en blanco (50 pt). Se tomaba 25 por interlínea y no había separadores."""
+def test_blank_line_in_short_dialogue_book_splits_paragraphs():
+    """Kage 7 (World Project): diálogos de una línea, el paso entre párrafos (25 pt) sale más que el de línea
+    (17 pt), y la escena cambia con una línea en blanco (50 pt). No es separador (las líneas en blanco nunca lo
+    son), pero los párrafos de los dos lados quedan separados."""
     doc = pymupdf.open()
     for number in (1, 2, 3):
         lines, y = [(72, 100, "Capitulo 1: Inicio", 20, "helv")] if number == 1 else [], 130
@@ -3656,12 +3657,9 @@ def test_blank_line_scene_break_in_short_dialogue_book():
     doc.save(path)
     book = convert.analyze(path)
     breaks = [(k, b.page) for k, b in enumerate(book.blocks) if b.kind == "break"]
-    assert [page for _, page in breaks] == [2], breaks
-    gap = book.blocks[breaks[0][0]].rect  # el hueco en blanco, para recuadrarlo en la vista del original
-    assert len(gap) == 4 and gap[1] < gap[3] and gap[0] < gap[2], gap
-    k = breaks[0][0]
-    assert "se marcho 24." in book.blocks[k - 1].html and "Sí, ya voy 25" in book.blocks[k + 1].html, (
-        book.blocks[k - 1].html, book.blocks[k + 1].html)
+    assert breaks == [], breaks
+    k = next(k for k, b in enumerate(book.blocks) if "Sí, ya voy 25" in b.html)
+    assert book.blocks[k - 1].html.endswith("se marcho 24."), (book.blocks[k - 1].html, book.blocks[k].html)
 
 
 def make_group_pdf():
@@ -4187,7 +4185,7 @@ def test_text_editor_opens_section_and_saves_only_changes():
 
 
 def test_text_editor_navigates_chapters_and_saves_only_changes():
-    """Como Word: la cinta dice en qué capítulo se está («Capítulo 2 de 2 · …») y su menú y ◀ ▶ llevan a los
+    """Como Word: la cinta dice en qué capítulo se está («Capítulo 2 de 2 · …») y su menú y Ctrl+AvPág llevan a los
     demás; hojear el PDF hasta otro capítulo lleva la hoja ahí. Lo editado en un capítulo sigue al volver y se
     marca con «•». Al aceptar se guarda solo lo cambiado: un título renombrado conserva su tipo y su ✓, todo se
     deshace con un Ctrl+Z. La página del PDF más pequeña que el panel queda en el medio."""
@@ -4224,7 +4222,7 @@ def test_text_editor_navigates_chapters_and_saves_only_changes():
     sheet.document().find("Capítulo 1: El inicio").insertText("Capítulo 1: El comienzo")
     editor.mark_changed()
     marked = any(editor.chapter_list.item(n).text().endswith("•") for n in range(editor.chapter_list.count()))
-    editor.step_section(1)  # ▶: el capítulo siguiente
+    editor.step_section(1)  # Ctrl+AvPág: el capítulo siguiente
     on_second = editor.current == window.section_bounds(int(second))
     sheet.goto_source(int(second) + 1)  # el primer párrafo del segundo capítulo
     sheet.textCursor().insertText("Nuevo. ")
@@ -4289,7 +4287,10 @@ def test_text_editor_steps_pdf_pages():
 def test_text_editor_chapter_list_is_a_small_popup():
     """Con muchos capítulos (Mitsuha 1: 34) la lista ocupaba toda la pantalla en columnas: es un desplegable
     pequeño con scroll bajo el botón, que se filtra escribiendo y se cierra al elegir."""
+    import shiboken6
+
     import app
+    import qtk
 
     root, window = visible_window()
     blocks = []
@@ -4305,21 +4306,26 @@ def test_text_editor_chapter_list_is_a_small_popup():
     window.tree.selection_set("0")
     editor = app.TextEditor(window, "0", *window.section_bounds(0))
     root.update()
-    editor.chapter_btn.click()
+    pop, seen = editor.chapter_popup, {}
+
+    def look():  # con el menú abierto: el clic de abajo espera a que se cierre
+        seen["shown"], seen["size"] = pop.isVisible(), pop.size()
+        seen["screen"], seen["box"] = pop.screen().availableGeometry(), pop.frameGeometry()
+        editor.chapter_filter.setText("título bastante largo para la lista número 37")
+        seen["visible"] = [editor.chapter_list.item(n).text() for n in range(editor.chapter_list.count())
+                           if not editor.chapter_list.item(n).isHidden()]
+        editor.chapter_filter.returnPressed.emit()
+
+    qtk.after(100, look)
+    qtk.after(3000, lambda: shiboken6.isValid(pop) and pop.hide())  # si look falla, el menú no se queda abierto
+    editor.chapter_btn.showMenu()
     root.update()
-    pop = editor.chapter_popup
-    shown, size = pop.isVisible(), pop.size()
-    screen = pop.screen().availableGeometry()
-    inside = screen.contains(pop.frameGeometry())
-    editor.chapter_filter.setText("título bastante largo para la lista número 37")
-    visible = [editor.chapter_list.item(n).text() for n in range(editor.chapter_list.count())
-               if not editor.chapter_list.item(n).isHidden()]
-    editor.chapter_filter.returnPressed.emit()
-    root.update()
+    shown, size, screen, box, visible = (seen.get(k) for k in ("shown", "size", "screen", "box", "visible"))
+    inside = bool(screen) and screen.contains(box)
     went = editor.current == window.section_bounds(74) and not pop.isVisible()
     editor.win.done(0)
     window.close()
-    assert shown and size.width() <= 480 and size.height() <= 420 and inside, (shown, size, screen, pop.frameGeometry())
+    assert shown and size.width() <= 480 and size.height() <= 420 and inside, (shown, size, screen, box)
     assert len(visible) == 1 and visible[0].startswith("Capítulo 37"), visible
     assert went
 
@@ -5002,6 +5008,12 @@ def test_dropdowns_join_their_button():
     q.processEvents()
     seam = menu.findChild(theme.QWidget, "seam").geometry()
     menu.close()
+    q.processEvents()
+    button.move(200, 0)  # menú corrido 50 px a la izquierda (no cabe a la derecha): borde a los dos lados del botón
+    menu.popup(button.mapToGlobal(button.rect().bottomLeft()) - app.QPoint(50, 0))
+    q.processEvents()
+    shifted = [(s.x(), s.width()) for s in (w.geometry() for w in menu.findChildren(theme.QWidget, "seam"))]
+    menu.close()
     combo = QComboBox()
     combo.addItems([str(n) for n in range(40)])  # más alta que lo que queda debajo: se abre encima
     combo.resize(160, 28)
@@ -5018,6 +5030,108 @@ def test_dropdowns_join_their_button():
     assert up is True, up
     assert button.text() == "Herramientas" and button.objectName() == "menu", button.text()  # flecha de las listas
     assert seam.left() == 109 and seam.right() == menu.width() - 1 and seam.height() == 1, (seam, menu.width())
+    assert shifted == [(159, menu.width() - 159), (0, 50)], (shifted, menu.width())
+
+
+def test_window_combo_click_leaves_no_focus_ring():
+    """Abrir y cerrar con el ratón una lista desplegable (Perfil) no le deja el borde azul del foco: solo se ve al
+    llegar con Tab."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QComboBox
+    root, window = visible_window()
+    root.update()
+    combo = next(c for c in window.options_row.findChildren(QComboBox) if not c.isEditable())
+    QTest.mouseClick(combo, Qt.MouseButton.LeftButton)
+    root.update()
+    opened = combo.view().isVisible()
+    combo.hidePopup()
+    root.update()
+    focused = combo.hasFocus()
+    window.close()
+    assert opened and not focused, (opened, focused)
+
+
+def test_window_chapter_menu_closes_on_its_button():
+    """El capítulo del editor es un botón ▾ como los demás: su lista se cierra al volver a pulsarlo (antes se
+    cerraba y se volvía a abrir) y no lleva ◀ ▶ al lado, que ya están bajo la página del PDF."""
+    from time import monotonic
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QFrame
+    import qtk
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("heading", 2, "Capítulo 2"),
+                                      B("p", 2, "Dos.")], [0, 2])
+    editor.win.show()
+    root.update()
+    button, pop, seen = editor.chapter_btn, editor.chapter_popup, []
+    def click():
+        QTest.mouseClick(editor.win.windowHandle(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         button.mapTo(editor.win, button.rect().center()))
+
+    def again():
+        seen.append(pop.isVisible())
+        click()  # con el menú abierto, el clic en su botón lo cierra
+        qtk.after(150, lambda: (seen.append(pop.isVisible()), pop.hide()))
+
+    qtk.after(150, again)
+    click()  # en un menú, este clic espera aquí a que se cierre
+    deadline = monotonic() + 5
+    while len(seen) < 2 and monotonic() < deadline:
+        root.update()
+    arrows = [n for n in ("prev_chapter", "next_chapter") if hasattr(editor, n)]
+    style = button.objectName(), button.text().endswith("▾")
+    editor.toggle_focus()  # en la barra de abajo: la lista se abre encima, unida al botón por arriba
+    root.update()
+    up = []
+    qtk.after(100, lambda: (up.append((pop.property("up"), button.property("up"),
+                                       pop.geometry().bottom() < button.mapToGlobal(button.rect().topLeft()).y() + 2,
+                                       pop.findChild(QFrame, "seam").geometry().top() == pop.height() - 1)),
+                            pop.hide()))
+    button.showMenu()
+    root.update()
+    editor.win.done(0)
+    window.close()
+    assert seen == [True, False], seen
+    assert up == [(True, True, True, True)], up
+    assert not arrows and style == ("menu", False), (arrows, style)
+
+
+def test_window_editor_focus_mode_buttons_and_scrollbar():
+    """En pantalla completa, Aceptar y Cancelar vuelven al editor sin cerrarlo, y la barra de scroll de la hoja
+    lleva la flecha del ratón, no la de ensanchar la hoja."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    import app
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
+    editor.win.resize(1300, 700)
+    editor.win.show()
+    editor.sheet.textCursor().insertText("Cambio. ")
+    asked = []
+    saved = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda *a, **kw: asked.append(a) or False
+    try:
+        results = []
+        for name in ("Aceptar", "Cancelar"):
+            editor.toggle_focus()
+            root.update()
+            sheet = editor.sheet.geometry()
+            QTest.mouseMove(editor.desk, QPoint(sheet.right() + 4, editor.desk.height() // 2))  # borde: ensanchar
+            root.update()
+            bar = editor.sheet.verticalScrollBar().cursor().shape()
+            next(b for b in editor.win.findChildren(app.QPushButton) if b.text() == name).click()
+            root.update()
+            results.append((name, editor.win.isVisible(), editor.focused, bar))
+        kept = editor.dirty()
+    finally:
+        app.messagebox.askyesno = saved
+        editor.win.done(0)
+        window.close()
+    arrow = Qt.CursorShape.ArrowCursor
+    assert results == [("Aceptar", True, False, arrow), ("Cancelar", True, False, arrow)], results
+    assert kept and not asked, (kept, asked)
 
 
 def test_editor_work_log():
@@ -5471,7 +5585,8 @@ def test_text_editor_ribbon_fits_the_screen():
     level, undo, tip = editor.ribbon_level, editor.undo_btn.toolButtonStyle(), editor.undo_btn.toolTip()
     editor.win.done(0)
     window.close()
-    assert widths == sorted(widths, reverse=True) and len(set(widths)) == len(widths), widths
+    # sin ◀ ▶ junto al capítulo, en los últimos niveles lo más ancho ya es la cinta, no la fila de las pestañas
+    assert widths == sorted(widths, reverse=True) and widths[0] > widths[1] > widths[-1], widths
     assert widths[0] <= 1366, widths  # repartida en pestañas cabe con el nombre de cada botón
     assert level == next((n for n, w in enumerate(widths) if w <= room), len(widths) - 1), (level, widths, room)
     from PySide6.QtCore import Qt
@@ -5586,7 +5701,7 @@ def test_speaker_reads_every_paragraph_with_powershell():
 
 def test_text_editor_ribbon_tabs_like_word():
     """La cinta va en pestañas como Word (Inicio, Insertar, Revisar, Vista): cada botón está en una sola, el
-    capítulo y ◀ ▶ se ven en todas, y «Mostrar cambios» de Vista va a la par con el del menú Cambios."""
+    capítulo y Revisado se ven en todas, y «Mostrar cambios» de Vista va a la par con el del menú Cambios."""
     from PySide6.QtWidgets import QAbstractButton
     B = convert.Block
     root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Texto.")], [0])
@@ -5599,7 +5714,7 @@ def test_text_editor_ribbon_tabs_like_word():
     for n in range(tabs.count()):
         tabs.setCurrentIndex(n)
         visible.append((pages.currentIndex(), editor.chapter_btn.isVisibleTo(editor.win),
-                        editor.next_chapter.isVisibleTo(editor.win), editor.review_btn.isVisibleTo(editor.win)))
+                        editor.review_btn.isVisibleTo(editor.win)))
     editor.show_changes_box.setChecked(True)
     from_box = editor.show_changes_action.isChecked()
     editor.show_changes_action.setChecked(False)
@@ -5610,7 +5725,7 @@ def test_text_editor_ribbon_tabs_like_word():
     assert names == ["Inicio", "Insertar", "Revisar", "Vista"], names
     assert all(len(n) == 1 for n in owners.values()), owners
     assert (where["N"], where["Símbolos ▾"], where["Leer"], where["Navegación"]) == tuple(names), where
-    assert visible == [(n, True, True, True) for n in range(4)], visible
+    assert visible == [(n, True, True) for n in range(4)], visible
     assert from_box and not from_menu, (from_box, from_menu)
     from PySide6.QtCore import Qt
     assert big == (Qt.ToolButtonStyle.ToolButtonTextUnderIcon, False), big
@@ -6791,54 +6906,36 @@ def test_title_page_with_label_below_name_and_repeat_on_next_page():
     assert [(page, letters) for page, letters, _ in book.skipped] == [(4, 18)], book.skipped
 
 
-def test_blank_gap_between_paragraphs_is_a_scene_break():
-    """Mitsuha (GambaTrans): la escena cambia con un hueco de unas tres líneas en blanco, sin símbolo ni adorno.
-    Es un separador de escena (sin imagen ni texto: sale el del estilo). Un hueco con una ilustración o un
-    título dentro, no; el espacio normal entre párrafos, tampoco."""
+def test_blank_lines_are_never_a_scene_break():
+    """Las líneas en blanco no son separador de escena en ningún libro: en Maryoku 2 (pág. 8) el hueco bajo
+    «El lado de una cierta chica rural» salía como ❖, y los de Mitsuha (GambaTrans), Re Zero o Strange Grief
+    también. Solo cuentan los símbolos y los adornos. Los párrafos de los dos lados siguen separados."""
     doc = pymupdf.open()
     para = lambda y, t: [(92, y, line(t, 57), 11, "cour"), (72, y + 14, line("sigue el parrafo", 60), 11, "cour"),
                          (72, y + 28, "fin.", 11, "cour")]
-    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv")] + para(150, "Primera escena del capitulo")
-             + para(194, "Sigue la primera escena") + para(290, "Cayo la noche y empezo otra")  # hueco de ~4 líneas
-             + para(334, "Mas de la segunda escena"))
-    page = add_page(doc, 2, para(150, "Texto antes de la ilustracion") + para(330, "Texto despues de la ilustracion")
-                    + [(72, 470, "Un subtitulo", 16, "hebo")] + para(520, "Texto tras el subtitulo"))
-    page.insert_image(pymupdf.Rect(200, 200, 300, 300), stream=jpeg(100, 100))
-    # 3: ficha de estado tras un hueco (Maryoku) y la firma del autor al final del epílogo (Eminence 7): no
-    add_page(doc, 3, para(150, "Mire mi pantalla de estado") + [(72, 250, "NOMBRE: Chise (Reencarnador)", 11, "cour")]
-             + para(350, "Ultimo parrafo del epilogo") + [(300, 450, "Autor Ejemplo", 11, "cour")])
-    for n in range(4, 9):  # texto corrido: un libro de verdad no tiene un hueco por página
+    # Maryoku 2: subtítulo del tamaño del texto, sin negrita, con una línea en blanco debajo (hueco de ~3 líneas)
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 20, "helv"), (72, 150, "El lado de una chica rural", 11, "cour")]
+             + para(198, "Yo era una chica de un pueblo"))
+    # Mitsuha (GambaTrans): la escena cambia con unas tres líneas en blanco
+    add_page(doc, 2, para(150, "Primera escena de la pagina") + para(194, "Sigue la primera escena")
+             + para(290, "Cayo la noche y empezo otra") + para(334, "Mas de la segunda escena"))
+    for n in range(3, 8):  # texto corrido: un libro de verdad no tiene un hueco por página
         add_page(doc, n, [row for y in range(150, 700, 44) for row in para(y, "Texto corrido sin huecos")])
-    path = TMP / "hueco-escena.pdf"
+    path = TMP / "lineas-en-blanco.pdf"
     doc.save(path)
     blocks = convert.analyze(path).blocks
-    kinds = [[b.kind for b in blocks if b.page == n and b.kind != "image"] for n in (1, 2, 3)]
-    gap = next((b for b in blocks if b.kind == "break"), None)
-    assert kinds == [["heading", "p", "p", "break", "p", "p"], ["p", "p", "heading", "p"], ["p", "p", "p", "p"]], kinds
-    assert gap is not None and not gap.image and not gap.html, gap
-    # Megami 4: una línea en blanco entre muchos párrafos, en todas las páginas: es el estilo del libro
-    doc = pymupdf.open()
-    for n in range(1, 4):
-        add_page(doc, n, [(72, 100, f"Capitulo {n}: Otro", 20, "helv")]
-                 + [row for y in range(150, 700, 90) for row in para(y, "Parrafo con hueco despues")])
-    doc.save(TMP / "huecos-estilo.pdf")
-    styled = [b.kind for b in convert.analyze(TMP / "huecos-estilo.pdf").blocks]
-    assert "break" not in styled, styled
-    # Farming Life 1: uno o dos por página (1,5 de media) agrupan párrafos de la misma escena. Mitsuha 3, el libro con
-    # más escenas, llega a 0,9 por página
-    doc = pymupdf.open()
-    for n in range(1, 5):
-        ys = (150, 194, 284, 328, 418, 462) if n % 2 else (150, 194, 284, 328, 372, 416)
-        add_page(doc, n, [(72, 100, f"Capitulo {n}: Otro", 20, "helv")]
-                 + [row for y in ys for row in para(y, "Parrafo de la misma escena")])
-    doc.save(TMP / "huecos-estilo-2.pdf")
-    styled = [b.kind for b in convert.analyze(TMP / "huecos-estilo-2.pdf").blocks]
-    assert "break" not in styled, styled
+    kinds = [[b.kind for b in blocks if b.page == n] for n in (1, 2)]
+    assert kinds == [["heading", "p", "p"], ["p", "p", "p", "p"]], kinds
+    assert _plain_of(blocks, 2)[2].startswith("Cayo la noche"), _plain_of(blocks, 2)
+
+
+def _plain_of(blocks, page):
+    return [convert._plain(b) for b in blocks if b.page == page]
 
 
 def test_blank_line_alone_is_not_a_break_when_symbols_are_padded():
-    """Oukoku 2 a 4: la escena cambia con «◇◇◇◇◇» entre dos líneas en blanco; una línea en blanco sola es una pausa,
-    no un separador (salían 40 a 70 de más por tomo). Dos líneas en blanco sí: la escena sin su «◇»."""
+    """Oukoku 2 a 4: la escena cambia con «◇◇◇◇◇» entre dos líneas en blanco: el símbolo es el separador. Una línea
+    en blanco sola es una pausa (salían 40 a 70 de más por tomo), y dos tampoco: las líneas en blanco nunca lo son."""
     para = lambda y, t: [(92, y, line(t, 57), 11, "cour"), (72, y + 14, line("sigue el parrafo", 60), 11, "cour"),
                          (72, y + 28, "fin.", 11, "cour")]
     doc = pymupdf.open()
@@ -6848,14 +6945,14 @@ def test_blank_line_alone_is_not_a_break_when_symbols_are_padded():
             rows += [(280, 224, "* * *", 11, "cour")] + para(270, "Otra escena empieza aqui")
         elif n in (3, 5, 7):  # línea en blanco sola
             rows += para(224, "Sigue la misma escena")
-        elif n == 8:  # dos líneas en blanco: escena sin su símbolo (Oukoku 2, pág. 94)
+        elif n == 8:  # dos líneas en blanco, sin símbolo (Oukoku 2, pág. 94): no es separador
             rows += para(254, "Otra escena sin simbolo")
         else:
             rows += para(194, "Sigue la misma escena")
         add_page(doc, n, ([(72, 100, "Capitulo 1: Inicio", 20, "helv")] if n == 1 else []) + rows)
     doc.save(TMP / "huecos-con-simbolo.pdf")
     breaks = [(b.page, b.html) for b in convert.analyze(TMP / "huecos-con-simbolo.pdf").blocks if b.kind == "break"]
-    assert breaks == [(2, "* * *"), (4, "* * *"), (6, "* * *"), (8, "")], breaks
+    assert breaks == [(2, "* * *"), (4, "* * *"), (6, "* * *")], breaks
 
 
 def test_blank_line_after_bold_subtitle_is_not_a_scene_break():
@@ -7100,6 +7197,140 @@ def test_editor_sheet_frames_round_trip_and_toggle():
     assert "<marco>" not in sheet.content(), sheet.content()
     sheet.undo()
     assert sheet.content().count("<marco>") == 3, sheet.content()
+
+
+def test_editor_sheet_has_no_empty_paragraphs_after_style_change():
+    """Nageki 1, epílogo: párrafos invisibles en la hoja (hueco con el texto «debajo») hasta ensancharla. Tras un
+    cambio de estilo Qt maqueta a trozos; si entonces llega el subrayado del corrector, da la maquetación por
+    acabada y deja párrafos sin líneas. Ningún párrafo con texto se queda sin maquetar."""
+    import random
+
+    import qtk
+
+    import editor
+
+    root = qtk.app()
+    rnd = random.Random(3)
+    words = "la casa del bosque tenía una puerta roja y nadie sabía quién vivía allí maná zzkx".split()
+    sheet = editor.Sheet()
+    sheet.resize(530, 420)
+    sheet.show()
+    sheet.set_content([(k, " ".join(rnd.choice(words) for _ in range(rnd.randint(3, 120)))) for k in range(432)], {})
+    sheet.setStyleSheet(sheet.styleSheet() + " ")  # como un cambio de tema o de zoom de la ventana
+    sheet.look.set_unknown({"maná", "zzkx"}, changed={"maná", "zzkx"})
+    for _ in range(200):
+        root.processEvents()
+    empty, block = 0, sheet.document().firstBlock()
+    while block.isValid():
+        empty += block.layout().lineCount() == 0
+        block = block.next()
+    sheet.close()
+    assert empty == 0, empty
+
+
+def test_text_editor_next_chapter_has_no_empty_paragraphs():
+    """Nageki 1: al pasar a un capítulo largo aún no abierto (◀ ▶, lista de capítulos), casi todos sus párrafos
+    quedaban sin maquetar (319 de 361): un hueco en la hoja, con el texto «debajo», hasta ensancharla o F11."""
+    import random
+
+    B, rnd = convert.Block, random.Random(5)
+    words = "la casa del bosque tenía una puerta roja y nadie sabía quién vivía allí desde hacía años".split()
+    long = [B("p", 2, " ".join(rnd.choice(words) for _ in range(rnd.randint(3, 120)))) for _ in range(400)]
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Corto."), B("heading", 2, "Capítulo 2"),
+                                      *long], [0, 2])
+    for _ in range(50):  # con el editor ya asentado (corrector, marcas): recién abierto no pasaba
+        root.update()
+    editor.step_section(1)
+    root.update()
+    empty, block = 0, editor.sheet.document().firstBlock()
+    while block.isValid():
+        empty += block.layout().lineCount() == 0
+        block = block.next()
+    count = editor.sheet.document().blockCount()
+    editor.win.done(0)
+    window.close()
+    assert count == 401 and empty == 0, (count, empty)
+
+
+def test_editor_sheet_aligns_inside_frames_and_makes_lists():
+    """En un recuadro el texto iba siempre a la izquierda y pegado; ahora se centra o va a la derecha («<marco
+    centro>») y sus párrafos se separan un poco. Los párrafos elegidos se vuelven lista de viñetas o numerada
+    («<lista decimal>»), como en Word: Intro en un elemento vacío sale de ella y todo se deshace de una vez."""
+    import qtk
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    lines = [(1, "Antes."), (2, "<marco>NOMBRE: Teto"), (3, "<marco derecha>CLASE: Espadachín"),
+             (4, "<lista decimal>Uno"), (5, "<lista decimal>Dos"), (6, "<lista disc>Punto"), (7, "Después.")]
+    sheet.set_content(lines, {})
+    assert sheet.content() == "\n\n".join(line for _, line in lines), sheet.content()
+    doc = sheet.document()
+
+    def at(n, end=None):
+        c = sheet.textCursor()
+        c.setPosition(doc.findBlockByNumber(n).position())
+        if end is not None:
+            c.setPosition(doc.findBlockByNumber(end).position() + 1, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+
+    def line(n):
+        return sheet.content().split("\n\n")[n]
+
+    third = doc.findBlockByNumber(2)
+    assert third.blockFormat().topMargin() == editor.FRAME_GAP and third.blockFormat().alignment() & Qt.AlignmentFlag.AlignRight
+    assert doc.findBlockByNumber(3).textList() == doc.findBlockByNumber(4).textList() != doc.findBlockByNumber(5).textList()
+    at(1)
+    sheet.toggle_center()
+    assert line(1) == "<marco centro>NOMBRE: Teto" and sheet.is_framed() and sheet.is_centered(), line(1)
+    sheet.set_align(None)
+    assert line(1) == "<marco>NOMBRE: Teto", line(1)
+    sheet.undo()
+    sheet.undo()
+    assert sheet.content() == "\n\n".join(line for _, line in lines), sheet.content()
+    at(0, 1)  # dos párrafos, uno en recuadro: lista con letras; salen del recuadro
+    sheet.set_list("lower-alpha")
+    assert (line(0), line(1)) == ("<lista lower-alpha>Antes.", "<lista lower-alpha>NOMBRE: Teto"), sheet.content()
+    sheet.undo()
+    assert sheet.content() == "\n\n".join(line for _, line in lines), sheet.content()
+    at(6)
+    sheet.set_list("disc")  # se une a la lista de arriba, del mismo estilo
+    assert line(6) == "<lista disc>Después." and doc.findBlockByNumber(6).textList() == doc.findBlockByNumber(5).textList()
+    sheet.set_list("disc")  # el mismo estilo otra vez: la quita
+    assert line(6) == "Después." and sheet.list_style() is None, line(6)
+    c = sheet.textCursor()
+    c.setPosition(doc.findBlockByNumber(4).position() + 3)  # final de «Dos»
+    sheet.setTextCursor(c)
+    sheet.split_here()  # elemento nuevo, vacío
+    assert sheet.list_style() == "decimal"
+    sheet.split_here()  # Intro en el vacío: fuera de la lista
+    assert sheet.list_style() is None and sheet.content() == "\n\n".join(line for _, line in lines), sheet.content()
+
+
+def test_epub_keeps_frame_alignment_and_lists():
+    """Lo que el editor guarda como «<marco centro>» o «<lista decimal>» sale en el EPUB: el párrafo centrado dentro
+    de su recuadro y los elementos seguidos del mismo estilo en una sola lista, y vuelve igual al texto del editor."""
+    import zipfile
+
+    book = convert.analyze(framed_pdf())
+    start = book.candidates[0] + 1
+    lines = convert.section_text(book, start, len(book.blocks)).split("\n\n")
+    lines[2] = lines[2].replace("<marco>", "<marco centro>")
+    lines[5:6] = ["<lista decimal>Primero", "<lista decimal>Segundo", "<lista circle>Suelto"]
+    convert.edit_section(book, start, len(book.blocks), "\n\n".join(lines))
+    assert [b.align for b in book.blocks[start + 1:start + 3]] == ["frame", "frame-center"]
+    assert convert.section_text(book, start, len(book.blocks)).split("\n\n")[:8] == lines[:8]
+    out = TMP / "recuadro-listas.epub"
+    convert.write_epub(book, [(book.candidates[0], "Capitulo 1")], out)
+    with zipfile.ZipFile(out) as z:
+        page = next(z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml") and b"Lorna" in z.read(n))
+    assert '<p class="sub center">' in page and page.count('<div class="marco">') == 2, page
+    assert ('<ol class="lista" style="list-style-type: decimal">\n<li>Primero</li>\n<li>Segundo</li>\n</ol>\n'
+            '<ul class="lista" style="list-style-type: circle">\n<li>Suelto</li>\n</ul>') in page, page
+    assert convert.check_epub(out) == [], convert.check_epub(out)
 
 
 def test_bookmarked_page_starts_new_paragraph_without_indent():
@@ -9550,7 +9781,7 @@ def test_epub_sources_and_output_name():
 
 
 def card_text(window, n):
-    """Texto de la tarjeta n de recientes en la pantalla de inicio (o del aviso «Aún no has abierto…»)."""
+    """Texto de la tarjeta n de recientes en la pantalla de inicio."""
     from PySide6.QtWidgets import QLabel
 
     item = window.recent_list.item(n)
@@ -9616,15 +9847,20 @@ def test_window_start_screen_shows_only_what_needs_no_book():
     assert first_page.height() == 124 and not app._thumb_path(broken).exists(), first_page.size()
 
 def test_window_empty_screen_and_dropped_pdf():
-    """Sin PDF: la pantalla vacía con los recientes. Soltar archivos sobre la ventana abre el primer .pdf y
-    no hace nada si no hay ninguno."""
+    """Sin PDF: la pantalla vacía con los recientes; sin ninguno, un aviso centrado que nombra PDF y EPUB en vez de
+    una línea suelta arriba de la lista. Soltar archivos sobre la ventana abre el primer .pdf y no hace nada si no
+    hay ninguno."""
     from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl
     from PySide6.QtGui import QDropEvent
 
     import app
 
     root, window = visible_window()
-    empty = (window.stack.currentIndex(), window.recent_list.item(0).text())
+    from PySide6.QtWidgets import QLabel
+    root.update()
+    hint = " ".join(label.text() for label in window.recent_empty.findChildren(QLabel))
+    empty = (window.stack.currentIndex(), window.recent_list.isVisible(), window.recent_empty.isVisible(),
+             "PDF" in hint and "EPUB" in hint)
     notes = TMP / "notas.txt"
     notes.write_text("no es un pdf", encoding="utf-8")
     pdf = make_novel()
@@ -9644,7 +9880,7 @@ def test_window_empty_screen_and_dropped_pdf():
     window.show_book(convert.analyze(pdf))
     book_page = window.stack.currentIndex()
     window.close()
-    assert empty == (0, "Aún no has abierto ningún PDF"), empty
+    assert empty == (0, False, True, True), (empty, hint)
     assert picked == (None, str(pdf).replace("\\", "/")) or picked == (None, str(pdf)), picked
     assert len(opened) == 1 and Path(opened[0]) == pdf, opened
     assert book_page == 1

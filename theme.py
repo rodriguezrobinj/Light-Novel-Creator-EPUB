@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPalette, QPen
-from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QProxyStyle, QStyle, QWidget
 
 CHOICES = ("Sistema", "Claro", "Oscuro")
 
@@ -18,7 +18,7 @@ DIALOG = {"s": (560, 260), "m": (780, 440), "l": (980, 600)}  # tamaño mínimo 
 # Un icono es un glifo de texto monocromo que toma el color del tema. Nunca un emoji: Windows 10 y 11 lo dibujan
 # distinto y sale a color (Qt ignora U+FE0E). Un glifo = una acción en toda la app
 ICONS = {"warn": "▲", "ok": "✓", "close": "✕", "menu": "▾", "menu_open": "▴", "prev": "◀", "next": "▶",
-         "first": "◀◀", "last": "▶▶", "undo": "↶", "redo": "↷", "note": "✎", "split": "✂", "center": "≡",
+         "first": "◀◀", "last": "▶▶", "undo": "↶", "redo": "↷", "note": "✎", "split": "✂", "center": "≡", "left": "⇤",
          "frame": "▭", "right": "⇥", "join": "⤒", "scene": "❖", "nav": "☰", "search": "⌕", "read": "♪",
          "link": "↗", "doc": "🗎", "dot": "●", "minus": "−", "symbols": "Ω", "changes": "±", "stats": "Σ",
          "show": "◉", "image": "▣"}
@@ -75,9 +75,11 @@ QWidget {{ font-family: "Segoe UI"; font-size: 9pt; color: {ink}; }}
 QMainWindow, QDialog {{ background: {bg}; }}
 QPushButton, QToolButton {{ border: 1px solid {edge}; border-radius: 6px; padding: 4px 12px; background: {card}; }}
 QPushButton:hover, QToolButton:hover {{ background: {hover}; }}
+QPushButton:pressed, QToolButton:pressed {{ background: {press}; }}
 QPushButton:open, QToolButton:open {{ background: {card}; border-bottom-color: {card}; border-bottom-left-radius: 0;
     border-bottom-right-radius: 0; }}
-QPushButton:pressed, QToolButton:pressed {{ background: {press}; }}
+QPushButton[up="true"]:open, QToolButton[up="true"]:open {{ border-bottom-color: {edge}; border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px; border-top-color: {card}; border-top-left-radius: 0; border-top-right-radius: 0; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {hint}; }}
 QToolButton::menu-indicator {{ image: none; width: 0; }}
 QToolButton#menu {{ padding-right: 28px; }}
@@ -128,6 +130,7 @@ QTabBar::tab {{ padding: 4px 12px; border: 0; border-bottom: 2px solid transpare
 QTabBar::tab:selected {{ color: {acc}; border-bottom-color: {acc}; font-weight: 600; }}
 QMenu {{ background: {card}; border: 1px solid {edge}; padding: 2px; }}
 QMenu#drop {{ border-top: 0; }}
+QMenu#drop[up="true"] {{ border-top: 1px solid {edge}; border-bottom: 0; }}
 QFrame#seam {{ background: {edge}; }}
 QMenu::item {{ padding: 4px 24px 4px 22px; min-height: 16px; }}
 QMenu::item:selected {{ background: {sel}; color: {ink}; }}
@@ -278,6 +281,10 @@ class _Shown(QObject):
     lista desplegable que no cabe debajo de su campo se abre encima: el campo se une a ella por arriba (up)."""
 
     def eventFilter(self, obj, event):
+        # Una lista sin campo de texto no toma el foco con el ratón: al cerrarla le quedaba el borde azul del foco
+        if (event.type() == QEvent.Type.Polish and isinstance(obj, QComboBox) and not obj.isEditable()
+                and obj.focusPolicy() in (Qt.FocusPolicy.StrongFocus, Qt.FocusPolicy.WheelFocus)):
+            obj.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         if event.type() != QEvent.Type.Show or not isinstance(obj, QWidget):
             return False
         if obj.windowType() in (Qt.WindowType.Window, Qt.WindowType.Dialog):
