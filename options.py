@@ -36,8 +36,19 @@ OPTIONS = (
            "El Kindle apenas parte palabras en español: sin esto el texto justificado queda con huecos."),
     Option("Texto", "reading", "check", "Minutos de lectura en el índice",
            "Cuánto se tarda en leer cada capítulo, en la página «Contenido»."),
-    Option("Texto", "credits", "check", "Página de créditos",
-           "Tras la portada, una página con los datos del libro: traductor, grupo, ilustrador…"),
+    Option("Texto", "credits", "check", "Página de título y créditos",
+           "Tras la portada: título, volumen y los créditos por rol, con enlaces. Sus datos, en «Editar datos» → "
+           "«Más datos…»."),
+    Option("Texto", "synopsis", "check", "Página de sinopsis",
+           "Tras la portada, la sinopsis del libro. **negrita** y *cursiva* en la sinopsis se ven así."),
+    Option("Texto", "endnotes", "check", "Notas al final del libro",
+           "Todas las notas en una página «Notas», con enlace de vuelta. Si no, cada capítulo lleva las suyas al final."),
+    Option("Texto", "note_style", "choice", "Llamada de nota", "Cómo se ve el número de la nota en el texto."),
+    Option("Texto", "heading_font", "choice", "Fuente de títulos",
+           "Los títulos de capítulo con otra letra: Eagle Lake es caligráfica. «Archivo propio» usa el de abajo."),
+    Option("Texto", "heading_font_file", "file", "Archivo de fuente de títulos", "Un .ttf o .otf, para «Archivo propio»."),
+    Option("Texto", "box_style", "choice", "Estilo de recuadros",
+           "«Pantalla de juego»: fondo negro, brillo azul y letra blanca, como las ventanas de opciones de un juego."),
     Option("Texto", "autocase", "check", "Corregir las mayúsculas al abrir si vienen en MAYÚSCULAS",
            "Los títulos escritos todo en mayúsculas pasan a mayúsculas al estilo español."),
     Option("Ilustraciones", "shrink", "check", "Reducir imágenes", "Las imágenes son casi todo el peso del EPUB."),
@@ -45,6 +56,8 @@ OPTIONS = (
     Option("Ilustraciones", "gray", "check", "Imágenes en gris", "Para e-readers de tinta: pesa menos y se ve igual."),
     Option("Ilustraciones", "trim", "check", "Recortar márgenes blancos de las ilustraciones",
            "Quita el borde blanco que traen algunas ilustraciones escaneadas."),
+    Option("Ilustraciones", "logo", "file", "Logo del grupo",
+           "Una imagen PNG o JPG en su propia página, tras la página de título. En «Libros nuevos», para todos."),
     Option("PDF", "whole_words", "check", "No partir palabras al final de línea",
            "La palabra que no cabe pasa entera a la línea siguiente, sin guion."),
     Option("PDF", "pdf_size", "choice", "Tamaño preferido", "Sale primero en el menú «PDF ▾»."),
@@ -62,6 +75,9 @@ OPTIONS = (
 # está en la barra de abajo de la ventana: se cambia mirando la vista previa
 BOOK_KEYS = tuple(o.key for o in OPTIONS if o.category in CATEGORIES[BOOK]) + ("style", "separator", "font", "font_file",
                                                                                     "contents")
+
+
+FILE_TYPES = {"logo": ("Imagen", "*.png *.jpg *.jpeg"), "heading_font_file": ("Fuente", "*.ttf *.otf")}
 
 
 def fold(text):
@@ -252,16 +268,20 @@ class OptionsDialog:
         if option.kind == "translate":
             self.translation_page(layout, option)
             return
-        if option.kind == "folder":
+        if option.kind in ("folder", "file"):
             widget = QLabel(value or "Ninguna")
             widget.setWordWrap(True)
             pick, stop = QPushButton("Elegir…"), QPushButton("Dejar de vigilar")
             stop.setEnabled(bool(value))
-            pick.clicked.connect(lambda: self.pick_folder(key))
+            pick.clicked.connect(lambda: self.pick_folder(key) if option.kind == "folder" else self.pick_file(key))
+            if option.kind == "file":
+                stop.setText("Quitar")
             stop.clicked.connect(lambda: (self.put(key, ""), self.show(self.category)))
             row = QWidget()
             line = QHBoxLayout(row)
             line.setContentsMargins(0, 0, 0, 0)
+            if option.kind == "file":  # la carpeta vigilada tiene su página; un archivo comparte la suya
+                line.addWidget(QLabel(f"{option.label}:"))
             line.addWidget(widget, 1)
             line.addWidget(pick)
             line.addWidget(stop)
@@ -451,6 +471,12 @@ class OptionsDialog:
         show_engine()
         self.parts.update(engine=engine, model=model, base=base, key=key, eye=eye, src=src, dst=dst,
                           models=find_models, status=status)
+
+    def pick_file(self, key):
+        path = qtk.filedialog.askopenfilename(filetypes=[FILE_TYPES[key]])
+        if path:
+            self.put(key, path)
+            self.show(self.category)
 
     def pick_folder(self, key):
         folder = self.owner.ask_folder()

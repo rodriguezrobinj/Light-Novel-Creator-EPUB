@@ -190,6 +190,7 @@ def test_epub_has_series_metadata():
     collection = [m for m in metas if m.get("property") == "belongs-to-collection"]
     assert len(collection) == 1 and collection[0].text == "Mi Serie", [(m.attrib, m.text) for m in metas]
     refined = {m.get("property"): m.text for m in metas if m.get("refines") == "#" + collection[0].get("id")}
+    assert refined.pop("dcterms:identifier").startswith("urn:uuid:"), refined  # el mismo en todos los tomos
     assert refined == {"collection-type": "series", "group-position": "3"}, refined
     calibre = {m.get("name"): m.get("content") for m in metas if m.get("name", "").startswith("calibre:")}
     assert calibre == {"calibre:series": "Mi Serie", "calibre:series_index": "3"}, calibre
@@ -290,8 +291,8 @@ def test_chapter_title_split_into_number_and_name():
     out = TMP / "titulo-partido.epub"
     convert.write_epub(styled_book(), [(0, "Capítulo 3: La Guarida"), (4, "Epílogo")], out)
     text = epub_text(out)
-    assert '<h1><span class="num">Capítulo 3</span> <span class="name">La Guarida</span></h1>' in text, text
-    assert "<h1>Epílogo</h1>" in text  # sin número ni nombre: una sola línea
+    assert '<h1 id="titulo"><span class="num">Capítulo 3</span> <span class="name">La Guarida</span></h1>' in text, text
+    assert '<h1 id="titulo">Epílogo</h1>' in text  # sin número ni nombre: una sola línea
     assert "Capítulo 3: La Guarida" in epub_file(out, "OEBPS/nav.xhtml")  # el índice conserva el título entero
 
 
@@ -307,7 +308,7 @@ def test_epub_landmarks_guide_and_contents_page():
         opf = ET.fromstring(z.read("OEBPS/content.opf"))
         contents = z.read("OEBPS/contents.xhtml").decode()
         first_chapter = next(n for n in sorted(z.namelist()) if re.fullmatch(r"OEBPS/sec\d+\.xhtml", n)
-                             and "<h1>" in z.read(n).decode().replace('<h1><span', "<h1>"))
+                             and '<h1 id="titulo">' in z.read(n).decode())
     landmarks = next(e for e in nav.iter() if e.get(ops) == "landmarks")
     marks = {a.get(ops): a.get("href") for a in landmarks.iter() if a.get("href")}
     assert marks == {"cover": "cover.xhtml", "toc": "contents.xhtml",
@@ -315,7 +316,7 @@ def test_epub_landmarks_guide_and_contents_page():
     guide = {r.get("type"): r.get("href") for r in opf.findall("o:guide/o:reference", opf_ns)}
     assert guide == {"cover": "cover.xhtml", "toc": "contents.xhtml", "text": marks["bodymatter"]}, guide
     spine = [r.get("idref") for r in opf.findall("o:spine/o:itemref", opf_ns)]
-    assert spine[:2] == ["cover", "contents"], spine
+    assert spine[:3] == ["cover", "s0", "contents"], spine  # las láminas del principio, antes del índice
     assert 'href="' + marks["bodymatter"] + '"' in contents and "Capitulo 2: Final" in contents
     assert re.search(r'href="sec\d+\.xhtml#t\d+"', contents), contents  # subtítulos enlazados
 
@@ -1401,7 +1402,7 @@ def test_epub_index_nests_subtitles_under_their_chapter():
     out = TMP / "indice.epub"
     convert.write_epub(book, [(book.candidates[0], "Capitulo 1: Inicio")], out)
     toc = [(level, title) for level, title, _ in pymupdf.open(out).get_toc()]
-    assert toc == [(1, "Inicio"), (1, "Capitulo 1: Inicio"), (2, "Capitulo 2: Final")], toc
+    assert toc == [(1, "Ilustraciones"), (1, "Capitulo 1: Inicio"), (2, "Capitulo 2: Final")], toc
     ns = {"n": "http://www.daisy.org/z3986/2005/ncx/"}
     with zipfile.ZipFile(out) as z:
         ncx = ET.fromstring(z.read("OEBPS/toc.ncx"))
@@ -2243,10 +2244,187 @@ def test_epub_metadata_group_translator_synopsis():
     convert.write_epub(book, [(0, "Cap 1")], out)
     opf = epub_file(out, "OEBPS/content.opf")
     ET.fromstring(opf.encode())  # sigue siendo XML válido con & y <>
-    assert "<dc:publisher>Grupo &amp; Co</dc:publisher>" in opf, opf
+    assert "<dc:publisher>Grupo</dc:publisher>\n<dc:publisher>Co</dc:publisher>" in opf, opf  # uno por grupo
     assert '<dc:contributor id="trl">Ana</dc:contributor>' in opf and ">trl</meta>" in opf, opf
     assert "<dc:description>Una bruja &lt;muy&gt; fuerte.</dc:description>" in opf, opf
 
+
+
+def full_book():
+    """Libro con todo lo del EPUB de referencia (Date A Live 14, ZeePubs): láminas, prólogo con nota, capítulo con
+    recuadro, palabras del autor y todos los datos de «Más datos…»."""
+    B = convert.Block
+    blocks = [B("image", 1, image=jpeg(300, 400)), B("heading", 2, "Prólogo: Estrellas"),
+              B("p", 2, 'Texto<span class="nota">Una nota</span>.'), B("heading", 3, "Capítulo 1: Templo"),
+              B("p", 3, "Más."), B("break", 3, "* * *"), B("p", 3, "① Opción", align="frame"),
+              B("heading", 4, "Palabras del autor"), B("p", 4, 'Gracias<span class="nota">Otra</span>.')]
+    book = convert.Book("Date A Live", "Koushi Tachibana", jpeg(300, 400), blocks, [1, 3, 7], series="Date A Live",
+                        volume="14", translator="Jorelex & AddLu y Neo", publisher="DALT, EHJR",
+                        description="**¿¡Haz que se enamore!?**\nSegundo *párrafo* con 3 * 4 y <etiqueta> & más.",
+                        illustrator="Tsunako", original_title="デート・ア・ライブ")
+    for name, value in (("subtitle", "Planet Mukuro"), ("franchise", "Date A Live Universo"), ("rating", "4,5"),
+                        ("romaji_title", "Deeto a Raibu"), ("author_native", "橘 公司"), ("illustrator_native", "つなこ"),
+                        ("epub_by", "Zhi"), ("distributor", "ZeePubs"), ("relay", "chn-ing: Inverse ★ Kurumi"),
+                        ("isbn", "978-40-4070-695-5"), ("asin", "B01CZALD9Y"),
+                        ("source_url", "https://datealivetranslation.blogspot.com/"),
+                        ("links", "Date A Live Translations = https://datealivetranslation.blogspot.com/\n"
+                                  "mal = ftp://algo\nhttps://yenpress.com"),
+                        ("revised", "08.04.2026")):
+        setattr(book, name, value)
+    chapters = [(1, "Prólogo: Estrellas"), (3, "Capítulo 1: Templo"), (7, "Palabras del autor")]
+    return book, chapters
+
+
+def test_epub_metadata_complete():
+    """Metadatos como el EPUB de referencia: una persona por nombre, títulos y autor en japonés, identificadores,
+    colección dentro de colección, tipo, valoración y sinopsis con formato (escapada, sin perder lo suelto)."""
+    book, chapters = full_book()
+    out = TMP / "metadatos-completos.epub"
+    convert.write_epub(book, chapters, out)
+    opf = epub_file(out, "OEBPS/content.opf")
+    ET.fromstring(opf.encode())
+    for line in ('<dc:contributor id="trl">Jorelex</dc:contributor>', '<dc:contributor id="trl2">AddLu</dc:contributor>',
+                 '<dc:contributor id="trl3">Neo</dc:contributor>', '<meta refines="#mrk" property="role" '
+                 'scheme="marc:relators">mrk</meta>', '<meta refines="#dst" property="role" scheme="marc:relators">dst',
+                 "<dc:publisher>DALT</dc:publisher>\n<dc:publisher>EHJR</dc:publisher>",
+                 '<meta refines="#title" property="alternate-script" xml:lang="ja">デート・ア・ライブ</meta>',
+                 '<meta refines="#title" property="alternate-script" xml:lang="ja-Latn">Deeto a Raibu</meta>',
+                 '<meta refines="#aut" property="alternate-script" xml:lang="ja">橘 公司</meta>',
+                 '<meta refines="#ill" property="alternate-script" xml:lang="ja">つなこ</meta>',
+                 '<dc:identifier id="isbn">urn:isbn:9784040706955</dc:identifier>',
+                 'scheme="onix:codelist5">15</meta>', "urn:amazon:B01CZALD9Y",
+                 '<dc:identifier id="fuente">https://datealivetranslation.blogspot.com/</dc:identifier>',
+                 '<meta property="belongs-to-collection" id="coleccion" refines="#serie">Date A Live Universo</meta>',
+                 "<dc:type>Novela ligera</dc:type>", '<meta name="calibre:rating" content="9"/>'):
+        assert line in opf, (line, opf)
+    description = re.search(r"<dc:description>(.*)</dc:description>", opf)[1]
+    assert html.unescape(description) == ("<b>¿¡Haz que se enamore!?</b><br/>Segundo <i>párrafo</i> con 3 * 4 y "
+                                          "&lt;etiqueta&gt; &amp; más."), description
+    book.isbn, book.rating, book.book_type = "12345", "seis", "Manga"  # mal escritos: no salen
+    convert.write_epub(book, chapters, out)
+    opf = epub_file(out, "OEBPS/content.opf")
+    assert "isbn" not in opf and "calibre:rating" not in opf and "<dc:type>Manga</dc:type>" in opf, opf
+    assert convert._isbn("40-4070-695-x") == "404070695X" and convert._people(" , Ana ;") == ["Ana"]
+    old = TMP / "metadatos-completos-epub2.epub"
+    book.isbn = "9784040706955"
+    convert.write_epub(book, chapters, old, epub2=True)
+    opf = epub_file(old, "OEBPS/content.opf")
+    assert '<dc:identifier opf:scheme="ISBN">9784040706955</dc:identifier>' in opf and "refines" not in opf, opf
+    assert not convert.check_epub(old), convert.check_epub(old)
+
+
+def test_epub_semantics_sections_and_landmarks():
+    """Cada página dice qué es (epub:type y role): láminas como preliminares, prólogo, capítulo, palabras del autor
+    como finales; los puntos de referencia y el índice del lector llevan todo. Apple Books usa las fuentes."""
+    book, chapters = full_book()
+    out = TMP / "semantica.epub"
+    convert.write_epub(book, chapters, out, synopsis=True)
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        pages = {n: z.read(n).decode() for n in names if n.endswith(".xhtml")}
+        apple = z.read("META-INF/com.apple.ibooks.display-options.xml").decode()
+    assert '<option name="specified-fonts">true</option>' in apple
+    expected = {"sec001.xhtml": ('<body epub:type="frontmatter">', '<section aria-label="Ilustraciones">'),
+                "sec002.xhtml": ('<body epub:type="bodymatter">', '<section epub:type="prologue" role="doc-prologue" '
+                                 'aria-labelledby="titulo">'),
+                "sec003.xhtml": ('<body epub:type="bodymatter">', 'epub:type="chapter" role="doc-chapter"'),
+                "sec004.xhtml": ('<body epub:type="backmatter">', 'epub:type="afterword" role="doc-afterword"'),
+                "sinopsis.xhtml": ('epub:type="abstract" role="doc-abstract"', "<p><b>¿¡Haz que se enamore!?</b></p>"),
+                "cover.xhtml": ('epub:type="cover"', 'role="doc-cover"')}
+    for name, parts in expected.items():
+        for part in parts:
+            assert part in pages["OEBPS/" + name], (name, part, pages["OEBPS/" + name])
+    nav = pages["OEBPS/nav.xhtml"]
+    order = re.findall(r'<li><a href="([^"#]+)">', nav.split("landmarks")[0])
+    assert order == ["cover.xhtml", "sinopsis.xhtml", "sec001.xhtml", "contents.xhtml", "sec002.xhtml", "sec003.xhtml",
+                     "sec004.xhtml"], order
+    marks = dict(re.findall(r'<a epub:type="(\w+)" href="([^"]+)"', nav))
+    assert marks == {"cover": "cover.xhtml", "toc": "contents.xhtml", "bodymatter": "sec002.xhtml",
+                     "prologue": "sec002.xhtml", "afterword": "sec004.xhtml"}, marks
+    spine = re.findall(r'<itemref idref="([^"]+)"', epub_file(out, "OEBPS/content.opf"))
+    assert spine == ["cover", "synopsis", "s0", "contents", "s1", "s2", "s3"], spine
+    assert "Cubierta" not in epub_file(out, "OEBPS/toc.ncx")  # el índice del PDF sigue siendo solo la lectura
+    assert not convert.check_epub(out), convert.check_epub(out)
+    kobo = TMP / "semantica.kepub.epub"
+    convert.write_epub(book, chapters, kobo, kepub=True)
+    assert '<body epub:type="bodymatter">\n<div id="book-columns">' in epub_file(kobo, "OEBPS/sec002.xhtml")
+    old = TMP / "semantica-epub2.epub"
+    convert.write_epub(book, chapters, old, epub2=True, synopsis=True)
+    with zipfile.ZipFile(old) as z:
+        assert not any("epub:type" in z.read(n).decode() or "<section" in z.read(n).decode()
+                       for n in z.namelist() if n.endswith(".xhtml")), "EPUB 2 con semántica de EPUB 3"
+    assert not convert.check_epub(old), convert.check_epub(old)
+    book.description = ""
+    convert.write_epub(book, chapters, out, synopsis=True)
+    assert "sinopsis.xhtml" not in zipfile.ZipFile(out).namelist()  # sin sinopsis, sin página
+
+
+def test_epub_title_page_logo_and_endnotes():
+    """Página de título con ilustración, subtítulo, volumen, furigana, enlaces y fechas; logo en su página; notas al
+    final con su vuelta y la llamada «❮01❯». Un enlace mal escrito sale como texto y un logo borrado no sale."""
+    book, chapters = full_book()
+    logo = TMP / "logo.png"
+    pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 20), 1).save(logo)
+    out = TMP / "pagina-de-titulo.epub"
+    convert.write_epub(book, chapters, out, credits=True, title_image=convert.image_key(book.blocks[0].image),
+                       logo=str(logo), endnotes=True,
+                       note_style="❮01❯")
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        title = z.read("OEBPS/credits.xhtml").decode()
+        notes = z.read("OEBPS/notas.xhtml").decode()
+        prologue = z.read("OEBPS/sec002.xhtml").decode()
+        nav = z.read("OEBPS/nav.xhtml").decode()
+        opf = z.read("OEBPS/content.opf").decode()
+    for part in ('<div class="tp-img"><img src="img/titulo.jpg" alt=""/></div>', '<section epub:type="titlepage"',
+                 '>Date A Live<br/><span class="tp-sub">Planet Mukuro</span></h1>',
+                 "Volumen 14<br/><small>[Novela ligera]</small>",
+                 "<b>Autor:</b> <ruby>橘 公司<rp>(</rp><rt>Koushi Tachibana</rt><rp>)</rp></ruby>",
+                 "<b>Traducción intermedia:</b> chn-ing: Inverse ★ Kurumi", "<b>Maquetación EPUB:</b> Zhi",
+                 '<a href="https://datealivetranslation.blogspot.com/">Date A Live Translations</a>', "<p>mal</p>",
+                 '<a href="https://yenpress.com">https://yenpress.com</a>', "<b>Última corrección:</b> 08.04.2026",
+                 "EPUB creado el "):
+        assert part in title, (part, title)
+    assert "OEBPS/img/logo.png" in names and 'epub:type="colophon"' in epub_file(out, "OEBPS/logo.xhtml")
+    assert '<li id="nota1"><p><a href="sec002.xhtml#ref1" role="doc-backlink">❮01❯</a> Una nota</p></li>' in notes
+    assert '<li id="nota2"><p><a href="sec004.xhtml#ref2"' in notes and 'epub:type="endnotes"' in notes, notes
+    assert 'href="notas.xhtml#nota1" id="ref1">❮01❯</a>' in prologue and "<aside" not in prologue, prologue
+    assert '<a epub:type="endnotes" href="notas.xhtml">' in nav and '<a epub:type="titlepage"' in nav, nav
+    spine = re.findall(r'<itemref idref="([^"]+)"', opf)
+    assert spine == ["cover", "s0", "credits", "logo", "contents", "s1", "s2", "s3", "notas"], spine
+    assert not convert.check_epub(out), convert.check_epub(out)
+    logo.unlink()
+    old = TMP / "pagina-de-titulo-epub2.epub"
+    convert.write_epub(book, chapters, old, epub2=True, credits=True, logo=str(logo), endnotes=True)
+    title = epub_file(old, "OEBPS/credits.xhtml")
+    assert "<b>Autor:</b> Koushi Tachibana (橘 公司)" in title and "<ruby>" not in title, title
+    assert "logo.xhtml" not in zipfile.ZipFile(old).namelist()  # el logo ya no está: sin página, sin error
+    assert not convert.check_epub(old), convert.check_epub(old)
+
+
+def test_epub_heading_font_separator_and_game_box():
+    """Fuente de títulos aparte (Eagle Lake o un archivo propio, que si se borró no sale), Liberation Serif para el
+    texto, separador escrito a mano y recuadros «Pantalla de juego»."""
+    book, chapters = full_book()
+    out = TMP / "estilo-referencia.epub"
+    convert.write_epub(book, chapters, out, heading_font="Eagle Lake", font="Liberation Serif",
+                       separator="※ ・ ※ ・ ※", box_style="Pantalla de juego")
+    with zipfile.ZipFile(out) as z:
+        names, css = z.namelist(), z.read("OEBPS/style.css").decode()
+        chapter = z.read("OEBPS/sec003.xhtml").decode()
+    assert "OEBPS/fonts/eaglelake.ttf" in names and "OEBPS/fonts/liberation-700-italic.ttf" in names, names
+    assert 'font-family: "Titulos"' in css and 'src: url("fonts/eaglelake.ttf")' in css, css
+    assert "box-shadow: 0 0 10px 1px #00219b" in css and "@media amzn-kf8" in css
+    assert '<p class="brk">※ ・ ※ ・ ※</p>' in chapter and '<div class="marco">' in chapter, chapter
+    convert.write_epub(book, chapters, out, heading_font="Lo que sea", separator="<b>~ ~</b>")
+    with zipfile.ZipFile(out) as z:
+        assert not any("fonts/" in n for n in z.namelist()) and "Titulos" not in z.read("OEBPS/style.css").decode()
+        assert '<p class="brk">&lt;b&gt;~ ~&lt;/b&gt;</p>' in z.read("OEBPS/sec003.xhtml").decode()
+    own = TMP / "Mi letra.ttf"
+    own.write_bytes((convert.FONT_DIR / "eaglelake.ttf").read_bytes())
+    convert.write_epub(book, chapters, out, heading_font=str(own))
+    assert "OEBPS/fonts/titulos.ttf" in zipfile.ZipFile(out).namelist()
+    assert not convert.check_epub(out), convert.check_epub(out)
 
 
 def test_epub_accessibility_metadata_and_alt_text():
@@ -2989,6 +3167,78 @@ def test_window_metadata_cover_and_shrink_reach_the_epub():
     assert (pix.width, pix.height) == (933, convert.SHRINK), (pix.width, pix.height)  # reducida por defecto
 
 
+def test_window_more_data_title_page_and_options_reach_the_epub():
+    """«Más datos…»: cerrar sin Aceptar no cambia nada; lo escrito y la ilustración elegida van a la revisión y a la
+    página de título del EPUB. Las opciones nuevas llegan a write_epub, el logo borrado no, y el separador se escribe."""
+    import time
+
+    import app
+    from PySide6.QtWidgets import QLabel, QListWidget, QPushButton
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    out = TMP / "mas-datos.epub"
+    originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
+    app.messagebox.showinfo = lambda *args: None
+    try:
+        window.edit_more_data()
+        win, entries, links, save = window.more_window
+        entries["subtitle"].setText("No vale")
+        win.close()
+        cancelled = window.subtitle_var.get()
+        window.edit_more_data()
+        win, entries, links, save = window.more_window
+        entries["subtitle"].setText("  Planet Mukuro ")
+        entries["author_native"].setText("橘 公司")
+        entries["isbn"].setText("978-40-4070-695-5")
+        links.setPlainText("Web = https://a.com")
+        next(b for b in win.findChildren(QPushButton) if b.text() == "Elegir ilustración…").click()
+        grid = window.picture_window.findChild(QListWidget)
+        grid.itemClicked.emit(grid.item(0))
+        picked = next(b.image for b in window.book.blocks if b.kind == "image")
+        save()
+        state = window.review_state()
+        window.credits_var.set(True)
+        window.author_var.set("Koushi Tachibana")
+        window.generate()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+        editable = window.separator_box.isEditable()
+        options = window.open_options("Ilustraciones")
+        labels = [w.text() for w in options.win.findChildren(QLabel) if w.isVisible()]
+        options.cancel()
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
+        window.close()
+    assert cancelled == "", cancelled
+    assert "Logo del grupo:" in labels and "Ninguna" in labels, labels  # la fila de archivo dice qué archivo es
+    assert (state["subtitle"], state["isbn"], state["links"]) == ("Planet Mukuro", "978-40-4070-695-5",
+                                                                  "Web = https://a.com"), state
+    assert state["title_image"] == convert.image_key(picked) and state["synopsis"] is True, state
+    page = epub_file(out, "OEBPS/credits.xhtml")
+    assert '<span class="tp-sub">Planet Mukuro</span>' in page and "<ruby>橘 公司" in page, page
+    assert 'src="img/titulo.jpg"' in page and '<a href="https://a.com">Web</a>' in page, page
+    assert "urn:isbn:9784040706955" in epub_file(out, "OEBPS/content.opf")
+    logo = TMP / "logo-borrado.png"
+    options = app._write_options({"logo": str(logo), "heading_font": "Eagle Lake", "box_style": "Pantalla de juego",
+                                  "endnotes": True, "note_style": "❮01❯", "separator": "※ ・ ※ ・ ※"})
+    assert options["logo"] == "" and options["heading_font"] == "Eagle Lake" and options["endnotes"], options
+    assert (options["box_style"], options["note_style"], options["separator"]) == (
+        "Pantalla de juego", "❮01❯", "※ ・ ※ ・ ※"), options
+    logo.write_bytes(b"\x89PNG")
+    own = TMP / "titulos.ttf"
+    own.write_bytes(b"x")
+    options = app._write_options({"logo": str(logo), "heading_font": app.HEADING_OWN, "heading_font_file": str(own),
+                                  "note_style": "otra", "box_style": "otra"})
+    assert (options["logo"], options["heading_font"]) == (str(logo), str(own)), options
+    assert (options["note_style"], options["box_style"], options["synopsis"]) == ("1", "Sencillo", True), options
+    assert editable
+
+
 def two_color(width, height):
     """JPEG con la mitad izquierda roja y la derecha azul, para saber qué mitad es cada página."""
     pix = painted(width, height, (255, 0, 0), (width // 2, 0, width, height, (0, 0, 255)))
@@ -3169,7 +3419,7 @@ ANILIST_SAMPLE = {"data": {"Page": {"media": [{
     "startDate": {"year": 2019}, "genres": ["Fantasy", "Slice of Life", "Raro"],
     "description": "Chise was an office worker.<br><br>Now she is a <i>witch</i> &amp; more.\n(Source: J-Novel Club)",
     "staff": {"edges": [{"role": "Illustration", "node": {"name": {"full": "Kei"}}},
-                        {"role": "Story", "node": {"name": {"full": "Aloha Zaregoto"}}}]},
+                        {"role": "Story", "node": {"name": {"full": "Aloha Zaregoto", "native": "アロハ座長"}}}]},
     "characters": {"edges": [{"role": "MAIN", "node": {"name": {"full": "Chise Itou"}}},
                              {"role": "SUPPORTING", "node": {"name": {"full": None}}},
                              {"role": "BACKGROUND", "node": {"name": {"full": "Teto"}}}]}}]}}}
@@ -3181,6 +3431,8 @@ def test_anilist_results_and_fill_only_empty_fields():
     found = app._anilist_results(ANILIST_SAMPLE)
     assert found == [{"name": "Maryoku Cheat na Majo ni Narimashita (2019) · I Became a Witch with Cheat Mana",
                       "author": "Aloha Zaregoto", "illustrator": "Kei", "original_title": "魔力チートな魔女になりました",
+                      "author_native": "アロハ座長", "illustrator_native": "",
+                      "romaji_title": "Maryoku Cheat na Majo ni Narimashita",
                       "subjects": "Fantasía, Recuentos de la vida, Raro",
                       "description": "Chise was an office worker.\n\nNow she is a witch & more.",
                       "characters": [("Chise Itou", "MAIN"), ("Teto", "BACKGROUND")]}], found
@@ -3202,12 +3454,14 @@ def test_anilist_results_and_fill_only_empty_fields():
         window.author_var.set("Autor del PDF")
         window.apply_online(found[0])
         got = (window.author_var.get(), window.illustrator_var.get(), window.subjects_var.get(), window.description)
+        natives = (window.author_native_var.get(), window.romaji_title_var.get())
     finally:
         app.messagebox.askyesno = original
         window.close()
     assert got == ("Autor del PDF", "Kei", "Fantasía, Recuentos de la vida, Raro",
                    "Chise was an office worker.\n\nNow she is a witch & more."), got
     assert "Aloha" not in asked[0] and "Ilustraciones: Kei" in asked[0] and "en inglés" in asked[0], asked
+    assert natives == ("アロハ座長", "Maryoku Cheat na Majo ni Narimashita"), natives  # para «Más datos…»
 
 
 def test_window_character_page():
@@ -3428,7 +3682,8 @@ def test_link_sections_and_credits_page():
     out = TMP / "creditos.epub"
     convert.write_epub(book, [(0, "Cap 1"), (4, "Cap 2")], out, credits=True)
     credits = epub_file(out, "OEBPS/credits.xhtml")
-    for line in ("<b>Mi libro</b>", "Serie: Serie, volumen 2", "Autor: Autora", "Traducción: Ana", "Grupo: Grupo"):
+    for line in (">Mi libro</h1>", "<b>Serie:</b> Serie, volumen 2", "<b>Autor:</b> Autora", "<b>Traducción:</b> Ana",
+                 "<b>Grupo:</b> Grupo", "Volumen 2<br/><small>[Novela ligera]</small>"):
         assert line in credits, credits
     opf = epub_file(out, "OEBPS/content.opf")
     assert opf.index('idref="cover"') < opf.index('idref="credits"') < opf.index('idref="contents"'), opf
@@ -6864,7 +7119,7 @@ def test_footnotes_become_popup_notes():
     for path in (out, old, kobo):
         assert convert.check_epub(path) == [], (path, convert.check_epub(path))
     first, second = epub_file(out, "OEBPS/sec001.xhtml"), epub_file(out, "OEBPS/sec002.xhtml")
-    assert 'Hola<a class="nref" epub:type="noteref" href="#nota1" id="ref1">1</a>. Fin.' in first, first
+    assert 'Hola<a class="nref" epub:type="noteref" role="doc-noteref" href="#nota1" id="ref1">1</a>. Fin.' in first, first
     assert ('<aside epub:type="footnote" class="nota" id="nota1"><p><a href="#ref1">1</a>. Nota <i>uno</i>.</p>'
             '</aside>') in first, first
     assert 'href="#nota2"' in second and 'id="nota2"' in second, second  # numeración seguida en el libro
@@ -7631,7 +7886,7 @@ def test_bookmarked_title_drawn_as_image():
     box = [round(v) for v in heads["Capitulo 2: Fuera"].rect]
     assert box == [72, 99, 523, 234], box  # el panel del editor recuadra el dibujo
     assert not kept, kept
-    assert '<h1 class="imagen"><img src="img/' in second and 'alt="Capitulo 2: Fuera"' in second, second
+    assert '<h1 class="imagen" id="titulo"><img src="img/' in second and 'alt="Capitulo 2: Fuera"' in second, second
     assert "Capitulo 2: Fuera" in nav, nav
     assert convert.check_epub(out) == [], convert.check_epub(out)
     assert convert._plain(renamed) == "Capítulo 2: Fuera de casa" and renamed.image, renamed

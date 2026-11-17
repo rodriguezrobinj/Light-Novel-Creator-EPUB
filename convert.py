@@ -117,6 +117,22 @@ class Book:
     # [(índice en el análisis de antes, título)] de los títulos de solo ilustraciones que ya no se ponen (Witch 1:
     # «Insert»): con ellos una revisión hecha antes se traslada (app._migrate_dropped)
     dropped_titles: list = field(default_factory=list)
+    # «Más datos…»: página de título y metadatos de catálogo (identificadores, nombres en japonés, colección)
+    subtitle: str = ""
+    franchise: str = ""          # colección por encima de la serie («Date A Live» sobre «Planet Mukuro»)
+    book_type: str = ""          # dc:type; vacío = «Novela ligera»
+    rating: str = ""             # valoración 0-5 (calibre:rating va de 0 a 10)
+    romaji_title: str = ""
+    author_native: str = ""      # nombre en japonés: alternate-script y furigana en la página de título
+    illustrator_native: str = ""
+    epub_by: str = ""            # maquetación del EPUB (rol mrk)
+    distributor: str = ""        # rol dst
+    relay: str = ""              # traducción intermedia («chn-ing: Inverse ★ Kurumi»)
+    isbn: str = ""
+    asin: str = ""
+    source_url: str = ""         # página de la traducción original
+    links: str = ""              # «Texto = https://…», uno por línea: enlaces de la página de título
+    revised: str = ""            # fecha de la última corrección del texto
 
 
 VOLUME = re.compile(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*0*(\d+(?:[.,]\d+)?)", re.I)
@@ -2779,7 +2795,8 @@ def combine(parts, title):
     return merged, chapters, removed, breaks
 
 
-FONTS = {"Literata": "literata", "Bitter": "bitter"}  # tipografías libres (OFL) en la carpeta fonts
+# tipografías libres (OFL) en la carpeta fonts; Liberation Serif se parece a Times New Roman
+FONTS = {"Literata": "literata", "Bitter": "bitter", "Liberation Serif": "liberation"}
 FONT_DIR = Path(__file__).parent / "fonts"  # en el .exe, junto a los módulos (--add-data fonts;fonts)
 
 
@@ -3314,6 +3331,23 @@ span.min { font-size: 0.8em; color: #777777; }
 a.nref { font-size: 0.75em; vertical-align: super; line-height: 0; text-decoration: none; }
 .nota { font-size: 0.85em; margin-top: 1.5em; }
 .nota p { text-indent: 0; }
+ol.notes { list-style: none; margin: 0; padding: 0; font-size: 0.9em; }
+ol.notes li { margin: 0 0 0.8em; }
+ol.notes p { text-indent: 0; }
+ol.notes a { text-decoration: none; font-weight: bold; }
+div.tp-img { text-align: center; margin: 0; page-break-after: always; }
+div.tp-img img { max-width: 100%; max-height: 95vh; }
+h1.tp-title { text-align: center; font-size: 1.6em; margin: 1.5em 0 0.3em; border: 0; }
+h1.tp-title .tp-sub { display: block; font-size: 0.7em; font-weight: normal; margin-top: 0.3em; }
+p.tp-vol { text-indent: 0; text-align: center; font-size: 1.15em; margin: 0 0 1.5em; }
+div.tp-credits p { text-indent: 0; text-align: center; margin: 0.2em 0; }
+div.tp-credits p.gap { margin-top: 1em; }
+rt { font-size: 0.6em; }
+div.logo { text-align: center; margin-top: 30%; }
+div.logo img { width: 54%; }
+/* Kindle: alto de línea mínimo y sin «no partir dentro», que deja páginas en blanco */
+@media amzn-kf8 { h1, h2 { line-height: 1.2; page-break-inside: auto; } }
+@media amzn-mobi { h1 { font-size: xx-large; } h2 { font-size: x-large; } }
 """
 STYLES = {  # nombre en la ventana -> CSS propio del estilo
     "Clásico": """body { font-family: serif; }
@@ -3336,8 +3370,9 @@ p.brk { font-size: 1.2em; }
 """,
 }
 SEPARATORS = {"Novela ligera": "❖"}  # separador de escena; el resto usa "* * *"
-SEPARATOR_CHOICES = ["Según el estilo", "Original del PDF", "* * *", "❖", "✦", "⁂", "◆ ◆ ◆", "~", "Línea",
-                     "Espacio en blanco"]  # en la ventana, desplegable "Separador"
+# En la ventana, desplegable "Separador"; editable: un texto que no es de la lista se usa tal cual (_separator)
+SEPARATOR_CHOICES = ["Según el estilo", "Original del PDF", "* * *", "❖", "✦", "⁂", "◆ ◆ ◆", "※ ・ ※ ・ ※", "~",
+                     "Línea", "Espacio en blanco"]
 CHAPTER_NUMBER = re.compile(  # "Capítulo 3: Nombre" -> número y nombre, para el inicio de capítulo
     r"((?:cap[ií]tulo|chapter|pr[oó]logo|prologue|ep[ií]logo|epilogue|interludio|interlude|parte|part"
     r"|historia (?:paralela|adicional|corta))(?: [\w.]+)?)\s*[:.\-–—]\s*(.+)", re.I)
@@ -3358,8 +3393,16 @@ CONTAINER = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def _xhtml(title, body, lang, epub2=False):
-    """Página XHTML del libro. epub2: XHTML 1.1, como pide EPUB 2 (sin <meta charset> ni lang, que no existen en él)."""
+def _xhtml(title, body, lang, epub2=False, kind=None):
+    """Página XHTML del libro. epub2: XHTML 1.1, como pide EPUB 2 (sin <meta charset> ni lang, que no existen en él).
+    kind: (frontmatter|bodymatter|backmatter, epub:type, role) de EPUB 3: el lector y el lector de pantalla saben
+    qué es la página (prólogo, notas…). El contenido va en un <section> con el nombre de su título."""
+    if kind and not epub2:
+        matter, etype, role = kind
+        label = ' aria-labelledby="titulo"' if 'id="titulo"' in body else f' aria-label="{html.escape(title)}"'
+        attrs = (f' epub:type="{etype}"' if etype else "") + (f' role="{role}"' if role else "") + label
+        body = f"<section{attrs}>\n{body}\n</section>"
+        return _xhtml(title, body, lang).replace("<body>", f'<body epub:type="{matter}">', 1)
     head = (('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n'
              f'<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}">\n'
              '<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>') if epub2 else
@@ -3399,8 +3442,8 @@ def _kepub(xhtml):
         return m[1] + "".join(out) + m[4]
 
     body = KOBO_BLOCK.sub(wrap, xhtml)
-    return (body.replace("<body>\n", '<body>\n<div id="book-columns"><div id="book-inner">\n', 1)
-            .replace("\n</body>", "\n</div></div>\n</body>", 1))
+    body = re.sub(r"(<body[^>]*>\n)", r'\1<div id="book-columns"><div id="book-inner">' + "\n", body, count=1)
+    return body.replace("\n</body>", "\n</div></div>\n</body>", 1)
 
 
 def _separator(block, index, style, choice, images):
@@ -3448,6 +3491,122 @@ def _file_as(author):
     return author if "," in author or len(words) < 2 else f"{words[-1]}, {' '.join(words[:-1])}"
 
 
+PEOPLE = re.compile(r"\s*(?:&|,|/|;|\s+y\s+)\s*")
+
+
+def _people(text):
+    """«Jorelex & AddLu y Neo» -> ["Jorelex", "AddLu", "Neo"]: el OPF lleva un dc:contributor por persona."""
+    return [p for p in PEOPLE.split(text or "") if p.strip()]
+
+
+def _rich(text):
+    """Sinopsis escrita a mano -> párrafos HTML: cada línea uno, **negrita** y *cursiva*. Lo demás, escapado."""
+    out = []
+    for line in (text or "").splitlines():
+        line = html.escape(line.strip(), quote=False)
+        if line:
+            line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+            out.append(re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>", line))
+    return out
+
+
+def _isbn(text):
+    """Cifras de un ISBN-10 o ISBN-13 escrito con guiones o espacios; "" si no lo es."""
+    digits = re.sub(r"[\s\-‐–]", "", text or "").upper()
+    return digits if re.fullmatch(r"\d{13}|\d{9}[\dX]", digits) else ""
+
+
+def _links(text):
+    """«Texto = https://…» por línea -> [(texto, url o "")]: sin url válida, la línea va como texto."""
+    out = []
+    for line in (text or "").splitlines():
+        label, _, url = line.partition("=")
+        label, url = label.strip(), url.strip()
+        if not url and re.match(r"https?://\S+$", label):  # solo la dirección
+            url = label
+        if label or url:
+            out.append((label or url, url if re.match(r"https?://\S+$", url) else ""))
+    return out
+
+
+AFTERWORD = re.compile(r"(?:palabras|notas?|ep[ií]logo|comentarios?|mensaje)\s+del?\s+(?:la\s+)?(?:autor|autora)\b"
+                       r"|afterword|pos(?:t)?facio", re.I)
+
+
+def _section_kind(title, is_chapter):
+    """(materia, epub:type, role) de una sección por su título: prólogo, epílogo, palabras del autor o capítulo."""
+    plain = TAGS.sub("", html.unescape(title)).strip()
+    if not is_chapter:
+        return "frontmatter", "", ""
+    if AFTERWORD.search(plain):
+        return "backmatter", "afterword", "doc-afterword"
+    if re.match(r"(?:pr[oó]logo|prologue)\b", plain, re.I):
+        return "bodymatter", "prologue", "doc-prologue"
+    if re.match(r"(?:ep[ií]logo|epilogue)\b", plain, re.I):
+        return "bodymatter", "epilogue", "doc-epilogue"
+    return "bodymatter", "chapter", "doc-chapter"
+
+
+def _ruby(name, native, epub2):
+    """Nombre con su escritura japonesa encima (furigana) en la página de título; EPUB 2 no tiene <ruby>."""
+    name, native = html.escape(name), html.escape(native)
+    if not native:
+        return name
+    if epub2:
+        return f"{name} ({native})"
+    return f"<ruby>{native}<rp>(</rp><rt>{name}</rt><rp>)</rp></ruby>"
+
+
+def _title_page(book, image, lang, epub2):
+    """Página de título, como en los EPUB hechos a mano: ilustración (image, ruta en el EPUB, o ""), título y
+    subtítulo, volumen y tipo, créditos por rol con furigana, enlaces y fechas."""
+    esc = html.escape
+    parts = [f'<div class="tp-img"><img src="{image}" alt=""/></div>'] if image else []
+    sub = f'<br/><span class="tp-sub">{esc(book.subtitle.strip())}</span>' if book.subtitle.strip() else ""
+    parts.append(f'<h1 class="tp-title" id="titulo">{esc(book.title)}{sub}</h1>')
+    volume = f"Volumen {esc(book.volume)}<br/>" if book.volume else ""
+    parts.append(f'<p class="tp-vol">{volume}<small>[{esc(book.book_type.strip() or "Novela ligera")}]</small></p>')
+    serie = f"{book.series}, volumen {book.volume}" if book.series and book.volume else book.series
+    groups = [[("Autor", _ruby(book.author, book.author_native, epub2)),
+               ("Ilustraciones", _ruby(book.illustrator, book.illustrator_native, epub2))],
+              [("Título original", esc(book.original_title)), ("Serie", esc(serie))],
+              [("Traducción intermedia", esc(book.relay)), ("Traducción", esc(book.translator)),
+               ("Corrección", esc(book.proofreader)), ("Edición", esc(book.editor))],
+              [("Maquetación EPUB", esc(book.epub_by)), ("Grupo", esc(book.publisher)),
+               ("Distribuye", esc(book.distributor))]]
+    lines = []
+    for group in groups:
+        rows = [f"<b>{label}:</b> {value}" for label, value in group if value.strip()]
+        lines += [(n == 0, row) for n, row in enumerate(rows)]
+    links = [f'<a href="{esc(url)}">{esc(text)}</a>' if url else esc(text) for text, url in _links(book.links)]
+    lines += [(n == 0, link) for n, link in enumerate(links)]
+    dates = ([f"<b>Última corrección:</b> {esc(book.revised.strip())}"] if book.revised.strip() else []) + [
+        f"EPUB creado el {datetime.now():%d/%m/%Y}"]
+    lines += [(n == 0, line) for n, line in enumerate(dates)]
+    parts.append('<div class="tp-credits">\n' + "\n".join(
+        f'<p{" class=\"gap\"" if gap else ""}>{line}</p>' for gap, line in lines) + "\n</div>")
+    return _xhtml("Página de título", "\n".join(parts), lang, epub2, ("frontmatter", "titlepage", ""))
+
+
+HEADING_FONTS = {"Eagle Lake": "eaglelake.ttf"}  # fuentes de títulos libres (OFL) en la carpeta fonts
+HEADING_FONT_CHOICES = ["La del texto"] + list(HEADING_FONTS)
+NOTE_STYLES = {"1": "{}", "[1]": "[{}]", "❮01❯": "❮{:02d}❯"}  # cómo se ve la llamada de nota
+BOX_STYLES = {"Sencillo": "",
+              # Ventanas de opciones de los juegos (Date A Live): fondo negro, brillo azul y letra blanca
+              "Pantalla de juego": """div.marco { border: 0; border-radius: 5px; background-color: #000000;
+  box-shadow: 0 0 10px 1px #00219b; color: #ffffff; padding: 0.6em 1.2em; }
+div.marco p { text-shadow: -1px 0 10px #004fff, -1px 0 6px #002775; }
+"""}
+# Apple Books solo usa las fuentes incrustadas si el libro lo pide
+APPLE_OPTIONS = """<?xml version="1.0" encoding="utf-8"?>
+<display_options>
+<platform name="*">
+<option name="specified-fonts">true</option>
+</platform>
+</display_options>
+"""
+
+
 STATUS = re.compile(r"\s*[【\[].*[】\]]\s*")  # "【Habilidad adquirida】", "[Nivel 5]": ventana de estado
 
 
@@ -3463,7 +3622,8 @@ def _fit_style(data, page):
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
                breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
-               progress=None, fit=None, whole_words=False, css_extra=""):
+               progress=None, fit=None, whole_words=False, css_extra="", synopsis=False, title_image=None, logo="",
+               endnotes=False, note_style="1", heading_font="", box_style="Sencillo"):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
@@ -3486,7 +3646,12 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     Cada página del PDF deja una marca invisible (page-list): el lector puede mostrar su número.
     progress(hechos, total): avanza por sección e ilustración escritas (reducir las imágenes es lo lento).
     fit: (ancho, alto) de la página de la vista previa: cada ilustración lleva un tamaño que cabe en ella
-    (_fit_style). Solo para MuPDF; el EPUB de verdad no lo lleva. css_extra: reglas al final de la hoja (write_pdf)."""
+    (_fit_style). Solo para MuPDF; el EPUB de verdad no lo lleva. css_extra: reglas al final de la hoja (write_pdf).
+    synopsis: página «Sinopsis» tras la portada, si el libro tiene sinopsis. credits: página de título (ilustración
+    title_image, su image_key; título, volumen, créditos con furigana, enlaces y fechas). logo: ruta de una
+    imagen PNG/JPG, en su propia página tras la de título. endnotes: todas las notas en «Notas», al final del libro.
+    note_style: una de NOTE_STYLES. heading_font: una de HEADING_FONTS o la ruta de un .ttf/.otf, para los títulos.
+    box_style: uno de BOX_STYLES, el aspecto de los recuadros."""
     rules = _rules(replacements)
     hyphenate = hyphenate and not whole_words and lang.split("-")[0].lower() == "es"
     typo = (lambda s, dashes=False: _typography(s, dashes)) if typography else (lambda s, dashes=False: s)
@@ -3513,7 +3678,11 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 sections.append(["Inicio", False, []])
             sections[-1][2].append((k, b))
 
-    files, images = {}, {}
+    if sections and not sections[0][1] and sections[0][2] and all(b.kind == "image" for _, b in sections[0][2]):
+        sections[0][0] = "Ilustraciones"  # las láminas a color del principio, con su nombre en el índice
+    files, images, kinds = {}, {}, {}  # kinds: archivo -> (materia, epub:type, role)
+    note_mark = NOTE_STYLES.get(note_style, "{}").format
+    all_notes = []  # con endnotes: (número, html, archivo de la llamada)
 
     def icon_file(m):
         """El icono de ICON como archivo: el mismo ♡ en todo el libro, uno solo."""
@@ -3529,13 +3698,13 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         name = f"sec{n:03d}.xhtml"
         # quote=False: la limpieza tipográfica ve las comillas («"Hola"» -> «“Hola”»), no &quot;
         heading = fix(html.escape(title, quote=False))
-        parts = [_chapter_heading(heading)] if is_chapter else []
+        parts = [_chapter_heading(heading).replace("<h1", '<h1 id="titulo"', 1)] if is_chapter else []
         if n in drawn:  # el dibujo del PDF en lugar del texto; el nombre queda para el índice y los lectores de voz
             k, data = drawn[n]
             data = title_picture(data, title)  # traducido o corregido: el dibujo dice el título de ahora
             src = f"img/t{k:05d}.{'png' if data[:4] == b'\x89PNG' else 'jpg'}"
             images[src] = data
-            parts = [f'<h1 class="imagen"><img src="{src}" alt="{html.escape(title)}"/></h1>']
+            parts = [f'<h1 class="imagen" id="titulo"><img src="{src}" alt="{html.escape(title)}"/></h1>']
         pending = None  # página que empieza en este tramo: su marca va en el siguiente párrafo o título
         notes = []  # (número, html) de las notas de esta sección: van al final, tras el texto
 
@@ -3543,8 +3712,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             nonlocal noted
             noted += 1
             notes.append((noted, m[1]))
-            kind = "" if epub2 else ' epub:type="noteref"'
-            return f'<a class="nref"{kind} href="#nota{noted}" id="ref{noted}">{noted}</a>'
+            kind = "" if epub2 else ' epub:type="noteref" role="doc-noteref"'
+            where = "notas.xhtml" if endnotes else ""
+            return f'<a class="nref"{kind} href="{where}#nota{noted}" id="ref{noted}">{note_mark(noted)}</a>'
 
         def mark():
             nonlocal pending
@@ -3611,16 +3781,38 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         # Los lectores con notas emergentes (Kobo, Kindle, Apple Books) ocultan el aside y lo muestran
         # al tocar la llamada; los demás lo dejan al final de la sección, con enlace de vuelta.
         tag, kind = ("div", "") if epub2 else ("aside", ' epub:type="footnote"')
-        parts += [f'<{tag}{kind} class="nota" id="nota{k}"><p><a href="#ref{k}">{k}</a>. {text}</p></{tag}>'
-                  for k, text in notes]
-        files[name] = _xhtml(html.unescape(heading), "\n".join(parts), lang, epub2)
+        if endnotes:
+            all_notes += [(k, text, name) for k, text in notes]
+        else:
+            parts += [f'<{tag}{kind} class="nota" id="nota{k}"><p><a href="#ref{k}">{note_mark(k)}</a>'
+                      f'{"." if note_style == "1" else ""} {text}</p></{tag}>' for k, text in notes]
+        kinds[name] = _section_kind(title, is_chapter)
+        files[name] = _xhtml(html.unescape(heading), "\n".join(parts), lang, epub2, kinds[name])
+
+    title_src = logo_src = ""  # ilustración de la página de título y logo, si van
+    # por su image_key: el índice del bloque cambia al editar, la ilustración no
+    data = next((b.image for b in book.blocks if title_image and b.kind == "image" and b.image
+                 and image_key(b.image) == title_image), b"") if credits else b""
+    if data:
+        title_src = f"img/titulo.{'png' if data[:4] == b'\x89PNG' else 'jpg'}"
+        images[title_src] = data
+    if logo:
+        try:
+            data = Path(logo).read_bytes()
+        except OSError:
+            data = b""  # el archivo ya no está: el libro sale sin la página del logo
+        if data[:4] == b"\x89PNG" or data[:3] == b"\xff\xd8\xff":
+            logo_src = f"img/logo.{'png' if data[:4] == b'\x89PNG' else 'jpg'}"
+            images[logo_src] = data
+    synopsis = bool(synopsis and _rich(book.description))
+    endnotes = bool(endnotes and all_notes)
 
     # el mismo libro exportado otra vez conserva su identificador: el lector no lo duplica ni pierde la posición
     uid = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'{book.series}|{book.volume}|{book.title}|{book.author}')}"
     title = html.escape(book.title)
     meta = []  # metadatos: en EPUB 3 los roles y el orden van en <meta refines>; en EPUB 2, como atributos opf:
 
-    def person(tag, ident, value, role, file_as=""):
+    def person(tag, ident, value, role, file_as="", native=""):
         value = html.escape(value)
         if epub2:
             extra = f' opf:file-as="{html.escape(file_as)}"' if file_as else ""
@@ -3630,32 +3822,75 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         meta.append(f'<meta refines="#{ident}" property="role" scheme="marc:relators">{role}</meta>')
         if file_as:
             meta.append(f'<meta refines="#{ident}" property="file-as">{html.escape(file_as)}</meta>')
+        if native:
+            meta.append(f'<meta refines="#{ident}" property="alternate-script" xml:lang="ja">{html.escape(native)}</meta>')
 
-    if book.author:
-        person("creator", "aut", book.author, "aut", _file_as(book.author))
-    for ident, value, role in (("trl", book.translator, "trl"), ("ill", book.illustrator, "ill"),
-                               ("pfr", book.proofreader, "pfr"), ("edt", book.editor, "edt")):
-        if value:
-            person("contributor", ident, value, role)
-    if book.publisher:
-        meta.append(f"<dc:publisher>{html.escape(book.publisher)}</dc:publisher>")
+    def people(tag, ident, value, role, native="", file_as=False):
+        """Una persona por nombre; el nombre japonés va con ella si hay tantos como nombres."""
+        names, natives = _people(value), _people(native)
+        for n, name in enumerate(names):
+            person(tag, ident if n == 0 else f"{ident}{n + 1}", name, role, _file_as(name) if file_as else "",
+                   natives[n] if len(natives) == len(names) else "")
+
+    if not epub2:
+        meta.append('<meta refines="#title" property="title-type">main</meta>')
+        for value, script in ((book.original_title, "ja"), (book.romaji_title, "ja-Latn")):
+            if value:
+                meta.append(f'<meta refines="#title" property="alternate-script" xml:lang="{script}">'
+                            f'{html.escape(value)}</meta>')
+    people("creator", "aut", book.author, "aut", book.author_native, file_as=True)
+    for ident, value, role, native in (("trl", book.translator, "trl", ""),
+                                       ("ill", book.illustrator, "ill", book.illustrator_native),
+                                       ("pfr", book.proofreader, "pfr", ""), ("edt", book.editor, "edt", ""),
+                                       ("mrk", book.epub_by, "mrk", ""), ("dst", book.distributor, "dst", "")):
+        people("contributor", ident, value, role, native)
+    meta += [f"<dc:publisher>{html.escape(p)}</dc:publisher>" for p in _people(book.publisher)]
     if book.description:
-        meta.append(f"<dc:description>{html.escape(book.description)}</dc:description>")
+        rich = _rich(book.description)
+        # con formato o varios párrafos va como HTML (Calibre lo muestra así); si no, texto tal cual
+        plain = len(rich) == 1 and rich[0] == html.escape(book.description.strip(), quote=False)
+        meta.append(f"<dc:description>{html.escape(book.description.strip() if plain else '<br/>'.join(rich))}"
+                    "</dc:description>")
     meta += [f"<dc:subject>{html.escape(s.strip())}</dc:subject>" for s in book.subjects.split(",") if s.strip()]
+    meta.append(f"<dc:type>{html.escape(book.book_type.strip() or 'Novela ligera')}</dc:type>")
     if book.date:
         meta.append(f"<dc:date>{html.escape(book.date)}</dc:date>")
+    isbn = _isbn(book.isbn)
+    if isbn:
+        if epub2:
+            meta.append(f'<dc:identifier opf:scheme="ISBN">{isbn}</dc:identifier>')
+        else:  # código ONIX: 15 = ISBN-13, 02 = ISBN-10
+            meta.append(f'<dc:identifier id="isbn">urn:isbn:{isbn}</dc:identifier>\n<meta refines="#isbn" '
+                        f'property="identifier-type" scheme="onix:codelist5">{"15" if len(isbn) == 13 else "02"}</meta>')
+    if book.asin.strip():
+        meta.append(f'<dc:identifier id="asin">urn:amazon:{html.escape(book.asin.strip())}</dc:identifier>')
+    if re.match(r"https?://\S+$", book.source_url.strip()):
+        meta.append(f'<dc:identifier id="fuente">{html.escape(book.source_url.strip())}</dc:identifier>')
     if book.original_title and not epub2:
         meta.append(f'<meta property="dcterms:alternative">{html.escape(book.original_title)}</meta>')
     if book.series:  # serie en EPUB 3 (belongs-to-collection) y en el formato de Calibre
         name, number = html.escape(book.series), html.escape(book.volume)
         if not epub2:
             meta.append(f'<meta property="belongs-to-collection" id="serie">{name}</meta>\n'
-                        '<meta refines="#serie" property="collection-type">series</meta>')
+                        '<meta refines="#serie" property="collection-type">series</meta>\n'
+                        f'<meta refines="#serie" property="dcterms:identifier">urn:uuid:'
+                        f'{uuid.uuid5(uuid.NAMESPACE_URL, "serie|" + book.series)}</meta>')
             if number:
                 meta.append(f'<meta refines="#serie" property="group-position">{number}</meta>')
         meta.append(f'<meta name="calibre:series" content="{name}"/>')
         if number:
             meta.append(f'<meta name="calibre:series_index" content="{number}"/>')
+    if book.franchise.strip() and not epub2:  # la franquicia contiene la serie (o el libro, si no hay serie)
+        refines = ' refines="#serie"' if book.series else ""
+        meta.append(f'<meta property="belongs-to-collection" id="coleccion"{refines}>{html.escape(book.franchise.strip())}'
+                    f'</meta>\n<meta refines="#coleccion" property="dcterms:identifier">urn:uuid:'
+                    f'{uuid.uuid5(uuid.NAMESPACE_URL, "coleccion|" + book.franchise.strip())}</meta>')
+    try:  # estrellas de 0 a 5 (admite medias); Calibre cuenta de 0 a 10
+        stars = float((book.rating or "").strip().replace(",", "."))
+    except ValueError:
+        stars = 0
+    if 0 < stars <= 5:
+        meta.append(f'<meta name="calibre:rating" content="{round(stars * 2)}"/>')
     if not epub2:
         meta.append(f'<meta property="dcterms:modified">{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}</meta>')
         meta += _accessibility(bool(images))
@@ -3684,16 +3919,32 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         src, family = f"fonts/propia{Path(font).suffix.lower()}", re.sub(r'["\\]', "", Path(font).stem)
         fonts[src] = Path(font)  # nombre fijo: el del usuario puede llevar espacios o tildes, que rompen el href
         css += f'@font-face {{ font-family: "{family}"; src: url("{src}"); }}\nbody {{ font-family: "{family}", serif; }}\n'
+    bundled = HEADING_FONTS.get(heading_font)
+    if bundled or (heading_font and heading_font not in HEADING_FONT_CHOICES and Path(heading_font).is_file()):
+        src = f"fonts/{bundled}" if bundled else f"fonts/titulos{Path(heading_font).suffix.lower()}"
+        fonts[src] = FONT_DIR / bundled if bundled else Path(heading_font)
+        css += (f'@font-face {{ font-family: "Titulos"; src: url("{src}"); }}\n'
+                'h1, h1 span, h2 { font-family: "Titulos", serif; font-weight: normal; }\n')
+    css += BOX_STYLES.get(box_style, "")
     css += css_extra
     manifest += [f'<item id="f{k}" href="{src}" media-type="application/vnd.ms-opentype"/>' for k, src in enumerate(fonts)]
-    spine = ['<itemref idref="cover"/>'] + [f'<itemref idref="s{k}"/>' for k in range(len(files))]
     toc_page = "contents.xhtml" if contents else "nav.xhtml"
-    if contents:  # página "Contenido" visible, justo después de la portada
-        manifest.append('<item id="contents" href="contents.xhtml" media-type="application/xhtml+xml"/>')
-        spine.insert(1, '<itemref idref="contents"/>')
-    if credits:  # antes del índice
-        manifest.append('<item id="credits" href="credits.xhtml" media-type="application/xhtml+xml"/>')
-        spine.insert(1, '<itemref idref="credits"/>')
+    # Orden de la referencia (Sigil): portada, sinopsis, láminas, página de título, logo, índice, lectura, notas
+    front = [next(iter(files))] if sections and sections[0][0] == "Ilustraciones" else []
+    extra = [("synopsis", "sinopsis.xhtml", synopsis)] + [(name, name, True) for name in front] + [
+        ("credits", "credits.xhtml", credits), ("logo", "logo.xhtml", bool(logo_src)),
+        ("contents", "contents.xhtml", contents)]
+    spine = ['<itemref idref="cover"/>']
+    for ident, href, on in extra:
+        if on and href in files:
+            spine.append(f'<itemref idref="s{list(files).index(href)}"/>')
+        elif on:
+            manifest.append(f'<item id="{ident}" href="{href}" media-type="application/xhtml+xml"/>')
+            spine.append(f'<itemref idref="{ident}"/>')
+    spine += [f'<itemref idref="s{k}"/>' for k, name in enumerate(files) if name not in front]
+    if endnotes:
+        manifest.append('<item id="notas" href="notas.xhtml" media-type="application/xhtml+xml"/>')
+        spine.append('<itemref idref="notas"/>')
     # Inicio de la lectura: el primer capítulo (no "Inicio", que son las láminas del principio)
     reading_start = next((name for name, sec in zip(files, sections) if sec[1]), next(iter(files), "cover.xhtml"))
     manifest_xml, spine_xml, meta_xml = "\n".join(manifest), "\n".join(spine), "\n".join(meta)
@@ -3702,7 +3953,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
 <package xmlns="http://www.idpf.org/2007/opf" version="{'2.0' if epub2 else '3.0'}" unique-identifier="uid">
 <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"{opf_ns}>
 <dc:identifier id="uid">{uid}</dc:identifier>
-<dc:title>{title}</dc:title>
+<dc:title id="title">{title}</dc:title>
 {meta_xml}
 <dc:language>{lang}</dc:language>
 <meta name="cover" content="cover-image"/>
@@ -3739,18 +3990,31 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             point += (f'<navPoint id="n{order}" playOrder="{order}"><navLabel><text>{text}</text></navLabel>'
                       f'<content src="{name}#{anchor}"/></navPoint>')
         points.append(point + "</navPoint>")
+    # El índice del lector también lleva las páginas preliminares, en el orden del libro; toc.ncx no: es el índice
+    # del PDF (write_pdf) y su «Contenido» numera solo la lectura
+    entry = lambda href, text: f'<li><a href="{href}">{text}</a></li>'
+    items = ([entry("cover.xhtml", "Cubierta")] + [entry("sinopsis.xhtml", "Sinopsis")] * synopsis
+             + items[:len(front)] + [entry("credits.xhtml", "Página de título")] * bool(credits)
+             + [entry("contents.xhtml", "Contenido")] * bool(contents) + items[len(front):]
+             + [entry("notas.xhtml", "Notas")] * endnotes)
     items, shown, points = "\n".join(items), "\n".join(shown), "\n".join(points)
     # Puntos de referencia: los botones "Ir a la portada / al índice / al inicio" de los lectores
+    marks = [("cover", "cover.xhtml", "Portada")] + [("titlepage", "credits.xhtml", "Página de título")] * bool(credits)
+    marks += [("toc", toc_page, "Índice"), ("bodymatter", reading_start, "Inicio de la lectura")]
+    for etype, label in (("prologue", "Prólogo"), ("epilogue", "Epílogo"), ("afterword", "Palabras del autor")):
+        found = next((name for name in files if kinds[name][1] == etype), None)
+        marks += [(etype, found, label)] if found else []
+    marks += [("endnotes", "notas.xhtml", "Notas")] * endnotes
     landmarks = ('<nav epub:type="landmarks" id="landmarks" hidden="hidden"><ol>'
-                 '<li><a epub:type="cover" href="cover.xhtml">Portada</a></li>'
-                 f'<li><a epub:type="toc" href="{toc_page}">Índice</a></li>'
-                 f'<li><a epub:type="bodymatter" href="{reading_start}">Inicio de la lectura</a></li></ol></nav>')
+                 + "".join(f'<li><a epub:type="{etype}" href="{href}">{label}</a></li>' for etype, href, label in marks)
+                 + '</ol></nav>')
     page_list = ('\n<nav epub:type="page-list" id="page-list" hidden="hidden"><ol>'
                  + "".join(f'<li><a href="{name}#pg{page}">{page}</a></li>' for name, page in pages)
                  + "</ol></nav>") if pages else ""
     nav = _xhtml("Índice", f'<nav epub:type="toc" id="toc"><h1>Índice</h1><ol>\n{items}\n</ol></nav>\n{landmarks}'
                  f"{page_list}", lang)
-    contents_page = _xhtml("Contenido", f'<h1 class="toc">Contenido</h1>\n<ol class="toc">\n{shown}\n</ol>', lang, epub2)
+    contents_page = _xhtml("Contenido", f'<h1 class="toc" id="titulo">Contenido</h1>\n<ol class="toc">\n{shown}\n</ol>',
+                           lang, epub2, ("frontmatter", "", ""))
     ncx = f"""<?xml version="1.0" encoding="utf-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
 <head><meta name="dtb:uid" content="{uid}"/></head>
@@ -3760,14 +4024,19 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
 </navMap>
 </ncx>
 """
-    cover = _xhtml(book.title, '<div class="img"><img src="cover.jpg" alt="Portada"/></div>', lang, epub2)
-    serie = f"{book.series}, volumen {book.volume}" if book.series and book.volume else book.series
-    lines = [f"<b>{title}</b>"] + [f"{label}: {html.escape(value)}" for label, value in (
-        ("Título original", book.original_title), ("Serie", serie), ("Autor", book.author),
-        ("Ilustraciones", book.illustrator), ("Traducción", book.translator), ("Corrección", book.proofreader),
-        ("Edición", book.editor), ("Grupo", book.publisher)) if value] + [f"EPUB creado el {datetime.now():%d/%m/%Y}"]
-    credits_page = _xhtml("Créditos", '<h1 class="toc">Créditos</h1>\n'
-                          + "\n".join(f'<p class="credits">{line}</p>' for line in lines), lang, epub2)
+    doc_cover = "" if epub2 else ' role="doc-cover"'
+    cover = _xhtml(book.title, f'<div class="img"><img{doc_cover} src="cover.jpg" alt="Portada"/></div>', lang, epub2,
+                   ("frontmatter", "cover", ""))
+    credits_page = _title_page(book, title_src, lang, epub2)
+    synopsis_page = _xhtml("Sinopsis", '<h1 id="titulo">Sinopsis</h1>\n'
+                           + "\n".join(f"<p>{line}</p>" for line in _rich(book.description)), lang, epub2,
+                           ("frontmatter", "abstract", "doc-abstract"))
+    logo_page = _xhtml("Logo", f'<div class="logo"><img src="{logo_src}" alt="Logo"/></div>', lang, epub2,
+                       ("frontmatter", "colophon", "doc-colophon"))
+    back = "" if epub2 else ' role="doc-backlink"'
+    notes_page = _xhtml("Notas", '<h1 id="titulo">Notas</h1>\n<ol class="notes">\n' + "\n".join(
+        f'<li id="nota{k}"><p><a href="{where}#ref{k}"{back}>{note_mark(k)}</a> {text}</p></li>'
+        for k, text, where in all_notes) + "\n</ol>", lang, epub2, ("backmatter", "endnotes", "doc-endnotes"))
 
     tmp = partial_path(out_path)
     try:
@@ -3779,8 +4048,11 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 z.writestr("OEBPS/nav.xhtml", nav)
             if contents:
                 z.writestr("OEBPS/contents.xhtml", contents_page)
-            if credits:
-                z.writestr("OEBPS/credits.xhtml", credits_page)
+            for on, name, text in ((credits, "credits.xhtml", credits_page), (synopsis, "sinopsis.xhtml", synopsis_page),
+                                   (logo_src, "logo.xhtml", logo_page), (endnotes, "notas.xhtml", notes_page)):
+                if on:
+                    z.writestr(f"OEBPS/{name}", _kepub(text) if kepub else text)
+            z.writestr("META-INF/com.apple.ibooks.display-options.xml", APPLE_OPTIONS)
             z.writestr("OEBPS/toc.ncx", BAD_XML.sub("", ncx))
             z.writestr("OEBPS/style.css", css)
             z.writestr("OEBPS/cover.xhtml", cover)

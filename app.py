@@ -91,7 +91,9 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
-             "contents", "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes")
+             "contents", "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes",
+             "book_type", "franchise", "author_native", "illustrator_native", "relay", "epub_by", "distributor", "links",
+             "synopsis", "endnotes", "note_style", "heading_font", "heading_font_file", "box_style", "logo")
 # De INHERITED, lo que es de toda la serie aunque el tomo ya tenga revisión: glosarios, diccionario y personajes
 SERIES_VOCAB = ("words", "glossary", "tr_glossary", "tr_notes")
 def _data_dir():
@@ -108,6 +110,14 @@ SETTINGS = _data_dir() / "ajustes.json"
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
+# Los de «Más datos…» (página de título y catálogo): también son datos del libro, como convert.Book
+MORE_FIELDS = (("subtitle", "Subtítulo"), ("book_type", "Tipo"), ("franchise", "Franquicia"),
+               ("rating", "Valoración (0-5)"), ("romaji_title", "Título romanizado"),
+               ("author_native", "Autor en japonés"), ("illustrator_native", "Ilustrador en japonés"),
+               ("relay", "Traducción intermedia"), ("epub_by", "Maquetación EPUB"), ("distributor", "Distribuye"),
+               ("isbn", "ISBN"), ("asin", "ASIN"), ("source_url", "Enlace de la fuente"),
+               ("revised", "Última corrección"), ("links", "Enlaces"))
+BOOK_FIELDS += tuple(name for name, _ in MORE_FIELDS)
 # Perfil de salida -> opciones que fija (los demás perfiles dejan las opciones como estén)
 PROFILES = {"Personalizado": {},
             "Celular": {"gray": False, "shrink": True, "shrink_size": 1200, "epub2": False, "kepub": False, "hyphenate": False},
@@ -119,6 +129,7 @@ PROFILES = {"Personalizado": {},
             "Lector antiguo (EPUB 2)": {"gray": False, "shrink": True, "shrink_size": 1400, "epub2": True,
                                         "kepub": False, "hyphenate": False}}
 FONT_CHOICES = ["Del lector"] + list(convert.FONTS) + ["Otra…"]  # «Otra…» pide un archivo
+HEADING_OWN = "Archivo propio"  # fuente de títulos de un archivo (heading_font_file)
 APP_NAME = "Light Novel Creator"  # nombre visible; el .exe y la carpeta de ajustes siguen siendo «PDF a EPUB»
 KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro, theme.kind_colors(True)
 PREVIEW_BOX = (480, 640)  # ancho y alto máximos de cada vista previa, en píxeles
@@ -595,7 +606,27 @@ def _write_options(state, breaks=()):
             else path if path and Path(path).name == font and Path(path).is_file() else "",
             "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
             "contents": bool(state.get("contents", True)), "hyphenate": bool(state.get("hyphenate")), "breaks": list(breaks),
+            "synopsis": bool(state.get("synopsis", True)), "endnotes": bool(state.get("endnotes")),
+            "note_style": note if (note := str(state.get("note_style", "1"))) in convert.NOTE_STYLES else "1",
+            "box_style": box if (box := str(state.get("box_style", "Sencillo"))) in convert.BOX_STYLES else "Sencillo",
+            "heading_font": _heading_font(state), "logo": _image_file(state.get("logo")),
+            "title_image": str(state.get("title_image") or ""),
             "alts": {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}}
+
+
+def _heading_font(state):
+    """Fuente de títulos de write_epub: una de las incluidas o la ruta de la propia si sigue en su sitio."""
+    choice = str(state.get("heading_font", ""))
+    if choice in convert.HEADING_FONTS:
+        return choice
+    return _font_file(state.get("heading_font_file")) if choice == HEADING_OWN else ""
+
+
+def _image_file(path):
+    """Imagen PNG o JPG local de los ajustes (el logo); "" si no lo es o ya no existe."""
+    path = str(path or "")
+    return path if (Path(path).is_absolute() and not _network_path(path) and path.lower().endswith((".png", ".jpg", ".jpeg"))
+                    and Path(path).is_file()) else ""
 
 
 def _write_pdf(book, chapters, out, removed, options, size, progress=None):
@@ -1041,14 +1072,17 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "separator": "Separadores", "font": "Fuente", "font_file": "Archivo de fuente", "profile": "Perfil",
                 "typography": "Limpieza tipográfica", "gray": "Imágenes en gris", "shrink": "Reducir imágenes",
                 "shrink_size": "Tamaño de las imágenes", "trim": "Recortar márgenes blancos",
-                "credits": "Página de créditos", "reading": "Minutos de lectura", "contents": "Índice", "epub2": "EPUB 2",
+                "credits": "Página de título y créditos", "reading": "Minutos de lectura", "contents": "Índice", "epub2": "EPUB 2",
                 "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
                 "words": "Diccionario de la serie", "glossary": "Glosario", "tr_glossary": "Glosario de traducción",
                 "tr_notes": "Personajes y estilo de traducción", "ignored": "Avisos ignorados", "comments": "Comentarios",
                 "alts": "Descripciones de ilustraciones",
                 "echoes": "Buscar ecos", "whole_words": "No partir palabras en el PDF",
-                "pdf_size": "Tamaño de PDF preferido"}
+                "pdf_size": "Tamaño de PDF preferido", **dict(MORE_FIELDS), "synopsis": "Página de sinopsis",
+                "endnotes": "Notas al final del libro", "note_style": "Llamada de nota", "heading_font": "Fuente de títulos",
+                "heading_font_file": "Archivo de fuente de títulos", "box_style": "Estilo de recuadros", "logo": "Logo",
+                "title_image": "Ilustración de la página de título"}
 
 
 def _versions_path(pdf):
@@ -1446,7 +1480,7 @@ ANILIST = "https://graphql.anilist.co"  # API pública, sin clave
 ROLES = {"MAIN": "Principal", "SUPPORTING": "Secundario", "BACKGROUND": "De fondo"}  # papeles de AniList
 ANILIST_QUERY = """query ($q: String) { Page(perPage: 6) { media(search: $q, type: MANGA, format: NOVEL) {
   title { romaji english native } startDate { year } genres description(asHtml: false)
-  staff(perPage: 10) { edges { role node { name { full } } } }
+  staff(perPage: 10) { edges { role node { name { full native } } } }
   characters(sort: [ROLE, RELEVANCE], perPage: 25) { edges { role node { name { full } } } } } } }"""
 GENRES = {"Action": "Acción", "Adventure": "Aventura", "Comedy": "Comedia", "Drama": "Drama", "Ecchi": "Ecchi",
           "Fantasy": "Fantasía", "Horror": "Terror", "Mahou Shoujo": "Mahō shōjo", "Mecha": "Mecha",
@@ -1476,11 +1510,14 @@ def _anilist_results(data):
     found = []
     for m in (((data.get("data") or {}).get("Page") or {}).get("media") or []):
         title = m.get("title") or {}
-        staff = [(edge.get("role") or "", ((edge.get("node") or {}).get("name") or {}).get("full") or "")
+        staff = [(edge.get("role") or "", ((edge.get("node") or {}).get("name") or {}).get("full") or "",
+                  ((edge.get("node") or {}).get("name") or {}).get("native") or "")
                  for edge in (m.get("staff") or {}).get("edges") or []]
-        author = next((n for role, n in staff if re.search(r"story|original", role, re.I)), "")
-        illustrator = next((n for role, n in staff if re.search(r"\b(art|illustration)\b", role, re.I)
-                            and not re.search(r"story", role, re.I)), "")
+        author, author_native = next(((n, j) for role, n, j in staff if re.search(r"story|original", role, re.I)),
+                                     ("", ""))
+        illustrator, illustrator_native = next(((n, j) for role, n, j in staff
+                                                if re.search(r"\b(art|illustration)\b", role, re.I)
+                                                and not re.search(r"story", role, re.I)), ("", ""))
         name = title.get("romaji") or title.get("english") or ""
         year = (m.get("startDate") or {}).get("year")
         english = title.get("english") or ""
@@ -1489,6 +1526,8 @@ def _anilist_results(data):
         text = re.sub(r"\(Source:[^)]*\)\s*$", "", text.strip()).strip()
         found.append({"name": name + (f" ({year})" if year else "") + (f" · {english}" if english and english != name else ""),
                       "author": author, "illustrator": illustrator, "original_title": title.get("native") or "",
+                      "author_native": author_native, "illustrator_native": illustrator_native,
+                      "romaji_title": title.get("romaji") or "",
                       "subjects": ", ".join(GENRES.get(g, g) for g in m.get("genres") or []),
                       "description": re.sub(r"\n{3,}", "\n\n", text),
                       "characters": [(edge["node"]["name"]["full"], edge.get("role") or "")
@@ -2067,6 +2106,15 @@ class App:
         # Datos de la página de créditos y del catálogo: en el panel «Editar datos»
         self.illustrator_var, self.proofreader_var, self.editor_var = qtk.Var(), qtk.Var(), qtk.Var()
         self.original_title_var, self.subjects_var, self.date_var = qtk.Var(), qtk.Var(), qtk.Var()
+        for name, _ in MORE_FIELDS:  # «Más datos…»
+            setattr(self, f"{name}_var", qtk.Var())
+        self.title_image_var = qtk.Var("")  # image_key de la ilustración de la página de título ("" sin ilustración)
+        self.synopsis_var, self.endnotes_var = qtk.Var(True), qtk.Var(False)  # página «Sinopsis»; notas al final
+        self.note_style_var = qtk.Var("1")  # cómo se ve la llamada de nota (convert.NOTE_STYLES)
+        self.heading_font_var = qtk.Var("La del texto")  # convert.HEADING_FONT_CHOICES o «Archivo propio»
+        self.heading_font_file_var = qtk.Var("")  # ruta de la fuente propia de títulos
+        self.box_style_var = qtk.Var("Sencillo")  # aspecto de los recuadros (convert.BOX_STYLES)
+        self.logo_var = qtk.Var("")  # imagen del logo del grupo, en su propia página
         self.lang_var = qtk.Var("es")
         self.autocase_var = qtk.Var(False)
         self.profile_var = qtk.Var("Personalizado")  # fija gris, tamaño de imagen, EPUB 2 y KEPUB
@@ -2261,14 +2309,19 @@ class App:
         # Herramientas → Opciones
         self.font_last = "Del lector"  # a la que se vuelve si «Otra…» no elige archivo
         self.font_box = _combo(self.font_var, FONT_CHOICES, 8, changed=self.font_changed)
+        # Editable: lo que se escriba (Intro) es el separador, tal cual
+        self.separator_box = _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12, editable=True,
+                                    changed=self.update_preview)
+        self.separator_box.setToolTip("Elige uno o escribe el tuyo y pulsa Intro")
+        self.separator_box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)  # el propio no se suma a la lista
+        self.separator_box.lineEdit().editingFinished.connect(self.update_preview)
         index = qtk.Var.check(self.contents_var, QCheckBox("Índice"))
         index.setToolTip("Página «Contenido» tras la portada, con los capítulos y sus subtítulos")
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
                                                                  changed=self.apply_profile),
                             _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
                                                       changed=self.update_preview),
-                            _label("Separador:"), _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12,
-                                                         changed=self.update_preview),
+                            _label("Separador:"), self.separator_box,
                             _label("Letra:"), self.font_box, index, 1, self.pdf_btn, self.gen_btn))
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
@@ -2413,7 +2466,8 @@ class App:
         self.cover_label = _label("", "muted")
         grid.addLayout(_row(_button("Portada…", self.choose_cover), self.cover_label,
                             _button("Reemplazos…", self.edit_replacements),
-                            _button("Glosario…", self.edit_glossary), _menu_button("Títulos", titles), 1,
+                            _button("Glosario…", self.edit_glossary), _menu_button("Títulos", titles),
+                            _button("Más datos…", self.edit_more_data), 1,
                             _button("Buscar en internet (AniList)…", self.search_online)), 5, 0, 1, 8)
         for c in (1, 3, 5):
             grid.setColumnStretch(c, 2)
@@ -2774,7 +2828,8 @@ class App:
                                 [convert.Block("heading", page, html.escape(title)) for _, title, page in rows], [])
             chapters = [(n, title) for n, (kind, title, _) in enumerate(rows) if kind == ON]
             options = self.write_options([])
-            options.update(shrink=False, trim=False, epub2=False, credits=False, contents=True, reading=False)
+            options.update(shrink=False, trim=False, epub2=False, credits=False, contents=True, reading=False,
+                           synopsis=False, logo="")
             key = ("contents", chapters, rows, sorted(options.items()))
             try:
                 if key != self.preview_key:  # «Contenido» va justo tras la portada: el capítulo 1 del EPUB
@@ -2823,7 +2878,8 @@ class App:
                 options = self.write_options([0] * (kind == SEP) + [k for k, v in inner.items() if v == SEP])
                 options["removed"] = [k for k, v in inner.items() if v == CUT]
                 # rápido: solo lo que se ve; sin página de índice: el capítulo 1 es la sección
-                options.update(shrink=False, trim=False, epub2=False, credits=False, contents=False)
+                options.update(shrink=False, trim=False, epub2=False, credits=False, contents=False, synopsis=False,
+                               logo="")
                 chapters = [(0, self.tree.set(item, "title"))] if kind == ON else []
                 options["fit"] = DEVICES[self.device_var.get()]  # ilustraciones que caben en la página de MuPDF
                 key = (self.book.title, self.book.cover, chapters, sorted(options.items()),
@@ -3662,7 +3718,8 @@ class App:
     def option_choices(self):
         """Valores de las listas de «Opciones»."""
         return {"profile": list(PROFILES), "lang": LANGUAGES, "pdf_size": list(convert.PDF_SIZES),
-                "theme": theme.CHOICES, "device": list(DEVICES)}
+                "theme": theme.CHOICES, "device": list(DEVICES), "note_style": list(convert.NOTE_STYLES),
+                "heading_font": convert.HEADING_FONT_CHOICES + [HEADING_OWN], "box_style": list(convert.BOX_STYLES)}
 
     def open_options(self, category=None, scope=None, on_close=None):
         """«Opciones»: en category, o en la última vista."""
@@ -4668,12 +4725,8 @@ class App:
             except ValueError as e:
                 messagebox.showerror("Error", str(e))
 
-    def choose_cover(self):
-        """Portada: miniaturas de las ilustraciones para elegir con un clic, o la página mostrada del PDF,
-        o una imagen de un archivo."""
-        if not self.book:
-            return
-        win, column = self.dialog("Elegir portada")
+    def illustration_grid(self, chosen):
+        """Miniaturas de las ilustraciones del libro; un clic llama a chosen(índice del bloque)."""
         grid = QListWidget()
         grid.setViewMode(QListWidget.ViewMode.IconMode)
         grid.setIconSize(QPixmap(130, 130).size())
@@ -4692,7 +4745,70 @@ class App:
         if not images:
             grid.addItem("Este libro no tiene ilustraciones")
         grid.itemClicked.connect(lambda item: item.data(Qt.ItemDataRole.UserRole) is not None
-                                 and (self.set_cover(("image", item.data(Qt.ItemDataRole.UserRole))), win.close()))
+                                 and chosen(item.data(Qt.ItemDataRole.UserRole)))
+        return grid
+
+    def edit_more_data(self):
+        """«Más datos…»: lo de la página de título y del catálogo que no cabe en el panel. Aceptar lo guarda."""
+        if not self.book:
+            return
+        win, column = self.dialog("Más datos del libro")
+        column.addWidget(_label("Salen en la página de título (Opciones → Texto) y en los datos del EPUB que leen "
+                                "Calibre y los lectores.", "muted"))
+        grid = QGridLayout()
+        entries = {}
+        for n, (name, label) in enumerate(MORE_FIELDS[:-1]):  # los enlaces, abajo en su caja
+            entries[name] = QLineEdit(getattr(self, f"{name}_var").get())
+            entries[name].setMinimumWidth(240)  # el nombre japonés o un enlace se leen enteros
+            grid.addWidget(QLabel(f"{label}:"), n // 2, (n % 2) * 2)
+            grid.addWidget(entries[name], n // 2, (n % 2) * 2 + 1)
+        hints = {"book_type": "Novela ligera", "rating": "de 0 a 5, como 4,5", "isbn": "978-…",
+                 "relay": "chn-ing: Nombre", "revised": "08.04.2026", "source_url": "https://…",
+                 "author_native": "橘 公司", "franchise": "reúne varias series"}
+        for name, hint in hints.items():
+            entries[name].setPlaceholderText(hint)
+        column.addLayout(grid)
+        column.addWidget(QLabel("Enlaces (uno por línea, «Texto = https://…»):"))
+        links = QPlainTextEdit(self.links_var.get())
+        links.setFixedHeight(70)
+        column.addWidget(links)
+        chosen = [self.title_image_var.get()]
+        picture = _label("", "muted")
+
+        def show_picture():
+            found = next((b for b in self.book.blocks if b.kind == "image" and b.image and chosen[0]
+                          and convert.image_key(b.image) == chosen[0]), None)
+            picture.setText(f"Ilustración de la página de título: página {found.page}" if found
+                            else "La página de título va sin ilustración")
+
+        def pick_picture():
+            box, inner = self.dialog("Ilustración de la página de título", parent=win)
+            inner.addWidget(self.illustration_grid(lambda k: (chosen.__setitem__(0, convert.image_key(
+                self.book.blocks[k].image)), show_picture(), box.close())), 1)
+            box.show()
+            self.picture_window = box
+
+        def save():
+            for name, entry in entries.items():
+                getattr(self, f"{name}_var").set(entry.text().strip())
+            self.links_var.set(links.toPlainText().strip())
+            self.title_image_var.set(chosen[0])
+            win.close()
+
+        show_picture()
+        column.addLayout(_row(picture, 1, _button("Elegir ilustración…", pick_picture),
+                              _button("Sin ilustración", lambda: (chosen.__setitem__(0, ""), show_picture()))))
+        column.addLayout(_row(1, _button("Aceptar", save, "primary"), _button("Cancelar", win.close)))
+        win.show()
+        self.more_window = win, entries, links, save
+
+    def choose_cover(self):
+        """Portada: miniaturas de las ilustraciones para elegir con un clic, o la página mostrada del PDF,
+        o una imagen de un archivo."""
+        if not self.book:
+            return
+        win, column = self.dialog("Elegir portada")
+        grid = self.illustration_grid(lambda k: (self.set_cover(("image", k)), win.close()))
         column.addWidget(grid, 1)
         column.addLayout(_row(_button(f"Página mostrada del original ({self.pdf_page + 1})",
                                       lambda: (self.cover_from_page(), win.close())),
@@ -4742,8 +4858,11 @@ class App:
         """Solo rellena lo vacío: lo escrito a mano o leído del PDF no se pisa."""
         fill = [(label, var, item[key]) for key, label, var in (
             ("author", "Autor", self.author_var), ("illustrator", "Ilustraciones", self.illustrator_var),
-            ("original_title", "Título original", self.original_title_var), ("subjects", "Géneros", self.subjects_var))
-            if item[key] and not var.get().strip()]
+            ("original_title", "Título original", self.original_title_var), ("subjects", "Géneros", self.subjects_var),
+            ("romaji_title", "Título romanizado", self.romaji_title_var),
+            ("author_native", "Autor en japonés", self.author_native_var),
+            ("illustrator_native", "Ilustrador en japonés", self.illustrator_native_var))
+            if item.get(key) and not var.get().strip()]
         description = item["description"] if item["description"] and not self.description.strip() else ""
         if not fill and not description:
             messagebox.showinfo("Datos de AniList", "No hay nada que rellenar: esos datos ya están en la ventana.")
@@ -5255,7 +5374,11 @@ class App:
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
                 "contents": self.contents_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var,
-                "hyphenate": self.hyphenate_var, "whole_words": self.whole_words_var, "pdf_size": self.pdf_size_var}
+                "hyphenate": self.hyphenate_var, "whole_words": self.whole_words_var, "pdf_size": self.pdf_size_var,
+                **{name: getattr(self, f"{name}_var") for name, _ in MORE_FIELDS},
+                "title_image": self.title_image_var, "synopsis": self.synopsis_var, "endnotes": self.endnotes_var,
+                "note_style": self.note_style_var, "heading_font": self.heading_font_var,
+                "heading_font_file": self.heading_font_file_var, "box_style": self.box_style_var, "logo": self.logo_var}
 
     def rows(self):
         return {item: [self.tree.set(item, "inc"), self.tree.set(item, "title"), self.tree.set(item, "ok")]
