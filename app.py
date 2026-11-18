@@ -37,7 +37,7 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QLockFile, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QLockFile, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPainterPath,
                            QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -2671,6 +2671,8 @@ class App:
         """Al cerrar a mitad de un trabajo, detiene el proceso y borra el EPUB a medio escribir.
         False si se canceló (editor de texto con cambios)."""
         editor = self.text_editor
+        if editor:
+            editor.sync_web()
         if editor and editor.dirty() and not messagebox.askyesno(
                 "Cerrar", "El texto que estás editando tiene cambios sin guardar. ¿Cerrar y descartarlos?",
                 parent=editor.win):
@@ -7263,6 +7265,7 @@ class TextEditor:
         # ¿cambios sin volcar en la hoja web?, qué hacer al cargarla, y el párrafo de su cursor (su sitio en la de Qt)
         self.web_dirty, self.web_then, self.web_home = False, None, None
         self.web_resume = False  # se dejó la hoja web por «Contenido»: se vuelve a ella en el capítulo siguiente
+        self.web_busy, self.web_queue = False, []  # on_sheet en curso y lo pulsado mientras tanto
         import webview
         if webview.available():
             self.web = webview.WebSheet()
@@ -7279,6 +7282,7 @@ class TextEditor:
                                 # los de la hoja (Sheet.keyPressEvent) que Chromium no tiene
                                 ("Ctrl+T", lambda: self.do("toggle_heading")), ("Ctrl+J", lambda: self.do("join_next")),
                                 ("Ctrl+D", lambda: self.do("toggle_right")),
+                                ("Ctrl+E", lambda: self.do("toggle_center")),
                                 ("Shift+F3", lambda: self.do("change_case")),
                                 ("Ctrl+Alt+K", lambda: self.show_link_bar()),
                                 ("Ctrl+Return", lambda: self.toggle_reviewed()),
@@ -7389,6 +7393,7 @@ class TextEditor:
         self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
         self.more, self.below = None, None  # trozo del párrafo en la página siguiente y dónde va esa página
         self.drawn = None  # source_key() del dibujo actual del panel
+        self.page_cache, self.file_starts = {}, None  # source_page: página de cada bloque de un EPUB
         self.pending, self.closed = {}, False  # trabajo diferido: nombre -> temporizador
         self.set_text_zoom(100)
         self.open_section(start, end, int(item))
@@ -7864,6 +7869,10 @@ class TextEditor:
         self.whole_box, self.case_box = QCheckBox("Palabra completa"), QCheckBox("Mayúsculas")
         self.case_box.setToolTip("Distinguir mayúsculas y minúsculas")
         self.regex_box = QCheckBox(".*")
+        font = self.regex_box.font()  # dos signos finos: en negrita y algo mayores se leen (contraste 1,4:1 si no)
+        font.setBold(True)
+        font.setPointSizeF(font.pointSizeF() + 2)
+        self.regex_box.setFont(font)
         self.regex_box.setToolTip(r"Expresión regular: \d+ cifras, (\w+) una palabra… En el reemplazo, \1 es lo "
                                   "del primer paréntesis")
         for widget in (self.find_entry, self.regex_box):  # la expresión se revisa al escribirla
@@ -7993,15 +8002,22 @@ class TextEditor:
             return
         block = self.sheet.textCursor().block()
         original = editor.original_of(block)
-        if (not self.show_changes_action.isChecked() or editor.objects_of(block) or not block.text().strip()
-                or (original is not None and editor.block_lines(block) == [original])):
+        if self.web_on:  # el párrafo del cursor de la web (sondeo): la hoja de Qt aún no tiene lo escrito en ella
+            st = self.web_state
+            text, objects = st.get("text", "").replace(" ", " "), st.get("obj")
+            new = st.get("fresh") or original is None
+            unchanged = not st.get("edited") and not new
+        else:
+            text, objects, new = block.text(), editor.objects_of(block), original is None
+            unchanged = original is not None and editor.block_lines(block) == [original]
+        if not self.show_changes_action.isChecked() or objects or not text.strip() or unchanged:
             self.diff_frame.hide()
             return
-        if original is None:
+        if new:
             self.diff_label.setText("<i>Párrafo nuevo</i>")
         else:
             colors = theme.mark_colors(self.app.dark)
-            parts, diff = [], _word_diff(editor.plain_line(original), block.text())
+            parts, diff = [], _word_diff(editor.plain_line(original), text)
             for n, (text, tag) in enumerate(diff):
                 text = html.escape(text)
                 gap = " " if tag == "old" and n + 1 < len(diff) and diff[n + 1][1] == "new" else ""  # «cargada grávida»
@@ -8323,8 +8339,34 @@ class TextEditor:
         self.counts = len(changed), issues
         self.show_counts()
         self.nav_entries = nav
-        if not self.nav.isHidden():
+        self.refill_nav()
+
+    def refill_nav(self):
+        """El panel de navegación, si está a la vista: con la hoja web, de lo que hay en ella (web_nav)."""
+        if self.nav.isHidden():
+            return
+        if self.web_on:
+            self.web_nav()
+        else:
             self.fill_nav()
+
+    def web_nav(self):
+        """El panel de navegación de la hoja web, con lo escrito en ella: títulos, avisos, comentarios y cambios;
+        cada entrada lleva ("web", número del párrafo)."""
+        def got(data):
+            if not self.web_on or not data:
+                return
+            d = json.loads(data)
+            entries = {"Títulos": [], "Avisos": [], "Comentarios": [], "Cambios": []}
+            entries["Títulos"] = [(("web", i), text) for i, text in d.get("titles", [])]
+            entries["Cambios"] = [(("web", i), text) for i, text in d.get("changed", [])]
+            for i, text, ident in d.get("issues", []):
+                issue = self.web_issues.get(ident)
+                if issue is not None:
+                    entries["Comentarios" if issue.kind == "comment" else "Avisos"].append((("web", i), text))
+            self.nav_entries = entries
+            self.fill_nav()
+        self.web.call("outline", done=got)
 
     # Panel de navegación, como el de Word: lo que hay en el capítulo, a un clic
     def nav_panel(self):
@@ -8343,8 +8385,7 @@ class TextEditor:
         self.nav_btn.setChecked(not self.nav.isHidden())
         self.app.settings["editor_nav"] = not self.nav.isHidden()
         self.app.save_settings()
-        if not self.nav.isHidden():
-            self.fill_nav()
+        self.refill_nav()
 
     def fill_nav(self):
         """Cuatro grupos con su cuenta; cada entrada, el párrafo recortado. Los vacíos salen sin desplegar."""
@@ -8355,13 +8396,18 @@ class TextEditor:
                 text = " ".join(text.replace("￼", "").split())
                 item = QTreeWidgetItem(group, [text[:60] + ("…" if len(text) > 60 else "")])
                 item.setToolTip(0, text)
-                item.setData(0, Qt.ItemDataRole.UserRole, block.blockNumber())
+                item.setData(0, Qt.ItemDataRole.UserRole, block if isinstance(block, tuple) else block.blockNumber())
             group.setExpanded(bool(entries))
 
     def nav_go(self, item):
         number = item.data(0, Qt.ItemDataRole.UserRole)
         if number is None:
             item.setExpanded(not item.isExpanded())
+            return
+        if isinstance(number, tuple):  # ("web", párrafo) de web_nav
+            if self.web_on:
+                self.web.call("select", number[1], 0)
+                self.web.setFocus()
             return
         block = self.sheet.document().findBlockByNumber(number)
         if block.isValid():
@@ -8985,7 +9031,7 @@ class TextEditor:
         se dice en la barra de abajo."""
         if not self.web_on:
             return getattr(self.sheet, name)(*args)
-        state, call = self.web_state, self.web.call
+        call = self.web.call
         actions = {
             "toggle_bold": lambda: call("cmd", "bold"), "toggle_italic": lambda: call("cmd", "italic"),
             "toggle_underline": lambda: call("cmd", "underline"), "toggle_strike": lambda: call("cmd", "strikeThrough"),
@@ -9000,14 +9046,10 @@ class TextEditor:
             "set_color": lambda color: call("css", "foreColor", QColor(color).name() if color is not None else "inherit"),
             "set_family": lambda family: call("css", "fontName", family or "inherit"),
             "grow_font": lambda step: call("size", "1.2" if step > 0 else "0.83"),
-            "set_paragraph_style": lambda name: call("retag", WEB_TAGS[name]),
-            "set_align": lambda how: call("align", how),
-            "toggle_center": lambda: call("align", None if state.get("align") == "center" else "center"),
-            "toggle_right": lambda: call("align", None if state.get("align") == "right" else "right"),
-            "toggle_justify": lambda: call("align", None if state.get("align") == "justify" else "justify"),
-            "toggle_indent": lambda: call("indent", "1.5em" if state.get("indent") in ("0px", "") else "0"),
         }
-        if name not in actions:  # versalitas, recuadro, lista, unir, separador, mayúsculas: en la hoja de Qt
+        # Lo demás en la hoja de Qt: versalitas, recuadro, lista, unir, separador, mayúsculas, y estilo, alineación y
+        # sangría del párrafo (en Chromium cambian su atributo a mano, fuera de su deshacer: Ctrl+Z no los quitaba)
+        if name not in actions:
             self.on_sheet(lambda: getattr(self.sheet, name)(*args))
             return None
         actions[name](*args)
@@ -9071,8 +9113,16 @@ class TextEditor:
         self.web.setZoomFactor(self.text_zoom.value() / 100)  # load_sheet la deja al 100 %
         self.web.call("goHome", self.web_index(self.sheet.textCursor().block()))
         then, self.web_then = self.web_then, None
-        if then:
+        if then:  # el de sheet_to_web acaba con web_settled, ya con la selección puesta
             then()
+        else:
+            self.web_settled()
+
+    def web_settled(self):
+        """La hoja web volvió de on_sheet con su selección: lo pulsado mientras tanto, ahora."""
+        self.web_busy = False
+        if self.web_queue:
+            self.on_sheet(self.web_queue.pop(0))
 
     def web_index(self, block):
         """Número del párrafo de la hoja web (hijo de la hoja, como los carga load_web) del bloque de la hoja."""
@@ -9107,6 +9157,8 @@ class TextEditor:
         self.web_dirty = bool(self.web_state.get("dirty"))
         self.update_tools()
         self.undo_btn.setEnabled(bool(self.web_state.get("canUndo")) or self.sheet.document().isUndoAvailable())
+        if self.show_changes_action.isChecked():
+            self.update_diff()
         if self.web_state.get("wants") in ("undo", "redo"):  # Ctrl+Z o Ctrl+Y sin nada que hacer en Chromium
             self.web_undo(self.web_state["wants"] == "redo")
         if isinstance(self.reading, int) and self.web_state.get("i", -1) != self.reading:
@@ -9127,6 +9179,7 @@ class TextEditor:
             self.later("draft", DRAFT_MS, self.write_draft)
         if self.web_shown():
             self.later("web", 600, self.draw_web)
+        self.later("nav", 600, self.refill_nav)
 
     def web_text(self, dumped):
         """lnc.dump() como texto de la hoja (websheet.lines_of), o None si no se pudo."""
@@ -9172,6 +9225,7 @@ class TextEditor:
                            "change": colors["changed"]},
                 "levels": [colors.get(level, colors["Grave"]) for level in levels]}
         self.web.call("setMarks", json.dumps(data))
+        self.refill_nav()  # tras las marcas: el panel lista los avisos pintados
 
     def web_menu(self, pos):
         """Clic derecho en la hoja web, como en la hoja: sugerencias de la palabra que no está (ignorarla, añadirla al
@@ -9218,10 +9272,12 @@ class TextEditor:
                 if issue.edit:
                     change = self.fix_preview(issue)
                     menu.addAction(f"Arreglar: «{change}»" if issue.edit[2] else "Arreglar: quitar este párrafo",
-                                   lambda i=issue: self.via_sheet(lambda: self.fix_issue(i, go_next=False)))
+                                   lambda i=issue: self.on_sheet(lambda: self.fix_issue(i, go_next=False)))
                 menu.addAction("Quitar comentario" if issue.kind == "comment" else "Ignorar este aviso",
                                lambda i=issue: (self.ignore_issue(i), self.web_marks()))
+                menu.addAction("Aviso siguiente   (F8)", self.next_issue)
                 menu.addSeparator()
+            self.web_menu_more(menu, info, word)
             page = self.web.page()
             for item in (("Deshacer", QWebEnginePage.WebAction.Undo), ("Rehacer", QWebEnginePage.WebAction.Redo),
                          None, ("Cortar", QWebEnginePage.WebAction.Cut), ("Copiar", QWebEnginePage.WebAction.Copy),
@@ -9234,18 +9290,53 @@ class TextEditor:
             menu.popup(self.web.mapToGlobal(pos))
         self.web.call("at", pos.x(), pos.y(), done=show)
 
-    def via_sheet(self, fn):
-        """fn() sobre la hoja de Qt con lo escrito en la web, y la hoja web otra vez con el resultado."""
-        self.flush_web(lambda: (fn(), self.load_web()))
+    def web_menu_more(self, menu, info, word):
+        """Lo demás del clic derecho de la hoja (mark_menu) en la hoja web: cambiar la ilustración, comentario del
+        párrafo, volver al original y sinónimos. Lo que cambia el texto pasa por la hoja de Qt (on_sheet), con el
+        cursor donde se pulsó (lnc.at lo puso)."""
+        token = convert.TOKEN.fullmatch(info.get("token", ""))
+        if token and token[1] == "Ilustración":
+            k = int(token[2])
+            menu.addAction("Cambiar ilustración…", lambda: self.on_sheet(lambda: self.change_picture(k))).setToolTip(
+                "Para moverla, córtala (Ctrl+X) y pégala donde vaya")
+            menu.addSeparator()
+        if info.get("home") is None:
+            return
+        block = self.web_block(info["home"])
+        k = editor.source_of(block)
+        if k is not None and editor._is_text(block) and self.app.book.blocks[k].kind == "p":
+            has = any(i.kind == "comment" for i in self.block_issues(block))
+            menu.addAction("Cambiar comentario…" if has else "Comentario…",
+                           lambda: (self.edit_comment(block), self.web_marks()))
+        if info.get("edited") or self.sheet.can_restore(block, self.loaded()):
+            menu.addAction("Volver al original", lambda: self.on_sheet(self.restore_current))
+        if word and word.isalpha() and word not in self.unknown - self.ignored_words and self.app.spanish():
+            found = editor.synonyms(word)
+            if found:
+                sub = menu.addMenu("Sinónimos")
+                for synonym in found:
+                    shown = editor.match_case(word, synonym)
+                    sub.addAction(shown, lambda s=shown: self.web.call("replaceWord", s))
+        if menu.actions() and not menu.actions()[-1].isSeparator():
+            menu.addSeparator()
 
     def on_sheet(self, fn):
         """fn() en la hoja de Qt: con la hoja web, sobre lo escrito en ella y con su selección, y vuelta a la web
         con el resultado y la selección. Así lo que Chromium no sabe hacer (versalitas, recuadro, unir…) también
         se hace desde la hoja web."""
-        if self.web_on:
-            self.web_to_sheet(lambda: (fn(), self.sheet_to_web()))
-        else:
+        if not self.web_on:
             fn()
+        elif self.web_busy:  # la anterior aún recarga la web: si no, esta volcaría la página vieja y la pisaría
+            self.web_queue.append(fn)
+        else:
+            self.web_busy = True
+            self.web_to_sheet(lambda: self.sheet_step(fn))
+
+    def sheet_step(self, fn):
+        try:
+            fn()
+        finally:  # aunque falle, la web vuelve y la cola sigue
+            self.sheet_to_web()
 
     def web_to_sheet(self, then):
         """Lo escrito en la hoja web pasa a la de Qt, su selección también (websheet.positions), y luego then()."""
@@ -9285,10 +9376,11 @@ class TextEditor:
                 spots = []
                 for n, qt, pos in ends:
                     if n >= len(texts):
+                        self.web_settled()
                         return
                     spots.append((n, websheet.web_position(websheet.positions(texts[n], qt), pos)))
                 (i, a), (j, z) = spots
-                self.web.call("select", i, a, z, j)
+                self.web.call("select", i, a, z, j, done=lambda _: self.web_settled())
             self.web.call("texts", done=got)
         self.web_then = place
         self.load_web()
@@ -9305,7 +9397,7 @@ class TextEditor:
         self.web.call("dump", done=back)
 
     def web_done(self):
-        self.web_on, self.web_dirty = False, False
+        self.web_on, self.web_dirty, self.web_busy, self.web_queue = False, False, False, []
         self.web_poll.stop()
         self.web.hide()
         self.sheet.show()
@@ -9700,7 +9792,7 @@ class TextEditor:
                                             QEvent.Type.MouseButtonRelease):
             return False
         x = event.position().x()
-        sheet = self.sheet.geometry()
+        sheet = (self.web if self.web_on else self.sheet).geometry()  # la hoja a la vista: la de Qt va oculta
         near = abs(x - sheet.left()) <= 10 or abs(x - sheet.right()) <= 10
         if kind == QEvent.Type.MouseButtonPress and near:
             self.dragging = True
@@ -9713,6 +9805,8 @@ class TextEditor:
             room = self.desk.width() - 2 * (self.focus_prev.width() + 40)  # la hoja no llega a las flechas
             self.page_share = max(1.0, min(width, room) / self.page_width())
             self.sheet.setMaximumWidth(int(self.page_width() * self.page_share))
+            if self.web is not None:
+                self.web.setMaximumWidth(self.sheet.maximumWidth())
             return True
         self.desk.setCursor(Qt.CursorShape.SizeHorCursor if near else Qt.CursorShape.ArrowCursor)
         return False
@@ -9734,6 +9828,9 @@ class TextEditor:
             qtk.cancel(job)
         self.pending.clear()
         self.closed = True
+        if self.web is not None and shiboken6.isValid(self.web):  # lo que Chromium conteste ya no tiene a quién
+            self.web.closing = True
+            self.web_poll.stop()
         self.drop_draft()  # se aceptó o se descartó: el borrador ya no hace falta
         # shortcut: tras aceptar, un párrafo añadido antes desplaza el bloque; se queda cerca, que basta para volver
         _log_work(self.app.work, datetime.now().date().isoformat(), paragraphs=self.saved_paragraphs,
@@ -9874,7 +9971,8 @@ class TextEditor:
                                    theme.colors(self.app.dark))
             self.page_label.setText("")
         else:
-            page = self.app.pdf_doc[block.page - 1]
+            index = self.source_page(k)
+            page = self.app.pdf_doc[index]
             boxes = [pymupdf.Rect(b.rect) if b.rect else self.find_box(page, b)
                      for b in [block] + [blocks[j] for j in joined]]
             boxes = [box for box in boxes if box]
@@ -9882,11 +9980,28 @@ class TextEditor:
             for box in boxes[1:]:
                 self.box |= box
             # El párrafo que sigue en la página siguiente (Backstabbed 1, pág. 96): esa página va debajo y su
-            # trozo también se recuadra
-            more = self.continuation(([block] + [blocks[j] for j in joined])[-1])
+            # trozo también se recuadra. En un EPUB las páginas son de MuPDF, no del libro: no se busca
+            more = None if self.app.book.origin else self.continuation(([block] + [blocks[j] for j in joined])[-1])
             self.more = (block.page, more) if more else None
-            self.show_page(block.page - 1)
+            self.show_page(index)
         self.update_status()
+
+    def source_page(self, k):
+        """Página (desde 0) del original en la que está el bloque k. En un PDF, la suya. Un bloque de un EPUB solo
+        sabe la primera página de su archivo (faithful._first_pages): su texto se busca en las de ese archivo."""
+        block, doc = self.app.book.blocks[k], self.app.pdf_doc
+        start = block.page - 1
+        if not self.app.book.origin or doc is None or block.kind not in ("p", "heading"):
+            return start
+        if k not in self.page_cache:
+            if self.file_starts is None:  # primera página de cada archivo, en orden
+                self.file_starts = sorted({b.page for b in self.app.book.blocks})
+            after = next((p - 1 for p in self.file_starts if p > block.page), doc.page_count)
+            # desde la del párrafo anterior del mismo archivo: van en orden
+            near = self.page_cache.get(k - 1, start) if k and self.app.book.blocks[k - 1].page == block.page else start
+            self.page_cache[k] = next((i for i in range(near, min(after, doc.page_count))
+                                       if self.find_box(doc[i], block)), start)
+        return self.page_cache[k]
 
     def continuation(self, block):
         """Recuadro de lo que el párrafo block sigue en la página siguiente, o None si acaba en la suya."""
@@ -9996,6 +10111,24 @@ class TextEditor:
             return
         index, point = spot
         page, blocks = self.app.pdf_doc[index], self.app.book.blocks
+        if self.app.book.origin:  # un EPUB: el párrafo cuyo texto lleva la línea pulsada
+            every = page.get_text("words")  # (x0, y0, x1, y1, palabra, bloque, línea, n)
+            hit = min(every, key=lambda w: abs((w[1] + w[3]) / 2 - point.y), default=None)
+            line = [w for w in every if hit and w[5:7] == hit[5:7]]  # la línea más cercana al clic, entera
+            words = " ".join(w[4] for w in sorted(line, key=lambda w: w[0])[:5])
+            if words:
+                found = [k for _, start, end, _ in self.sections for k in range(start, end)
+                         if blocks[k].kind in ("p", "heading") and blocks[k].page <= index + 1
+                         and words in " ".join(convert._plain(blocks[k]).split())]
+                # del archivo de esa página (el de primera página más alta); si la línea se repite («—Sí.»), el que
+                # en esta página se recuadra donde se pulsó
+                found = [k for k in found if blocks[k].page == max(blocks[j].page for j in found)]
+                k = next((k for k in found if (box := self.find_box(page, blocks[k]))
+                          and (box + (-4, -4, 4, 4)).contains(point)), found[0] if found else None)
+                if k is not None:
+                    self.page_cache[k] = index
+                    self.go_block(k)
+            return
         last = None  # último párrafo de la página anterior: puede seguir en esta
         for _, start, end, _ in self.sections:
             for k in range(start, end):
@@ -10094,7 +10227,10 @@ class TextEditor:
         starts = self.page_starts()
         self.prev_page.setEnabled(any(p < page for p in starts))
         self.next_page.setEnabled(any(p > page for p in starts))
-        self.status.setText(f"Página {page} del PDF · {where} · "
+        source = "del original" if self.app.book.origin else "del PDF"
+        if self.app.book.origin:  # la página en la que está, no la primera de su archivo
+            page = self.source_page(self.source_block()) + 1
+        self.status.setText(f"Página {page} {source} · {where} · "
                             f"{words:,} palabra{'' if words == 1 else 's'}".replace(",", "."))
 
     @staticmethod
@@ -10105,6 +10241,16 @@ class TextEditor:
             return [line.strip() for line in text.splitlines() if line.strip()]
         text = editor.dump(page["doc"]) if text is None else text
         return lines(text) != lines("\n\n".join(line for _, line in page["lines"]))
+
+    def sync_web(self):
+        """Pregunta a la hoja web si tiene cambios ahora mismo (como mucho 1 s): cerrar la ventana no espera al
+        sondeo, y lo escrito en el último medio segundo no contaba."""
+        if not self.web_on:
+            return
+        loop = QEventLoop()
+        self.web.call("state", done=lambda st: (self.web_polled(st), loop.quit()))
+        QTimer.singleShot(1000, loop.quit)
+        loop.exec()
 
     def dirty(self):
         """¿Hay algo sin guardar? También lo escrito en la hoja web y aún no volcado (según su último sondeo)."""

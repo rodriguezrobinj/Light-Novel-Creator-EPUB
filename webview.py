@@ -175,7 +175,7 @@ if AVAILABLE:
             super().__init__(parent)
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # aquí sí se escribe
             self.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)  # copiar, pegar
-            self.loaded = False
+            self.loaded, self.closing = False, False  # closing: el editor se cerró (TextEditor.on_destroy)
 
         def load_sheet(self, files, path, text):
             """Muestra text (la página de websheet.page) como el archivo path, con files (ruta -> bytes) a mano."""
@@ -204,8 +204,11 @@ if AVAILABLE:
 
         def call(self, name, *args, done=None):
             """window.lnc.name(*args); done(resultado)."""
+            import shiboken6
             script = f"window.lnc && window.lnc.{name}({', '.join(json.dumps(a) for a in args)})"
-            self.page().runJavaScript(script, 0, done or (lambda _: None))
+            # la respuesta puede llegar con la ventana ya cerrada: entonces no se hace nada con ella
+            self.page().runJavaScript(script, 0, lambda result: done and shiboken6.isValid(self) and not self.closing
+                                      and done(result))
 
 
 def section_path(data):

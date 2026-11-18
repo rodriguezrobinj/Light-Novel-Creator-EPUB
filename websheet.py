@@ -50,17 +50,6 @@ SHEET_JS = r"""
     sheet.focus(); var s = getSelection(); s.removeAllRanges(); s.addRange(r);
     (p[0].nodeType === 3 ? p[0].parentElement : b).scrollIntoView({block: 'center'});
   }
-  function blocks() {  // los párrafos de la selección
-    var s = window.getSelection(); if (!s.rangeCount) return [];
-    var r = s.getRangeAt(0), a = block(r.startContainer), b = block(r.endContainer), out = [], n = a;
-    while (n) { if (n.nodeType === 1 && !n.classList.contains('lnc-obj')) out.push(n); if (n === b) break; n = n.nextSibling; }
-    return out;
-  }
-  function style(el, key, value) {
-    el.style.setProperty(key, value === null ? '' : value);
-    if (value === null) el.style.removeProperty(key);
-    if (!el.getAttribute('style')) el.removeAttribute('style');
-  }
   // Intro: Chromium copia el párrafo con su id; el nuevo no puede llevarlo
   var repaint = null;
   sheet.addEventListener('input', function () {
@@ -103,7 +92,6 @@ SHEET_JS = r"""
       if (!document.queryCommandEnabled(redo ? 'redo' : 'undo')) { e.preventDefault(); lnc.wanted = redo ? 'redo' : 'undo'; }
     }
     else if (e.ctrlKey && !e.altKey && !e.shiftKey && keys[e.keyCode]) { e.preventDefault(); document.execCommand(keys[e.keyCode]); }
-    else if (e.ctrlKey && !e.altKey && e.keyCode === 69) { e.preventDefault(); lnc.align(lnc.state().align === 'center' ? null : 'center'); }
   });
   window.lnc = {
     state: function () {
@@ -116,6 +104,9 @@ SHEET_JS = r"""
               tag: b ? b.tagName.toLowerCase() : '', align: align === 'start' ? 'left' : align,
               indent: b ? getComputedStyle(b).textIndent : '', i: b ? index(b) : -1, home: b ? lnc.homeOf(b) : -1,
               sc: !!(at && at.closest('small.sc')), frame: !!(b && b.closest('.marco')),
+              // el párrafo del cursor, para la barra de «Mostrar cambios»: su texto, si cambió y si es nuevo
+              text: b ? b.textContent : '', edited: !!(b && lnc.orig && lnc.edited(b)),
+              fresh: !!(b && lnc.orig && !lnc.orig.has(b)), obj: !!(b && b.classList.contains('lnc-obj')),
               dirty: lnc.changedAny(), canUndo: document.queryCommandEnabled('undo'),
               wants: lnc.take()});  // un objeto no llega a Python: JSON
     },
@@ -155,6 +146,18 @@ SHEET_JS = r"""
       return JSON.stringify({texts: Array.prototype.map.call(sheet.children, function (b) {
         return b.classList.contains('lnc-obj') ? '' : b.textContent; }), at: at, to: to});
     },
+    outline: function () {  // el panel de navegación: títulos, párrafos cambiados y avisos pintados, [número, texto]
+      var out = {titles: [], changed: [], issues: []};
+      Array.prototype.forEach.call(sheet.children, function (b, i) {
+        if (b.classList.contains('lnc-obj')) return;
+        if (/^h[1-6]$/i.test(b.tagName)) out.titles.push([i, b.textContent]);  // XHTML: en minúsculas
+        if (lnc.edited(b)) out.changed.push([i, b.textContent]);
+      });
+      (lnc.found || []).forEach(function (f) {
+        var b = block(f.range.startContainer); if (b) out.issues.push([index(b), b.textContent, f.id]);
+      });
+      return JSON.stringify(out);
+    },
     select: function (i, a, z, j) {  // de a en el párrafo i a z en el j (o en el i)
       var b = sheet.children[i], c = j === undefined || j === null ? b : sheet.children[j];
       if (b && c) caret(b, a, z, c); return !!b;
@@ -190,18 +193,6 @@ SHEET_JS = r"""
         if (!el.getAttribute('style')) el.removeAttribute('style');
       });
     },
-    retag: function (tag) {  // estilo de párrafo: otra etiqueta, mismos atributos y contenido
-      blocks().forEach(function (b) {
-        if (b.tagName.toLowerCase() === tag) return;
-        var n = document.createElement(tag);
-        if (lnc.home.has(b)) lnc.home.set(n, lnc.home.get(b));
-        Array.prototype.forEach.call(b.attributes, function (a) { n.setAttribute(a.name, a.value); });
-        while (b.firstChild) n.appendChild(b.firstChild);
-        b.parentNode.replaceChild(n, b);
-      });
-    },
-    align: function (how) { blocks().forEach(function (b) { style(b, 'text-align', how); if (how) style(b, 'text-indent', '0'); }); },
-    indent: function (value) { blocks().forEach(function (b) { style(b, 'text-indent', value); }); },
     ruby: function (base, reading) {
       lnc.cmd('insertHTML', '<ruby>' + base + '<rp>(</rp><rt>' + reading + '</rt><rp>)</rp></ruby>');
     },
@@ -284,6 +275,13 @@ SHEET_JS = r"""
         lnc.wordRange = document.createRange(); lnc.wordRange.setStart(n, a); lnc.wordRange.setEnd(n, z);
       }
       (lnc.found || []).forEach(function (f) { if (f.range.isPointInRange(n, o)) out.issues.push(f.id); });
+      // el párrafo (su sitio en la hoja de Qt), si cambió y su marca (ilustración); como Word, el clic fuera de lo
+      // elegido pone ahí el cursor: lo que se haga desde el menú es sobre ese punto
+      var b = block(n), s = getSelection();
+      if (b) { out.home = lnc.homeOf(b); out.edited = lnc.edited(b); out.token = b.getAttribute('data-token') || ''; }
+      if (b && !(s.rangeCount && !s.isCollapsed && s.getRangeAt(0).isPointInRange(n, o))) {
+        var c = document.createRange(); c.setStart(n, o); c.collapse(true); s.removeAllRanges(); s.addRange(c);
+      }
       return JSON.stringify(out);
     },
     replaceWord: function (text) {  // la palabra del último clic derecho
