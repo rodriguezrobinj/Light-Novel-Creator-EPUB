@@ -36,13 +36,16 @@ SHEET_JS = r"""
   function offset(b, node, at) {  // posición de (node, at) en el texto de b
     var r = document.createRange(); r.setStart(b, 0); r.setEnd(node, at); return r.toString().length;
   }
-  function spot(b, pos) {  // (nodo de texto, posición) del carácter pos de b
+  function spot(b, pos, start) {  // (nodo de texto, posición) del carácter pos de b; start: en el límite, el siguiente
     var w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n, last = null, from = 0;
-    while ((n = w.nextNode())) { if (pos <= from + n.data.length) return [n, pos - from]; from += n.data.length; last = n; }
+    while ((n = w.nextNode())) {
+      if (pos < from + n.data.length || (!start && pos === from + n.data.length)) return [n, pos - from];
+      from += n.data.length; last = n;
+    }
     return last ? [last, last.data.length] : [b, 0];
   }
-  function caret(b, a, z) {  // elige de a a z en b (o pone el cursor) y lo trae a la vista
-    var p = spot(b, a), q = spot(b, z === undefined ? a : z), r = document.createRange();
+  function caret(b, a, z, c) {  // elige de a en b a z en c (o en b; o pone el cursor) y lo trae a la vista
+    var p = spot(b, a, z !== undefined && (c || z !== a)), q = spot(c || b, z === undefined ? a : z), r = document.createRange();
     r.setStart(p[0], p[1]); r.setEnd(q[0], q[1]);
     sheet.focus(); var s = getSelection(); s.removeAllRanges(); s.addRange(r);
     (p[0].nodeType === 3 ? p[0].parentElement : b).scrollIntoView({block: 'center'});
@@ -95,18 +98,35 @@ SHEET_JS = r"""
   });
   var keys = {78: 'bold', 66: 'bold', 75: 'italic', 73: 'italic', 83: 'underline'};  // N, B, K, I, S (Word en español)
   sheet.addEventListener('keydown', function (e) {
-    if (e.ctrlKey && !e.altKey && !e.shiftKey && keys[e.keyCode]) { e.preventDefault(); document.execCommand(keys[e.keyCode]); }
+    if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.keyCode === 90 || e.keyCode === 89)) {  // Ctrl+Z, Ctrl+Y
+      var redo = e.keyCode === 89;
+      if (!document.queryCommandEnabled(redo ? 'redo' : 'undo')) { e.preventDefault(); lnc.wanted = redo ? 'redo' : 'undo'; }
+    }
+    else if (e.ctrlKey && !e.altKey && !e.shiftKey && keys[e.keyCode]) { e.preventDefault(); document.execCommand(keys[e.keyCode]); }
     else if (e.ctrlKey && !e.altKey && e.keyCode === 69) { e.preventDefault(); lnc.align(lnc.state().align === 'center' ? null : 'center'); }
   });
   window.lnc = {
     state: function () {
-      var b = here(), align = b ? getComputedStyle(b).textAlign : '';
+      var b = here(), align = b ? getComputedStyle(b).textAlign : '', s = getSelection();
+      var at = s.rangeCount ? s.getRangeAt(0).startContainer : null;
+      at = at && at.nodeType === 3 ? at.parentElement : at;
       return JSON.stringify({bold: document.queryCommandState('bold'), italic: document.queryCommandState('italic'),
               underline: document.queryCommandState('underline'), strike: document.queryCommandState('strikeThrough'),
               sup: document.queryCommandState('superscript'), sub: document.queryCommandState('subscript'),
               tag: b ? b.tagName.toLowerCase() : '', align: align === 'start' ? 'left' : align,
               indent: b ? getComputedStyle(b).textIndent : '', i: b ? index(b) : -1, home: b ? lnc.homeOf(b) : -1,
-              dirty: lnc.changedAny()});  // un objeto no llega a Python: JSON
+              sc: !!(at && at.closest('small.sc')), frame: !!(b && b.closest('.marco')),
+              dirty: lnc.changedAny(), canUndo: document.queryCommandEnabled('undo'),
+              wants: lnc.take()});  // un objeto no llega a Python: JSON
+    },
+    // Ctrl+Z (o Ctrl+Y) sin nada que deshacer en Chromium: lo hecho por la hoja de Qt (versalitas, recuadro…) se
+    // deshace allí; el sondeo lo recoge
+    wanted: '',
+    take: function () { var w = lnc.wanted; lnc.wanted = ''; return w; },
+    undo: function (redo) {
+      var name = redo ? 'redo' : 'undo';
+      if (!document.queryCommandEnabled(name)) return false;
+      sheet.focus(); document.execCommand(name); return true;
     },
     // Dónde estaba cada párrafo al cargar (o al volcar a la hoja de Qt): la hoja de Qt sigue con esas líneas, y así
     // el panel del original y el de navegación encuentran su párrafo aunque se haya escrito uno nuevo antes
@@ -127,13 +147,18 @@ SHEET_JS = r"""
       var s = getSelection(), at = [-1, 0, 0];
       if (s.rangeCount) {
         var r = s.getRangeAt(0), b = block(r.startContainer);
+        var c = block(r.endContainer), to = null;
         if (b) { var a = offset(b, r.startContainer, r.startOffset);
-                 at = [index(b), a, block(r.endContainer) === b ? offset(b, r.endContainer, r.endOffset) : a]; }
+                 at = [index(b), a, c === b ? offset(b, r.endContainer, r.endOffset) : a];
+                 if (c && c !== b) to = [index(c), offset(c, r.endContainer, r.endOffset)]; }  // varios párrafos
       }
       return JSON.stringify({texts: Array.prototype.map.call(sheet.children, function (b) {
-        return b.classList.contains('lnc-obj') ? '' : b.textContent; }), at: at});
+        return b.classList.contains('lnc-obj') ? '' : b.textContent; }), at: at, to: to});
     },
-    select: function (i, a, z) { var b = sheet.children[i]; if (b) caret(b, a, z); return !!b; },
+    select: function (i, a, z, j) {  // de a en el párrafo i a z en el j (o en el i)
+      var b = sheet.children[i], c = j === undefined || j === null ? b : sheet.children[j];
+      if (b && c) caret(b, a, z, c); return !!b;
+    },
     replaceSel: function (text) { sheet.focus(); document.execCommand('insertText', false, text); },
     // Leer en voz alta: el párrafo i (o el del cursor, con -1) o el siguiente con texto, de fondo y con el cursor
     readAt: function (i, color) {
@@ -355,6 +380,29 @@ def clean(inner):
     return re.sub(r"<br\s*/?\s*>", "<br/>", inner)
 
 
+QT_ONLY = {editor.LINE_BREAK, editor.VOID_CHAR, "￼"}  # en el texto de la hoja de Qt, no en el de Chromium
+
+
+def positions(web, qt):
+    """[posición en el texto qt de un párrafo de la hoja de Qt de cada posición 0..len(web) del mismo párrafo en la
+    web]. La hoja de Qt tiene de más los saltos de línea (<br/>), las etiquetas vacías y los objetos; un espacio
+    duro y uno normal valen igual. Lo que no casa se salta: un párrafo distinto da posiciones aproximadas."""
+    out, j = [], 0
+    for ch in web:
+        while j < len(qt) and qt[j] in QT_ONLY and qt[j] != ch:
+            j += 1
+        out.append(j)
+        if j < len(qt) and (qt[j] == ch or qt[j].isspace() and ch.isspace()):
+            j += 1
+    out.append(j)
+    return out
+
+
+def web_position(table, pos):
+    """Al revés que positions: la posición en la web de la posición pos de la hoja de Qt."""
+    return next((k for k, at in enumerate(table) if at >= pos), len(table) - 1)
+
+
 def lines_of(dumped):
     """lnc.dump() (JSON) -> texto para la hoja de Qt (como editor.dump), con las ilustraciones como sus marcas."""
     code = []
@@ -385,6 +433,8 @@ def sources(book, start, end, lines, pictures):
         text = files.get(first, b"").decode("utf-8", "replace")
         m = re.search(r"<head\b.*?</head>", text, re.S)
         head = m[0] if m else ""
+        # lo que el editor escribe con clases propias (versalitas, recuadro): al EPUB van con él (faithful)
+        head = head.replace("</head>", f"<style>{convert.MARKUP_CSS}</style></head>", 1)
         b = re.search(r"<body\b([^>]*)>", text)
         body_attrs = b[1] if b else ""
         path = first

@@ -61,3 +61,21 @@ aceptar y generar.
 - **Cancelar** pregunta también por lo escrito solo en la web: antes consulta `lnc.state()` (`dirty`:
   `lnc.changedAny`). Cerrar la ventana principal usa el último sondeo (400 ms).
 - Ctrl+F, Ctrl+H y F9 también desde la hoja web.
+
+## A4
+
+- **Por defecto**: el editor abre en la hoja web si Chromium está (`settings["editor_web"]`, `True` si falta); apagarla
+  con Vista → Hoja web se recuerda. «Contenido» (la lista de capítulos) va en la hoja de Qt: al llegar a él se deja la
+  web (`web_resume`) y vuelve en el capítulo siguiente.
+- **Lo que Chromium no hace** (versalitas, recuadro, listas, unir, separador, mayúsculas, título con Ctrl+T, enlace,
+  dividir, imagen, tipografía, volver al original) pasa por la hoja de Qt (`on_sheet`): se vuelca la web con su
+  selección (`web_to_sheet`, posiciones con `websheet.positions`: la hoja de Qt tiene de más saltos de línea, marcas
+  vacías y objetos), se hace allí y se vuelve a cargar la web con la selección (`sheet_to_web`).
+- **Deshacer**: si Chromium no tiene nada que deshacer (`queryCommandEnabled('undo')`), Ctrl+Z (tecla, botón o
+  sondeo de `lnc.wanted`) deshace en la hoja de Qt: lo hecho por `on_sheet` y lo escrito antes de recargar.
+- **Atajos** de la hoja que Chromium no tiene (Ctrl+T, Ctrl+J, Ctrl+D, Mayús+F3, Ctrl+Alt+K, Ctrl+Intro, símbolos,
+  super y subíndice, tamaño) como `QShortcut` de la hoja web. La cinta marca también Versalitas y Recuadro.
+- **Zoom y ancho**: la barra de zoom agranda la hoja web (`setZoomFactor`) y le da el ancho de página de la hoja.
+- **Marcas propias en un EPUB fiel**: `<small class="sc">`, `div.marco`, `p.center`… no tienen regla en el CSS del
+  original. Con el aspecto «Original», `write_faithful` añade `convert.MARKUP_CSS` (en `lnc/estilo.css`) solo si un
+  texto cambiado usa esas clases (sin cambios sale igual byte a byte); la hoja web la lleva siempre.

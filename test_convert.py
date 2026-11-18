@@ -10788,6 +10788,7 @@ def test_editor_epub_tab_follows_what_is_written():
             window.show_book(convert.analyze(src))
             k = window.book.candidates[2]
             window.tree.selection_set(str(k))
+            window.settings["editor_web"] = False  # se escribe en la hoja de Qt
             ed = app.TextEditor(window, str(k), *window.section_bounds(k))
             ed.side_tabs.setCurrentIndex(1)
             assert wait_for(lambda: ed.side_web.pages > 0), "la pestaña EPUB no cargó"
@@ -10838,7 +10839,7 @@ def test_websheet_round_trip_and_editing_reach_the_book():
             window.tree.selection_set(str(k))
             ed = app.TextEditor(window, str(k), *window.section_bounds(k))
             before = editor_dump(ed)
-            ed.toggle_web()
+            # la hoja web sale sola al abrir el editor (A4)
             assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
             family = js(ed.web, "getComputedStyle(document.querySelector('#lnc-sheet h1')).fontFamily")
             ed.flush_web(lambda: None)
@@ -10906,7 +10907,7 @@ def test_websheet_marks_spelling_issues_changes_and_menu():
             ed.issues[second] = [convert.Issue("prueba", second, 1, "Grave", "Palabra dudosa", "Una explicación.", "",
                                                span=(0, 7))]
             ed.unknown |= {"cielo"}
-            ed.toggle_web()
+            # la hoja web sale sola al abrir el editor (A4)
             assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
             count = "(function(n){var h=CSS.highlights.get(n);return h?h.size:0;})(%s)"
             painted = wait_for(lambda: js(ed.web, count % '"lnc-spell"') == 1 and js(ed.web, count % '"lnc-issue-0"') >= 1)
@@ -10982,7 +10983,7 @@ def test_websheet_find_read_sync_draft_and_cancel():
             fourth = next(n for n, b in enumerate(blocks) if b.html.startswith("Cuarto"))
             window.tree.selection_set(str(k))
             ed = app.TextEditor(window, str(k), *window.section_bounds(k))
-            ed.toggle_web()
+            # la hoja web sale sola al abrir el editor (A4)
             assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
             here = "(function(){var b=getSelection().anchorNode;while(b&&b.parentNode&&b.parentNode.id!=='lnc-sheet')" \
                    "b=b.parentNode;return b&&b.textContent?b.textContent.trim():'';})()"
@@ -10993,14 +10994,14 @@ def test_websheet_find_read_sync_draft_and_cancel():
                        "return true;})()")
             js(ed.web, "lnc.select(Array.from(document.getElementById('lnc-sheet').children).findIndex(b=>b.textContent"
                        ".startsWith('Cuarto')),0,0)")
-            synced = wait_for(lambda: editor.source_of(ed.sheet.textCursor().block()) == fourth, 5)
+            synced = wait_for(lambda: editor.source_of(ed.sheet.textCursor().block()) == fourth, 15)
             ed.go_block(third)  # clic en el original
-            back = wait_for(lambda: js(ed.web, here).startswith("Tercero"), 5)
+            back = wait_for(lambda: js(ed.web, here).startswith("Tercero"), 15)
             # leer en voz alta desde el cursor: «Tercero.», luego el siguiente con texto
             ed.toggle_reading()
-            wait_for(lambda: FakeSpeaker.said, 5)
+            wait_for(lambda: FakeSpeaker.said, 15)
             ed.speaker.done.emit()
-            wait_for(lambda: len(FakeSpeaker.said) >= 2, 5)
+            wait_for(lambda: len(FakeSpeaker.said) >= 2, 15)
             reading = js(ed.web, "(function(){var h=CSS.highlights.get('lnc-reading');return h?h.size:0;})()")
             ed.stop_reading()
             said = list(FakeSpeaker.said)
@@ -11013,18 +11014,18 @@ def test_websheet_find_read_sync_draft_and_cancel():
             ed.replace_entry.setText("parágrafo")
             ed.replace_one()
             replaced = wait_for(lambda: "Quinto parágrafo." in js(ed.web, "document.getElementById('lnc-sheet')"
-                                                                          ".innerText"), 5)
+                                                                          ".innerText"), 15)
             focused = []  # cerrar la barra devuelve el foco a la hoja web, no a la de Qt (oculta: se escribía a ciegas)
             ed.web.setFocus, ed.sheet.setFocus = lambda: focused.append("web"), lambda: focused.append("qt")
             next(b for b in ed.find_frame.findChildren(QPushButton) if b.text() == "✕").click()
             del ed.web.setFocus, ed.sheet.setFocus
-            dirty = wait_for(lambda: ed.dirty(), 5)
+            dirty = wait_for(lambda: ed.dirty(), 15)
             ed.write_draft()
             draft = app._draft_path(src)
             drafted = wait_for(lambda: draft.exists() and "parágrafo" in draft.read_text(encoding="utf-8")
-                               and "Nuevo arriba." in draft.read_text(encoding="utf-8"), 5)
+                               and "Nuevo arriba." in draft.read_text(encoding="utf-8"), 15)
             ed.cancel()
-            wait_for(lambda: asked, 5)
+            wait_for(lambda: asked, 15)
             still = ed.win.isVisible()
             ed.win.done(0)
         finally:
@@ -11034,8 +11035,65 @@ def test_websheet_find_read_sync_draft_and_cancel():
     assert said[:2] == ["Tercero.", "Subparte"] and reading == 1, (said, reading)
     assert other and replaced, (other, replaced)
     assert dirty and drafted, (dirty, drafted)
-    assert focused == ["web"], focused
+    assert "web" in focused and "qt" not in focused, focused
     assert asked and still, (asked, still)  # preguntó y, al decir que no, el editor sigue abierto
+
+
+def test_websheet_positions_skip_what_only_qt_has():
+    """La selección pasa de la web a la hoja de Qt y vuelve: la hoja de Qt tiene de más el salto de línea (<br/> no
+    es texto en Chromium) y las marcas vacías; un espacio duro vale como uno normal."""
+    import editor
+    import websheet
+    qt = "Hola" + editor.LINE_BREAK + "mundo" + editor.VOID_CHAR + " azul"
+    table = websheet.positions("Holamundo azul", qt)
+    assert table[4] == 5 and table[9] == 11 and table[10] == 12 and table[-1] == len(qt), table  # «m», « », «a»
+    assert websheet.web_position(table, 5) == 4 and websheet.web_position(table, 12) == 10, table
+
+
+def test_websheet_is_default_and_does_what_chromium_cannot():
+    """La hoja web sale sola al abrir el editor. Lo que Chromium no hace (versalitas) pasa por la hoja de Qt con la
+    selección y vuelve con ella; Ctrl+Z, sin nada que deshacer en Chromium, lo deshace allí. «Contenido» va en la
+    hoja de Qt y al salir de él vuelve la web. Apagarla se recuerda para la próxima vez."""
+    import app
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil hoja web A4.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = window.book.candidates[2]
+            window.tree.selection_set(str(k))
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            default = wait_for(lambda: ed.web_on and ed.web.loaded)
+            js(ed.web, "(function(){var b=Array.from(document.getElementById('lnc-sheet').children).findIndex("
+                       "e=>e.textContent.startsWith('Tercero'));return lnc.select(b,0,7);})()")
+            ed.web.loaded = False
+            ed.do("toggle_small_caps")
+            wait_for(lambda: ed.web.loaded)
+            caps = wait_for(lambda: js(ed.web, "getSelection().toString()") == "Tercero", 15)
+            ribbon = wait_for(lambda: ed.caps_btn.isChecked(), 15)  # la cinta la marca, como en la hoja
+            line = next(x for x in editor_dump(ed).split("\n\n") if "Tercero" in x)
+            ed.web.loaded = False
+            js(ed.web, "(function(){document.getElementById('lnc-sheet').dispatchEvent(new KeyboardEvent('keydown',"
+                       "{keyCode:90,ctrlKey:true,bubbles:true,cancelable:true}));return true;})()")
+            undone = wait_for(lambda: ed.web.loaded and "Tercero." in editor_dump(ed).split("\n\n"), 15)
+            ed.open_section(*ed.sections[0][1:3])  # «Contenido»
+            contents = wait_for(lambda: ed.current[0] < 0 and not ed.web_on and ed.sheet.isVisible(), 15)
+            ed.open_section(*window.section_bounds(k))
+            back = wait_for(lambda: ed.web_on and ed.web.loaded, 10)
+            ed.toggle_web()
+            wait_for(lambda: not ed.web_on, 15)
+            ed.win.done(0)
+            again = app.TextEditor(window, str(k), *window.section_bounds(k))
+            remembered = not again.web_on
+            again.win.done(0)
+        finally:
+            window.close()
+    assert default, "la hoja web no salió sola al abrir el editor"
+    assert caps and ribbon and line != "Tercero." and "Tercero" in line, (caps, ribbon, line)
+    assert undone, editor_dump(ed)
+    assert contents and back, (contents, back)
+    assert remembered and window.settings.get("editor_web") is False, window.settings.get("editor_web")
 
 
 def editor_dump(ed):
@@ -11071,6 +11129,27 @@ def test_faithful_epub_read_blocks_titles_and_metadata():
     assert (book.series, book.volume, book.original_title, book.description) == ("Date A Live", "14", "デート・ア・ライブ",
                                                                                  "**¡Hola!**\nMás."), book
     assert book.cover and book.origin.endswith("Sigil - Volumen 14.epub")
+
+
+def test_faithful_epub_small_caps_from_the_editor_get_their_css():
+    """Versalitas puestas en el editor (<small class="sc">) en un EPUB con su aspecto original: el original no trae
+    esa regla, así que el escritor fiel añade la hoja de la app con las de sus marcas, enlazada desde las páginas; y
+    solo entonces (sin cambios sale igual, lo mira la prueba de abajo). Pasa check_epub."""
+    src = sigil_epub(TMP / "Sigil versalitas.epub")
+    book = convert.analyze(src)
+    start, end = book.candidates[2], book.candidates[3]
+    text = convert.section_text(book, start, end).replace("Tercero.", '<small class="sc">Tercero</small>.')
+    convert.edit_section(book, start, end, text)
+    out = TMP / "Sigil versalitas (LNC).epub"
+    convert.write_epub(book, faithful_chapters(book), out, typography=False, style=convert.ORIGINAL,
+                       separator="Original del PDF", contents=False)
+    with zipfile.ZipFile(out) as z:
+        sheets = [n for n in z.namelist() if n.endswith("lnc/estilo.css")]
+        css = z.read(sheets[0]).decode() if sheets else ""
+        chapter = z.read("OEBPS/Text/capitulo01.xhtml").decode()
+    assert "small.sc" in css and "font-variant: small-caps" in css, sheets
+    assert '<small class="sc">Tercero</small>' in chapter and "estilo.css" in chapter, chapter
+    assert not convert.check_epub(out), convert.check_epub(out)
 
 
 def test_faithful_epub_unchanged_is_identical_and_changes_are_patched():

@@ -7262,6 +7262,7 @@ class TextEditor:
         self.web, self.web_on, self.web_state = None, False, {}
         # ¿cambios sin volcar en la hoja web?, qué hacer al cargarla, y el párrafo de su cursor (su sitio en la de Qt)
         self.web_dirty, self.web_then, self.web_home = False, None, None
+        self.web_resume = False  # se dejó la hoja web por «Contenido»: se vuelve a ella en el capítulo siguiente
         import webview
         if webview.available():
             self.web = webview.WebSheet()
@@ -7274,7 +7275,20 @@ class TextEditor:
             self.web.menu_at.connect(self.web_menu)
             for key, action in (("F7", lambda: self.next_change()), ("F8", lambda: self.next_issue()),
                                 ("Ctrl+F", lambda: self.show_find_bar(False)),
-                                ("Ctrl+H", lambda: self.show_find_bar(True)), ("F9", lambda: self.toggle_nav())):
+                                ("Ctrl+H", lambda: self.show_find_bar(True)), ("F9", lambda: self.toggle_nav()),
+                                # los de la hoja (Sheet.keyPressEvent) que Chromium no tiene
+                                ("Ctrl+T", lambda: self.do("toggle_heading")), ("Ctrl+J", lambda: self.do("join_next")),
+                                ("Ctrl+D", lambda: self.do("toggle_right")),
+                                ("Shift+F3", lambda: self.do("change_case")),
+                                ("Ctrl+Alt+K", lambda: self.show_link_bar()),
+                                ("Ctrl+Return", lambda: self.toggle_reviewed()),
+                                ("Ctrl+Alt+-", lambda: self.do("insert_symbol", "—")),
+                                ("Ctrl+Alt+.", lambda: self.do("insert_symbol", "…")),
+                                ("Ctrl+Alt+Q", lambda: self.do("wrap", "«", "»")),
+                                ("Ctrl+Shift+=", lambda: self.do("toggle_sup")),
+                                ("Ctrl+=", lambda: self.do("toggle_sub")),
+                                ("Ctrl+Shift+>", lambda: self.do("grow_font", 1)),
+                                ("Ctrl+Shift+<", lambda: self.do("grow_font", -1))):
                 QShortcut(QKeySequence(key), self.web, action, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         desk_row.addStretch(1)
         desk_row.addWidget(self.focus_next, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -7380,6 +7394,12 @@ class TextEditor:
         self.open_section(start, end, int(item))
         self.recover_draft()
         self.offer_resume()
+        # La hoja web es la vista de siempre (si Chromium está); quien la apaga, la encuentra apagada la próxima vez
+        if self.web is not None and app.settings.get("editor_web", True):
+            if self.current[0] >= 0:
+                self.load_web()
+            else:
+                self.web_resume = True
         self.opened, self.saved_paragraphs = time.monotonic(), 0  # para «Tu trabajo» de «Cifras»
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         # Sin reiniciar la cuenta en cada aviso (la ortografía repinta y avisa sin parar): como mucho 5 s de trabajo perdido
@@ -7617,7 +7637,7 @@ class TextEditor:
             ("… Puntos suspensivos   (Ctrl+Alt+.)", lambda: self.do("insert_symbol", "…")),
             ("« » Comillas   (Ctrl+Alt+Q)", lambda: self.do("wrap", "«", "»")),
             ("¿ ? Pregunta", lambda: self.do("wrap", "¿", "?")), ("¡ ! Exclamación", lambda: self.do("wrap", "¡", "!")), None,
-            ("Corregir tipografía del capítulo", self.fix_typography)], icon="symbols")
+            ("Corregir tipografía del capítulo", lambda: self.on_sheet(self.fix_typography))], icon="symbols")
         group("Símbolos", [self.symbols_btn])
         group("Texto", [tool("Separador", "Separador de escena tras el párrafo", lambda: self.do("insert_break"), icon="scene"),
                         tool("Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", lambda: self.do("insert_note"),
@@ -7625,8 +7645,8 @@ class TextEditor:
         # Un botón con menú: dos botones grandes ensanchaban «Insertar» más que la pantalla de 1366 px
         self.picture_btn, _ = menu_tool("Imagen ▾", "Imagen tras el párrafo del cursor; también se pega una copiada "
                                         "(Ctrl+V)", [
-            ("Desde un archivo…", self.insert_image),
-            ("Página del original que se ve a la derecha", self.page_as_image)], icon="image")
+            ("Desde un archivo…", lambda: self.on_sheet(self.insert_image)),
+            ("Página del original que se ve a la derecha", lambda: self.on_sheet(self.page_as_image))], icon="image")
         group("Ilustraciones", [self.picture_btn])
         group("Vínculos", [tool("Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)",
                                 self.show_link_bar, icon="link")])
@@ -7635,7 +7655,8 @@ class TextEditor:
 
         page("Revisar")
         self.changes_btn, self.changes_menu = menu_tool("Cambios ▾", "Párrafos que editaste en este capítulo", [
-            ("Cambio siguiente   (F7)", self.next_change), ("Volver al original", self.restore_current)],
+            ("Cambio siguiente   (F7)", self.next_change),
+            ("Volver al original", lambda: self.on_sheet(self.restore_current))],
             icon="changes")
         self.issues_btn, self.issues_menu = menu_tool("Avisos ▾", "Avisos del informe de calidad en este capítulo", [
             ("Aviso siguiente   (F8)", self.next_issue)], icon="warn")
@@ -7650,7 +7671,8 @@ class TextEditor:
         self.show_changes_action.toggled.connect(self.set_show_changes)
         group("Revisión", [self.changes_btn, self.issues_btn])
         group("Corrección", [tool("Cifras", "Cifras: palabras, párrafos, minutos de lectura y diálogo del capítulo y "
-                                  "del libro", self.show_stats, icon="stats")])
+                                  "del libro", lambda: self.flush_web(self.show_stats) if self.web_on else self.show_stats(),
+                                  icon="stats")])
         self.read_btn = tool("Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
                              "(Esc, un clic o el mismo botón para parar)", self.toggle_reading, True, icon="read")
         group("Voz", [self.read_btn])
@@ -8017,7 +8039,10 @@ class TextEditor:
         if section:
             self.open_section(section[1], section[2], self.resume_at)
 
-    def show_link_bar(self):
+    def show_link_bar(self, synced=False):
+        if self.web_on and not synced:  # la selección de la web, a la hoja de Qt: el enlace se pone allí
+            self.web_to_sheet(lambda: self.show_link_bar(True))
+            return
         self.link_selection = QTextCursor(self.sheet.textCursor())  # el foco se va a la barra
         if not self.link_selection.hasSelection() and not self.sheet.link_at():
             self.link_info.setText("Elige primero el texto del enlace")
@@ -8038,7 +8063,14 @@ class TextEditor:
         self.sheet.setTextCursor(self.link_selection)
         self.sheet.set_link(href)
         self.link_frame.hide()
-        self.sheet.setFocus()
+        self.back_to_page()
+
+    def back_to_page(self):
+        """Tras una barra que cambió la hoja de Qt: con la hoja web, se vuelve a cargar con el resultado."""
+        if self.web_on:
+            self.sheet_to_web()
+        else:
+            self.sheet.setFocus()
 
     def show_find_bar(self, replace):
         self.hide_bars()
@@ -8183,7 +8215,10 @@ class TextEditor:
         bar.hide()
         return bar
 
-    def show_split_bar(self):
+    def show_split_bar(self, synced=False):
+        if self.web_on and not synced:
+            self.web_to_sheet(lambda: self.show_split_bar(True))
+            return
         self.split_cursor = QTextCursor(self.sheet.textCursor())  # el foco se va a la barra
         self.split_info.setText("")
         self.split_entry.clear()
@@ -8201,7 +8236,7 @@ class TextEditor:
             return
         self.split_frame.hide()
         self.tell("Capítulo nuevo: al aceptar sale en la lista · Ctrl+Z para deshacer")
-        self.sheet.setFocus()
+        self.back_to_page()
 
     def issue_bar(self):
         """Barra del aviso elegido (F8): qué pasa, qué hacer y, si se puede, arreglarlo en la hoja."""
@@ -8956,7 +8991,7 @@ class TextEditor:
             "toggle_underline": lambda: call("cmd", "underline"), "toggle_strike": lambda: call("cmd", "strikeThrough"),
             "toggle_sup": lambda: call("cmd", "superscript"), "toggle_sub": lambda: call("cmd", "subscript"),
             "clear_format": lambda: call("cmd", "removeFormat"), "insert_line_break": lambda: call("cmd", "insertLineBreak"),
-            "undo": lambda: call("cmd", "undo"), "redo": lambda: call("cmd", "redo"),
+            "undo": lambda: self.web_undo(False), "redo": lambda: self.web_undo(True),
             "insert_symbol": lambda text: call("cmd", "insertText", text),
             "wrap": lambda a, b: self.web.page().runJavaScript(
                 f"document.execCommand('insertText', false, {json.dumps(a)} + window.getSelection().toString() + "
@@ -8972,13 +9007,21 @@ class TextEditor:
             "toggle_justify": lambda: call("align", None if state.get("align") == "justify" else "justify"),
             "toggle_indent": lambda: call("indent", "1.5em" if state.get("indent") in ("0px", "") else "0"),
         }
-        if name not in actions:
-            QApplication.beep()
-            self.note.setText("En la hoja web aún no: vuelve a la hoja (Vista → Hoja web) para eso")
+        if name not in actions:  # versalitas, recuadro, lista, unir, separador, mayúsculas: en la hoja de Qt
+            self.on_sheet(lambda: getattr(self.sheet, name)(*args))
             return None
         actions[name](*args)
         self.web.setFocus()
         return None
+
+    def web_undo(self, redo):
+        """Deshacer (o rehacer) en la hoja web; sin nada que deshacer en Chromium, lo hecho por la hoja de Qt (lo que
+        pasó por on_sheet, o lo escrito antes de cambiar de capítulo) se deshace allí."""
+        def done(ok):
+            doc = self.sheet.document()
+            if not ok and (doc.isRedoAvailable() if redo else doc.isUndoAvailable()):
+                self.on_sheet(self.sheet.redo if redo else self.sheet.undo)
+        self.web.call("undo", redo, done=done)
 
     def toggle_web(self):
         """Vista «Hoja web»: el capítulo en Chromium, editable con el aspecto del libro; al volver, lo escrito pasa a la
@@ -8987,6 +9030,12 @@ class TextEditor:
             return
         if self.reading is not None:  # la voz iba por párrafos de la otra hoja
             self.stop_reading()
+        if not self.web_on and self.current[0] < 0:
+            self.web_btn.setChecked(False)
+            self.tell("«Contenido» es la lista de capítulos: se edita en la hoja")
+            return
+        self.app.settings["editor_web"] = not self.web_on  # la próxima vez, el editor abre en la misma hoja
+        self.app.save_settings()
         if not self.web_on:
             if self.code.isVisible():
                 self.toggle_code()
@@ -9019,6 +9068,7 @@ class TextEditor:
     def web_ready(self):
         """La hoja web cargó: sus marcas, el cursor en el párrafo del de la hoja y lo que esperaba (buscar)."""
         self.web_marks()
+        self.web.setZoomFactor(self.text_zoom.value() / 100)  # load_sheet la deja al 100 %
         self.web.call("goHome", self.web_index(self.sheet.textCursor().block()))
         then, self.web_then = self.web_then, None
         if then:
@@ -9056,6 +9106,9 @@ class TextEditor:
         self.web_state = json.loads(st) if st else {}
         self.web_dirty = bool(self.web_state.get("dirty"))
         self.update_tools()
+        self.undo_btn.setEnabled(bool(self.web_state.get("canUndo")) or self.sheet.document().isUndoAvailable())
+        if self.web_state.get("wants") in ("undo", "redo"):  # Ctrl+Z o Ctrl+Y sin nada que hacer en Chromium
+            self.web_undo(self.web_state["wants"] == "redo")
         if isinstance(self.reading, int) and self.web_state.get("i", -1) != self.reading:
             self.stop_reading()  # un clic o una tecla en otro párrafo: la voz se calla, como en la hoja
         home = self.web_state.get("home", -1)
@@ -9185,6 +9238,61 @@ class TextEditor:
         """fn() sobre la hoja de Qt con lo escrito en la web, y la hoja web otra vez con el resultado."""
         self.flush_web(lambda: (fn(), self.load_web()))
 
+    def on_sheet(self, fn):
+        """fn() en la hoja de Qt: con la hoja web, sobre lo escrito en ella y con su selección, y vuelta a la web
+        con el resultado y la selección. Así lo que Chromium no sabe hacer (versalitas, recuadro, unir…) también
+        se hace desde la hoja web."""
+        if self.web_on:
+            self.web_to_sheet(lambda: (fn(), self.sheet_to_web()))
+        else:
+            fn()
+
+    def web_to_sheet(self, then):
+        """Lo escrito en la hoja web pasa a la de Qt, su selección también (websheet.positions), y luego then()."""
+        import websheet
+
+        def got(data):
+            info = json.loads(data or "{}")
+            texts, (i, s, e), to = info.get("texts", []), info.get("at") or (-1, 0, 0), info.get("to")
+
+            def at(n, pos):  # posición en la hoja de Qt de pos del párrafo n de la web
+                block = self.web_block(n)
+                table = websheet.positions(texts[n] if n < len(texts) else "", block.text())
+                return block.position() + table[min(pos, len(table) - 1)]
+
+            def flushed():
+                if 0 <= i < len(texts):
+                    cursor = self.sheet.textCursor()
+                    cursor.setPosition(at(i, s))
+                    cursor.setPosition(at(*to) if to else at(i, e), QTextCursor.MoveMode.KeepAnchor)
+                    self.sheet.setTextCursor(cursor)
+                then()
+            self.flush_web(flushed)
+        self.web.call("texts", done=got)
+
+    def sheet_to_web(self):
+        """Vuelve a cargar la hoja web con la hoja de Qt, con su selección."""
+        import websheet
+        cursor, doc = self.sheet.textCursor(), self.sheet.document()
+        ends = []
+        for pos in (cursor.selectionStart(), cursor.selectionEnd()):
+            block = doc.findBlock(pos)
+            ends.append((self.web_index(block), block.text(), pos - block.position()))
+
+        def place():
+            def got(data):
+                texts = json.loads(data or "{}").get("texts", [])
+                spots = []
+                for n, qt, pos in ends:
+                    if n >= len(texts):
+                        return
+                    spots.append((n, websheet.web_position(websheet.positions(texts[n], qt), pos)))
+                (i, a), (j, z) = spots
+                self.web.call("select", i, a, z, j)
+            self.web.call("texts", done=got)
+        self.web_then = place
+        self.load_web()
+
     def flush_web(self, then):
         """Lo escrito en la hoja web pasa a la hoja de Qt (si cambió) y luego then()."""
         def back(dumped):
@@ -9258,7 +9366,8 @@ class TextEditor:
         if getattr(self, "web_on", False):
             st = self.web_state
             for button, key in ((self.bold_btn, "bold"), (self.italic_btn, "italic"), (self.underline_btn, "underline"),
-                                (self.strike_btn, "strike"), (self.sup_btn, "sup"), (self.sub_btn, "sub")):
+                                (self.strike_btn, "strike"), (self.sup_btn, "sup"), (self.sub_btn, "sub"),
+                                (self.caps_btn, "sc"), (self.frame_btn, "frame")):
                 button.setChecked(bool(st.get(key)))
             tag = st.get("tag", "p")
             self.style.setCurrentText(next((name for name, t in WEB_TAGS.items() if t == tag), "Normal"))
@@ -9299,8 +9408,10 @@ class TextEditor:
     def open_section(self, start, end, focus=None):
         """Muestra el capítulo start..end en la hoja (el ya editado si se visitó) y lo dice en la cinta."""
         if getattr(self, "web_on", False) and self.current and (start, end) != self.current:
-            # con la hoja web: lo escrito pasa a su capítulo, se abre el otro y se vuelve a la hoja web con él
-            self.flush_web(lambda: (self.web_done(), self.open_section(start, end, focus), self.load_web()))
+            # con la hoja web: lo escrito pasa a su capítulo, se abre el otro y se vuelve a la hoja web con él;
+            # «Contenido» (la lista de capítulos) va en la hoja, y al salir de él se vuelve a la web
+            self.flush_web(lambda: (self.web_done(), self.open_section(start, end, focus),
+                                    self.load_web() if start >= 0 else setattr(self, "web_resume", True)))
             return
         if self.reading is not None:
             self.stop_reading()
@@ -9330,6 +9441,14 @@ class TextEditor:
             self.request_suggestions()
         self.sheet.ensureCursorVisible()
         self.sheet.setFocus()
+        if self.web_resume and start >= 0:  # tras el bucle que la abrió (reemplazar todo da vueltas por la hoja)
+            self.later("web_resume", 0, self.resume_web)
+
+    def resume_web(self):
+        """De «Contenido» a un capítulo: la hoja web otra vez, como estaba."""
+        if self.web_resume and not self.web_on and self.current and self.current[0] >= 0:
+            self.web_resume = False
+            self.load_web()
 
     def section_lines(self, start, end):
         """Líneas de la sección como se cargan en la hoja, [(bloque, línea)], y {bloque: tipo} de sus títulos. Un
@@ -9568,6 +9687,9 @@ class TextEditor:
         self.sheet.set_zoom(percent)
         share = self.page_share if self.focused else 1.0  # más ancha solo en pantalla completa
         self.sheet.setMaximumWidth(int(self.page_width(percent) * share))
+        if self.web is not None:  # la hoja web, del mismo ancho de página y con la misma letra
+            self.web.setMaximumWidth(self.sheet.maximumWidth())
+            self.web.setZoomFactor(percent / 100)
         self.text_zoom_label.setText(f"{percent} %")
 
     def on_desk_event(self, event):
