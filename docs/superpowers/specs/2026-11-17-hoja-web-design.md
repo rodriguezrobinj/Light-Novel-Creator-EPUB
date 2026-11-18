@@ -43,3 +43,21 @@ aceptar y generar.
   de cada aviso (sobre la hoja de Qt, `via_sheet`) y deshacer, cortar, copiar, pegar.
 - **F7/F8** en la hoja web: el cambio o el aviso siguiente (`lnc.next`); sin más avisos en el capítulo, F8 sigue en la
   hoja con los siguientes.
+
+## A3
+
+- **Sitio de cada párrafo** (`lnc.home`, un `WeakMap`): su número al cargar o al volcar a la hoja de Qt. La hoja de
+  Qt, oculta, sigue con esas líneas hasta volcar, así que un párrafo escrito antes no descoloca nada: uno nuevo toma el
+  sitio del anterior. `lnc.state()` lo da (`home`), y el sondeo pone el cursor de la hoja de Qt en ese bloque
+  (`TextEditor.web_block`); de ahí el panel del original dibuja su página como siempre. Al revés (`web_index`,
+  `lnc.goHome`): un clic en el original, el panel de navegación y la carga de la hoja web llevan su cursor al párrafo.
+- **Buscar y reemplazar**: la misma expresión de Python (`find_pattern`) sobre el texto de cada párrafo
+  (`lnc.texts`), y el resultado se elige en Chromium (`lnc.select`). Sin más en el capítulo, se abre el siguiente con
+  resultados y, ya cargado, se elige el primero (`web_then`). Reemplazar cambia lo elegido si es un resultado
+  (`lnc.replaceSel`, `\1` con `m.expand`); «Reemplazar todo» y «Todos» vuelcan antes a la hoja de Qt.
+- **Leer en voz alta**: `lnc.readAt` da el párrafo con texto desde el cursor, con fondo (resaltado `lnc-reading`) y
+  el cursor al principio; `self.reading` es su número. Un clic en otro párrafo la calla.
+- **Borrador**: lo escrito en la web (`takeText`) pide el borrador; el capítulo de ahora va con el volcado de la web.
+- **Cancelar** pregunta también por lo escrito solo en la web: antes consulta `lnc.state()` (`dirty`:
+  `lnc.changedAny`). Cerrar la ventana principal usa el último sondeo (400 ms).
+- Ctrl+F, Ctrl+H y F9 también desde la hoja web.

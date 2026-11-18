@@ -32,6 +32,21 @@ SHEET_JS = r"""
     return node && node.nodeType === 1 ? node : null;
   }
   function here() { var s = window.getSelection(); return s.rangeCount ? block(s.getRangeAt(0).startContainer) : null; }
+  function index(b) { return Array.prototype.indexOf.call(sheet.children, b); }
+  function offset(b, node, at) {  // posición de (node, at) en el texto de b
+    var r = document.createRange(); r.setStart(b, 0); r.setEnd(node, at); return r.toString().length;
+  }
+  function spot(b, pos) {  // (nodo de texto, posición) del carácter pos de b
+    var w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n, last = null, from = 0;
+    while ((n = w.nextNode())) { if (pos <= from + n.data.length) return [n, pos - from]; from += n.data.length; last = n; }
+    return last ? [last, last.data.length] : [b, 0];
+  }
+  function caret(b, a, z) {  // elige de a a z en b (o pone el cursor) y lo trae a la vista
+    var p = spot(b, a), q = spot(b, z === undefined ? a : z), r = document.createRange();
+    r.setStart(p[0], p[1]); r.setEnd(q[0], q[1]);
+    sheet.focus(); var s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    (p[0].nodeType === 3 ? p[0].parentElement : b).scrollIntoView({block: 'center'});
+  }
   function blocks() {  // los párrafos de la selección
     var s = window.getSelection(); if (!s.rangeCount) return [];
     var r = s.getRangeAt(0), a = block(r.startContainer), b = block(r.endContainer), out = [], n = a;
@@ -90,8 +105,50 @@ SHEET_JS = r"""
               underline: document.queryCommandState('underline'), strike: document.queryCommandState('strikeThrough'),
               sup: document.queryCommandState('superscript'), sub: document.queryCommandState('subscript'),
               tag: b ? b.tagName.toLowerCase() : '', align: align === 'start' ? 'left' : align,
-              indent: b ? getComputedStyle(b).textIndent : ''});  // un objeto no llega a Python: JSON
+              indent: b ? getComputedStyle(b).textIndent : '', i: b ? index(b) : -1, home: b ? lnc.homeOf(b) : -1,
+              dirty: lnc.changedAny()});  // un objeto no llega a Python: JSON
     },
+    // Dónde estaba cada párrafo al cargar (o al volcar a la hoja de Qt): la hoja de Qt sigue con esas líneas, y así
+    // el panel del original y el de navegación encuentran su párrafo aunque se haya escrito uno nuevo antes
+    rehome: function () { lnc.home = new WeakMap(); Array.prototype.forEach.call(sheet.children, function (b, i) { lnc.home.set(b, i); }); },
+    homeOf: function (b) { while (b && !lnc.home.has(b)) b = b.previousElementSibling; return b ? lnc.home.get(b) : 0; },
+    goHome: function (n) {  // el cursor al principio del párrafo que estaba en el sitio n
+      var t = Array.prototype.find.call(sheet.children, function (b) { return lnc.home.has(b) && lnc.home.get(b) >= n; });
+      t = t || sheet.lastElementChild;
+      if (t) caret(t, 0);
+    },
+    changedAny: function () {  // ¿algo distinto de lo cargado? (cancelar pregunta)
+      if (!lnc.orig) return false;
+      return sheet.children.length !== lnc.count || Array.prototype.some.call(sheet.children, function (b) {
+        return !b.classList.contains('lnc-obj') && lnc.edited(b); });
+    },
+    // Buscar: el texto de cada párrafo y lo elegido; Python busca con su expresión y elige el resultado
+    texts: function () {
+      var s = getSelection(), at = [-1, 0, 0];
+      if (s.rangeCount) {
+        var r = s.getRangeAt(0), b = block(r.startContainer);
+        if (b) { var a = offset(b, r.startContainer, r.startOffset);
+                 at = [index(b), a, block(r.endContainer) === b ? offset(b, r.endContainer, r.endOffset) : a]; }
+      }
+      return JSON.stringify({texts: Array.prototype.map.call(sheet.children, function (b) {
+        return b.classList.contains('lnc-obj') ? '' : b.textContent; }), at: at});
+    },
+    select: function (i, a, z) { var b = sheet.children[i]; if (b) caret(b, a, z); return !!b; },
+    replaceSel: function (text) { sheet.focus(); document.execCommand('insertText', false, text); },
+    // Leer en voz alta: el párrafo i (o el del cursor, con -1) o el siguiente con texto, de fondo y con el cursor
+    readAt: function (i, color) {
+      if (i < 0) { var h = here(); i = h ? index(h) : 0; }
+      while (i < sheet.children.length && (sheet.children[i].classList.contains('lnc-obj')
+                                           || !sheet.children[i].textContent.trim())) i++;
+      lnc.reading = sheet.children[i] || null;
+      var css = document.getElementById('lnc-read') || document.head.appendChild(document.createElement('style'));
+      css.id = 'lnc-read'; css.textContent = '::highlight(lnc-reading){background-color: ' + color + ';}';
+      lnc.paint();
+      if (!lnc.reading) return '';
+      caret(lnc.reading, 0);
+      return JSON.stringify({i: i, text: lnc.reading.innerText});
+    },
+    stopReading: function () { lnc.reading = null; lnc.paint(); },
     cmd: function (name, value) { sheet.focus(); document.execCommand('styleWithCSS', false, false); document.execCommand(name, false, value || null); },
     css: function (name, value) {  // color o letra: un <span style>
       sheet.focus(); document.execCommand('styleWithCSS', false, true); document.execCommand(name, false, value);
@@ -112,6 +169,7 @@ SHEET_JS = r"""
       blocks().forEach(function (b) {
         if (b.tagName.toLowerCase() === tag) return;
         var n = document.createElement(tag);
+        if (lnc.home.has(b)) lnc.home.set(n, lnc.home.get(b));
         Array.prototype.forEach.call(b.attributes, function (a) { n.setAttribute(a.name, a.value); });
         while (b.firstChild) n.appendChild(b.firstChild);
         b.parentNode.replaceChild(n, b);
@@ -136,6 +194,7 @@ SHEET_JS = r"""
       if (!lnc.orig) {  // cómo era cada párrafo al cargar: el que cambia pierde sus avisos y es un cambio
         lnc.orig = new WeakMap();
         Array.prototype.forEach.call(sheet.children, function (b) { lnc.orig.set(b, b.innerHTML); });
+        lnc.count = sheet.children.length;
       }
       lnc.paint();
     },
@@ -184,6 +243,9 @@ SHEET_JS = r"""
       CSS.highlights.set('lnc-spell', spell);
       CSS.highlights.set('lnc-change', change);
       Object.keys(levels).forEach(function (n) { CSS.highlights.set('lnc-issue-' + n, levels[n]); });
+      if (lnc.reading && lnc.reading.isConnected) {
+        var read = document.createRange(); read.selectNodeContents(lnc.reading); CSS.highlights.set('lnc-reading', new Highlight(read));
+      }
     },
     at: function (x, y) {  // lo que hay en el punto del clic derecho: palabra y avisos
       var r = document.caretRangeFromPoint(x, y), out = {word: '', issues: []};
@@ -228,6 +290,7 @@ SHEET_JS = r"""
       }));
     }
   };
+  lnc.rehome();
   return true;
 })()
 """
