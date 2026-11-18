@@ -130,6 +130,9 @@ PROFILES = {"Personalizado": {},
                                         "kepub": False, "hyphenate": False}}
 FONT_CHOICES = ["Del lector"] + list(convert.FONTS) + ["Otra…"]  # «Otra…» pide un archivo
 HEADING_OWN = "Archivo propio"  # fuente de títulos de un archivo (heading_font_file)
+# Un EPUB abierto sale como es: su CSS, sus separadores y sus páginas; la limpieza tipográfica ya la tiene
+EPUB_DEFAULTS = {"style": convert.ORIGINAL, "separator": "Original del PDF", "typography": False, "contents": False,
+                 "credits": False, "synopsis": False}
 APP_NAME = "Light Novel Creator"  # nombre visible; el .exe y la carpeta de ajustes siguen siendo «PDF a EPUB»
 KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro, theme.kind_colors(True)
 PREVIEW_BOX = (480, 640)  # ancho y alto máximos de cada vista previa, en píxeles
@@ -597,7 +600,7 @@ def _write_options(state, breaks=()):
     font, path = state.get("font"), _font_file(state.get("font_file"))
     return {"lang": lang if LANG.fullmatch(lang) else "es",
             "typography": bool(state.get("typography", True)),
-            "style": style if style in convert.STYLES else "Clásico",
+            "style": style if style in convert.STYLES or style == convert.ORIGINAL else "Clásico",
             "separator": str(state.get("separator", "Según el estilo")),
             "shrink": int(state.get("shrink_size") or convert.SHRINK) if state.get("shrink", True) else False,
             "replacements": [tuple(rule) for rule in state.get("replacements", [])],
@@ -638,7 +641,9 @@ def _write_pdf(book, chapters, out, removed, options, size, progress=None):
 def _write_checked(book, chapters, out, removed, options, progress=None):
     """write_epub y, en el mismo proceso de trabajo, check_epub: devuelve los problemas del EPUB."""
     convert.write_epub(book, chapters, out, removed=removed, progress=progress, **options)
-    return convert.check_epub(out)
+    rebuilt = ["EPUB 2 no admite el HTML del EPUB original: el libro se rehízo con el aspecto de la app."
+               ] if book.origin and options.get("epub2") else []
+    return rebuilt + convert.check_epub(out)
 
 
 def _epub_name(path, kepub):
@@ -1428,9 +1433,9 @@ def _prepare(pdf, options):
         _replay(book, state)
         chapters, removed, breaks = _plan(book, state["rows"])
     else:
-        state = {**options, **_inherited(pdf, book.series)}
+        state = {**options, **(EPUB_DEFAULTS if book.origin else {}), **_inherited(pdf, book.series)}
         state["author"] = book.author or state.get("author", "")
-        chapters = [(k, html.unescape(book.blocks[k].html)) for k in book.candidates]
+        chapters = [(k, book.blocks[k].title or html.unescape(book.blocks[k].html)) for k in book.candidates]
         removed, breaks = convert.link_sections(book), []
         for k in convert.duplicate_images(book):
             book.blocks[k].keep = False
@@ -2309,6 +2314,9 @@ class App:
         # Herramientas → Opciones
         self.font_last = "Del lector"  # a la que se vuelve si «Otra…» no elige archivo
         self.font_box = _combo(self.font_var, FONT_CHOICES, 8, changed=self.font_changed)
+        # «Original» solo con un EPUB de entrada (show_book la pone o la quita): su CSS, sin tocar
+        self.style_box = _combo(self.style_var, list(convert.STYLES), 10, changed=self.update_preview)
+        self.style_box.setToolTip("«Original»: el aspecto del EPUB abierto, con su CSS y sus fuentes")
         # Editable: lo que se escriba (Intro) es el separador, tal cual
         self.separator_box = _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12, editable=True,
                                     changed=self.update_preview)
@@ -2319,8 +2327,7 @@ class App:
         index.setToolTip("Página «Contenido» tras la portada, con los capítulos y sus subtítulos")
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
                                                                  changed=self.apply_profile),
-                            _label("Estilo:"), _combo(self.style_var, list(convert.STYLES), 10,
-                                                      changed=self.update_preview),
+                            _label("Estilo:"), self.style_box,
                             _label("Separador:"), self.separator_box,
                             _label("Letra:"), self.font_box, index, 1, self.pdf_btn, self.gen_btn))
         self.progress = QProgressBar()
@@ -2874,7 +2881,7 @@ class App:
                     part_blocks = self.book.blocks[index:end]
                     inner = {k - index: self.tree.set(str(k), "inc") for k in range(index + 1, end)
                              if self.tree.exists(str(k)) and self.is_title(str(k))}
-                part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [])
+                part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [], origin=self.book.origin)
                 options = self.write_options([0] * (kind == SEP) + [k for k, v in inner.items() if v == SEP])
                 options["removed"] = [k for k, v in inner.items() if v == CUT]
                 # rápido: solo lo que se ve; sin página de índice: el capítulo 1 es la sección
@@ -3225,6 +3232,9 @@ class App:
         self.update_chrome()
         self.save_thumb()
         self.apply_state(self.new_book_options())  # la revisión o la serie, si las hay, mandan después
+        if book.origin:
+            self.apply_state(EPUB_DEFAULTS)
+        self.offer_original(bool(book.origin))
         self.title_var.set(book.title)
         self.author_var.set(book.author)
         self.series_var.set(book.series)
@@ -3336,12 +3346,13 @@ class App:
                                                                 len(blocks))]) for k in heads}
         for i, block in enumerate(blocks):
             if block.kind == "heading":
-                mark, title = (ON if i in chapters else OFF), html.unescape(block.html)
+                # el nombre del índice del EPUB de entrada; si no, el texto del título
+                mark, title = (ON if i in chapters else OFF), block.title or html.unescape(block.html)
             elif block.kind == "image":
                 double = " doble" if str(i) in self.wide else ""
                 mark, title = (IMG if block.keep else DROPPED), f"Ilustración{double} · página {block.page}"
             elif block.kind == "break":  # separador de escena del texto: su símbolo, para encontrarlo
-                symbol = html.unescape(block.html).strip() or ("Adorno" if block.image else "Separador")
+                symbol = convert._plain(block).strip() or ("Adorno" if block.image else "Separador")
                 mark, title = SEP, f"{symbol} · página {block.page}"
             else:
                 continue
@@ -3789,6 +3800,17 @@ class App:
             self.font_box.insertItem(self.font_box.count() - 1, name)
         self.font_box.setCurrentText(name)
 
+    def offer_original(self, epub):
+        """«Original» en el desplegable de estilo solo con un EPUB de entrada (con un PDF no hay aspecto original)."""
+        at = self.style_box.findText(convert.ORIGINAL)
+        if epub and at < 0:
+            self.style_box.insertItem(0, convert.ORIGINAL)
+        elif not epub and at >= 0:
+            if self.style_var.get() == convert.ORIGINAL:
+                self.style_var.set("Clásico")
+            self.style_box.removeItem(at)
+        self.style_box.setCurrentText(self.style_var.get())
+
     def new_book_options(self):
         """Opciones con las que abre un libro sin revisión ni serie: «Libros nuevos» sobre los valores de fábrica."""
         return {**self.factory, **self.settings.get("defaults", {})}
@@ -4103,7 +4125,7 @@ class App:
                 heads = [j for j in range(edit[0], edit[0] + count) if self.book.blocks[j].kind == "heading"]
                 for j, kind in zip(heads, kinds[n]):
                     if kind in NEXT:  # el editor da Capítulo o Subtítulo; la traducción, el que tenía la fila
-                        rows[str(j)] = [kind, html.unescape(self.book.blocks[j].html), ""]
+                        rows[str(j)] = [kind, self.book.blocks[j].title or html.unescape(self.book.blocks[j].html), ""]
             if follow and item is not None:
                 item = str(mapping[int(item)]) if int(item) in mapping else None
         self.fill_tree(rows)
@@ -5416,7 +5438,7 @@ class App:
                     var.set(state[name])
                 except (ValueError, TypeError):
                     pass  # valor mal escrito a mano en el .json
-        if self.style_var.get() not in convert.STYLES:  # el .json se puede editar a mano
+        if self.style_var.get() not in convert.STYLES and self.style_var.get() != convert.ORIGINAL:  # .json a mano
             self.style_var.set("Clásico")
         if not _font_file(self.font_file_var.get()):  # ruta de red o que no es una fuente: ni se mira
             self.font_file_var.set("")

@@ -35,6 +35,9 @@ WHOLE = MIME + "-parrafos"  # lo copiado acaba en un salto de párrafo: se pegan
 ICON = _USER + 10     # imagen: la etiqueta <img> de un icono del texto (convert.ICON), que vuelve a section_text
 MARKS = re.compile(r'(</?(?:i|b|sup|sc)>|<a href="[^"]*">|</a>|<img class="icono" [^>]*>)')
 LINK = re.compile(r'<a href="([^"]*)">')
+# Etiquetas de un EPUB de entrada (convert.RAW_TAG, ya sin escapar) que se ven como texto en gris
+RAW = re.compile(r"(</?(?:ruby|rb|rt|rp|rtc|span|br|small|sub|abbr|cite|code|q|s|u|mark|big|tt|del|ins|em|strong|img|"
+                 r"wbr|a|i|b|sup)\b[^<>]*>)")
 LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; TextEditor pone el azul del tema
 NOTE = re.compile(r"\[Nota: [^\]]*\]")
 THUMB = 160  # alto de las miniaturas de ilustración en la hoja, en píxeles
@@ -60,7 +63,7 @@ def _runs(text):
         tag = part.strip("</>")
         if tag in on and part in (f"<{tag}>", f"</{tag}>"):
             on[tag] = not part.startswith("</")
-        elif part == "</a>":
+        elif part == "</a>" and href:  # el cierre de un enlace de un EPUB (nota con id…) sigue siendo texto
             href = ""
         elif LINK.fullmatch(part):
             href = LINK.fullmatch(part).group(1)
@@ -99,7 +102,13 @@ def _insert_marked(cursor, text, color="#888888"):
     for part, *marks in _runs(text):
         m = convert.ICON.fullmatch(part)
         if not m:
-            cursor.insertText(part, char_format(*marks))
+            # Las etiquetas de un EPUB que la hoja no sabe mostrar (furigana, notas): en gris, que se lea el texto
+            for piece in RAW.split(part):
+                f = char_format(*marks)
+                if RAW.fullmatch(piece):
+                    f.setForeground(QColor(color))
+                if piece:
+                    cursor.insertText(piece, f)
             continue
         picture = QImage.fromData(base64.b64decode(m[1]))
         tinted = QPainter(picture)

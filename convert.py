@@ -9,9 +9,11 @@ import hashlib
 import html
 import io
 import os
+import posixpath
 import re
 import tempfile
 import unicodedata
+import urllib.parse
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -89,6 +91,12 @@ class Block:
     layout: str = ""    # imagen doble: "" tal cual, "split" en dos páginas, "rotate" girada 90°
     align: str = ""     # párrafo: "center" si en el PDF va centrado (cartas, carteles, avisos)
     rect: tuple = ()    # (x0, y0, x1, y1) del título en su página, para resaltarlo en la vista previa
+    # EPUB de entrada (read_epub): el elemento del que sale, para escribir el libro parcheando el original
+    tag: str = ""       # etiqueta del elemento ("p", "h2", "li"…)
+    src: tuple = ()     # (archivo, inicio y fin del contenido, inicio y fin del elemento); inicio -1: título sintético
+    orig: str = ""      # html tal como se leyó: si html sigue igual, se copian los bytes originales
+    ref: str = ""       # imagen: su archivo dentro del EPUB
+    title: str = ""     # título: el nombre de la fila (el del índice del EPUB), si no es su texto
 
 
 @dataclass
@@ -133,6 +141,7 @@ class Book:
     source_url: str = ""         # página de la traducción original
     links: str = ""              # «Texto = https://…», uno por línea: enlaces de la página de título
     revised: str = ""            # fecha de la última corrección del texto
+    origin: str = ""             # EPUB de entrada leído por read_epub: write_epub lo parchea en vez de rehacerlo
 
 
 VOLUME = re.compile(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*0*(\d+(?:[.,]\d+)?)", re.I)
@@ -1365,6 +1374,10 @@ TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor d
 # nombre, sin ruta: una revisión ajena no hace abrir otra carpeta ni una ruta de red
 PICTURE = re.compile(r"\[(Imagen) ([0-9a-f]{16}\.jpg)\]")
 INLINE = re.compile(r"&lt;(/?)(i|b|sup|sc)&gt;")
+# Etiquetas en línea de un EPUB de entrada que el editor muestra como texto (faithful): al guardar vuelven a serlo
+RAW_TAG = re.compile(r'&lt;(/?)(ruby|rb|rt|rp|rtc|span|br|small|sub|abbr|cite|code|q|s|u|mark|big|tt|del|ins|em|'
+                     r'strong|img|wbr|i|b|sup)((?:\s+[\w:.-]+="[^"<>]*")*)\s*(/?)&gt;')
+RAW_LINK = re.compile(r'&lt;a((?:\s+[\w:.-]+="[^"<>]*")+)\s*&gt;(.*?)&lt;/a&gt;', re.S)  # el par entero
 # nota al pie en el editor de texto; puede llevar corchetes dentro («[Nota: ver [Arco 2].]»)
 NOTE_MARK = re.compile(r"\[Nota: ((?:[^\[\]]|\[[^\[\]]*\])+)\]")
 # Enlace escrito en el editor, ya escapado: solo direcciones web (un javascript: no sirve en un libro)
@@ -1417,8 +1430,11 @@ def _line(b, k):
 
 
 def _balanced(out):
+    """Cada etiqueta abierta se cierra, en orden (las vacías, como <br/>, no cuentan)."""
     stack = []
-    for close, tag in re.findall(r"<(/?)(i|b|sup|sc)>", out):
+    for close, tag, empty in re.findall(r"<(/?)([A-Za-z][\w:.-]*)[^<>]*?(/?)>", out):
+        if empty or tag in ("br", "img", "wbr"):
+            continue
         if not close:
             stack.append(tag)
         elif not stack or stack.pop() != tag:
@@ -1426,11 +1442,22 @@ def _balanced(out):
     return not stack
 
 
+def _raw_tag(m):
+    """Etiqueta de un EPUB de entrada escrita en el editor (furigana, span con clase): vuelve a ser etiqueta."""
+    return f"<{m[1]}{m[2]}{m[3]}{'/' if m[4] or m[2] in ('br', 'img', 'wbr') else ''}>"
+
+
+def _raw_link(m):
+    """Enlace escrito en el editor (nota de un EPUB, web): vuelve a ser enlace. Uno javascript: se queda como texto."""
+    return m[0] if "javascript:" in m[1].lower() else f"<a{m[1]}>{m[2]}</a>"
+
+
 def _inline(text):
     """Línea escrita por el usuario a XHTML: escapada, salvo <i> y <b>, que se conservan si están bien
     cerradas; si no, se quitan para no romper el EPUB. "[Nota: …]" vuelve a ser la nota al pie, si
     dentro las etiquetas también cierran (si no, cruzarían el límite de la nota)."""
     out = INLINE.sub(r"<\1\2>", html.escape(BAD_XML.sub("", text), quote=False))  # un control rompe el XML
+    out = RAW_LINK.sub(_raw_link, RAW_TAG.sub(_raw_tag, out))
     out = out if _balanced(out) else TAGS.sub("", out)
     out = LINK_MARK.sub(lambda m: f'<a href="{m[1]}">{m[2]}</a>' if _balanced(m[2]) else m[0], out)
     out = NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
@@ -1489,6 +1516,8 @@ def edit_section(book, start, end, text, folder=None):
             page = new[-1].page = origin[j].page
             new[-1].rect = origin[j].rect
             was, now = origin[j], new[-1]
+            if was.src and was.kind == now.kind:  # EPUB de entrada: se escribe en el mismo elemento
+                now.tag, now.src, now.orig, now.title = was.tag, was.src, was.orig, was.title
             if was.kind == now.kind == "heading":
                 now.image = was.image  # el título dibujado (Witch 1) sigue con su nombre corregido o traducido
             # Traducido sin la marca (revisiones de antes de los recuadros, o la IA la quitó): sigue en su recuadro
@@ -1760,7 +1789,9 @@ def link_sections(book):
     """Títulos cuya sección es publicidad del grupo (redes, Patreon, enlaces): corta, de menos de 2000
     letras, y con algún enlace. La sección llega hasta donde la quitaría write_epub. En los
     preliminares cuenta también la página: en una página de créditos con enlaces (Re Zero) se quitan
-    todos sus títulos, no solo el último."""
+    todos sus títulos, no solo el último. Un EPUB de entrada sale como es: nada que proponer."""
+    if book.origin:
+        return []
     heads = [k for k, b in enumerate(book.blocks) if b.kind == "heading"]
     first = book.blocks[book.candidates[0]].page if book.candidates else 0
     linked = {b.page for b in book.blocks if b.page < first and b.kind in ("p", "heading") and LINKS.search(b.html)}
@@ -1934,7 +1965,10 @@ def _same(a, b):
 
 def duplicate_images(book):
     """Ilustraciones repetidas (la portada otra vez dentro del libro, un inserto duplicado): índices
-    de las que sobran. Se conserva la primera; la portada cuenta como ya vista."""
+    de las que sobran. Se conserva la primera; la portada cuenta como ya vista. En un EPUB de entrada, ninguna: la
+    portada repetida en su página de portada es parte del libro."""
+    if book.origin:
+        return []
     seen = [_hash(book.cover)] if book.cover else []
     found = []
     for k, b in enumerate(book.blocks):
@@ -2824,7 +2858,10 @@ def open_pdf(path):
 def analyze(pdf_path, progress=None):
     """Lee el PDF (o un EPUB, que PyMuPDF compone en páginas) y lo devuelve como bloques, con los títulos de
     capítulo candidatos."""
-    kind = "EPUB" if str(pdf_path).lower().endswith(".epub") else "PDF"
+    if str(pdf_path).lower().endswith(".epub"):  # su HTML tal cual: el libro sale igual, con lo que se cambie
+        import faithful
+        return faithful.read_epub(pdf_path, progress)
+    kind = "PDF"
     try:
         doc = open_pdf(pdf_path)
     except Exception as e:
@@ -3369,6 +3406,7 @@ h1 .name.long { font-size: 1em; }
 p.brk { font-size: 1.2em; }
 """,
 }
+ORIGINAL = "Original"  # estilo de un EPUB de entrada (faithful): su CSS tal cual
 SEPARATORS = {"Novela ligera": "❖"}  # separador de escena; el resto usa "* * *"
 # En la ventana, desplegable "Separador"; editable: un texto que no es de la lista se usa tal cual (_separator)
 SEPARATOR_CHOICES = ["Según el estilo", "Original del PDF", "* * *", "❖", "✦", "⁂", "◆ ◆ ◆", "※ ・ ※ ・ ※", "~",
@@ -3393,7 +3431,7 @@ CONTAINER = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def _xhtml(title, body, lang, epub2=False, kind=None):
+def _xhtml(title, body, lang, epub2=False, kind=None, css="style.css"):
     """Página XHTML del libro. epub2: XHTML 1.1, como pide EPUB 2 (sin <meta charset> ni lang, que no existen en él).
     kind: (frontmatter|bodymatter|backmatter, epub:type, role) de EPUB 3: el lector y el lector de pantalla saben
     qué es la página (prólogo, notas…). El contenido va en un <section> con el nombre de su título."""
@@ -3402,7 +3440,7 @@ def _xhtml(title, body, lang, epub2=False, kind=None):
         label = ' aria-labelledby="titulo"' if 'id="titulo"' in body else f' aria-label="{html.escape(title)}"'
         attrs = (f' epub:type="{etype}"' if etype else "") + (f' role="{role}"' if role else "") + label
         body = f"<section{attrs}>\n{body}\n</section>"
-        return _xhtml(title, body, lang).replace("<body>", f'<body epub:type="{matter}">', 1)
+        return _xhtml(title, body, lang, css=css).replace("<body>", f'<body epub:type="{matter}">', 1)
     head = (('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n'
              f'<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}">\n'
              '<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>') if epub2 else
@@ -3410,7 +3448,7 @@ def _xhtml(title, body, lang, epub2=False, kind=None):
              f' lang="{lang}" xml:lang="{lang}">\n<head><meta charset="utf-8"/>'))
     return ('<?xml version="1.0" encoding="utf-8"?>\n' + head
             + f'<title>{html.escape(BAD_XML.sub("", title))}</title>'
-            '<link rel="stylesheet" type="text/css" href="style.css"/></head>\n'
+            f'<link rel="stylesheet" type="text/css" href="{css}"/></head>\n'
             f'<body>\n{BAD_XML.sub("", body)}\n</body>\n</html>\n')  # un carácter de control rompe el XML
 
 
@@ -3442,7 +3480,7 @@ def _kepub(xhtml):
         return m[1] + "".join(out) + m[4]
 
     body = KOBO_BLOCK.sub(wrap, xhtml)
-    body = re.sub(r"(<body[^>]*>\n)", r'\1<div id="book-columns"><div id="book-inner">' + "\n", body, count=1)
+    body = re.sub(r"(<body[^>]*>)\n?", r'\1' + "\n" + '<div id="book-columns"><div id="book-inner">' + "\n", body, count=1)
     return body.replace("\n</body>", "\n</div></div>\n</body>", 1)
 
 
@@ -3619,6 +3657,105 @@ def _fit_style(data, page):
     return f' style="width: {width * scale:.0f}px; height: {height * scale:.0f}px"'
 
 
+def _metadata(book, epub2=False):
+    """Metadatos del OPF salvo identificador, título, idioma, fecha de cambio y accesibilidad: personas (una por
+    nombre), grupos, sinopsis, géneros, tipo, fecha, identificadores, serie, franquicia y valoración."""
+    meta = []  # metadatos: en EPUB 3 los roles y el orden van en <meta refines>; en EPUB 2, como atributos opf:
+
+    def person(tag, ident, value, role, file_as="", native=""):
+        value = html.escape(value)
+        if epub2:
+            extra = f' opf:file-as="{html.escape(file_as)}"' if file_as else ""
+            meta.append(f'<dc:{tag} opf:role="{role}"{extra}>{value}</dc:{tag}>')
+            return
+        meta.append(f'<dc:{tag} id="{ident}">{value}</dc:{tag}>')
+        meta.append(f'<meta refines="#{ident}" property="role" scheme="marc:relators">{role}</meta>')
+        if file_as:
+            meta.append(f'<meta refines="#{ident}" property="file-as">{html.escape(file_as)}</meta>')
+        if native:
+            meta.append(f'<meta refines="#{ident}" property="alternate-script" xml:lang="ja">{html.escape(native)}</meta>')
+
+    def people(tag, ident, value, role, native="", file_as=False):
+        """Una persona por nombre; el nombre japonés va con ella si hay tantos como nombres."""
+        names, natives = _people(value), _people(native)
+        for n, name in enumerate(names):
+            person(tag, ident if n == 0 else f"{ident}{n + 1}", name, role, _file_as(name) if file_as else "",
+                   natives[n] if len(natives) == len(names) else "")
+
+    if not epub2:
+        meta.append('<meta refines="#title" property="title-type">main</meta>')
+        for value, script in ((book.original_title, "ja"), (book.romaji_title, "ja-Latn")):
+            if value:
+                meta.append(f'<meta refines="#title" property="alternate-script" xml:lang="{script}">'
+                            f'{html.escape(value)}</meta>')
+    people("creator", "aut", book.author, "aut", book.author_native, file_as=True)
+    for ident, value, role, native in (("trl", book.translator, "trl", ""),
+                                       ("ill", book.illustrator, "ill", book.illustrator_native),
+                                       ("pfr", book.proofreader, "pfr", ""), ("edt", book.editor, "edt", ""),
+                                       ("mrk", book.epub_by, "mrk", ""), ("dst", book.distributor, "dst", "")):
+        people("contributor", ident, value, role, native)
+    meta += [f"<dc:publisher>{html.escape(p)}</dc:publisher>" for p in _people(book.publisher)]
+    if book.description:
+        rich = _rich(book.description)
+        # con formato o varios párrafos va como HTML (Calibre lo muestra así); si no, texto tal cual
+        plain = len(rich) == 1 and rich[0] == html.escape(book.description.strip(), quote=False)
+        meta.append(f"<dc:description>{html.escape(book.description.strip() if plain else '<br/>'.join(rich))}"
+                    "</dc:description>")
+    meta += [f"<dc:subject>{html.escape(s.strip())}</dc:subject>" for s in book.subjects.split(",") if s.strip()]
+    meta.append(f"<dc:type>{html.escape(book.book_type.strip() or 'Novela ligera')}</dc:type>")
+    if book.date:
+        meta.append(f"<dc:date>{html.escape(book.date)}</dc:date>")
+    isbn = _isbn(book.isbn)
+    if isbn:
+        if epub2:
+            meta.append(f'<dc:identifier opf:scheme="ISBN">{isbn}</dc:identifier>')
+        else:  # código ONIX: 15 = ISBN-13, 02 = ISBN-10
+            meta.append(f'<dc:identifier id="isbn">urn:isbn:{isbn}</dc:identifier>\n<meta refines="#isbn" '
+                        f'property="identifier-type" scheme="onix:codelist5">{"15" if len(isbn) == 13 else "02"}</meta>')
+    if book.asin.strip():
+        meta.append(f'<dc:identifier id="asin">urn:amazon:{html.escape(book.asin.strip())}</dc:identifier>')
+    if re.match(r"https?://\S+$", book.source_url.strip()):
+        meta.append(f'<dc:identifier id="fuente">{html.escape(book.source_url.strip())}</dc:identifier>')
+    if book.original_title and not epub2:
+        meta.append(f'<meta property="dcterms:alternative">{html.escape(book.original_title)}</meta>')
+    if book.series:  # serie en EPUB 3 (belongs-to-collection) y en el formato de Calibre
+        name, number = html.escape(book.series), html.escape(book.volume)
+        if not epub2:
+            meta.append(f'<meta property="belongs-to-collection" id="serie">{name}</meta>\n'
+                        '<meta refines="#serie" property="collection-type">series</meta>\n'
+                        f'<meta refines="#serie" property="dcterms:identifier">urn:uuid:'
+                        f'{uuid.uuid5(uuid.NAMESPACE_URL, "serie|" + book.series)}</meta>')
+            if number:
+                meta.append(f'<meta refines="#serie" property="group-position">{number}</meta>')
+        meta.append(f'<meta name="calibre:series" content="{name}"/>')
+        if number:
+            meta.append(f'<meta name="calibre:series_index" content="{number}"/>')
+    if book.franchise.strip() and not epub2:  # la franquicia contiene la serie (o el libro, si no hay serie)
+        refines = ' refines="#serie"' if book.series else ""
+        meta.append(f'<meta property="belongs-to-collection" id="coleccion"{refines}>{html.escape(book.franchise.strip())}'
+                    f'</meta>\n<meta refines="#coleccion" property="dcterms:identifier">urn:uuid:'
+                    f'{uuid.uuid5(uuid.NAMESPACE_URL, "coleccion|" + book.franchise.strip())}</meta>')
+    try:  # estrellas de 0 a 5 (admite medias); Calibre cuenta de 0 a 10
+        stars = float((book.rating or "").strip().replace(",", "."))
+    except ValueError:
+        stars = 0
+    if 0 < stars <= 5:
+        meta.append(f'<meta name="calibre:rating" content="{round(stars * 2)}"/>')
+    return meta
+
+
+def skipped(book, chapters, removed):
+    """Índices de los bloques de las secciones quitadas: un capítulo se lleva todo hasta el siguiente capítulo; un
+    subtítulo, hasta el siguiente título."""
+    starts, skip = dict(chapters), set()
+    for k in removed:
+        chapter = k in book.candidates or k in starts
+        end = next((j for j in range(k + 1, len(book.blocks))
+                    if book.blocks[j].kind == "heading" and (j in starts or not chapter)), len(book.blocks))
+        skip.update(range(k, end))
+    return skip
+
+
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
                breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
@@ -3651,19 +3788,22 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     title_image, su image_key; título, volumen, créditos con furigana, enlaces y fechas). logo: ruta de una
     imagen PNG/JPG, en su propia página tras la de título. endnotes: todas las notas en «Notas», al final del libro.
     note_style: una de NOTE_STYLES. heading_font: una de HEADING_FONTS o la ruta de un .ttf/.otf, para los títulos.
-    box_style: uno de BOX_STYLES, el aspecto de los recuadros."""
+    box_style: uno de BOX_STYLES, el aspecto de los recuadros.
+    Un libro leído de un EPUB (book.origin) se escribe parcheando el original (faithful.write_faithful), salvo en
+    EPUB 2, que no puede llevar su HTML de EPUB 3 y se rehace."""
+    if book.origin and Path(book.origin).is_file():
+        import faithful
+        if not epub2:
+            return faithful.write_faithful(book, chapters, out_path, **{
+                k: v for k, v in locals().items() if k not in ("book", "chapters", "out_path", "faithful", "epub2")})
+        book = faithful.flattened(book)
     rules = _rules(replacements)
     hyphenate = hyphenate and not whole_words and lang.split("-")[0].lower() == "es"
     typo = (lambda s, dashes=False: _typography(s, dashes)) if typography else (lambda s, dashes=False: s)
     fix = lambda s, dashes=False: typo(_replace(s, rules) if rules else s, dashes)  # títulos: sin rayas
     limit = SHRINK if shrink is True else int(shrink or 0)
     starts, breaks = dict(chapters), set(breaks)
-    skip = set()
-    for k in removed:
-        chapter = k in book.candidates or k in starts
-        end = next((j for j in range(k + 1, len(book.blocks))
-                    if book.blocks[j].kind == "heading" and (j in starts or not chapter)), len(book.blocks))
-        skip.update(range(k, end))
+    skip = skipped(book, chapters, removed)
     sections = []  # [título, es_capítulo, [(índice, bloque)]]
     drawn = {}  # número de sección -> (bloque, imagen) de su título dibujado (Witch 1)
     for k, b in enumerate(book.blocks):
@@ -3810,87 +3950,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     # el mismo libro exportado otra vez conserva su identificador: el lector no lo duplica ni pierde la posición
     uid = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'{book.series}|{book.volume}|{book.title}|{book.author}')}"
     title = html.escape(book.title)
-    meta = []  # metadatos: en EPUB 3 los roles y el orden van en <meta refines>; en EPUB 2, como atributos opf:
-
-    def person(tag, ident, value, role, file_as="", native=""):
-        value = html.escape(value)
-        if epub2:
-            extra = f' opf:file-as="{html.escape(file_as)}"' if file_as else ""
-            meta.append(f'<dc:{tag} opf:role="{role}"{extra}>{value}</dc:{tag}>')
-            return
-        meta.append(f'<dc:{tag} id="{ident}">{value}</dc:{tag}>')
-        meta.append(f'<meta refines="#{ident}" property="role" scheme="marc:relators">{role}</meta>')
-        if file_as:
-            meta.append(f'<meta refines="#{ident}" property="file-as">{html.escape(file_as)}</meta>')
-        if native:
-            meta.append(f'<meta refines="#{ident}" property="alternate-script" xml:lang="ja">{html.escape(native)}</meta>')
-
-    def people(tag, ident, value, role, native="", file_as=False):
-        """Una persona por nombre; el nombre japonés va con ella si hay tantos como nombres."""
-        names, natives = _people(value), _people(native)
-        for n, name in enumerate(names):
-            person(tag, ident if n == 0 else f"{ident}{n + 1}", name, role, _file_as(name) if file_as else "",
-                   natives[n] if len(natives) == len(names) else "")
-
-    if not epub2:
-        meta.append('<meta refines="#title" property="title-type">main</meta>')
-        for value, script in ((book.original_title, "ja"), (book.romaji_title, "ja-Latn")):
-            if value:
-                meta.append(f'<meta refines="#title" property="alternate-script" xml:lang="{script}">'
-                            f'{html.escape(value)}</meta>')
-    people("creator", "aut", book.author, "aut", book.author_native, file_as=True)
-    for ident, value, role, native in (("trl", book.translator, "trl", ""),
-                                       ("ill", book.illustrator, "ill", book.illustrator_native),
-                                       ("pfr", book.proofreader, "pfr", ""), ("edt", book.editor, "edt", ""),
-                                       ("mrk", book.epub_by, "mrk", ""), ("dst", book.distributor, "dst", "")):
-        people("contributor", ident, value, role, native)
-    meta += [f"<dc:publisher>{html.escape(p)}</dc:publisher>" for p in _people(book.publisher)]
-    if book.description:
-        rich = _rich(book.description)
-        # con formato o varios párrafos va como HTML (Calibre lo muestra así); si no, texto tal cual
-        plain = len(rich) == 1 and rich[0] == html.escape(book.description.strip(), quote=False)
-        meta.append(f"<dc:description>{html.escape(book.description.strip() if plain else '<br/>'.join(rich))}"
-                    "</dc:description>")
-    meta += [f"<dc:subject>{html.escape(s.strip())}</dc:subject>" for s in book.subjects.split(",") if s.strip()]
-    meta.append(f"<dc:type>{html.escape(book.book_type.strip() or 'Novela ligera')}</dc:type>")
-    if book.date:
-        meta.append(f"<dc:date>{html.escape(book.date)}</dc:date>")
-    isbn = _isbn(book.isbn)
-    if isbn:
-        if epub2:
-            meta.append(f'<dc:identifier opf:scheme="ISBN">{isbn}</dc:identifier>')
-        else:  # código ONIX: 15 = ISBN-13, 02 = ISBN-10
-            meta.append(f'<dc:identifier id="isbn">urn:isbn:{isbn}</dc:identifier>\n<meta refines="#isbn" '
-                        f'property="identifier-type" scheme="onix:codelist5">{"15" if len(isbn) == 13 else "02"}</meta>')
-    if book.asin.strip():
-        meta.append(f'<dc:identifier id="asin">urn:amazon:{html.escape(book.asin.strip())}</dc:identifier>')
-    if re.match(r"https?://\S+$", book.source_url.strip()):
-        meta.append(f'<dc:identifier id="fuente">{html.escape(book.source_url.strip())}</dc:identifier>')
-    if book.original_title and not epub2:
-        meta.append(f'<meta property="dcterms:alternative">{html.escape(book.original_title)}</meta>')
-    if book.series:  # serie en EPUB 3 (belongs-to-collection) y en el formato de Calibre
-        name, number = html.escape(book.series), html.escape(book.volume)
-        if not epub2:
-            meta.append(f'<meta property="belongs-to-collection" id="serie">{name}</meta>\n'
-                        '<meta refines="#serie" property="collection-type">series</meta>\n'
-                        f'<meta refines="#serie" property="dcterms:identifier">urn:uuid:'
-                        f'{uuid.uuid5(uuid.NAMESPACE_URL, "serie|" + book.series)}</meta>')
-            if number:
-                meta.append(f'<meta refines="#serie" property="group-position">{number}</meta>')
-        meta.append(f'<meta name="calibre:series" content="{name}"/>')
-        if number:
-            meta.append(f'<meta name="calibre:series_index" content="{number}"/>')
-    if book.franchise.strip() and not epub2:  # la franquicia contiene la serie (o el libro, si no hay serie)
-        refines = ' refines="#serie"' if book.series else ""
-        meta.append(f'<meta property="belongs-to-collection" id="coleccion"{refines}>{html.escape(book.franchise.strip())}'
-                    f'</meta>\n<meta refines="#coleccion" property="dcterms:identifier">urn:uuid:'
-                    f'{uuid.uuid5(uuid.NAMESPACE_URL, "coleccion|" + book.franchise.strip())}</meta>')
-    try:  # estrellas de 0 a 5 (admite medias); Calibre cuenta de 0 a 10
-        stars = float((book.rating or "").strip().replace(",", "."))
-    except ValueError:
-        stars = 0
-    if 0 < stars <= 5:
-        meta.append(f'<meta name="calibre:rating" content="{round(stars * 2)}"/>')
+    meta = _metadata(book, epub2)
     if not epub2:
         meta.append(f'<meta property="dcterms:modified">{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}</meta>')
         meta += _accessibility(bool(images))
@@ -3906,7 +3966,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     manifest += [f'<item id="i{k}" href="{src}" media-type="image/{"png" if src.endswith(".png") else "jpeg"}"/>'
                  for k, src in enumerate(images)]
     fonts = {}  # ruta en el EPUB -> archivo de la carpeta fonts
-    css = BASE_CSS + STYLES[style]
+    css = BASE_CSS + STYLES.get(style, STYLES["Clásico"])  # «Original» rehecho (EPUB 2): el clásico
     if whole_words:  # el PDF maquetado por MuPDF partía «mu-jer», «cue-ro» con hyphens: auto
         css += "p { -webkit-hyphens: none; hyphens: none; }\n"
     if font in FONTS:
@@ -4354,6 +4414,12 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
 IMAGE_MAGIC = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG", "image/gif": b"GIF8"}  # primeros bytes
 
 
+def _zip_path(base, href):
+    """Ruta dentro del zip de href (relativo, con %20…) escrito en el archivo base."""
+    href = urllib.parse.unquote(href.split("#")[0])
+    return posixpath.normpath(posixpath.join(posixpath.dirname(base), href)) if href else base
+
+
 def check_epub(path):
     """Revisa un EPUB ya escrito: XML válido, mimetype el primero y sin comprimir, ningún archivo, imagen
     ni enlace (también «#ancla» del mismo archivo) que falte, imágenes del tipo declarado y ningún capítulo
@@ -4370,11 +4436,17 @@ def check_epub(path):
         first = z.infolist()[0] if z.infolist() else None
         if first is None or first.filename != "mimetype" or first.compress_type != zipfile.ZIP_STORED:
             problems.append("El archivo mimetype no va el primero y sin comprimir: algunos lectores no abren el libro")
-        base = "OEBPS/"
-        opf = trees.get(base + "content.opf")
+        # El OPF donde diga container.xml (Sigil y Calibre no usan OEBPS/content.opf); las rutas, desde cada archivo
+        try:
+            container = ET.fromstring(z.read("META-INF/container.xml"))
+            opf_path = next(e.get("full-path") for e in container.iter() if e.tag.endswith("rootfile"))
+        except (KeyError, StopIteration, ET.ParseError):
+            opf_path = "OEBPS/content.opf"
+        base = posixpath.dirname(opf_path) + "/" if "/" in opf_path else ""
+        opf = trees.get(opf_path)
         if opf is not None:
             for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
-                href, kind = base + item.get("href", ""), item.get("media-type", "")
+                href, kind = _zip_path(opf_path, item.get("href", "")), item.get("media-type", "")
                 if href not in names:
                     problems.append(f"Falta {item.get('href')}, declarado en content.opf")
                 # vacía (libro sin portada) no es de otro tipo
@@ -4382,17 +4454,18 @@ def check_epub(path):
                     problems.append(f"{item.get('href')} no es una imagen {kind[6:].upper()}, aunque así se declara")
     ids = {name: {e.get("id") for e in tree.iter() if e.get("id")} for name, tree in trees.items()}
     for name, tree in trees.items():
-        if not name.endswith(".xhtml"):
+        if not name.endswith((".xhtml", ".html", ".htm")):
             continue
+        shown = name.removeprefix(base)
         for img in tree.iter(XHTML + "img"):
-            if base + img.get("src", "") not in names:
-                problems.append(f"{name[len(base):]}: falta la imagen {img.get('src')}")
+            if not img.get("src", "").startswith("data:") and _zip_path(name, img.get("src", "")) not in names:
+                problems.append(f"{shown}: falta la imagen {img.get('src')}")
         for a in tree.iter(XHTML + "a"):
             target, _, anchor = a.get("href", "").partition("#")
-            file = base + target if target else name  # «#nota3»: ancla del mismo archivo
-            if ((target or anchor) and not re.match(r"https?://", target)
+            file = _zip_path(name, target) if target else name  # «#nota3»: ancla del mismo archivo
+            if ((target or anchor) and not re.match(r"[a-z][\w+.-]*:", target)  # https:, mailto:
                     and (file not in names or (anchor and anchor not in ids.get(file, ())))):
-                problems.append(f"{name[len(base):]}: enlace roto a {a.get('href')}")
+                problems.append(f"{shown}: enlace roto a {a.get('href')}")
         h1 = next(tree.iter(XHTML + "h1"), None)
         if (re.fullmatch(r"OEBPS/sec\d+\.xhtml", name) and h1 is not None
                 and not any(True for _ in tree.iter(XHTML + "p")) and not any(True for _ in tree.iter(XHTML + "img"))):

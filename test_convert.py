@@ -4069,6 +4069,39 @@ def test_editor_sheet_round_trip():
     assert sources == [2, 3, 4, 5, 6, 7, 8, 9, 10], sources
 
 
+def test_editor_keeps_epub_tags_when_a_paragraph_is_edited():
+    """Un párrafo de un EPUB con nota enlazada (<a … epub:type>…</a>) y furigana, editado en la hoja: las etiquetas,
+    en gris, vuelven al libro enteras y el párrafo sigue en su elemento; antes el </a> se perdía y edit_section
+    quitaba todas las etiquetas del párrafo."""
+    import qtk
+    from PySide6.QtGui import QTextCursor, QTextDocument
+
+    import editor
+
+    qtk.app()
+    book = convert.analyze(sigil_epub(TMP / "Sigil - Volumen 14.epub"))
+    start, end = book.candidates[2], book.candidates[3]
+    k = next(k for k in range(start, end) if "noteref" in book.blocks[k].html)
+    src = book.blocks[k].src
+    doc = QTextDocument()
+    editor.load(doc, [(j, convert._line(book.blocks[j], j)) for j in range(start, end)], {})
+    block = doc.findBlockByNumber(k - start)
+    it, colors = block.begin(), {}
+    while not it.atEnd():
+        colors[it.fragment().text()] = it.fragment().charFormat().foreground().color().name()
+        it += 1
+    cursor = QTextCursor(block)
+    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    cursor.insertText(" Fin.")
+    convert.edit_section(book, start, end, editor.dump(doc))
+    edited = book.blocks[k]
+    assert edited.html == ('Las <i>leyendas</i> dicen<a href="notas.xhtml#nt1" id="rf1" epub:type="noteref"><sup>❮01❯'
+                           '</sup></a> que el <b>cielo</b> es azul. Fin.'), edited.html
+    assert edited.src == src and edited.tag == "p", (edited.src, src)
+    tag = '<a href="notas.xhtml#nt1" id="rf1" epub:type="noteref">'
+    assert colors.get(tag) == "#888888" and colors.get("Las ") != "#888888", colors  # la etiqueta, en gris
+
+
 def test_editor_long_separator_is_not_shrunk():
     """«◇◇◇…» de 42 rombos (Oukoku 4, pág. 107) se dibuja a la medida de la hoja: encogido como imagen, los
     trazos finos se perdían y el separador salía entrecortado."""
@@ -10289,25 +10322,259 @@ def test_theme_light_dark_and_bad_setting():
 
 
 def test_analyze_reads_epub():
-    """Un EPUB se lee como un PDF (PyMuPDF lo compone en páginas): mismos capítulos, cursiva e ilustración.
-    El número del capítulo, pequeño y sin negrita encima del nombre, vuelve a unirse al título."""
+    """Un EPUB se lee por su HTML (read_epub): cada archivo es una sección con el nombre de su índice, con la cursiva
+    y la ilustración; la marca de página al principio del párrafo no entra en el texto editable."""
     pdf = TMP / "Ida y vuelta - Volumen 2.pdf"
     make_novel().replace(pdf)
     book = convert.analyze(pdf)
     epub = TMP / "Ida y vuelta - Volumen 2 (LNC).epub"
     convert.write_epub(book, [(k, convert._plain(book.blocks[k])) for k in book.candidates], epub)
     again = convert.analyze(epub)
-    titles = [convert._plain(again.blocks[k]) for k in again.candidates]
+    titles = [again.blocks[k].title for k in again.candidates]
     assert titles[-2:] == ["Capitulo 1: Inicio", "Capitulo 2: Final"], titles
     assert "Ella penso <i>que era tarde.</i>" in [b.html for b in again.blocks], [b.html for b in again.blocks][:8]
     assert any(b.kind == "image" for b in again.blocks)
     assert not any(convert._plain(b) == "Capitulo 1" for b in again.blocks), "el número quedó como párrafo"
 
 
+SIGIL_PAGE = ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" '
+              'xmlns:epub="http://www.idpf.org/2007/ops" lang="es" xml:lang="es">\n<head>\n  <title>{title}</title>\n'
+              '  <link href="../Styles/style.css" rel="stylesheet" type="text/css"/>\n</head>\n<body>\n{body}\n</body>\n</html>\n')
+
+
+def sigil_epub(path):
+    """EPUB hecho a mano como los de Sigil (ZeePubs): carpetas Text/Images/Styles/Fonts, portada SVG, h1 de dos líneas,
+    h2 y h3, furigana, notas enlazadas, <em>/<strong>, separador «※ ・ ※», nav anidado y metadatos completos."""
+    pic = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 90), False)
+    pic.clear_with(90)
+    texts = {
+        "cubierta": ("Cubierta", '<section epub:type="cover"><h1 class="hidden">Cubierta</h1>\n'
+                                 '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+                                 'viewBox="0 0 60 90"><image width="60" height="90" xlink:href="../Images/cover.jpg"/>'
+                                 '</svg></section>'),
+        "titulo": ("Página de título", '<section epub:type="titlepage">\n  <figure class="fill"><img src="../Images/lamina.jpg" '
+                                       'alt=""/></figure>\n  <p class="space-1"><b>Autor:</b> <ruby>橘 公司<rp>(</rp>'
+                                       '<rt>Koushi Tachibana</rt><rp>)</rp></ruby></p>\n  <p><b>Web:</b> <a href='
+                                       '"https://ejemplo.com/?a=1&amp;b=2">Grupo</a></p>\n</section>'),
+        "capitulo01": ("Capítulo 1: El Templo", '<section epub:type="chapter">\n  <h1 title="Capítulo 1: El Templo" '
+                       'class="lucida" id="encabezado">\n    <i>Capítulo 1</i><br/>\n    <span class="small"><i>El Templo'
+                       '</i></span>\n  </h1>\n  <p class="no-indent">Las <em>leyendas</em> dicen<a href="notas.xhtml#nt1" '
+                       'id="rf1" epub:type="noteref"><sup>❮01❯</sup></a> que el <strong>cielo</strong> es azul.</p>\n'
+                       '  <p>Segundo párrafo &amp; más.</p>\n  <p class="text align-center"><b>※ ・ ※ ・ ※</b></p>\n'
+                       '  <h2 id="p1">Parte uno</h2>\n  <p>Tercero.</p>\n  <h3>Subparte</h3>\n  <p>Cuarto.</p>\n'
+                       '  <figure class="fill"><img src="../Images/lamina%201.jpg" alt=""/></figure>\n</section>'),
+        "capitulo02": ("Capítulo 2: Héroe", '<section epub:type="chapter">\n  <h1>Capítulo 2: Héroe</h1>\n'
+                       '  <p><span epub:type="pagebreak" id="pg9" title="9"></span>Quinto párrafo.</p>\n</section>'),
+        "notas": ("Notas", '<section epub:type="endnotes">\n  <h1>Notas</h1>\n  <ol>\n    <li id="nt1"><p><a href='
+                  '"capitulo01.xhtml#rf1">❮01❯</a> Una nota.</p></li>\n  </ol>\n</section>'),
+    }
+    nav = ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" '
+           'xmlns:epub="http://www.idpf.org/2007/ops" lang="es" xml:lang="es">\n<head><title>Índice</title></head>\n<body>\n'
+           '<nav epub:type="toc" id="toc"><h1>Índice</h1>\n<ol>\n<li><a href="cubierta.xhtml">Cubierta</a></li>\n'
+           '<li><a href="capitulo01.xhtml">Capítulo 1: El Templo</a>\n<ol><li><a href="capitulo01.xhtml#p1">Parte uno</a>'
+           '</li></ol></li>\n<li><a href="capitulo02.xhtml">Capítulo 2: Héroe</a></li>\n</ol>\n</nav>\n'
+           '<nav epub:type="landmarks" hidden=""><ol><li><a epub:type="bodymatter" href="capitulo01.xhtml">Inicio</a></li>'
+           '</ol></nav>\n</body>\n</html>\n')
+    manifest = "".join(f'\n    <item id="{n}" href="Text/{n}.xhtml" media-type="application/xhtml+xml"/>' for n in texts)
+    spine = "".join(f'\n    <itemref idref="{n}"/>' for n in texts)
+    opf = ('<?xml version="1.0" encoding="utf-8"?>\n<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+           'unique-identifier="BookId" xml:lang="es">\n  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+           '    <dc:identifier id="BookId">urn:uuid:019f0f81-ed68-7f68-bb2d-481b5179b572</dc:identifier>\n'
+           '    <dc:title id="title">Date A Live 14</dc:title>\n'
+           '    <meta refines="#title" property="alternate-script" xml:lang="ja">デート・ア・ライブ</meta>\n'
+           '    <dc:language>es</dc:language>\n    <dc:creator id="c1">Koushi Tachibana</dc:creator>\n'
+           '    <meta refines="#c1" property="role" scheme="marc:relators">aut</meta>\n'
+           '    <dc:contributor id="t1">Jorelex</dc:contributor>\n'
+           '    <meta refines="#t1" property="role" scheme="marc:relators">trl</meta>\n'
+           '    <dc:contributor id="t2">AddLu</dc:contributor>\n'
+           '    <meta refines="#t2" property="role" scheme="marc:relators">trl</meta>\n'
+           '    <dc:publisher>DALT</dc:publisher>\n    <dc:description>&lt;b&gt;¡Hola!&lt;/b&gt;&lt;br/&gt;Más.</dc:description>\n'
+           '    <meta property="belongs-to-collection" id="serie">Date A Live</meta>\n'
+           '    <meta refines="#serie" property="collection-type">series</meta>\n'
+           '    <meta refines="#serie" property="group-position">14</meta>\n'
+           '    <meta property="schema:accessibilitySummary">Hecho a mano.</meta>\n'
+           '    <meta property="dcterms:modified">2026-11-15T01:36:18Z</meta>\n'
+           '    <meta name="Sigil version" content="2.8.1"/>\n    <meta name="cover" content="cover.jpg"/>\n  </metadata>\n'
+           f'  <manifest>{manifest}\n    <item id="nav" href="Text/nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+           '\n    <item id="style.css" href="Styles/style.css" media-type="text/css"/>\n'
+           '    <item id="cover.jpg" href="Images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>\n'
+           '    <item id="lamina.jpg" href="Images/lamina.jpg" media-type="image/jpeg"/>\n'
+           '    <item id="lamina1.jpg" href="Images/lamina%201.jpg" media-type="image/jpeg"/>\n'
+           '    <item id="lucida" href="Fonts/Lucida.ttf" media-type="font/ttf"/>\n  </manifest>\n'
+           f'  <spine>{spine}\n  </spine>\n</package>\n')
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        z.writestr("META-INF/container.xml", '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:'
+                   'opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type='
+                   '"application/oebps-package+xml"/></rootfiles></container>')
+        z.writestr("OEBPS/content.opf", opf)
+        z.writestr("OEBPS/Text/nav.xhtml", nav)
+        for name, (title, body) in texts.items():
+            z.writestr(f"OEBPS/Text/{name}.xhtml", SIGIL_PAGE.format(title=title, body=body))
+        z.writestr("OEBPS/Styles/style.css", '@font-face { font-family: "Lucida"; src: url(../Fonts/Lucida.ttf); }\n'
+                   '.lucida { font-family: "Lucida", serif; }\n.hidden { display: none; }\n')
+        z.writestr("OEBPS/Fonts/Lucida.ttf", (convert.FONT_DIR / "eaglelake.ttf").read_bytes())
+        for name in ("cover.jpg", "lamina.jpg", "lamina 1.jpg"):
+            z.writestr(f"OEBPS/Images/{name}", pic.tobytes("jpg"))
+    return path
+
+
+def faithful_chapters(book):
+    return [(k, book.blocks[k].title) for k in book.candidates]
+
+
+def test_faithful_epub_read_blocks_titles_and_metadata():
+    """Un EPUB de Sigil se lee por su HTML: un capítulo por archivo con el nombre del índice (la portada sin título
+    visible también), h2/h3 como subtítulos, furigana, enlaces y notas tal cual, <em>/<strong> como <i>/<b>, el
+    separador «※ ・ ※ ・ ※», las ilustraciones de <img> y del <svg> de la portada, la marca de página fuera del
+    texto, y los datos del OPF."""
+    book = convert.analyze(sigil_epub(TMP / "Sigil - Volumen 14.epub"))
+    titles = [book.blocks[k].title for k in book.candidates]
+    assert titles == ["Cubierta", "Página de título", "Capítulo 1: El Templo", "Capítulo 2: Héroe", "Notas"], titles
+    kinds = [(b.kind, b.tag) for b in book.blocks]
+    assert kinds[:2] == [("heading", "h1"), ("image", "svg")] and ("heading", "h3") in kinds, kinds
+    by_html = {b.html: b for b in book.blocks}
+    assert '<b>Autor:</b> <ruby>橘 公司<rp>(</rp><rt>Koushi Tachibana</rt><rp>)</rp></ruby>' in by_html, list(by_html)
+    assert ('Las <i>leyendas</i> dicen<a href="notas.xhtml#nt1" id="rf1" epub:type="noteref"><sup>❮01❯</sup></a> que '
+            'el <b>cielo</b> es azul.') in by_html
+    assert "Quinto párrafo." in by_html and by_html["<b>※ ・ ※ ・ ※</b>"].kind == "break"
+    synthetic = book.blocks[book.candidates[1]]
+    assert synthetic.src[1] == -1 and synthetic.html == "Página de título"
+    assert sum(b.kind == "image" for b in book.blocks) == 3
+    assert (book.title, book.author, book.translator, book.publisher) == ("Date A Live 14", "Koushi Tachibana",
+                                                                          "Jorelex & AddLu", "DALT"), book
+    assert (book.series, book.volume, book.original_title, book.description) == ("Date A Live", "14", "デート・ア・ライブ",
+                                                                                 "**¡Hola!**\nMás."), book
+    assert book.cover and book.origin.endswith("Sigil - Volumen 14.epub")
+
+
+def test_faithful_epub_unchanged_is_identical_and_changes_are_patched():
+    """Sin cambios, cada archivo sale con los mismos bytes. Con cambios solo cambia lo tocado: un párrafo editado en el
+    editor (con su furigana y su enlace), un capítulo renombrado (índice y título de dos líneas), una sección quitada
+    (fuera del spine, del manifiesto y del índice), una ilustración descartada, un párrafo duplicado (sin repetir su
+    id), la portada nueva y los datos cambiados (lo demás del OPF se queda). Todo pasa check_epub."""
+    src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+    book = convert.analyze(src)
+    out = TMP / "Sigil - Volumen 14 (LNC).epub"
+    options = {"typography": False, "style": convert.ORIGINAL, "separator": "Original del PDF", "contents": False}
+    convert.write_epub(book, faithful_chapters(book), out, **options)
+    with zipfile.ZipFile(src) as a, zipfile.ZipFile(out) as b:
+        assert a.namelist() == b.namelist() or sorted(a.namelist()) == sorted(b.namelist())
+        assert [n for n in a.namelist() if a.read(n) != b.read(n)] == [], "sin cambios debía salir igual"
+    # editor: el párrafo de la portada de título con furigana, cambiado; otro duplicado
+    k = next(k for k, b in enumerate(book.blocks) if "<ruby>" in b.html)
+    end = book.candidates[2]
+    text = convert.section_text(book, book.candidates[1], end)
+    assert "<ruby>橘 公司<rp>(</rp><rt>Koushi Tachibana</rt><rp>)</rp></ruby>" in text, text
+    lines = text.split("\n\n")
+    lines[lines.index(next(line for line in lines if "ruby" in line))] = lines[2].replace("Autor:", "Autora:")
+    lines.append(lines[-1])  # el enlace dos veces
+    convert.edit_section(book, book.candidates[1], end, "\n\n".join(lines))
+    dropped = next(k for k, b in enumerate(book.blocks) if b.kind == "image" and b.ref.endswith("lamina 1.jpg"))
+    book.blocks[dropped].keep = False
+    book.cover = jpeg(70, 100)
+    book.translator, book.publisher = "Jorelex & Neo", "DALT & EHJR"
+    chapters = [(k, "Capítulo 1: El Santuario" if t.startswith("Capítulo 1") else t) for k, t in faithful_chapters(book)]
+    notes = next(k for k, t in chapters if t == "Notas")
+    convert.write_epub(book, chapters, out, removed=[notes], **options)
+    with zipfile.ZipFile(src) as a, zipfile.ZipFile(out) as b:
+        changed = sorted(n for n in a.namelist() if n in b.namelist() and a.read(n) != b.read(n))
+        missing = sorted(set(a.namelist()) - set(b.namelist()))
+        title = b.read("OEBPS/Text/titulo.xhtml").decode()
+        chapter = b.read("OEBPS/Text/capitulo01.xhtml").decode()
+        nav = b.read("OEBPS/Text/nav.xhtml").decode()
+        opf = b.read("OEBPS/content.opf").decode()
+    assert missing == ["OEBPS/Text/notas.xhtml"], missing
+    assert changed == ["OEBPS/Images/cover.jpg", "OEBPS/Text/capitulo01.xhtml", "OEBPS/Text/nav.xhtml",
+                       "OEBPS/Text/titulo.xhtml", "OEBPS/content.opf"], changed
+    assert '<p class="space-1"><b>Autora:</b> <ruby>橘 公司<rp>(</rp><rt>Koushi Tachibana</rt><rp>)</rp></ruby></p>' in title
+    assert title.count('href="https://ejemplo.com/?a=1&amp;b=2"') == 2, title
+    assert ('<h1 title="Capítulo 1: El Santuario" class="lucida" id="encabezado"><i>Capítulo 1</i><br/> <span class="small">'
+            '<i>El Santuario</i></span></h1>') in chapter, chapter
+    assert "lamina%201.jpg" not in chapter and "<p>Segundo párrafo &amp; más.</p>" in chapter
+    assert ">Capítulo 1: El Santuario</a>" in nav and "notas.xhtml" not in opf, (nav, opf)
+    assert ("<dc:contributor id=\"trl2\">Neo</dc:contributor>" in opf and "<dc:publisher>EHJR</dc:publisher>" in opf
+            and "Sigil version" in opf and "Hecho a mano." in opf and "AddLu" not in opf), opf
+    assert opf.count("<dc:identifier") == 1 and "urn:uuid:019f0f81" in opf, opf
+    assert not convert.check_epub(out), convert.check_epub(out)
+
+
+def test_faithful_epub_move_options_pages_and_epub2():
+    """Mover un capítulo cambia el spine; otro estilo, otra letra o la fuente de títulos se añaden en una hoja propia
+    sin tocar la del libro; la página de título, la sinopsis y la portada de la app (si se quita la del libro) van en
+    lnc/; KEPUB envuelve las frases. EPUB 2 no puede ser fiel: se rehace con el furigana como «base (lectura)»."""
+    src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+    book = convert.analyze(src)
+    two, notes = book.candidates[3], book.candidates[4]
+    convert.move_section(book, two, notes, book.candidates[2])  # el capítulo 2 antes del 1
+    out = TMP / "Sigil movido.epub"
+    cover = book.candidates[0]
+    convert.write_epub(book, faithful_chapters(book), out, removed=[cover], style="Clásico", font="Literata",
+                       heading_font="Eagle Lake", credits=True, synopsis=True, contents=False, typography=False,
+                       separator="❖", kepub=True)
+    with zipfile.ZipFile(out) as z:
+        opf = z.read("OEBPS/content.opf").decode()
+        spine = re.findall(r'<itemref idref="([^"]+)"', opf)
+        chapter = z.read("OEBPS/Text/capitulo01.xhtml").decode()
+        css = z.read("OEBPS/lnc/estilo.css").decode()
+        names = z.namelist()
+        original_css = z.read("OEBPS/Styles/style.css").decode()
+    ids = {i: h for i, h in re.findall(r'<item id="([^"]+)" href="([^"]+)"', opf)}
+    assert [ids[i] for i in spine] == ["lnc/portada.xhtml", "lnc/sinopsis.xhtml", "lnc/titulo.xhtml", "Text/titulo.xhtml",
+                                       "Text/capitulo02.xhtml", "Text/capitulo01.xhtml", "Text/notas.xhtml"], spine
+    assert '<link href="../lnc/estilo.css" rel="stylesheet" type="text/css"/></head>' in chapter
+    assert 'font-family: "Literata"' in css and '"Titulos"' in css and "OEBPS/lnc/fonts/eaglelake.ttf" in names
+    assert original_css.startswith('@font-face { font-family: "Lucida"')  # la del libro, intacta
+    assert "koboSpan" in chapter and "❖" in chapter and "※ ・ ※ ・ ※" not in chapter, chapter
+    assert not convert.check_epub(out), convert.check_epub(out)
+    old = TMP / "Sigil EPUB 2.epub"
+    convert.write_epub(convert.analyze(src), faithful_chapters(convert.analyze(src)), old, epub2=True)
+    text = epub_text(old)
+    assert "Koushi Tachibana (橘 公司)" not in text and "橘 公司 (Koushi Tachibana)" in text, text[:400]
+    assert "<ruby>" not in text and "epub:type" not in text and not convert.check_epub(old), convert.check_epub(old)
+
+
+def test_window_opens_epub_as_original():
+    """La ventana abre un EPUB con su aspecto: estilo «Original» (que solo se ofrece con un EPUB), sin limpieza
+    tipográfica ni páginas de la app, la lista con los nombres del índice, y generar sin tocar nada da el mismo libro."""
+    import time
+
+    import app
+
+    src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+    root, window = visible_window()
+    out = TMP / "Sigil desde la ventana.epub"
+    originals = app.filedialog.asksaveasfilename, app.messagebox.showinfo
+    app.filedialog.asksaveasfilename = lambda **kwargs: str(out)
+    app.messagebox.showinfo = lambda *args: None
+    try:
+        window.pdf = src
+        window.show_book(convert.analyze(src))
+        state = (window.style_var.get(), window.style_box.currentText(), window.typography_var.get(),
+                 window.contents_var.get(), window.credits_var.get())
+        titles = [window.tree.set(i, "title") for i in window.tree.get_children() if window.is_title(i)]
+        window.generate()
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
+        pdf_styles = [window.style_box.itemText(i) for i in range(window.style_box.count())]
+    finally:
+        app.filedialog.asksaveasfilename, app.messagebox.showinfo = originals
+        window.close()
+    assert state == ("Original", "Original", False, False, False), state
+    assert titles[:3] == ["Cubierta", "Página de título", "Capítulo 1: El Templo"], titles
+    assert "Original" not in pdf_styles, pdf_styles
+    with zipfile.ZipFile(src) as a, zipfile.ZipFile(out) as b:
+        differ = [n for n in a.namelist() if a.read(n) != b.read(n)]
+    assert differ == [], differ
+
+
 def test_analyze_external_epub_long_toc_and_inline_image():
-    """EPUB de otro programa: su índice ocupa varias páginas al componerlo y solo la primera dice «Contenido»
-    (las demás son enlaces: también se omiten); una imagen en línea deja U+FFFC en el texto, que no debe
-    quedar como párrafo suelto."""
+    """EPUB de otro programa (EPUB 2, OPF en la raíz, sin nav): su índice es una sección más, con sus enlaces; cada
+    capítulo, la suya con su título; una imagen sola en un párrafo es una ilustración, sin restos (U+FFFC) en el texto."""
     import zipfile
 
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 60), False)
@@ -10340,11 +10607,11 @@ def test_analyze_external_epub_long_toc_and_inline_image():
             z.writestr(name, text)
     assert pymupdf.open(epub)[1].get_text().startswith("Capítulo"), "el índice debía ocupar más de una página"
     book = convert.analyze(epub)
-    titles = [convert._plain(book.blocks[k]) for k in book.candidates]
-    assert titles == list(heads.values()), titles[:3]
-    loose = [b.page for b in book.blocks[:book.candidates[0]] if b.kind == "p"]
-    assert not loose, f"restos del índice antes del capítulo 1, páginas {loose}"
+    titles = [book.blocks[k].title for k in book.candidates]
+    assert titles == ["Contenido"] + list(heads.values()), titles[:3]
+    assert sum(b.kind == "image" for b in book.blocks) == chapters
     assert not any("￼" in b.html or (b.kind == "p" and not convert._plain(b)) for b in book.blocks)
+    assert book.blocks[1].html == f'<a href="c1.xhtml">{heads[1]}</a>', book.blocks[1].html
 
 
 def test_epub_sources_and_output_name():
