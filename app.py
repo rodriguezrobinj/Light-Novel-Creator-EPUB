@@ -1025,6 +1025,8 @@ def _review_for(pdf, book):
     con los títulos de solo ilustraciones, trasladada (_migrate_review, _migrate_dropped). None si no hay o es de
     otro análisis."""
     state = _read_review(pdf, len(book.blocks))
+    if book.origin and state and not state.get("faithful"):  # de cuando un EPUB se leía como PDF: no casa
+        return None
     if state or not (book.credit_pages or book.dropped_titles):
         return state
     old = _read_review(pdf)
@@ -1068,7 +1070,7 @@ def _set_aside(pdf):
 # Versiones del trabajo de un libro, como los commits de git: copias completas de la revisión en un zip junto al
 # PDF. Restaurar una no borra las posteriores: así conviven alternativas del mismo tomo.
 # No cuentan para saber si una versión automática repite la última
-VERSION_NOISE = ("problems", "pdf", "editor_at", "work")
+VERSION_NOISE = ("problems", "pdf", "editor_at", "work", "faithful")
 COMPARE_LIMIT = 300  # párrafos cambiados que se muestran al comparar: más no se leen y la ventana tardaría
 FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volume": "Vol.", "publisher": "Grupo",
                 "translator": "Traductor", "illustrator": "Ilustraciones", "proofreader": "Corrección",
@@ -3302,7 +3304,13 @@ class App:
             backup = _set_aside(self.pdf)
             if backup:  # delante: si la línea no cabe, se corta el recuento y no esto
                 text = f"La revisión guardada no coincide con este análisis: copia en {backup.name} · {text}"
-            if stale:
+            if stale and book.origin and not stale.get("faithful"):
+                # De cuando el EPUB se leía como un PDF: sus datos y opciones eran de aquella lectura (el autor con su
+                # furigana pegado, el estilo de la app). Solo vale lo de la serie
+                self.apply_state({k: v for k, v in stale.items() if k in SERIES_VOCAB + ("replacements",)})
+                text = (f"La revisión guardada era de la lectura anterior de este EPUB: queda en {backup.name}; se "
+                        "conservan el glosario y los reemplazos")
+            elif stale:
                 self.apply_state(stale)
                 self.description = stale.get("description", "")
                 if stale.get("cover"):
@@ -3314,6 +3322,8 @@ class App:
                         f"cambios de texto y de la lista quedan en {backup.name}")
             else:
                 inherited = _inherited(self.pdf, book.series)
+                if book.origin:  # el EPUB trae sus datos y su aspecto: de la serie, solo su vocabulario
+                    inherited = {k: v for k, v in inherited.items() if k in SERIES_VOCAB + ("replacements",)}
                 if book.author:
                     inherited.pop("author", None)  # el del PDF manda
                 if inherited:
@@ -5412,7 +5422,8 @@ class App:
         state.update(blocks=self.analyzed, edits=self.edits, description=self.description, cover=self.cover_choice,
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
                      glossary=self.glossary, tr_glossary=self.tr_glossary, ignored=self.ignored, comments=self.comments,
-                     alts=self.alts, tr_notes=self.tr_notes, editor_at=self.editor_at, work=self.work)
+                     alts=self.alts, tr_notes=self.tr_notes, editor_at=self.editor_at, work=self.work,
+                     faithful=bool(getattr(self.book, "origin", "")))  # revisión del EPUB leído por su HTML
         return state
 
     def save_review(self):
@@ -9268,6 +9279,12 @@ class TextEditor:
             if n and r.y0 > box.y1 + r.height:  # otra aparición más abajo
                 break
             box |= r
+        # Todo el ancho de sus líneas: la primera (sangrada) y la última pueden ser más cortas que las de en medio
+        top, bottom = box.y0, box.y1
+        for x0, y0, x1, y1, *_ in page.get_text("words"):
+            middle = (y0 + y1) / 2
+            if top <= middle <= bottom:
+                box |= pymupdf.Rect(x0, y0, x1, y1)
         return box
 
     def update_status(self):
