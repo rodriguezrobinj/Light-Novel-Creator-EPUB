@@ -28,3 +28,18 @@ original, navegación, borrador), A4 la hoja web por defecto.
 Limpieza y vuelta a líneas; carga y vuelta sin cambios; negrita, Título 3, centrar, Intro sin ids repetidos, pegar
 desde Word y la cinta que sigue a la negrita, hasta el EPUB. En pantalla: clic y teclas reales, botón N, vuelta,
 aceptar y generar.
+
+## A2
+
+- **Marcas** con la API de resaltados de CSS (`CSS.highlights`, `::highlight`): no tocan el HTML del libro.
+  `TextEditor.web_marks` calcula lo mismo que la hoja de Qt (palabras que no están, avisos con su trozo exacto y su
+  color, párrafos cambiados) y lo manda a `lnc.setMarks`; cada aviso se busca en su párrafo por su texto, cerca de su
+  posición. Un párrafo editado pierde sus avisos (ya no valen) y pasa a ser un cambio; se repinta 300 ms después de
+  escribir.
+- **Ortografía en vivo**: el sondeo de la cinta recoge el texto si cambió (`lnc.takeText`) y lo manda al proceso de
+  ortografía; las palabras nuevas llegan a la hoja web con `lnc.setSpell`.
+- **Clic derecho** (`WebSheet.menu_at` → `TextEditor.web_menu`): `lnc.at(x, y)` dice la palabra y los avisos de ese
+  punto; sugerencias (cambian la palabra con `lnc.replaceWord`), ignorar, añadir al diccionario, explicación y arreglo
+  de cada aviso (sobre la hoja de Qt, `via_sheet`) y deshacer, cortar, copiar, pegar.
+- **F7/F8** en la hoja web: el cambio o el aviso siguiente (`lnc.next`); sin más avisos en el capítulo, F8 sigue en la
+  hoja con los siguientes.

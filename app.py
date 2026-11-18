@@ -7266,8 +7266,12 @@ class TextEditor:
             self.web.hide()
             desk_row.addWidget(self.web, 20)
             self.web_poll = QTimer(win)  # la cinta sigue al cursor de la hoja web (negrita, estilo, alineación)
-            self.web_poll.timeout.connect(lambda: self.web_on and self.web.call(
-                "state", done=lambda st: (setattr(self, "web_state", json.loads(st) if st else {}), self.update_tools())))
+            self.web_poll.timeout.connect(self.poll_web)
+            self.web_issues = {}  # id -> Issue de los avisos pintados en la hoja web
+            self.web.ready.connect(self.web_marks)
+            self.web.menu_at.connect(self.web_menu)
+            for key, action in (("F7", lambda: self.next_change()), ("F8", lambda: self.next_issue())):
+                QShortcut(QKeySequence(key), self.web, action, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         desk_row.addStretch(1)
         desk_row.addWidget(self.focus_next, 0, Qt.AlignmentFlag.AlignVCenter)
         # El borde de la hoja se arrastra para estrecharla o ensancharla, hasta el ancho de la página (set_text_zoom)
@@ -7949,6 +7953,8 @@ class TextEditor:
         for page in self.pages.values():
             page["look"].show_changes(color)
         self.update_diff()
+        if getattr(self, "web_on", False):
+            self.web.call("showChanges", bool(on))
 
     def update_diff(self):
         """El original del párrafo del cursor con lo quitado tachado y lo puesto subrayado; sin cambios, se oculta."""
@@ -8265,6 +8271,9 @@ class TextEditor:
 
     def next_change(self):
         """F7: el siguiente párrafo cambiado del capítulo (vuelve al principio al acabar)."""
+        if self.web_on:
+            self.web.call("next", "change", done=lambda found: found or self.tell("Sin más cambios en este capítulo"))
+            return
         changed = self.sheet.changed_blocks()
         if not changed:
             self.tell("Sin cambios en este capítulo")
@@ -8282,7 +8291,12 @@ class TextEditor:
         self.tell("Párrafo devuelto a su texto original · Ctrl+Z para deshacer")
 
     def next_issue(self):
-        """F8: el siguiente aviso desde el cursor, también en los capítulos siguientes, con su barra."""
+        """F8: el siguiente aviso desde el cursor, también en los capítulos siguientes, con su barra. En la hoja web,
+        el siguiente pintado; al acabar el capítulo, sigue en la hoja con el de los siguientes."""
+        if self.web_on:
+            self.web.call("next", "issue", done=lambda found: found or self.flush_web(
+                lambda: (self.web_done(), self.next_issue())))
+            return
         here = self.sheet.textCursor().block()
         block = here.next()
         while block.isValid():
@@ -8660,7 +8674,8 @@ class TextEditor:
             return
         for suggestion in self.suggestions[word] or ():
             action = QAction(suggestion, menu)
-            action.triggered.connect(lambda _=False, s=suggestion: self.replace_word(self.context_cursor, s))
+            action.triggered.connect(lambda _=False, s=suggestion: self.web.call("replaceWord", s)
+                                     if self.context_cursor is None else self.replace_word(self.context_cursor, s))
             font = action.font()
             font.setBold(True)
             action.setFont(font)
@@ -8678,6 +8693,8 @@ class TextEditor:
         self.sheet.unknown = shown  # las hojas que se carguen después
         for page in self.pages.values():
             page["look"].set_unknown(shown, changed)
+        if getattr(self, "web_on", False):
+            self.web.call("setSpell", json.dumps(sorted(w.lower() for w in shown)))
 
     def ignore_word(self, word):
         self.ignored_words.add(word)
@@ -8906,6 +8923,113 @@ class TextEditor:
         self.web_btn.setChecked(True)
         self.web_poll.start(400)
 
+    def poll_web(self):
+        """Cada poco, con la hoja web a la vista: el estado de la cinta y las palabras nuevas que revisar."""
+        if not self.web_on:
+            return
+        self.web.call("state", done=lambda st: (setattr(self, "web_state", json.loads(st) if st else {}),
+                                                self.update_tools()))
+        self.web.call("takeText", done=lambda text: text and self.send_words(text))
+
+    def web_marks(self):
+        """Marcas de la hoja web, las mismas que las de la hoja: palabras que no están, avisos del informe (del color
+        de su gravedad, en su trozo) y párrafos cambiados. Se pintan con resaltados de CSS: el HTML no cambia."""
+        if not self.web_on:
+            return
+        colors = theme.mark_colors(self.app.dark)
+        levels = list(convert.LEVELS)
+        changed = {b.blockNumber() for b in self.sheet.changed_blocks()}
+        issues, marked, self.web_issues, n = [], [], {}, 0
+        block = self.sheet.document().firstBlock()
+        while block.isValid():
+            lines = [line for line in editor.block_lines(block) if line.strip()]
+            for line in lines:
+                if not (convert.TOKEN.fullmatch(line.strip()) or convert.PICTURE.fullmatch(line.strip())):
+                    if block.blockNumber() in changed:
+                        marked.append(n)
+                    text = block.text()
+                    for issue in self.block_issues(block):
+                        start, end = issue.span or (0, len(text))
+                        start, end = min(start, len(text)), min(end, len(text))
+                        start, end = (start, end) if end > start else (0, len(text))
+                        piece = text[start:end].replace(editor.VOID_CHAR, "").replace(editor.LINE_BREAK, "")
+                        self.web_issues[len(self.web_issues)] = issue
+                        issues.append({"id": len(self.web_issues) - 1, "i": n, "text": piece, "at": start,
+                                       "level": levels.index(issue.level) if issue.level in levels else 0})
+                n += 1
+            block = block.next()
+        data = {"spell": sorted(w.lower() for w in self.unknown - self.ignored_words), "issues": issues,
+                "changed": marked, "show": self.show_changes_action.isChecked(),
+                "colors": {"spell": self.sheet.tags.get("broken", {}).get("foreground", colors["Grave"]),
+                           "change": colors["changed"]},
+                "levels": [colors.get(level, colors["Grave"]) for level in levels]}
+        self.web.call("setMarks", json.dumps(data))
+
+    def web_menu(self, pos):
+        """Clic derecho en la hoja web, como en la hoja: sugerencias de la palabra que no está (ignorarla, añadirla al
+        diccionario), cada aviso de ese punto con su explicación, arreglo e ignorar, y deshacer, cortar, copiar,
+        pegar."""
+        from PySide6.QtWebEngineCore import QWebEnginePage
+
+        def show(data):
+            info = json.loads(data or "{}")
+            word = info.get("word", "")
+            menu = QMenu(self.web)
+            self.context, self.context_word, self.context_cursor, self.context_wait = menu, word, None, None
+            if word and word in self.unknown - self.ignored_words:
+                suggestions = self.suggestions.get(word)
+                if suggestions is None:
+                    self.request_suggestions(first=word)
+                for suggestion in suggestions or ():
+                    action = menu.addAction(suggestion, lambda s=suggestion: self.web.call("replaceWord", s))
+                    font = action.font()
+                    font.setBold(True)
+                    action.setFont(font)
+                if not suggestions:
+                    wait = menu.addAction("Buscando sugerencias…" if suggestions is None else "Sin sugerencias")
+                    wait.setEnabled(False)
+                    self.context_wait = wait if suggestions is None else None
+                menu.addAction("Ignorar", lambda: self.ignore_word(word))
+                menu.addAction("Añadir al diccionario de la serie", lambda: self.add_word(word))
+                menu.addSeparator()
+            colors = theme.mark_colors(self.app.dark)
+            for ident in info.get("issues", []):
+                issue = self.web_issues.get(ident)
+                if issue is None:
+                    continue
+                title = QLabel(f"● {issue.level} · {issue.title}")
+                title.setStyleSheet(f"color: {colors[issue.level]}; font-weight: bold; padding: 6px 12px 2px 12px;")
+                explain = QLabel(issue.problem)
+                explain.setWordWrap(True)
+                explain.setMaximumWidth(380)
+                explain.setStyleSheet("padding: 0 12px 6px 12px;")
+                for label in (title, explain):
+                    action = QWidgetAction(menu)
+                    action.setDefaultWidget(label)
+                    menu.addAction(action)
+                if issue.edit:
+                    change = self.fix_preview(issue)
+                    menu.addAction(f"Arreglar: «{change}»" if issue.edit[2] else "Arreglar: quitar este párrafo",
+                                   lambda i=issue: self.via_sheet(lambda: self.fix_issue(i, go_next=False)))
+                menu.addAction("Quitar comentario" if issue.kind == "comment" else "Ignorar este aviso",
+                               lambda i=issue: (self.ignore_issue(i), self.web_marks()))
+                menu.addSeparator()
+            page = self.web.page()
+            for item in (("Deshacer", QWebEnginePage.WebAction.Undo), ("Rehacer", QWebEnginePage.WebAction.Redo),
+                         None, ("Cortar", QWebEnginePage.WebAction.Cut), ("Copiar", QWebEnginePage.WebAction.Copy),
+                         ("Pegar", QWebEnginePage.WebAction.Paste), None,
+                         ("Seleccionar todo", QWebEnginePage.WebAction.SelectAll)):
+                if item is None:
+                    menu.addSeparator()
+                else:
+                    menu.addAction(item[0], lambda a=item[1]: page.triggerAction(a))
+            menu.popup(self.web.mapToGlobal(pos))
+        self.web.call("at", pos.x(), pos.y(), done=show)
+
+    def via_sheet(self, fn):
+        """fn() sobre la hoja de Qt con lo escrito en la web, y la hoja web otra vez con el resultado."""
+        self.flush_web(lambda: (fn(), self.load_web()))
+
     def flush_web(self, then):
         """Lo escrito en la hoja web pasa a la hoja de Qt (si cambió) y luego then()."""
         import websheet
@@ -8963,7 +9087,7 @@ class TextEditor:
     def add_ruby(self):
         """Furigana: la lectura encima del texto elegido (o de lo que se escriba), en la hoja a la vista."""
         if self.web_on:
-            base = self.web.page().selectedText().strip()
+            base = self.web.page().selectedText().strip()  # noqa: lo elegido en la hoja web
         else:
             cursor = self.sheet.textCursor()
             base = cursor.selectedText().strip() if cursor.hasSelection() else ""
