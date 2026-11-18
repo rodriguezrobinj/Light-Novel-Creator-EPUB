@@ -3,6 +3,8 @@ pillow==13.0.0
 pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.9
 pyside6-essentials==6.12.0
+pyside6-addons==6.12.0
+pyside6-webengine==6.12.0.140
 segno==1.6.6
 spylls==0.1.7
 pyphen==0.18.1

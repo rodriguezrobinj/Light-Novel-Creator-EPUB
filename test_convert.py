@@ -1,5 +1,6 @@
 """Pruebas de convert.py con PDFs sintéticos. Ejecutar: python test_convert.py"""
 import html
+import json
 import os
 import re
 import sys
@@ -10658,11 +10659,149 @@ def sigil_epub(path):
         for name, (title, body) in texts.items():
             z.writestr(f"OEBPS/Text/{name}.xhtml", SIGIL_PAGE.format(title=title, body=body))
         z.writestr("OEBPS/Styles/style.css", '@font-face { font-family: "Lucida"; src: url(../Fonts/Lucida.ttf); }\n'
-                   '.lucida { font-family: "Lucida", serif; }\n.hidden { display: none; }\n')
+                   '.lucida { font-family: "Lucida", serif; }\n.hidden { display: none; }\n'
+                   'p { text-indent: 0; }\np + p { text-indent: 1.5em; }\n')
         z.writestr("OEBPS/Fonts/Lucida.ttf", (convert.FONT_DIR / "eaglelake.ttf").read_bytes())
         for name in ("cover.jpg", "lamina.jpg", "lamina 1.jpg"):
             z.writestr(f"OEBPS/Images/{name}", pic.tobytes("jpg"))
     return path
+
+
+class with_chromium:
+    """Con la vista previa de Chromium encendida (las pruebas la apagan: LNC_SIN_CHROMIUM)."""
+
+    def __enter__(self):
+        self.was = os.environ.pop("LNC_SIN_CHROMIUM", None)
+        import webview
+        return webview
+
+    def __exit__(self, *exc):
+        if self.was is not None:
+            os.environ["LNC_SIN_CHROMIUM"] = self.was
+
+
+def wait_for(condition, seconds=20):
+    """Deja correr la ventana hasta que condition() sea verdad (Chromium contesta por señales)."""
+    import time
+
+    import qtk
+    deadline = time.time() + seconds
+    while not condition() and time.time() < deadline:
+        qtk.app().processEvents()
+        time.sleep(0.02)
+    return condition()
+
+
+def js(view, script):
+    """Resultado de script en la página de view (webview.EpubView)."""
+    out = []
+    view.evaluate(script, out.append)
+    wait_for(lambda: out)
+    return out[0] if out else None
+
+
+def test_web_preview_paginates_with_the_whole_css():
+    """Chromium dibuja la sección con todo el CSS del libro, también lo que la hoja del editor no sabe (p + p), con
+    su fuente incrustada, paginada como un lector (columnas del ancho de la vista); go() pasa de página, find_page
+    encuentra la de un texto y el modo oscuro aclara la letra. Sin pantalla no hay píxeles: se mira el DOM."""
+    import qtk
+    with with_chromium() as webview:
+        qtk.app()
+        assert webview.available()
+        data = sigil_epub(TMP / "Sigil - Volumen 14.epub").read_bytes()
+        view = webview.EpubView()
+        view.resize(300, 400)
+        view.show()
+        paged = []
+        view.paged.connect(paged.append)
+        view.show_file(data, "OEBPS/Text/capitulo01.xhtml", (180, 240))
+        assert wait_for(lambda: paged), "Chromium no cargó la sección"
+        family = js(view, "getComputedStyle(document.querySelector('h1')).fontFamily")
+        indents = json.loads(js(view, "JSON.stringify(Array.from(document.querySelectorAll('section > p')).slice(0,2)"
+                                      ".map(p => getComputedStyle(p).textIndent))") or "[]")
+        columns = js(view, "getComputedStyle(document.body).columnWidth")
+        view.go(1)
+        left = js(view, "document.scrollingElement.scrollLeft / window.innerWidth")
+        found = []
+        view.find_page("Cuarto.", found.append)
+        wait_for(lambda: found)
+        paged.clear()
+        view.show_file(data, "OEBPS/Text/capitulo01.xhtml", (180, 240), dark=True)
+        wait_for(lambda: paged)
+        color = js(view, "getComputedStyle(document.body).color")
+        view.close()
+    assert "Lucida" in family, family
+    assert indents[0] == "0px" and indents[1] != "0px", indents  # p + p, que la hoja no aplica
+    assert columns != "auto" and paged[0] >= 1, (columns, paged)
+    assert left == (1 if view.pages > 1 else 0), (left, view.pages)
+    assert found and 0 <= found[0] < view.pages, found
+    assert color == "rgb(221, 221, 221)", color
+
+
+def test_window_web_preview_shows_section_pages_and_cover():
+    """En la ventana, la sección elegida se ve en Chromium: la leyenda dice sus páginas, ▶ pasa de página sin
+    recargar y la fila «Portada» vuelve a la hoja de MuPDF."""
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            book = convert.analyze(src)
+            k = book.candidates[2]
+            book.blocks[k + 1:k + 1] = [convert.Block("p", 1, "Un párrafo largo de prueba. " * 30) for _ in range(12)]
+            book.candidates = [c + 12 if c > k else c for c in book.candidates]  # un capítulo de varias páginas
+            window.show_book(book)
+            window.tree.selection_set(str(k))
+            window.device_var.set("Celular")
+            window.update_preview()
+            shown = wait_for(lambda: window.epub_web.isVisible() and "/" in window.epub_caption.text())
+            caption = window.epub_caption.text()
+            pages = window.epub_pages
+            key = window.web_key
+            window.epub_step(1)
+            stepped = window.epub_caption.text()
+            same = window.web_key == key
+            window.tree.selection_set(app_cover())
+            window.update_preview()
+            cover = (window.epub_web.isVisible(), window.epub_view.isVisible())
+        finally:
+            window.close()
+    assert shown and caption.endswith(f"1/{pages}") and pages > 1, (caption, pages)
+    assert stepped.endswith(f"2/{pages}") and same, (stepped, same)  # sin recargar la sección
+    assert cover == (False, True), cover
+
+
+def app_cover():
+    import app
+    return app.COVER
+
+
+def test_editor_epub_tab_follows_what_is_written():
+    """En el editor, la pestaña «EPUB» del panel dibuja el capítulo como saldrá, con lo escrito y sin guardar."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = window.book.candidates[2]
+            window.tree.selection_set(str(k))
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            ed.side_tabs.setCurrentIndex(1)
+            assert wait_for(lambda: ed.side_web.pages > 0), "la pestaña EPUB no cargó"
+            cursor = ed.sheet.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(" Final escrito ahora.")
+            found = wait_for(lambda: (js(ed.side_web, "document.body.innerText.indexOf('Final escrito ahora')")
+                                      or -1) >= 0)
+            ed.side_tabs.setCurrentIndex(0)
+            back = (ed.scroll.isVisible() or not ed.side_web.isVisible())
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert found and back, (found, back)
 
 
 def faithful_chapters(book):
@@ -12652,6 +12791,8 @@ def _run_tests(part, parts):
         # antes de importar app, que lee de aquí sus rutas: los procesos hijos heredan el entorno, no el parche de abajo
         for var in ("APPDATA", "LOCALAPPDATA"):
             os.environ[var] = str(TMP / var.lower())
+        # La vista previa de MuPDF (síncrona) en las pruebas de siempre; las de Chromium lo encienden (with_chromium)
+        os.environ["LNC_SIN_CHROMIUM"] = "1"
         import app
         app.SETTINGS = TMP / "ajustes.json"  # nunca las preferencias reales del usuario
         tests = [(name, fn) for name, fn in list(globals().items()) if name.startswith("test_")]
