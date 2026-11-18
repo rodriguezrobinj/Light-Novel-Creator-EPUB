@@ -10946,6 +10946,98 @@ def test_websheet_marks_spelling_issues_changes_and_menu():
     assert gone and found_change, (gone, found_change)
 
 
+def test_websheet_find_read_sync_draft_and_cancel():
+    """El resto del editor en la hoja web: el panel del original sigue al párrafo del cursor aunque se haya escrito
+    uno nuevo antes, y un clic en el original lleva el cursor de la web a ese párrafo; leer en voz alta va párrafo a
+    párrafo con su fondo; buscar sigue en el capítulo siguiente y reemplazar cambia el resultado elegido; el borrador
+    guarda lo escrito en la web (también de otro capítulo) y cancelar pregunta antes de descartarlo."""
+    import app
+    import editor
+    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtWidgets import QPushButton
+
+    class FakeSpeaker(QObject):
+        done, failed = Signal(), Signal(str)
+        said = []
+
+        def say(self, text):
+            self.said.append(text)
+
+        def stop(self):
+            pass
+
+    original = app.Speaker, app.messagebox.askyesno
+    asked = []
+    app.Speaker = FakeSpeaker
+    app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or False
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil hoja web A3.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            blocks = window.book.blocks
+            k = window.book.candidates[2]
+            third = next(n for n, b in enumerate(blocks) if b.html.startswith("Tercero"))
+            fourth = next(n for n, b in enumerate(blocks) if b.html.startswith("Cuarto"))
+            window.tree.selection_set(str(k))
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            ed.toggle_web()
+            assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            here = "(function(){var b=getSelection().anchorNode;while(b&&b.parentNode&&b.parentNode.id!=='lnc-sheet')" \
+                   "b=b.parentNode;return b&&b.textContent?b.textContent.trim():'';})()"
+            # un párrafo nuevo arriba y el cursor en «Cuarto.»: la hoja de Qt (el panel) va a su párrafo
+            js(ed.web, "(function(){var p=document.querySelector('#lnc-sheet p');var r=document.createRange();"
+                       "r.setStart(p,0);r.collapse(true);var s=getSelection();s.removeAllRanges();s.addRange(r);"
+                       "document.execCommand('insertText',false,'Nuevo arriba.');document.execCommand('insertParagraph');"
+                       "return true;})()")
+            js(ed.web, "lnc.select(Array.from(document.getElementById('lnc-sheet').children).findIndex(b=>b.textContent"
+                       ".startsWith('Cuarto')),0,0)")
+            synced = wait_for(lambda: editor.source_of(ed.sheet.textCursor().block()) == fourth, 5)
+            ed.go_block(third)  # clic en el original
+            back = wait_for(lambda: js(ed.web, here).startswith("Tercero"), 5)
+            # leer en voz alta desde el cursor: «Tercero.», luego el siguiente con texto
+            ed.toggle_reading()
+            wait_for(lambda: FakeSpeaker.said, 5)
+            ed.speaker.done.emit()
+            wait_for(lambda: len(FakeSpeaker.said) >= 2, 5)
+            reading = js(ed.web, "(function(){var h=CSS.highlights.get('lnc-reading');return h?h.size:0;})()")
+            ed.stop_reading()
+            said = list(FakeSpeaker.said)
+            # buscar desde «Tercero»: el resultado está en el capítulo 2, que se abre en la hoja web
+            ed.show_find_bar(False)
+            ed.find_entry.setText("párrafo")
+            ed.find(1)
+            other = wait_for(lambda: ed.current != window.section_bounds(k) and ed.web.loaded
+                             and js(ed.web, "getSelection().toString()") == "párrafo", 10)
+            ed.replace_entry.setText("parágrafo")
+            ed.replace_one()
+            replaced = wait_for(lambda: "Quinto parágrafo." in js(ed.web, "document.getElementById('lnc-sheet')"
+                                                                          ".innerText"), 5)
+            focused = []  # cerrar la barra devuelve el foco a la hoja web, no a la de Qt (oculta: se escribía a ciegas)
+            ed.web.setFocus, ed.sheet.setFocus = lambda: focused.append("web"), lambda: focused.append("qt")
+            next(b for b in ed.find_frame.findChildren(QPushButton) if b.text() == "✕").click()
+            del ed.web.setFocus, ed.sheet.setFocus
+            dirty = wait_for(lambda: ed.dirty(), 5)
+            ed.write_draft()
+            draft = app._draft_path(src)
+            drafted = wait_for(lambda: draft.exists() and "parágrafo" in draft.read_text(encoding="utf-8")
+                               and "Nuevo arriba." in draft.read_text(encoding="utf-8"), 5)
+            ed.cancel()
+            wait_for(lambda: asked, 5)
+            still = ed.win.isVisible()
+            ed.win.done(0)
+        finally:
+            app.Speaker, app.messagebox.askyesno = original
+            window.close()
+    assert synced and back, (synced, back)
+    assert said[:2] == ["Tercero.", "Subparte"] and reading == 1, (said, reading)
+    assert other and replaced, (other, replaced)
+    assert dirty and drafted, (dirty, drafted)
+    assert focused == ["web"], focused
+    assert asked and still, (asked, still)  # preguntó y, al decir que no, el editor sigue abierto
+
+
 def editor_dump(ed):
     import editor
     return editor.dump(ed.sheet.document())

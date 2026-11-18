@@ -7260,6 +7260,8 @@ class TextEditor:
         desk_row.addWidget(self.code, 20)
         # Vista «Hoja web» (Vista → Hoja web): el capítulo en Chromium, editable, con el aspecto del libro
         self.web, self.web_on, self.web_state = None, False, {}
+        # ¿cambios sin volcar en la hoja web?, qué hacer al cargarla, y el párrafo de su cursor (su sitio en la de Qt)
+        self.web_dirty, self.web_then, self.web_home = False, None, None
         import webview
         if webview.available():
             self.web = webview.WebSheet()
@@ -7268,9 +7270,11 @@ class TextEditor:
             self.web_poll = QTimer(win)  # la cinta sigue al cursor de la hoja web (negrita, estilo, alineación)
             self.web_poll.timeout.connect(self.poll_web)
             self.web_issues = {}  # id -> Issue de los avisos pintados en la hoja web
-            self.web.ready.connect(self.web_marks)
+            self.web.ready.connect(self.web_ready)
             self.web.menu_at.connect(self.web_menu)
-            for key, action in (("F7", lambda: self.next_change()), ("F8", lambda: self.next_issue())):
+            for key, action in (("F7", lambda: self.next_change()), ("F8", lambda: self.next_issue()),
+                                ("Ctrl+F", lambda: self.show_find_bar(False)),
+                                ("Ctrl+H", lambda: self.show_find_bar(True)), ("F9", lambda: self.toggle_nav())):
                 QShortcut(QKeySequence(key), self.web, action, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         desk_row.addStretch(1)
         desk_row.addWidget(self.focus_next, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -7385,8 +7389,9 @@ class TextEditor:
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
         sheet.cursorPositionChanged.connect(self.update_tools)
         # Un clic o una tecla en la hoja mientras se lee: la voz se calla, como al pulsar Parar
-        sheet.cursorPositionChanged.connect(lambda: self.reading is not None and self.sheet.textCursor().position()
-                                            != self.reading.position() and self.stop_reading())
+        sheet.cursorPositionChanged.connect(lambda: self.reading is not None and not self.web_on
+                                            and self.sheet.textCursor().position() != self.reading.position()
+                                            and self.stop_reading())
         sheet.currentCharFormatChanged.connect(lambda _: self.update_tools())
         sheet.undoAvailable.connect(self.undo_btn.setEnabled)
         sheet.redoAvailable.connect(self.redo_btn.setEnabled)
@@ -7470,7 +7475,7 @@ class TextEditor:
             button.setCheckable(checkable)
             if font:
                 button.setFont(font)
-            button.clicked.connect(lambda: (self.drop_ribbon(), action(), self.sheet.setFocus(), self.update_tools()))
+            button.clicked.connect(lambda: (self.drop_ribbon(), action(), self.focus_page(), self.update_tools()))
             return button
 
         def menu_tool(text, tip, items, icon=None):
@@ -7486,7 +7491,7 @@ class TextEditor:
                 if item is None:
                     menu.addSeparator()
                 else:
-                    menu.addAction(item[0], lambda fn=item[1]: (self.drop_ribbon(), fn(), self.sheet.setFocus(),
+                    menu.addAction(item[0], lambda fn=item[1]: (self.drop_ribbon(), fn(), self.focus_page(),
                                                                 self.update_tools()))
             button.setMenu(menu)
             _attach(button, menu)
@@ -7841,7 +7846,7 @@ class TextEditor:
                                   "del primer paréntesis")
         for widget in (self.find_entry, self.regex_box):  # la expresión se revisa al escribirla
             (widget.textChanged if widget is self.find_entry else widget.toggled).connect(lambda _: self.regex_error())
-        close = _button("✕", lambda: (bar.hide(), self.sheet.setFocus()))
+        close = _button("✕", lambda: (bar.hide(), self.focus_page()))
         close.setToolTip("Cerrar (Esc)")
         all_btn = _button("Todos", self.show_all_matches)
         all_btn.setToolTip("Lista de todos los resultados del libro")
@@ -7864,10 +7869,14 @@ class TextEditor:
         self.link_info = _label("", "muted")
         bar.setLayout(_row(_label("Enlace:"), self.link_entry, _button("Aplicar", self.apply_link, "primary"),
                            _button("Quitar enlace", lambda: self.apply_link("")), self.link_info, 1,
-                           _button("✕", lambda: (bar.hide(), self.sheet.setFocus())), margins=(10, 6, 10, 6)))
+                           _button("✕", lambda: (bar.hide(), self.focus_page())), margins=(10, 6, 10, 6)))
         self.escape_closes(bar, self.link_entry)
         bar.hide()
         return bar
+
+    def focus_page(self):
+        """El foco a la hoja a la vista: con la hoja web, a ella (en la de Qt, oculta, se escribía a ciegas)."""
+        (self.web if self.web_on else self.sheet).setFocus()
 
     def tell(self, text):
         """Nota de la última herramienta en la barra de estado; se borra sola: tras deshacer ya no sería cierta."""
@@ -7880,7 +7889,7 @@ class TextEditor:
         def handler(event):
             if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
                 bar.hide()
-                self.sheet.setFocus()
+                self.focus_page()
                 return True
             return False
 
@@ -7935,7 +7944,7 @@ class TextEditor:
             self.win.showNormal()
             qtk.after(0, lambda: shiboken6.isValid(self.win) and self.win.showMaximized())
             self.note.setText("")
-        self.sheet.setFocus()
+        self.focus_page()
 
     # Mostrar cambios, como el control de cambios de Word: lo puesto subrayado en la hoja y el original en una barra
     def diff_bar(self):
@@ -7986,7 +7995,7 @@ class TextEditor:
         self.resume_label = _label("")
         self.resume_go = _button("Ir allí", self.resume, "primary")
         bar.setLayout(_row(self.resume_label, self.resume_go, 1,
-                           _button("✕", lambda: (bar.hide(), self.sheet.setFocus())), margins=(10, 6, 10, 6)))
+                           _button("✕", lambda: (bar.hide(), self.focus_page())), margins=(10, 6, 10, 6)))
         self.resume_at = None
         bar.hide()
         return bar
@@ -8035,8 +8044,9 @@ class TextEditor:
         self.hide_bars()
         self.find_frame.show()
         cursor = self.sheet.textCursor()
-        if cursor.hasSelection() and "\u2029" not in cursor.selectedText():
-            self.find_entry.setText(cursor.selectedText())
+        chosen = self.web.page().selectedText() if self.web_on else cursor.selectedText()
+        if chosen and "\u2029" not in chosen and "\n" not in chosen:
+            self.find_entry.setText(chosen)
         (self.replace_entry if replace and self.find_entry.text() else self.find_entry).setFocus()
         self.find_entry.selectAll()
 
@@ -8045,6 +8055,9 @@ class TextEditor:
         term = self.find_entry.text()
         if not term or self.regex_error():
             return False
+        if self.web_on:
+            self.web_find(delta)
+            return True
         if self.sheet.find_next(term, delta < 0, *self.find_options()):
             self.find_info.setText("")
             return True
@@ -8064,19 +8077,84 @@ class TextEditor:
         QApplication.beep()
         return False
 
+    def web_find(self, delta, fresh=False, count=None):
+        """Buscar en la hoja web: la expresión de Python sobre el texto de cada párrafo (lo mismo que en la hoja) y
+        el resultado elegido en Chromium. Sin más en el capítulo, sigue en los siguientes. fresh: desde el principio
+        (o el final) del capítulo recién abierto; count: el resultado número count del capítulo («Todos»)."""
+        pattern = self.find_pattern()
+
+        def got(data):
+            info = json.loads(data or "{}")
+            texts, (i, s, e) = info.get("texts", []), info.get("at") or (-1, 0, 0)
+            if fresh or count is not None:
+                i, s, e = (-1, 0, 0) if delta > 0 else (len(texts), 0, 0)
+            hits = [(n, m.start(), m.end()) for n, t in enumerate(texts) for m in pattern.finditer(t) if m.end() > m.start()]
+            if count is not None:
+                hit = hits[count] if count < len(hits) else None
+            elif delta > 0:
+                hit = next((h for h in hits if (h[0], h[1]) >= (i, e)), None)
+            else:
+                hit = next((h for h in reversed(hits) if (h[0], h[2]) <= (i, s)), None)
+            if hit:
+                self.web.call("select", *hit)
+                self.find_info.setText("")
+                return
+            if not fresh and count is None and self.web_other_chapter(delta, pattern):
+                return
+            self.find_info.setText("Sin resultados")
+            QApplication.beep()
+        self.web.call("texts", done=got)
+
+    def web_other_chapter(self, delta, pattern):
+        """Abre en la hoja web el siguiente capítulo (o anterior) con resultados y elige el primero (o el último)."""
+        order = [s[1:3] for s in self.sections]
+        here = order.index(self.current) if self.current in order else 0
+        for step in range(1, len(order) + 1):
+            start, end = order[(here + step * delta) % len(order)]
+            if (start, end) == self.current:  # vuelta entera: desde el principio del de ahora
+                self.web_find(delta, fresh=True)
+                return True
+            text = self.pages[(start, end)]["doc"].toPlainText() if (start, end) in self.pages else \
+                convert.section_text(self.app.book, start, end)
+            if pattern.search(text):
+                self.web_then = lambda: self.web_find(delta, fresh=True)
+                self.open_section(start, end)
+                return True
+        return False
+
     def replace_one(self):
         """Cambia la aparición elegida y busca la siguiente, como Word."""
         if self.regex_error():
+            return
+        if self.web_on:
+            self.web_replace()
             return
         if not self.sheet.replace_current(self.find_entry.text(), self.replace_entry.text(), *self.find_options()):
             self.find(1)
             return
         self.find(1)
 
+    def web_replace(self):
+        """Reemplazar en la hoja web: si lo elegido es un resultado, lo cambia (con \\1 de la expresión), y busca el
+        siguiente."""
+        pattern, new = self.find_pattern(), self.replace_entry.text()
+
+        def got(data):
+            info = json.loads(data or "{}")
+            texts, (i, s, e) = info.get("texts", []), info.get("at") or (-1, 0, 0)
+            m = pattern.match(texts[i], s) if 0 <= i < len(texts) and e > s else None
+            if m and m.end() == e:
+                self.web.call("replaceSel", m.expand(new) if self.regex_box.isChecked() else new)
+            self.web_find(1)
+        self.web.call("texts", done=got)
+
     def replace_everywhere(self):
         """Cambia todas las apariciones en todos los capítulos; cada capítulo, un paso de su deshacer."""
         term, new = self.find_entry.text(), self.replace_entry.text()
         if not term or self.regex_error():
+            return
+        if self.web_on:  # en las hojas de Qt de cada capítulo, con lo escrito en la web, y luego otra vez la web
+            self.flush_web(lambda: (self.web_done(), self.replace_everywhere(), self.load_web()))
             return
         here, total = self.current, 0
         for _, start, end, _ in self.sections:
@@ -8100,7 +8178,7 @@ class TextEditor:
         self.split_info = _label("", "muted")
         bar.setLayout(_row(_label("Capítulo nuevo desde el cursor:"), self.split_entry,
                            _button("Dividir", self.apply_split, "primary"), self.split_info, 1,
-                           _button("✕", lambda: (bar.hide(), self.sheet.setFocus())), margins=(10, 6, 10, 6)))
+                           _button("✕", lambda: (bar.hide(), self.focus_page())), margins=(10, 6, 10, 6)))
         self.escape_closes(bar, self.split_entry)
         bar.hide()
         return bar
@@ -8135,7 +8213,7 @@ class TextEditor:
         column = QVBoxLayout(bar)
         column.setContentsMargins(10, 6, 10, 6)
         column.addLayout(_row(self.issue_title, 1, self.issue_fix, _button("Siguiente (F8)", self.next_issue),
-                              _button("✕", lambda: (bar.hide(), self.sheet.setFocus()))))
+                              _button("✕", lambda: (bar.hide(), self.focus_page()))))
         column.addWidget(self.issue_text)
         bar.hide()
         return bar
@@ -8198,7 +8276,7 @@ class TextEditor:
                 selection.cursor = cursor
                 selections.append(selection)
                 issues += 1
-            if block == self.reading:  # el párrafo que se lee en voz alta, de fondo: sin elegirlo, que teclear no lo borre
+            if not isinstance(self.reading, int) and block == self.reading:  # el párrafo que se lee en voz alta, de fondo: sin elegirlo, que teclear no lo borre
                 selection = QTextEdit.ExtraSelection()
                 selection.format.setBackground(QColor(colors["reading"]))
                 selection.cursor = QTextCursor(block)
@@ -8253,7 +8331,7 @@ class TextEditor:
         block = self.sheet.document().findBlockByNumber(number)
         if block.isValid():
             self.goto_block(block)
-            self.sheet.setFocus()
+            (self.web if self.web_on else self.sheet).setFocus()
 
     def show_counts(self):
         """Recuentos de Cambios y Avisos en la cinta y en la primera línea de su menú."""
@@ -8268,6 +8346,8 @@ class TextEditor:
         cursor.setPosition(block.position())
         self.sheet.setTextCursor(cursor)
         self.sheet.ensureCursorVisible()
+        if self.web_on:
+            self.web.call("goHome", self.web_index(block))
 
     def next_change(self):
         """F7: el siguiente párrafo cambiado del capítulo (vuelve al principio al acabar)."""
@@ -8559,8 +8639,11 @@ class TextEditor:
                     return found
         return found
 
-    def show_all_matches(self):
-        """«Todos»: lista bajo la barra con cada resultado; clic va a él."""
+    def show_all_matches(self, flushed=False):
+        """«Todos»: lista bajo la barra con cada resultado; clic va a él. Con la hoja web, lo escrito en ella cuenta."""
+        if self.web_on and not flushed:
+            self.flush_web(lambda: self.show_all_matches(True))
+            return
         found = self.all_matches()
         if not found:
             self.find_info.setText("Sin resultados")
@@ -8594,6 +8677,14 @@ class TextEditor:
 
     def goto_match(self, row, count):
         """El resultado número count de la sección row: se abre y se elige como al buscar."""
+        if self.web_on:
+            bounds = self.sections[row][1:3]
+            if bounds == self.current:
+                self.web_find(1, count=count)
+            else:
+                self.web_then = lambda: self.web_find(1, count=count)
+                self.open_section(*bounds)
+            return
         self.open_section(*self.sections[row][1:3])
         self.sheet.moveCursor(QTextCursor.MoveOperation.Start)
         for _ in range(count + 1):
@@ -8894,6 +8985,8 @@ class TextEditor:
         hoja de Qt (un deshacer), igual que desde la vista de código."""
         if self.web is None:
             return
+        if self.reading is not None:  # la voz iba por párrafos de la otra hoja
+            self.stop_reading()
         if not self.web_on:
             if self.code.isVisible():
                 self.toggle_code()
@@ -8916,20 +9009,82 @@ class TextEditor:
                 pictures[line.strip()] = (Path(editor.IMAGES) / m[2]).read_bytes()
         files, objects, path, head, body = websheet.sources(self.app.book, start, end, lines, pictures)
         self.web.load_sheet(files, path, websheet.page(lines, objects, head, body, path))
-        self.web_on = True
+        self.web_on, self.web_dirty, self.web_home = True, False, None
         self.sheet.hide()
         self.web.show()
         self.web.setFocus()
         self.web_btn.setChecked(True)
         self.web_poll.start(400)
 
+    def web_ready(self):
+        """La hoja web cargó: sus marcas, el cursor en el párrafo del de la hoja y lo que esperaba (buscar)."""
+        self.web_marks()
+        self.web.call("goHome", self.web_index(self.sheet.textCursor().block()))
+        then, self.web_then = self.web_then, None
+        if then:
+            then()
+
+    def web_index(self, block):
+        """Número del párrafo de la hoja web (hijo de la hoja, como los carga load_web) del bloque de la hoja."""
+        n, b = 0, self.sheet.document().firstBlock()
+        while b.isValid() and b != block:
+            n += sum(1 for line in editor.block_lines(b) if line.strip())
+            b = b.next()
+        return n
+
+    def web_block(self, n):
+        """El bloque de la hoja del párrafo n de la hoja web (al revés que web_index)."""
+        b = self.sheet.document().firstBlock()
+        while b.isValid():
+            n -= sum(1 for line in editor.block_lines(b) if line.strip())
+            if n < 0 or not b.next().isValid():
+                return b
+            b = b.next()
+        return b
+
     def poll_web(self):
-        """Cada poco, con la hoja web a la vista: el estado de la cinta y las palabras nuevas que revisar."""
+        """Cada poco, con la hoja web a la vista: el estado de la cinta, las palabras nuevas que revisar, el borrador
+        y el párrafo del cursor (el panel del original lo sigue)."""
         if not self.web_on:
             return
-        self.web.call("state", done=lambda st: (setattr(self, "web_state", json.loads(st) if st else {}),
-                                                self.update_tools()))
-        self.web.call("takeText", done=lambda text: text and self.send_words(text))
+        self.web.call("state", done=self.web_polled)
+        self.web.call("takeText", done=self.web_typed)
+
+    def web_polled(self, st):
+        if not self.web_on or not shiboken6.isValid(self.sheet):
+            return
+        self.web_state = json.loads(st) if st else {}
+        self.web_dirty = bool(self.web_state.get("dirty"))
+        self.update_tools()
+        if isinstance(self.reading, int) and self.web_state.get("i", -1) != self.reading:
+            self.stop_reading()  # un clic o una tecla en otro párrafo: la voz se calla, como en la hoja
+        home = self.web_state.get("home", -1)
+        if home >= 0 and home != self.web_home:  # la hoja de Qt (oculta) al mismo párrafo: el panel dibuja su página
+            self.web_home = home
+            block = self.web_block(home)
+            if block.isValid() and block != self.sheet.textCursor().block():
+                self.sheet.setTextCursor(QTextCursor(block))
+
+    def web_typed(self, text):
+        """Se escribió en la hoja web: palabras que revisar, el borrador y la pestaña «EPUB»."""
+        if not text or not self.web_on:
+            return
+        self.send_words(text)
+        if "draft" not in self.pending:
+            self.later("draft", DRAFT_MS, self.write_draft)
+        if self.web_shown():
+            self.later("web", 600, self.draw_web)
+
+    def web_text(self, dumped):
+        """lnc.dump() como texto de la hoja (websheet.lines_of), o None si no se pudo."""
+        import websheet
+        if not dumped:
+            return None
+        try:
+            return websheet.lines_of(dumped)
+        except ValueError as e:  # no debería pasar: Chromium siempre cierra sus etiquetas
+            _log(f"Hoja web: {e}")
+            return None
 
     def web_marks(self):
         """Marcas de la hoja web, las mismas que las de la hoja: palabras que no están, avisos del informe (del color
@@ -9032,22 +9187,17 @@ class TextEditor:
 
     def flush_web(self, then):
         """Lo escrito en la hoja web pasa a la hoja de Qt (si cambió) y luego then()."""
-        import websheet
-
         def back(dumped):
-            if dumped:
-                try:
-                    text = websheet.lines_of(dumped)
-                except ValueError as e:  # no debería pasar: Chromium siempre cierra sus etiquetas
-                    _log(f"Hoja web: {e}")
-                    text = None
-                if text is not None and text != editor.dump(self.sheet.document()):
-                    self.sheet.set_text(text)
+            text = self.web_text(dumped)
+            if text is not None and text != editor.dump(self.sheet.document()):
+                self.sheet.set_text(text)
+                self.web.call("rehome")  # la hoja de Qt ya tiene los párrafos de ahora
+                self.web_home = None
             then()
         self.web.call("dump", done=back)
 
     def web_done(self):
-        self.web_on = False
+        self.web_on, self.web_dirty = False, False
         self.web_poll.stop()
         self.web.hide()
         self.sheet.show()
@@ -9198,16 +9348,21 @@ class TextEditor:
         return lines, levels
 
     # Borrador: lo cambiado sin aceptar sobrevive a un cierre de la aplicación
-    def write_draft(self):
-        """Escribe el borrador con las secciones cambiadas; sin cambios lo borra. Un fallo no para el trabajo."""
-        if not self.app.pdf or not shiboken6.isValid(self.win):
+    def write_draft(self, current=None):
+        """Escribe el borrador con las secciones cambiadas; sin cambios lo borra. Un fallo no para el trabajo. Con la
+        hoja web, el capítulo de ahora es lo escrito en ella (current)."""
+        if not self.app.pdf or self.closed or not shiboken6.isValid(self.win):
+            return
+        if self.web_on and current is None:
+            self.web.call("dump", done=lambda d: self.write_draft(self.web_text(d) or editor.dump(self.sheet.document())))
             return
         path = _draft_path(self.app.pdf)
         pages = []
         for (start, end), page in self.pages.items():
             if start < 0:  # «Contenido» no va al borrador: sus cambios son nombres de la lista
                 continue
-            text = editor.dump(page["doc"])  # una vez: page_dirty la volcaba otra
+            # una vez: page_dirty la volcaba otra
+            text = current if current is not None and (start, end) == self.current else editor.dump(page["doc"])
             if self.page_dirty(page, text):
                 pages.append({"start": start, "end": end, "lines": [line for _, line in page["lines"]], "text": text})
         try:
@@ -9306,14 +9461,18 @@ class TextEditor:
             self.redraw()
             self.update_status()
 
-    def draw_web(self):
+    def draw_web(self, text=None):
         """El capítulo de la hoja escrito como irá al EPUB (con lo cambiado y sin guardar) y dibujado por Chromium en
-        el tamaño del dispositivo de la ventana, en la página del párrafo del cursor."""
-        if not self.web_shown() or not self.current or self.current[0] < 0:
+        el tamaño del dispositivo de la ventana, en la página del párrafo del cursor. Con la hoja web, lo escrito en
+        ella (text)."""
+        if self.closed or not self.web_shown() or not self.current or self.current[0] < 0:
+            return
+        if self.web_on and text is None:
+            self.web.call("dump", done=lambda d: self.draw_web(self.web_text(d) or editor.dump(self.sheet.document())))
             return
         import webview
         book, (start, end) = self.app.book, self.current
-        text = editor.dump(self.sheet.document())
+        text = editor.dump(self.sheet.document()) if text is None else text
         draft = copy.copy(book)  # el libro con este capítulo como está en la hoja; el de la ventana no se toca
         draft.blocks, draft.candidates = list(book.blocks), list(book.candidates)
         try:
@@ -9357,11 +9516,16 @@ class TextEditor:
     def go_block(self, k):
         """La hoja al párrafo del bloque k, abriendo su capítulo si es otro, y el panel lo dibuja."""
         bounds = next(s[1:3] for s in self.sections if s[1] <= k < s[2])
+        if bounds != self.current and self.web_on:  # la hoja web se vuelve a cargar en ese párrafo (web_ready)
+            self.open_section(*bounds, k)
+            return
         if bounds != self.current:
             self.open_section(*bounds)
         self.sheet.goto_source(k)
         self.sheet.ensureCursorVisible()
         self.draw_source()  # sin esperar a la pausa del cursor: el clic se ve al momento
+        if self.web_on:
+            self.web.call("goHome", self.web_index(self.sheet.textCursor().block()))
 
     def mark_changed(self):
         """Lista de capítulos: el de ahora elegido y «•» junto a los que tienen cambios sin guardar."""
@@ -9468,9 +9632,32 @@ class TextEditor:
             return
         if self.speaker is None:
             self.speaker = Speaker()
-            self.speaker.done.connect(lambda: self.reading is not None and self.read_block(self.reading.next()))
+            self.speaker.done.connect(self.read_next)
             self.speaker.failed.connect(self.reading_failed)
-        self.read_block(self.sheet.textCursor().block())
+        if self.web_on:
+            self.web_read(-1)
+        else:
+            self.read_block(self.sheet.textCursor().block())
+
+    def read_next(self):
+        """Acabó un párrafo: el siguiente, en la hoja o en la hoja web (donde self.reading es su número)."""
+        if isinstance(self.reading, int):
+            self.web_read(self.reading + 1)
+        elif self.reading is not None:
+            self.read_block(self.reading.next())
+
+    def web_read(self, i):
+        """Lee el párrafo i de la hoja web (-1: el del cursor), o el siguiente con texto, de fondo y con el cursor
+        al principio; al acabar el capítulo, para."""
+        def got(data):
+            info = json.loads(data) if data else None
+            if not info or not self.web_on:
+                self.stop_reading()
+                return
+            self.reading = info["i"]
+            self.read_btn.setChecked(True)
+            self.speaker.say(info["text"])
+        self.web.call("readAt", i, theme.mark_colors(self.app.dark)["reading"], done=got)
 
     def read_block(self, block):
         """Lee el párrafo block (o el siguiente con texto) con el cursor al principio y su fondo marcado; al acabar
@@ -9491,6 +9678,8 @@ class TextEditor:
         self.reading = None
         if self.speaker:
             self.speaker.stop()
+        if self.web_on:
+            self.web.call("stopReading")
         if shiboken6.isValid(self.read_btn):
             self.read_btn.setChecked(False)
             self.refresh_marks()
@@ -9796,7 +9985,8 @@ class TextEditor:
         return lines(text) != lines("\n\n".join(line for _, line in page["lines"]))
 
     def dirty(self):
-        return any(self.page_dirty(page) for page in self.pages.values())
+        """¿Hay algo sin guardar? También lo escrito en la hoja web y aún no volcado (según su último sondeo)."""
+        return (self.web_on and self.web_dirty) or any(self.page_dirty(page) for page in self.pages.values())
 
     def changes(self):
         """Lo que cambió en las secciones visitadas, línea a línea frente a lo cargado: [[inicio, fin, texto]]
@@ -9850,7 +10040,10 @@ class TextEditor:
             self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype)
         self.win.done(0)
 
-    def cancel(self, _=None):
+    def cancel(self, _=None, asked=False):
+        if self.web_on and not asked:  # lo último escrito en la web cuenta: se pregunta a la hoja antes
+            self.web.call("state", done=lambda st: (self.web_polled(st), self.cancel(asked=True)))
+            return
         if self.dirty() and not messagebox.askyesno(
                 "Descartar cambios", "El texto tiene cambios sin guardar. ¿Descartarlos?", parent=self.win):
             return
