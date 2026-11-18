@@ -44,7 +44,11 @@ SHEET_JS = r"""
     if (!el.getAttribute('style')) el.removeAttribute('style');
   }
   // Intro: Chromium copia el párrafo con su id; el nuevo no puede llevarlo
+  var repaint = null;
   sheet.addEventListener('input', function () {
+    lnc.dirty = true;  // palabras nuevas que revisar
+    clearTimeout(repaint);
+    repaint = setTimeout(function () { lnc.paint && lnc.paint(); }, 300);  // marcas al día, sin repintar en cada tecla
     var seen = {};
     Array.prototype.forEach.call(sheet.querySelectorAll('[id]'), function (el) {
       if (seen[el.id]) el.removeAttribute('id'); else seen[el.id] = true;
@@ -118,6 +122,104 @@ SHEET_JS = r"""
     ruby: function (base, reading) {
       lnc.cmd('insertHTML', '<ruby>' + base + '<rp>(</rp><rt>' + reading + '</rt><rp>)</rp></ruby>');
     },
+    // Marcas (ortografía, avisos, cambios): resaltados de CSS, que no tocan el HTML del libro
+    marks: {spell: new Set(), issues: [], changed: new Set(), show: false, colors: {}},
+    setMarks: function (data) {
+      var m = lnc.marks, d = JSON.parse(data);
+      m.spell = new Set(d.spell); m.issues = d.issues; m.show = d.show; m.colors = d.colors;
+      m.changed = new Set(d.changed.map(function (i) { return sheet.children[i]; }));
+      var css = document.getElementById('lnc-marks') || document.head.appendChild(document.createElement('style'));
+      css.id = 'lnc-marks';
+      css.textContent = '::highlight(lnc-spell){text-decoration: underline wavy ' + d.colors.spell + ';}' +
+        '::highlight(lnc-change){text-decoration: underline ' + d.colors.change + '; color: ' + d.colors.change + ';}' +
+        d.levels.map(function (c, n) { return '::highlight(lnc-issue-' + n + '){text-decoration: underline wavy ' + c + ';}'; }).join('');
+      if (!lnc.orig) {  // cómo era cada párrafo al cargar: el que cambia pierde sus avisos y es un cambio
+        lnc.orig = new WeakMap();
+        Array.prototype.forEach.call(sheet.children, function (b) { lnc.orig.set(b, b.innerHTML); });
+      }
+      lnc.paint();
+    },
+    setSpell: function (words) { lnc.marks.spell = new Set(JSON.parse(words)); lnc.paint(); },
+    showChanges: function (on) { lnc.marks.show = on; lnc.paint(); },
+    edited: function (b) { return lnc.marks.changed.has(b) || !lnc.orig || !lnc.orig.has(b) || lnc.orig.get(b) !== b.innerHTML; },
+    ranges: function (b, text, near) {  // Range de text en el párrafo b, la aparición más cercana a near
+      var nodes = [], all = '', w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n;
+      while ((n = w.nextNode())) { nodes.push([n, all.length]); all += n.data; }
+      var best = -1, at = all.indexOf(text);
+      while (at >= 0) { if (best < 0 || Math.abs(at - near) < Math.abs(best - near)) best = at; at = all.indexOf(text, at + 1); }
+      if (best < 0 || !text) return null;
+      function point(pos) { for (var i = nodes.length - 1; i >= 0; i--) if (pos >= nodes[i][1]) return [nodes[i][0], pos - nodes[i][1]]; return null; }
+      var a = point(best), z = point(best + text.length), r = document.createRange();
+      if (!a || !z) return null;
+      r.setStart(a[0], a[1]); r.setEnd(z[0], Math.min(z[1], z[0].data.length));
+      return r;
+    },
+    paint: function () {
+      if (!window.CSS || !CSS.highlights) return;
+      var m = lnc.marks, spell = new Highlight(), change = new Highlight(), levels = {};
+      lnc.found = [];  // [{id, range}] de los avisos pintados: para el clic derecho y F8
+      Array.prototype.forEach.call(sheet.children, function (b, i) {
+        if (b.classList.contains('lnc-obj')) return;
+        if (m.show && lnc.edited(b)) { var r = document.createRange(); r.selectNodeContents(b); change.add(r); }
+        if (m.spell.size) {
+          var w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n, re = /[\p{L}\p{M}]+/gu, k;
+          while ((n = w.nextNode())) {
+            if (n.parentElement && n.parentElement.closest('rt, rp')) continue;
+            re.lastIndex = 0;
+            while ((k = re.exec(n.data))) if (m.spell.has(k[0].toLowerCase())) {
+              var s = document.createRange(); s.setStart(n, k.index); s.setEnd(n, k.index + k[0].length); spell.add(s);
+            }
+          }
+        }
+      });
+      m.issues.forEach(function (it) {
+        var b = sheet.children[it.i];
+        if (!b || lnc.edited(b)) return;
+        var r = lnc.ranges(b, it.text, it.at);
+        if (!r) return;
+        (levels[it.level] = levels[it.level] || new Highlight()).add(r);
+        lnc.found.push({id: it.id, range: r});
+      });
+      CSS.highlights.clear();
+      CSS.highlights.set('lnc-spell', spell);
+      CSS.highlights.set('lnc-change', change);
+      Object.keys(levels).forEach(function (n) { CSS.highlights.set('lnc-issue-' + n, levels[n]); });
+    },
+    at: function (x, y) {  // lo que hay en el punto del clic derecho: palabra y avisos
+      var r = document.caretRangeFromPoint(x, y), out = {word: '', issues: []};
+      if (!r) return JSON.stringify(out);
+      var n = r.startContainer, o = r.startOffset;
+      if (n.nodeType === 3) {
+        var a = o, z = o, t = n.data, letter = /[\p{L}\p{M}]/u;
+        while (a > 0 && letter.test(t[a - 1])) a--;
+        while (z < t.length && letter.test(t[z])) z++;
+        out.word = t.slice(a, z);
+        lnc.wordRange = document.createRange(); lnc.wordRange.setStart(n, a); lnc.wordRange.setEnd(n, z);
+      }
+      (lnc.found || []).forEach(function (f) { if (f.range.isPointInRange(n, o)) out.issues.push(f.id); });
+      return JSON.stringify(out);
+    },
+    replaceWord: function (text) {  // la palabra del último clic derecho
+      if (!lnc.wordRange) return;
+      var s = getSelection(); s.removeAllRanges(); s.addRange(lnc.wordRange);
+      document.execCommand('insertText', false, text);
+    },
+    next: function (kind) {  // F7 (cambio) o F8 (aviso) siguiente tras el cursor; false si no hay más en el capítulo
+      var s = getSelection(), here = s.rangeCount ? s.getRangeAt(0) : null, target = null;
+      var items = kind === 'issue' ? (lnc.found || []).map(function (f) { return f.range; }) :
+        Array.prototype.filter.call(sheet.children, function (b) { return !b.classList.contains('lnc-obj') && lnc.edited(b); })
+          .map(function (b) { var r = document.createRange(); r.selectNodeContents(b); return r; });
+      items.sort(function (a, b) { return a.compareBoundaryPoints(Range.START_TO_START, b); });
+      for (var i = 0; i < items.length; i++) {
+        if (!here || items[i].compareBoundaryPoints(Range.START_TO_END, here) > 0) { target = items[i]; break; }
+      }
+      if (!target) return false;
+      var c = document.createRange(); c.setStart(target.startContainer, target.startOffset); c.collapse(true);
+      s.removeAllRanges(); s.addRange(c);
+      (target.startContainer.parentElement || sheet).scrollIntoView({block: 'center'});
+      return true;
+    },
+    takeText: function () { var t = lnc.dirty ? sheet.innerText : ''; lnc.dirty = false; return t; },
     dump: function () {  // [{tag, attrs, html, token}] de cada párrafo, en orden
       return JSON.stringify(Array.prototype.map.call(sheet.children, function (b) {
         var attrs = {};

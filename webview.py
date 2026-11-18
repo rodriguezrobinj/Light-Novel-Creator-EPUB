@@ -169,6 +169,7 @@ if AVAILABLE:
         """Hoja editable de Chromium (websheet): el capítulo con el CSS del libro, sin paginar. ready() avisa al cargar;
         las órdenes de la cinta y el volcado van por JavaScript (window.lnc de websheet.SHEET_JS)."""
         ready = Signal()
+        menu_at = Signal(object)  # QPoint del clic derecho
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -196,6 +197,10 @@ if AVAILABLE:
         def _ready(self):
             self.loaded = True
             self.ready.emit()
+
+        def contextMenuEvent(self, event):
+            """El clic derecho lo pone el editor (sugerencias, avisos), en español."""
+            self.menu_at.emit(event.pos())
 
         def call(self, name, *args, done=None):
             """window.lnc.name(*args); done(resultado)."""

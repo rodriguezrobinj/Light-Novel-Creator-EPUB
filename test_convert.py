@@ -10887,6 +10887,65 @@ def test_websheet_round_trip_and_editing_reach_the_book():
     assert "<b>Tercero</b>" in chapter and "<h3>Cuarto.</h3>" in chapter and not convert.check_epub(out), chapter
 
 
+def test_websheet_marks_spelling_issues_changes_and_menu():
+    """En la hoja web se ven las mismas marcas que en la hoja (con resaltados de CSS, sin tocar el HTML): la palabra
+    que no está, el aviso en su trozo y, con «Mostrar cambios», lo editado. El clic derecho encuentra la palabra y
+    el aviso de ese punto, y cambiar la palabra desde él la cambia. Editar el párrafo del aviso lo quita (ya no
+    vale); ignorar la palabra la desmarca; F7 y F8 van al cambio y al aviso."""
+    import app
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = window.book.candidates[2]
+            window.tree.selection_set(str(k))
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            second = next(n for n, b in enumerate(window.book.blocks) if b.html.startswith("Segundo"))
+            ed.issues[second] = [convert.Issue("prueba", second, 1, "Grave", "Palabra dudosa", "Una explicación.", "",
+                                               span=(0, 7))]
+            ed.unknown |= {"cielo"}
+            ed.toggle_web()
+            assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            count = "(function(n){var h=CSS.highlights.get(n);return h?h.size:0;})(%s)"
+            painted = wait_for(lambda: js(ed.web, count % '"lnc-spell"') == 1 and js(ed.web, count % '"lnc-issue-0"') >= 1)
+            inner = js(ed.web, "document.getElementById('lnc-sheet').innerHTML")
+            html_clean = not any(mark in inner for mark in ("lnc-spell", "lnc-issue", "lnc-change", "<mark"))
+
+            def center(word):
+                return json.loads(js(ed.web, "(function(t){var w=document.createTreeWalker(document.getElementById("
+                                             "'lnc-sheet'),4),n;while((n=w.nextNode())){var i=n.data.indexOf(t);if(i>=0)"
+                                             "{var r=document.createRange();r.setStart(n,i+1);r.setEnd(n,i+2);var b=r."
+                                             "getBoundingClientRect();return JSON.stringify([b.left+b.width/2,b.top+b."
+                                             "height/2]);}}return '[0,0]';})(%s)" % json.dumps(word)))
+            at_word = json.loads(js(ed.web, "lnc.at(%d, %d)" % tuple(round(v) for v in center("cielo"))))
+            at_issue = json.loads(js(ed.web, "lnc.at(%d, %d)" % tuple(round(v) for v in center("Segundo"))))
+            js(ed.web, "lnc.at(%d, %d)" % tuple(round(v) for v in center("cielo")))
+            ed.web.call("replaceWord", "firmamento")
+            ed.ignore_word("firmamento")
+            js(ed.web, "(function(){var p=Array.from(document.querySelectorAll('#lnc-sheet p')).find(e=>e.textContent"
+                       ".startsWith('Segundo'));var r=document.createRange();r.selectNodeContents(p);r.collapse(false);"
+                       "var s=getSelection();s.removeAllRanges();s.addRange(r);document.execCommand('insertText',false,"
+                       "' Añadido.');return true;})()")
+            ed.show_changes_action.setChecked(True)
+            mine = at_issue["issues"][0] if at_issue["issues"] else -1
+            gone = wait_for(lambda: js(ed.web, "lnc.found.filter(f => f.id === %d).length" % mine) == 0
+                            and js(ed.web, count % '"lnc-change"') >= 1, 5)
+            js(ed.web, "(function(){var s=getSelection();var r=document.createRange();r.setStart(document.getElementById("
+                       "'lnc-sheet'),0);r.collapse(true);s.removeAllRanges();s.addRange(r);return true;})()")
+            found_change = js(ed.web, "lnc.next('change')")
+            text = js(ed.web, "document.getElementById('lnc-sheet').innerText")
+            clicked = [ed.web_issues[i].title for i in at_issue["issues"]]
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert painted and html_clean, (painted, html_clean)
+    assert at_word["word"] == "cielo" and clicked == ["Palabra dudosa"], (at_word, at_issue, clicked)
+    assert "firmamento" in text and "Segundo párrafo & más. Añadido." in text, text
+    assert gone and found_change, (gone, found_change)
+
+
 def editor_dump(ed):
     import editor
     return editor.dump(ed.sheet.document())
