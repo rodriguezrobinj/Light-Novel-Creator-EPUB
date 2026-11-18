@@ -2284,6 +2284,15 @@ class App:
         panes.setContentsMargins(0, 0, 0, 0)
         self.pdf_pane, self.pdf_caption, self.pdf_view = self.preview_pane("PDF", self.pdf_step)
         self.epub_pane, self.epub_caption, self.epub_view = self.preview_pane("EPUB", self.epub_step)
+        # Chromium dibuja la sección con todo su HTML y CSS, paginada como en un lector; la hoja de MuPDF queda para
+        # los avisos y la portada (y para todo, si QtWebEngine no está)
+        self.epub_web, self.web_key = None, None
+        import webview  # aquí y no arriba: los procesos de trabajo no cargan Chromium
+        if webview.available():
+            self.epub_web = webview.EpubView()
+            self.epub_web.hide()
+            self.epub_web.paged.connect(self.web_paged)
+            self.epub_pane.layout().addWidget(self.epub_web, 1, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         panes.addWidget(self.pdf_pane)
         panes.addWidget(self.epub_pane)
         views.addWidget(self.pages, 1)
@@ -2727,7 +2736,16 @@ class App:
 
     def blank(self, view, text):
         """Hoja en blanco del tamaño de la vista previa, con un aviso tenue en el centro."""
+        if view is self.epub_view:
+            self.web_off()
         view.show_blank(self.box_size(), text, theme.colors(self.dark))
+
+    def web_off(self):
+        """La vista previa del EPUB vuelve a la hoja de MuPDF (aviso, portada)."""
+        if self.epub_web is not None and self.epub_web.isVisible():
+            self.epub_web.hide()
+            self.epub_view.show()
+        self.web_key = None
 
     def redraw(self):
         """Vuelve a dibujar las vistas previas (al iniciar, al cargar un libro o al cambiar de tamaño)."""
@@ -2789,6 +2807,7 @@ class App:
         self.pdf_page, self.highlight = self.cover_page() or 0, None
         self.draw_pdf()
         self.epub_cut, self.epub_pages = False, 0
+        self.web_off()
         image = QImage.fromData(self.book.cover) if self.book.cover else QImage()
         if image.isNull():
             self.blank(self.epub_view, "El EPUB llevará una portada con el título")
@@ -2910,6 +2929,10 @@ class App:
         self.find_target = None
         self.pdf_page, self.highlight = page - 1, None
         self.draw_pdf()
+        if self.epub_web is not None:  # Chromium busca el texto en la sección y va a su página
+            self.web_key, self.web_find = None, term
+            self.draw_epub()
+            return
         try:
             epub, pages = self.preview_epub()
             self.epub_page = next((n for n in range(pages) if epub.load_page((1, n)).search_for(term)), 0)
@@ -2952,6 +2975,9 @@ class App:
             self.blank(view, self.epub_message if self.epub_cut else "Sin vista previa")
             self.epub_caption.setText("EPUB")
             return
+        if self.epub_web is not None:
+            self.draw_web()
+            return
         try:
             epub, self.epub_pages = self.preview_epub()
             self.epub_page = max(0, min(self.epub_page, self.epub_pages - 1))
@@ -2960,6 +2986,39 @@ class App:
             self.blank(view, "Sin vista previa")
             return
         view.show_image(self.box_size(), image)
+        self.epub_caption.setText(f"EPUB · {self.device_var.get()} · {self.epub_page + 1}/{self.epub_pages}")
+
+    def draw_web(self):
+        """La sección del EPUB de la vista previa en Chromium, del tamaño del dispositivo; misma sección, mismo
+        dispositivo y mismo modo: solo se pasa de página."""
+        web, (width, height) = self.epub_web, DEVICES[self.device_var.get()]
+        key = (self.preview_key, self.device_var.get(), self.dark_var.get())
+        if key == self.web_key and self.epub_pages > 0:
+            web.go(self.epub_page)
+            self.web_paged(self.epub_pages)
+            return
+        try:
+            import webview
+            data = Path(self.preview_path).read_bytes()
+            path = webview.section_path(data)
+        except Exception:
+            self.blank(self.epub_view, "Sin vista previa")
+            return
+        box_w, box_h = self.box_size()
+        scale = min(box_w / width, box_h / height)
+        web.setFixedSize(max(60, round(width * scale)), max(80, round(height * scale)))
+        self.epub_view.hide()
+        web.show()
+        self.web_key = key
+        # En puntos con letra de 11 (MuPDF); Chromium lee a 16 px: la misma página en px de CSS
+        size = (round(width * 16 / 11), round(height * 16 / 11))
+        web.show_file(data, path, size, self.dark_var.get(), self.epub_page, getattr(self, "web_find", None))
+        self.web_find = None
+        self.epub_caption.setText(f"EPUB · {self.device_var.get()}")
+
+    def web_paged(self, pages):
+        """Chromium paginó la sección: el total y la página en la leyenda, como con MuPDF."""
+        self.epub_pages, self.epub_page = max(1, pages), self.epub_web.page_
         self.epub_caption.setText(f"EPUB · {self.device_var.get()} · {self.epub_page + 1}/{self.epub_pages}")
 
     def pdf_step(self, delta):
@@ -7230,7 +7289,24 @@ class TextEditor:
         side = self.side = QWidget()
         side_column = QVBoxLayout(side)
         side_column.setContentsMargins(8, 8, 8, 0)
+        # «Original»: la página de la que sale el párrafo; «EPUB»: el capítulo como saldrá, con lo que se va escribiendo
+        self.side_tabs = QTabBar()
+        self.side_tabs.addTab("Original")
+        self.side_web = None
+        import webview
+        if webview.available():
+            self.side_tabs.addTab("EPUB")
+            self.side_web = webview.EpubView()
+            self.side_web.hide()
+            self.side_web.paged.connect(lambda pages: self.page_label.setText(
+                f"Página {self.side_web.page_ + 1} de {pages}") if self.side_tabs.currentIndex() == 1 else None)
+        self.side_tabs.setDrawBase(False)
+        self.side_tabs.currentChanged.connect(self.show_side)
+        self.web_path = os.path.join(tempfile.gettempdir(), f"lnepub-vista-editor-{os.getpid()}.epub")
+        side_column.addWidget(self.side_tabs, 0, Qt.AlignmentFlag.AlignLeft)
         side_column.addWidget(self.scroll, 1)
+        if self.side_web is not None:
+            side_column.addWidget(self.side_web, 1, Qt.AlignmentFlag.AlignHCenter)
         # Fuera, de capítulo en capítulo (hojear página a página era lento para cruzar el libro); dentro, de página
         # ◀◀ y no los de saltar pista: Windows los dibuja como emoji azules
         prev_btn = qtk.ArrowButton(-1, lambda: self.step_section(-1), "Capítulo anterior", double=True)
@@ -7300,6 +7376,7 @@ class TextEditor:
         sheet.redoAvailable.connect(self.redo_btn.setEnabled)
         sheet.textChanged.connect(lambda: self.later("extra", 250, self.refresh_marks))
         sheet.textChanged.connect(lambda: self.later("spell", 1000, self.check_new_words))
+        sheet.textChanged.connect(lambda: self.web_shown() and self.later("web", 600, self.draw_web))
         sheet.command.connect(self.on_command)
         sheet.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         sheet.customContextMenuRequested.connect(self.context_menu)
@@ -8958,9 +9035,64 @@ class TextEditor:
                 starts.setdefault(self.app.book.blocks[k].page, k)
         return starts
 
+    def web_shown(self):
+        return self.side_web is not None and self.side_tabs.currentIndex() == 1
+
+    def show_side(self, index):
+        """Pestaña del panel: «Original» (la página de origen) o «EPUB» (Chromium, el capítulo como saldrá)."""
+        web = index == 1 and self.side_web is not None
+        self.scroll.setVisible(not web)
+        if self.side_web is not None:
+            self.side_web.setVisible(web)
+        if web:
+            self.draw_web()
+        else:
+            self.redraw()
+            self.update_status()
+
+    def draw_web(self):
+        """El capítulo de la hoja escrito como irá al EPUB (con lo cambiado y sin guardar) y dibujado por Chromium en
+        el tamaño del dispositivo de la ventana, en la página del párrafo del cursor."""
+        if not self.web_shown() or not self.current or self.current[0] < 0:
+            return
+        import webview
+        book, (start, end) = self.app.book, self.current
+        text = editor.dump(self.sheet.document())
+        draft = copy.copy(book)  # el libro con este capítulo como está en la hoja; el de la ventana no se toca
+        draft.blocks, draft.candidates = list(book.blocks), list(book.candidates)
+        try:
+            convert.edit_section(draft, start, end, text, editor.IMAGES)
+            stop = end + len(draft.blocks) - len(book.blocks)
+            part = convert.Book(book.title, "", book.cover, draft.blocks[start:stop], [], origin=book.origin)
+            first = part.blocks[0] if part.blocks else None
+            chapters = [(0, self.app.tree.set(str(start), "title") if self.app.tree.exists(str(start))
+                         else convert._plain(first))] if first is not None and first.kind == "heading" else []
+            options = self.app.write_options([])
+            options.update(shrink=False, trim=False, epub2=False, credits=False, contents=False, synopsis=False,
+                           logo="", kepub=False)
+            convert.write_epub(part, chapters, self.web_path, **options)
+            data = Path(self.web_path).read_bytes()
+            path = webview.section_path(data)
+        except Exception:
+            _log(traceback.format_exc())
+            self.page_label.setText("Sin vista del EPUB")
+            return
+        width, height = DEVICES[self.app.device_var.get()]
+        room_w, room_h = max(120, self.side.width() - 24), max(160, self.side.height() - 90)
+        scale = min(room_w / width, room_h / height)
+        self.side_web.setFixedSize(round(width * scale), round(height * scale))
+        words = self.sheet.textCursor().block().text().strip()[:40]  # la página del párrafo del cursor
+        self.side_web.show_file(data, path, (round(width * 16 / 11), round(height * 16 / 11)),
+                                self.app.dark_var.get(), find=words or None)
+
     def step_page(self, delta):
         """◀ ▶ bajo el PDF: la hoja va al primer párrafo de la página anterior o siguiente (abriendo su capítulo si
-        es otro) y el panel la dibuja. Las páginas sin nada del libro se saltan: no hay qué mostrar en la hoja."""
+        es otro) y el panel la dibuja. Las páginas sin nada del libro se saltan: no hay qué mostrar en la hoja.
+        En la pestaña «EPUB», las páginas del capítulo como saldrá."""
+        if self.web_shown():
+            self.side_web.go(self.side_web.page_ + delta)
+            self.page_label.setText(f"Página {self.side_web.page_ + 1} de {self.side_web.pages}")
+            return
         here, starts = self.app.book.blocks[self.source_block()].page, self.page_starts()
         pages = [p for p in starts if (p > here if delta > 0 else p < here)]
         if pages:
@@ -9466,10 +9598,38 @@ class TextEditor:
         self.win.done(0)
 
 
+def _check_chromium(report):
+    """Carga una página de prueba en la vista web y escribe en report «ok N» (sus páginas) o el error. 0 si funcionó.
+    Sin esto, un .exe sin alguna DLL de Chromium caía en silencio a la vista de MuPDF."""
+    import io
+
+    import webview
+    if not webview.available():
+        Path(report).write_text(f"sin Chromium: {webview.ERROR}", encoding="utf-8")
+        return 1
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as z:
+        z.writestr("p.xhtml", '<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head>'
+                   '<title>p</title></head><body><p>Prueba de Chromium.</p></body></html>')
+    view = webview.EpubView()
+    view.resize(300, 400)
+    result = []
+    view.paged.connect(result.append)
+    view.show_file(data.getvalue(), "p.xhtml", (300, 400))
+    qtk.after(30000, lambda: result.append(-1))
+    while not result:
+        qtk.app().processEvents()
+        time.sleep(0.02)
+    Path(report).write_text(f"ok {result[0]}" if result[0] > 0 else "Chromium no cargó la página", encoding="utf-8")
+    return 0 if result[0] > 0 else 1
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()  # en el .exe, el proceso de trabajo vuelve a lanzar el ejecutable
     sys.excepthook = lambda kind, value, tb: _log("".join(traceback.format_exception(kind, value, tb)))
     qtk.app()
+    if sys.argv[1:2] == ["--comprobar-chromium"]:  # /build-exe: que el .exe trae Chromium entero y dibuja una página
+        sys.exit(_check_chromium(sys.argv[2] if len(sys.argv) > 2 else "chromium.txt"))
     root = Window()
     window = App(root)
     root.show()

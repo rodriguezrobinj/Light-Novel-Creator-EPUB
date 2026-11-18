@@ -26,7 +26,11 @@ def u16(text, i):
 
 def app():
     """La QApplication única: la crea la primera ventana o la primera prueba."""
-    return QApplication.instance() or QApplication([])
+    if QApplication.instance():
+        return QApplication.instance()
+    import webview
+    webview.prepare()  # Chromium (la vista previa del EPUB) pide su esquema y OpenGL compartido antes que nada
+    return QApplication([])
 
 
 _timers = set()  # referencias: un QTimer sin dueño que se recoge no dispara
