@@ -292,9 +292,12 @@ def read_epub(path, progress=None):
                     if not heading and plain and convert.SCENE_BREAK.fullmatch(plain.replace("・", "")):
                         found.append(convert.Block("break", page, html_, tag=node.tag, src=spot, orig=html_))
                     else:
+                        opening = _start_tag(text[node.start:node.inner])
+                        # Un <p> o <h1> sin atributos es el de siempre: sin prefijo en la línea, como uno de un PDF
+                        # (la hoja web y la vista de código lo devuelven así)
+                        opening = "" if opening in ("<p>", "<h1>") else opening
                         found.append(convert.Block("heading" if heading else "p", page, html_, tag=node.tag, src=spot,
-                                                   orig=html_, title=plain if heading else "",
-                                                   opening=_start_tag(text[node.start:node.inner])))
+                                                   orig=html_, title=plain if heading else "", opening=opening))
             if not found:
                 continue
             label = labels.get(name) or (found[0].title if found[0].kind == "heading" else "")

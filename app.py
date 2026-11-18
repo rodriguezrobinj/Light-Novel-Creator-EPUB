@@ -67,6 +67,8 @@ POWERSHELL = str(WINDOWS / "System32" / "WindowsPowerShell" / "v1.0" / "powershe
 
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
 SEP = "Separador"                                   # título que se escribe como separador de escena
+# Estilo de párrafo de la cinta -> etiqueta en la hoja web
+WEB_TAGS = {"Normal": "p", "Capítulo": "h1", "Subtítulo": "h2", "Título 3": "h3", "Título 4": "h4", "Cita": "blockquote"}
 # Estilos de párrafo en la cinta del editor de texto (editor.Sheet.set_paragraph_style)
 STYLES = ["Normal", "Capítulo", "Subtítulo", "Título 3", "Título 4", "Cita"]
 
@@ -7256,6 +7258,16 @@ class TextEditor:
         self.code_look = editor.CodeLook(self.code.document(), theme.code_colors(app.dark))
         self.code.hide()
         desk_row.addWidget(self.code, 20)
+        # Vista «Hoja web» (Vista → Hoja web): el capítulo en Chromium, editable, con el aspecto del libro
+        self.web, self.web_on, self.web_state = None, False, {}
+        import webview
+        if webview.available():
+            self.web = webview.WebSheet()
+            self.web.hide()
+            desk_row.addWidget(self.web, 20)
+            self.web_poll = QTimer(win)  # la cinta sigue al cursor de la hoja web (negrita, estilo, alineación)
+            self.web_poll.timeout.connect(lambda: self.web_on and self.web.call(
+                "state", done=lambda st: (setattr(self, "web_state", json.loads(st) if st else {}), self.update_tools())))
         desk_row.addStretch(1)
         desk_row.addWidget(self.focus_next, 0, Qt.AlignmentFlag.AlignVCenter)
         # El borde de la hoja se arrastra para estrecharla o ensancharla, hasta el ancho de la página (set_text_zoom)
@@ -7512,21 +7524,21 @@ class TextEditor:
         strike_font.setStrikeOut(True)
 
         page("Inicio")
-        self.undo_btn = tool("Deshacer", "Deshacer (Ctrl+Z)", sheet.undo, glyph="undo")
-        self.redo_btn = tool("Rehacer", "Rehacer (Ctrl+Y)", sheet.redo, glyph="redo")
+        self.undo_btn = tool("Deshacer", "Deshacer (Ctrl+Z)", lambda: self.do("undo"), glyph="undo")
+        self.redo_btn = tool("Rehacer", "Rehacer (Ctrl+Y)", lambda: self.do("redo"), glyph="redo")
         self.undo_btn.setEnabled(False)
         self.redo_btn.setEnabled(False)
         group("Deshacer", [self.undo_btn], [self.redo_btn])
-        self.bold_btn = tool("N", "Negrita (Ctrl+N)", sheet.toggle_bold, True, bold_font)
-        self.italic_btn = tool("K", "Cursiva (Ctrl+K)", sheet.toggle_italic, True, italic_font)
-        self.case_btn = tool("Aa Mayúsculas", "Mayúsculas y minúsculas (Mayús+F3)", sheet.change_case, short="Aa",
+        self.bold_btn = tool("N", "Negrita (Ctrl+N)", lambda: self.do("toggle_bold"), True, bold_font)
+        self.italic_btn = tool("K", "Cursiva (Ctrl+K)", lambda: self.do("toggle_italic"), True, italic_font)
+        self.case_btn = tool("Aa Mayúsculas", "Mayúsculas y minúsculas (Mayús+F3)", lambda: self.do("change_case"), short="Aa",
                              level=2)
-        self.sup_btn = tool("x²", "Superíndice: 1.ᵉʳ, m² (Ctrl+Mayús+=)", sheet.toggle_sup, True)
-        self.caps_btn = tool("Vᴇʀs", "Versalitas: rangos, habilidades, sonidos en letra pequeña", sheet.toggle_small_caps,
+        self.sup_btn = tool("x²", "Superíndice: 1.ᵉʳ, m² (Ctrl+Mayús+=)", lambda: self.do("toggle_sup"), True)
+        self.caps_btn = tool("Vᴇʀs", "Versalitas: rangos, habilidades, sonidos en letra pequeña", lambda: self.do("toggle_small_caps"),
                              True)
-        self.underline_btn = tool("S", "Subrayado (Ctrl+S)", sheet.toggle_underline, True, underline_font)
-        self.strike_btn = tool("abc", "Tachado", sheet.toggle_strike, True, strike_font)
-        self.sub_btn = tool("x₂", "Subíndice: H₂O (Ctrl+=)", sheet.toggle_sub, True)
+        self.underline_btn = tool("S", "Subrayado (Ctrl+S)", lambda: self.do("toggle_underline"), True, underline_font)
+        self.strike_btn = tool("abc", "Tachado", lambda: self.do("toggle_strike"), True, strike_font)
+        self.sub_btn = tool("x₂", "Subíndice: H₂O (Ctrl+=)", lambda: self.do("toggle_sub"), True)
         group("Fuente", [self.bold_btn, self.italic_btn, self.underline_btn, self.strike_btn, self.sup_btn, self.sub_btn],
               [self.case_btn, self.caps_btn])
         # Letra, tamaño y color: como en Word, sobre lo elegido; salen en el libro como <span style>. En su pestaña:
@@ -7538,68 +7550,68 @@ class TextEditor:
         self.family_box.lineEdit().setPlaceholderText("Letra")
         self.family_box.addItems(["(La del libro)"] + sorted(editor.FAMILIES.values()) + list(convert.FONTS))
         self.family_box.setCurrentIndex(-1)
-        self.family_box.activated.connect(lambda n: (sheet.set_family(None if n == 0 else self.family_box.itemText(n)),
+        self.family_box.activated.connect(lambda n: (self.do("set_family", None if n == 0 else self.family_box.itemText(n)),
                                                      sheet.setFocus(), self.update_tools()))
-        grow = tool("A⁺", "Agrandar la letra (Ctrl+Mayús+>)", lambda: sheet.grow_font(1))
-        shrink = tool("A⁻", "Reducir la letra (Ctrl+Mayús+<)", lambda: sheet.grow_font(-1))
+        grow = tool("A⁺", "Agrandar la letra (Ctrl+Mayús+>)", lambda: self.do("grow_font", 1))
+        shrink = tool("A⁻", "Reducir la letra (Ctrl+Mayús+<)", lambda: self.do("grow_font", -1))
         self.color_btn, _ = menu_tool("Color ▾", "Color del texto elegido",
-                                      [(name, lambda c=color: sheet.set_color(c)) for name, color in theme.TEXT_COLORS])
+                                      [(name, lambda c=color: self.do("set_color", c)) for name, color in theme.TEXT_COLORS])
         letter = [self.family_box], [grow, shrink, self.color_btn]
         self.style = QComboBox()
         self.style.addItems(STYLES)
         self.style.setToolTip("Estilo del párrafo: capítulo, subtítulo, título 3 y 4 o cita (Ctrl+T: capítulo o normal)")
         self.style.setMinimumWidth(110)
-        self.style.activated.connect(lambda n: (sheet.set_paragraph_style(STYLES[n]), sheet.setFocus(),
+        self.style.activated.connect(lambda n: (self.do("set_paragraph_style", STYLES[n]), sheet.setFocus(),
                                                 self.update_tools()))
         # Las tres alineaciones, también dentro de un recuadro; sin texto: son tres y la cinta no da para más
-        self.left_btn = tool("", "Alinear el párrafo a la izquierda", lambda: sheet.set_align(None), True,
+        self.left_btn = tool("", "Alinear el párrafo a la izquierda", lambda: self.do("set_align", None), True,
                              glyph="left")
-        self.center_btn = tool("", "Centrar el párrafo: cartas, carteles (Ctrl+E)", sheet.toggle_center, True,
+        self.center_btn = tool("", "Centrar el párrafo: cartas, carteles (Ctrl+E)", lambda: self.do("toggle_center"), True,
                                glyph="center")
         self.frame_btn = tool("Recuadro", "Meter los párrafos elegidos en un recuadro, como las ventanas de estado, "
-                              "o sacarlos de él", sheet.toggle_frame, True, level=2, glyph="frame")
+                              "o sacarlos de él", lambda: self.do("toggle_frame"), True, level=2, glyph="frame")
         self.right_btn = tool("", "Alinear el párrafo a la derecha: firmas y fechas de cartas (Ctrl+D)",
-                              sheet.toggle_right, True, glyph="right")
+                              lambda: self.do("toggle_right"), True, glyph="right")
         self.list_btn, _ = menu_tool("Lista ▾", "Lista de viñetas o numerada con los párrafos elegidos, como en Word. "
                                      "Intro en un elemento vacío sale de la lista", [
-            ("●  Viñetas", lambda: sheet.set_list("disc")), ("○  Viñetas huecas", lambda: sheet.set_list("circle")),
-            ("■  Viñetas cuadradas", lambda: sheet.set_list("square")), None,
-            ("1.  Numerada", lambda: sheet.set_list("decimal")),
-            ("a.  Letras minúsculas", lambda: sheet.set_list("lower-alpha")),
-            ("A.  Letras mayúsculas", lambda: sheet.set_list("upper-alpha")),
-            ("i.  Romanos en minúsculas", lambda: sheet.set_list("lower-roman")),
-            ("I.  Romanos", lambda: sheet.set_list("upper-roman")), None,
-            ("Quitar la lista", lambda: sheet.set_list(None))])
-        self.justify_btn = tool("", "Justificar el párrafo: el texto llega a los dos márgenes", sheet.toggle_justify,
+            ("●  Viñetas", lambda: self.do("set_list", "disc")), ("○  Viñetas huecas", lambda: self.do("set_list", "circle")),
+            ("■  Viñetas cuadradas", lambda: self.do("set_list", "square")), None,
+            ("1.  Numerada", lambda: self.do("set_list", "decimal")),
+            ("a.  Letras minúsculas", lambda: self.do("set_list", "lower-alpha")),
+            ("A.  Letras mayúsculas", lambda: self.do("set_list", "upper-alpha")),
+            ("i.  Romanos en minúsculas", lambda: self.do("set_list", "lower-roman")),
+            ("I.  Romanos", lambda: self.do("set_list", "upper-roman")), None,
+            ("Quitar la lista", lambda: self.do("set_list", None))])
+        self.justify_btn = tool("", "Justificar el párrafo: el texto llega a los dos márgenes", lambda: self.do("toggle_justify"),
                                 True, glyph="justify")
-        indent = tool("Sangría", "Con o sin sangría en la primera línea del párrafo", sheet.toggle_indent,
+        indent = tool("Sangría", "Con o sin sangría en la primera línea del párrafo", lambda: self.do("toggle_indent"),
                       icon="indent")
         group("Párrafo", [self.style, self.left_btn, self.center_btn, self.right_btn, self.justify_btn],
               [self.frame_btn, self.list_btn,
                tool("Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
-                    sheet.join_next, level=2, glyph="join")])
+                    lambda: self.do("join_next"), level=2, glyph="join")])
         group("Edición", [tool("Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
                                lambda: self.show_find_bar(False), icon="search")])
 
         page("Formato")
         group("Letra", *letter)
         group("Limpiar", [tool("Borrar\nformato", "Quita cursiva, negrita, subrayado, tamaño y color de lo elegido; los "
-                               "enlaces y el furigana se quedan", sheet.clear_format, icon="clear")])
+                               "enlaces y el furigana se quedan", lambda: self.do("clear_format"), icon="clear")])
         group("Párrafo", [indent, tool("Salto de\nlínea", "Nueva línea dentro del mismo párrafo, como en una carta o "
-                                       "un poema (Mayús+Intro)", sheet.insert_line_break, icon="newline")])
+                                       "un poema (Mayús+Intro)", lambda: self.do("insert_line_break"), icon="newline")])
         group("Japonés", [tool("Furigana", "Lectura pequeña encima de un nombre o una palabra japonesa (<ruby>): "
                                            "elige el texto y escribe su lectura", self.add_ruby, icon="ruby")])
 
         page("Insertar")
         self.symbols_btn, _ = menu_tool("Símbolos ▾", "Raya, comillas, signos de apertura y tipografía española", [
-            ("— Raya   (Ctrl+Alt+-)", lambda: sheet.insert_symbol("—")),
-            ("… Puntos suspensivos   (Ctrl+Alt+.)", lambda: sheet.insert_symbol("…")),
-            ("« » Comillas   (Ctrl+Alt+Q)", lambda: sheet.wrap("«", "»")),
-            ("¿ ? Pregunta", lambda: sheet.wrap("¿", "?")), ("¡ ! Exclamación", lambda: sheet.wrap("¡", "!")), None,
+            ("— Raya   (Ctrl+Alt+-)", lambda: self.do("insert_symbol", "—")),
+            ("… Puntos suspensivos   (Ctrl+Alt+.)", lambda: self.do("insert_symbol", "…")),
+            ("« » Comillas   (Ctrl+Alt+Q)", lambda: self.do("wrap", "«", "»")),
+            ("¿ ? Pregunta", lambda: self.do("wrap", "¿", "?")), ("¡ ! Exclamación", lambda: self.do("wrap", "¡", "!")), None,
             ("Corregir tipografía del capítulo", self.fix_typography)], icon="symbols")
         group("Símbolos", [self.symbols_btn])
-        group("Texto", [tool("Separador", "Separador de escena tras el párrafo", sheet.insert_break, icon="scene"),
-                        tool("Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", sheet.insert_note,
+        group("Texto", [tool("Separador", "Separador de escena tras el párrafo", lambda: self.do("insert_break"), icon="scene"),
+                        tool("Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", lambda: self.do("insert_note"),
                              icon="note")])
         # Un botón con menú: dos botones grandes ensanchaban «Insertar» más que la pantalla de 1366 px
         self.picture_btn, _ = menu_tool("Imagen ▾", "Imagen tras el párrafo del cursor; también se pega una copiada "
@@ -7645,7 +7657,11 @@ class TextEditor:
         group("Mostrar", [self.nav_btn, self.show_changes_box])
         self.code_btn = tool("Código HTML", "Ver y editar el capítulo como su HTML: cada párrafo, su etiqueta y sus "
                              "atributos. Pulsa otra vez para volver a la hoja", self.toggle_code, True, icon="code")
-        group("Código", [self.code_btn])
+        self.web_btn = tool("Hoja web", "Escribir sobre el capítulo tal como se verá en el libro (Chromium, con todo su "
+                            "CSS). Pulsa otra vez para volver a la hoja", self.toggle_web, True, icon="web")
+        import webview
+        self.web_btn.setEnabled(webview.available())
+        group("Código", [self.code_btn, self.web_btn])
         for row in self.ribbon_rows:
             row.addStretch(1)
 
@@ -8821,6 +8837,100 @@ class TextEditor:
             self.split.setSizes([240, 10 ** 4, 10 ** 4])  # panel de navegación (si se ve), hoja y PDF a medias
             self.sheet.ensureCursorVisible()
 
+    def do(self, name, *args):
+        """Una acción de la cinta en la hoja a la vista: la de Qt o la web (WEB_ACTIONS); lo que la web aún no hace
+        se dice en la barra de abajo."""
+        if not self.web_on:
+            return getattr(self.sheet, name)(*args)
+        state, call = self.web_state, self.web.call
+        actions = {
+            "toggle_bold": lambda: call("cmd", "bold"), "toggle_italic": lambda: call("cmd", "italic"),
+            "toggle_underline": lambda: call("cmd", "underline"), "toggle_strike": lambda: call("cmd", "strikeThrough"),
+            "toggle_sup": lambda: call("cmd", "superscript"), "toggle_sub": lambda: call("cmd", "subscript"),
+            "clear_format": lambda: call("cmd", "removeFormat"), "insert_line_break": lambda: call("cmd", "insertLineBreak"),
+            "undo": lambda: call("cmd", "undo"), "redo": lambda: call("cmd", "redo"),
+            "insert_symbol": lambda text: call("cmd", "insertText", text),
+            "wrap": lambda a, b: self.web.page().runJavaScript(
+                f"document.execCommand('insertText', false, {json.dumps(a)} + window.getSelection().toString() + "
+                f"{json.dumps(b)})"),
+            "insert_note": lambda: call("cmd", "insertText", "[Nota: ]"),
+            "set_color": lambda color: call("css", "foreColor", QColor(color).name() if color is not None else "inherit"),
+            "set_family": lambda family: call("css", "fontName", family or "inherit"),
+            "grow_font": lambda step: call("size", "1.2" if step > 0 else "0.83"),
+            "set_paragraph_style": lambda name: call("retag", WEB_TAGS[name]),
+            "set_align": lambda how: call("align", how),
+            "toggle_center": lambda: call("align", None if state.get("align") == "center" else "center"),
+            "toggle_right": lambda: call("align", None if state.get("align") == "right" else "right"),
+            "toggle_justify": lambda: call("align", None if state.get("align") == "justify" else "justify"),
+            "toggle_indent": lambda: call("indent", "1.5em" if state.get("indent") in ("0px", "") else "0"),
+        }
+        if name not in actions:
+            QApplication.beep()
+            self.note.setText("En la hoja web aún no: vuelve a la hoja (Vista → Hoja web) para eso")
+            return None
+        actions[name](*args)
+        self.web.setFocus()
+        return None
+
+    def toggle_web(self):
+        """Vista «Hoja web»: el capítulo en Chromium, editable con el aspecto del libro; al volver, lo escrito pasa a la
+        hoja de Qt (un deshacer), igual que desde la vista de código."""
+        if self.web is None:
+            return
+        if not self.web_on:
+            if self.code.isVisible():
+                self.toggle_code()
+                if self.code.isVisible():  # el código no se pudo aplicar: se sigue en él
+                    self.web_btn.setChecked(False)
+                    return
+            self.load_web()
+            return
+        self.flush_web(self.web_done)
+
+    def load_web(self):
+        """Pone en la hoja web el capítulo de la hoja (con lo que lleve escrito)."""
+        import websheet
+        start, end = self.current
+        lines = [line for line in editor.dump(self.sheet.document()).split("\n\n") if line.strip()]
+        pictures = {}
+        for line in lines:  # imágenes puestas en esta sesión: su archivo en la carpeta del programa
+            m = convert.PICTURE.fullmatch(line.strip())
+            if m and editor.IMAGES and (Path(editor.IMAGES) / m[2]).is_file():
+                pictures[line.strip()] = (Path(editor.IMAGES) / m[2]).read_bytes()
+        files, objects, path, head, body = websheet.sources(self.app.book, start, end, lines, pictures)
+        self.web.load_sheet(files, path, websheet.page(lines, objects, head, body, path))
+        self.web_on = True
+        self.sheet.hide()
+        self.web.show()
+        self.web.setFocus()
+        self.web_btn.setChecked(True)
+        self.web_poll.start(400)
+
+    def flush_web(self, then):
+        """Lo escrito en la hoja web pasa a la hoja de Qt (si cambió) y luego then()."""
+        import websheet
+
+        def back(dumped):
+            if dumped:
+                try:
+                    text = websheet.lines_of(dumped)
+                except ValueError as e:  # no debería pasar: Chromium siempre cierra sus etiquetas
+                    _log(f"Hoja web: {e}")
+                    text = None
+                if text is not None and text != editor.dump(self.sheet.document()):
+                    self.sheet.set_text(text)
+            then()
+        self.web.call("dump", done=back)
+
+    def web_done(self):
+        self.web_on = False
+        self.web_poll.stop()
+        self.web.hide()
+        self.sheet.show()
+        self.sheet.setFocus()
+        self.web_btn.setChecked(False)
+        self.update_tools()
+
     def toggle_code(self):
         """Vista «Código HTML»: el capítulo de la hoja como su HTML, editable; al volver, lo cambiado pasa a la hoja
         (un deshacer). Una línea que no se entiende o deja una etiqueta sin cerrar se avisa y no se sale."""
@@ -8851,20 +8961,38 @@ class TextEditor:
         self.update_tools()
 
     def add_ruby(self):
-        """Furigana: la lectura encima del texto elegido (o de lo que se escriba)."""
-        cursor = self.sheet.textCursor()
-        base = cursor.selectedText().strip() if cursor.hasSelection() else ""
+        """Furigana: la lectura encima del texto elegido (o de lo que se escriba), en la hoja a la vista."""
+        if self.web_on:
+            base = self.web.page().selectedText().strip()
+        else:
+            cursor = self.sheet.textCursor()
+            base = cursor.selectedText().strip() if cursor.hasSelection() else ""
         if not base:
             base, ok = QInputDialog.getText(self.win, "Furigana", "Texto (el nombre o la palabra):")
             if not ok or not base.strip():
                 return
         reading, ok = QInputDialog.getText(self.win, "Furigana", f"Lectura de «{base}» (sale pequeña encima):")
-        if ok and reading.strip():
+        if ok and reading.strip() and self.web_on:
+            self.web.call("ruby", html.escape(base.strip(), quote=False), html.escape(reading.strip(), quote=False))
+        elif ok and reading.strip():
             self.sheet.insert_ruby(base.strip(), reading.strip())
 
     def update_tools(self):
         """La cinta sigue al cursor, como en Word: N y K marcadas si lo están, y el estilo del párrafo."""
         if not shiboken6.isValid(self.sheet) or not shiboken6.isValid(self.style):
+            return
+        if getattr(self, "web_on", False):
+            st = self.web_state
+            for button, key in ((self.bold_btn, "bold"), (self.italic_btn, "italic"), (self.underline_btn, "underline"),
+                                (self.strike_btn, "strike"), (self.sup_btn, "sup"), (self.sub_btn, "sub")):
+                button.setChecked(bool(st.get(key)))
+            tag = st.get("tag", "p")
+            self.style.setCurrentText(next((name for name, t in WEB_TAGS.items() if t == tag), "Normal"))
+            align = st.get("align", "")
+            self.left_btn.setChecked(align in ("left", "", "start"))
+            self.center_btn.setChecked(align == "center")
+            self.right_btn.setChecked(align == "right")
+            self.justify_btn.setChecked(align == "justify")
             return
         f = self.sheet.currentCharFormat()
         self.bold_btn.setChecked(f.fontWeight() >= QFont.Weight.DemiBold)
@@ -8896,6 +9024,10 @@ class TextEditor:
 
     def open_section(self, start, end, focus=None):
         """Muestra el capítulo start..end en la hoja (el ya editado si se visitó) y lo dice en la cinta."""
+        if getattr(self, "web_on", False) and self.current and (start, end) != self.current:
+            # con la hoja web: lo escrito pasa a su capítulo, se abre el otro y se vuelve a la hoja web con él
+            self.flush_web(lambda: (self.web_done(), self.open_section(start, end, focus), self.load_web()))
+            return
         if self.reading is not None:
             self.stop_reading()
         page = self.pages.get((start, end))
@@ -9585,6 +9717,9 @@ class TextEditor:
 
     def save(self):
         """Aplica solo lo que cambió: un párrafo rehecho pierde su página del PDF, y un título rehecho su tipo."""
+        if getattr(self, "web_on", False):  # lo escrito en la hoja web, primero a la hoja
+            self.flush_web(lambda: (self.web_done(), self.save()))
+            return
         if self.dirty():
             self.saved_paragraphs = self.changed_count()
             edits, titles, kinds, retype = self.changes()

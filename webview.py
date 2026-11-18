@@ -164,6 +164,45 @@ if AVAILABLE:
             self.page().runJavaScript(script, 0, done)
 
 
+if AVAILABLE:
+    class WebSheet(EpubView):
+        """Hoja editable de Chromium (websheet): el capítulo con el CSS del libro, sin paginar. ready() avisa al cargar;
+        las órdenes de la cinta y el volcado van por JavaScript (window.lnc de websheet.SHEET_JS)."""
+        ready = Signal()
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # aquí sí se escribe
+            self.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)  # copiar, pegar
+            self.loaded = False
+
+        def load_sheet(self, files, path, text):
+            """Muestra text (la página de websheet.page) como el archivo path, con files (ruta -> bytes) a mano."""
+            import websheet  # noqa: F401  (solo para que el .exe lo incluya junto a esta vista)
+            self.zip.files = dict(files)
+            self.zip.files[path] = text.encode("utf-8")
+            self.loaded = False
+            self.setZoomFactor(1.0)
+            self.setUrl(QUrl("epub:///" + path))
+
+        def resizeEvent(self, event):
+            QWebEngineView.resizeEvent(self, event)  # sin la escala del lector: se lee a su tamaño
+
+        def _loaded(self, ok):
+            import websheet
+            if ok:
+                self.page().runJavaScript(websheet.SHEET_JS, 0, lambda _: self._ready())
+
+        def _ready(self):
+            self.loaded = True
+            self.ready.emit()
+
+        def call(self, name, *args, done=None):
+            """window.lnc.name(*args); done(resultado)."""
+            script = f"window.lnc && window.lnc.{name}({', '.join(json.dumps(a) for a in args)})"
+            self.page().runJavaScript(script, 0, done or (lambda _: None))
+
+
 def section_path(data):
     """Ruta en el zip de la sección de un EPUB de vista previa: la segunda del spine (la primera es la portada)."""
     import io
