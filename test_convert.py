@@ -4069,7 +4069,7 @@ def test_editor_sheet_round_trip():
     assert sources == [2, 3, 4, 5, 6, 7, 8, 9, 10], sources
 
 
-def test_editor_keeps_epub_tags_when_a_paragraph_is_edited():
+def test_editor_shows_epub_tags_as_they_look_and_keeps_them():
     """Un párrafo de un EPUB con nota enlazada (<a … epub:type>…</a>) y furigana, editado en la hoja: las etiquetas,
     en gris, vuelven al libro enteras y el párrafo sigue en su elemento; antes el </a> se perdía y edit_section
     quitaba todas las etiquetas del párrafo."""
@@ -4086,9 +4086,11 @@ def test_editor_keeps_epub_tags_when_a_paragraph_is_edited():
     doc = QTextDocument()
     editor.load(doc, [(j, convert._line(book.blocks[j], j)) for j in range(start, end)], {})
     block = doc.findBlockByNumber(k - start)
-    it, colors = block.begin(), {}
+    it, shown = block.begin(), {}
     while not it.atEnd():
-        colors[it.fragment().text()] = it.fragment().charFormat().foreground().color().name()
+        f = it.fragment().charFormat()
+        shown[it.fragment().text()] = (f.isAnchor(), f.verticalAlignment() == f.VerticalAlignment.AlignSuperScript,
+                                       f.fontItalic(), f.fontWeight() >= 600)
         it += 1
     cursor = QTextCursor(block)
     cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
@@ -4098,8 +4100,9 @@ def test_editor_keeps_epub_tags_when_a_paragraph_is_edited():
     assert edited.html == ('Las <i>leyendas</i> dicen<a href="notas.xhtml#nt1" id="rf1" epub:type="noteref"><sup>❮01❯'
                            '</sup></a> que el <b>cielo</b> es azul. Fin.'), edited.html
     assert edited.src == src and edited.tag == "p", (edited.src, src)
-    tag = '<a href="notas.xhtml#nt1" id="rf1" epub:type="noteref">'
-    assert colors.get(tag) == "#888888" and colors.get("Las ") != "#888888", colors  # la etiqueta, en gris
+    # Se ve como en el libro, sin código: la llamada, enlace en superíndice; «leyendas» en cursiva; «cielo» en negrita
+    assert not any("<" in text for text in shown), shown
+    assert shown["❮01❯"][:2] == (True, True) and shown["leyendas"][2] and shown["cielo"][3], shown
 
 
 def test_editor_long_separator_is_not_shrunk():
@@ -5205,6 +5208,228 @@ def editor_on(blocks, candidates, dark=False):
     return root, window, app.TextEditor(window, "0", *window.section_bounds(0))
 
 
+def visual_sheet(lines, css=None):
+    """Hoja del editor con lines ([(bloque, línea)]); css: faithful.BookStyle de un EPUB o None (la de un PDF)."""
+    import qtk
+
+    import editor
+    qtk.app()
+    editor.use_css(css)
+    sheet = editor.Sheet()
+    sheet.set_content(lines, {})
+    return sheet
+
+
+def fragments(sheet, n):
+    """[(texto, formato)] de los trozos del párrafo n de la hoja."""
+    it, out = sheet.document().findBlockByNumber(n).begin(), []
+    while not it.atEnd():
+        out.append((it.fragment().text(), it.fragment().charFormat()))
+        it += 1
+    return out
+
+
+def select(sheet, n, word):
+    """Selecciona word en el párrafo n de la hoja, como con el ratón."""
+    from PySide6.QtGui import QTextCursor
+    block = sheet.document().findBlockByNumber(n)
+    at = block.position() + block.text().index(word)
+    cursor = QTextCursor(sheet.document())
+    cursor.setPosition(at)
+    cursor.setPosition(at + len(word), QTextCursor.MoveMode.KeepAnchor)
+    sheet.setTextCursor(cursor)
+
+
+def test_editor_shows_html_visually_and_gives_it_back_unchanged():
+    """La hoja muestra el HTML del libro como se verá, sin código: furigana pequeño y arriba (sin los paréntesis),
+    subrayado, tachado, subíndice, tamaño, salto de línea, la clase del CSS del EPUB (su fuente incrustada) y el
+    título con su etiqueta y su clase. Sin tocar nada vuelve cada línea igual, con sus etiquetas y atributos."""
+    import faithful
+    from PySide6.QtGui import QTextFormat
+
+    import editor
+    css = faithful.BookStyle(sigil_epub(TMP / "Sigil - Volumen 14.epub"))
+    lines = [(0, '<h1 title="Capítulo 1: El Templo" class="lucida" id="encabezado"><i>Capítulo 1</i><br/> '
+                 '<span class="small"><i>El Templo</i></span>'),
+             (1, '<p class="no-indent"><b>Autor:</b> <ruby>橘 公司<rp>(</rp><rt>Koushi Tachibana</rt><rp>)</rp></ruby>'),
+             (2, 'Uno <u>dos</u> <s>tres</s> H<sub>2</sub>O <span style="font-size: 1.2em">grande</span>'
+                 '<a id="marca"></a> fin.')]
+    sheet = visual_sheet(lines, css)
+    try:
+        dumped = editor.dump(sheet.document())
+        title, author, rest = (fragments(sheet, n) for n in range(3))
+        title_text = sheet.document().findBlockByNumber(0).text()
+        families = editor.FAMILIES
+    finally:
+        editor.use_css(None)
+    assert dumped == "\n\n".join(line for _, line in lines), dumped
+    assert "<" not in "".join(t for t, _ in title + author + rest), "se ve código en la hoja"
+    assert editor.LINE_BREAK in title_text and title[0][1].fontFamilies() == [families["Lucida"]], title
+    look = {text: f for text, f in author}
+    assert look["Koushi Tachibana"].verticalAlignment() == look["Koushi Tachibana"].VerticalAlignment.AlignSuperScript
+    assert look["("].foreground().color().alpha() == 0 and look["Autor:"].fontWeight() >= 600, "rp no se oculta"
+    look = {text.strip(): f for text, f in rest}
+    assert look["dos"].fontUnderline() and look["tres"].fontStrikeOut()
+    assert look["2"].verticalAlignment() == look["2"].VerticalAlignment.AlignSubScript
+    assert look["grande"].property(QTextFormat.Property.FontSizeAdjustment) == 1, "1.2em: un paso más grande"
+
+
+def test_editor_ribbon_writes_clean_html():
+    """Cada botón nuevo de la cinta escribe su HTML: subrayado <u>, tachado <s>, subíndice <sub>, tamaño, color y
+    letra en un <span style>, «Borrar formato» los quita (el enlace se queda), Mayús+Intro un <br/>, furigana un
+    <ruby>. En un párrafo de PDF, «Título 3», «Cita», justificado y sin sangría le dan su etiqueta; en uno del EPUB,
+    la cambian conservando su clase. Todo vuelve con un Ctrl+Z."""
+    from PySide6.QtGui import QColor
+
+    import editor
+    sheet = visual_sheet([(0, "Uno dos tres cuatro."), (1, 'Ver <a href="https://ejemplo.com">la web</a> hoy.'),
+                        (2, "Párrafo del PDF."), (3, '<p class="no-indent">Párrafo del EPUB.')])
+    before = editor.dump(sheet.document())
+    select(sheet, 0, "dos")
+    sheet.toggle_underline()
+    select(sheet, 0, "tres")
+    sheet.toggle_strike()
+    sheet.grow_font(1)
+    sheet.set_color(QColor("#c00000"))
+    sheet.set_family("Literata")
+    select(sheet, 0, "cuatro")
+    sheet.toggle_sub()
+    first = editor.dump(sheet.document()).split("\n\n")[0]
+    select(sheet, 1, "Ver la web hoy")
+    sheet.toggle_bold()
+    sheet.clear_format()
+    link = editor.dump(sheet.document()).split("\n\n")[1]
+    sheet.setTextCursor(sheet.cursorForPosition(sheet.cursorRect().center()))
+    select(sheet, 2, "Párrafo")
+    sheet.set_paragraph_style("Título 3")
+    title = editor.dump(sheet.document()).split("\n\n")[2]
+    sheet.set_paragraph_style("Cita")
+    quote = editor.dump(sheet.document()).split("\n\n")[2]
+    sheet.set_paragraph_style("Normal")
+    sheet.toggle_justify()
+    sheet.toggle_indent()
+    justified = editor.dump(sheet.document()).split("\n\n")[2]
+    select(sheet, 3, "Párrafo")
+    sheet.toggle_justify()
+    epub = editor.dump(sheet.document()).split("\n\n")[3]
+    select(sheet, 3, "EPUB")
+    sheet.insert_ruby("EPUB", "i-pab")
+    cursor = sheet.textCursor()
+    cursor.movePosition(cursor.MoveOperation.EndOfBlock)
+    sheet.setTextCursor(cursor)
+    sheet.insert_line_break()
+    sheet.textCursor().insertText("Otra línea")
+    ruby = editor.dump(sheet.document()).split("\n\n")[3]
+    while sheet.document().isUndoAvailable():
+        sheet.undo()
+    undone = editor.dump(sheet.document())
+    assert first == ('Uno <u>dos</u> <s><span style="font-size: 1.2em; color: #c00000; font-family: &quot;Literata&quot;">'
+                     'tres</span></s> <sub>cuatro</sub>.') or first.startswith("Uno <u>dos</u> <s><span style="), first
+    assert "font-size: 1.2em" in first and "color: #c00000" in first and "<sub>cuatro</sub>" in first, first
+    assert link == 'Ver <a href="https://ejemplo.com">la web</a> hoy.', link
+    assert title == "<h3>Párrafo del PDF.", title
+    assert quote == "<blockquote>Párrafo del PDF.", quote
+    assert justified == '<p style="text-align: justify; text-indent: 0">Párrafo del PDF.', justified
+    assert epub == '<p class="no-indent" style="text-align: justify">Párrafo del EPUB.', epub
+    assert ruby.endswith('<ruby>EPUB<rp>(</rp><rt>i-pab</rt><rp>)</rp></ruby>.<br/>Otra línea'), ruby
+    assert undone == before, undone
+
+
+def test_editor_code_view_round_trip_and_errors():
+    """Vista de código: cada párrafo como su elemento (las alineaciones de la app con sus clases, las ilustraciones
+    como comentario) y de vuelta igual; una etiqueta sin cerrar se avisa. Volver a la hoja con un cambio lo pone
+    en ese párrafo, que sigue siendo del mismo bloque; los demás no cambian."""
+    import editor
+    text = "\n\n".join(['<h1 class="lucida">Capítulo <i>1</i>', "# Título de PDF", "<center>Carta",
+                        "<lista decimal>Uno", "[Ilustración 7]", '<p class="no-indent">A & B <ruby>橘<rt>x</rt></ruby>',
+                        "Texto con [Nota: aclaración] y <sc>Rango</sc>."])
+    code = editor.to_code(text)
+    back = editor.from_code(code)
+    errors = []
+    for bad in ("<p>Mal <i>cerrado</p>", '<p class="x">Sin cierre'):
+        try:
+            editor.from_code(bad)
+        except ValueError as e:
+            errors.append(str(e))
+    sheet = visual_sheet([(10, "Primero."), (11, "Segundo."), (12, "Tercero.")])
+    sheet.set_text(editor.from_code(editor.to_code(editor.dump(sheet.document())).replace("Segundo", "Segundo editado")))
+    sources = [editor.source_of(sheet.document().findBlockByNumber(n)) for n in range(3)]
+    assert "<!-- [Ilustración 7] -->" in code and '<p class="center">Carta</p>' in code, code
+    assert '<li class="lista-decimal">Uno</li>' in code and '<span class="nota">aclaración</span>' in code, code
+    assert 'A &amp; B <ruby>' in code and "<h1>Título de PDF</h1>" in code, code
+    assert back == text, back
+    assert len(errors) == 2 and errors[0].startswith("Línea 1") and "no se cierra" in errors[1], errors
+    assert editor.dump(sheet.document()) == "Primero.\n\nSegundo editado.\n\nTercero.", editor.dump(sheet.document())
+    assert sources == [10, 11, 12], sources
+
+
+def test_editor_styles_reach_the_epub():
+    """Lo puesto en el editor sale en el libro: en un EPUB, el párrafo que pasa a «Título 3» con su clase se
+    reescribe en su sitio (<h3 class>…</h3>) y el resto sigue igual; en un libro de PDF, el justificado y el
+    subtítulo <h3> salen con su etiqueta."""
+    src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+    book = convert.analyze(src)
+    start, end = book.candidates[2], book.candidates[3]
+    lines = convert.section_text(book, start, end).split("\n\n")
+    at = next(n for n, line in enumerate(lines) if line.startswith('<p class="no-indent">'))
+    lines[at] = lines[at].replace('<p class="no-indent">', '<h3 class="no-indent">')
+    convert.edit_section(book, start, end, "\n\n".join(lines))
+    out = TMP / "Sigil con título 3.epub"
+    convert.write_epub(book, faithful_chapters(book), out, style=convert.ORIGINAL, typography=False, contents=False,
+                       separator="Original del PDF")
+    chapter = epub_file(out, "OEBPS/Text/capitulo01.xhtml")
+    with zipfile.ZipFile(src) as a, zipfile.ZipFile(out) as b:
+        changed = [n for n in a.namelist() if n in b.namelist() and a.read(n) != b.read(n)]
+    B = convert.Block
+    pdf = convert.Book("Libro", "", JPEG, [B("heading", 1, "Cap 1"), B("p", 1, "Uno.")], [0])
+    convert.edit_section(pdf, 1, 2, '<p style="text-align: justify">Uno.\n\n<h3>Parte\n\nDos.')
+    plain = TMP / "pdf-estilos.epub"
+    convert.write_epub(pdf, [(0, "Cap 1")], plain)
+    text = epub_file(plain, "OEBPS/sec001.xhtml")
+    assert '<h3 class="no-indent">Las <i>leyendas</i>' in chapter and "</h3>" in chapter, chapter
+    assert changed == ["OEBPS/Text/capitulo01.xhtml"], changed
+    assert '<p style="text-align: justify">' in text and re.search(r'<h3 id="t\d+">Parte</h3>', text), text
+    assert not convert.check_epub(out) and not convert.check_epub(plain)
+
+
+def test_window_editor_code_view_reaches_the_book():
+    """En el editor de un EPUB: Vista → «Código HTML» muestra el capítulo como su HTML (con la clase de cada
+    párrafo); un cambio en el código vuelve a la hoja al pulsar otra vez y, al aceptar, llega al libro. Un código
+    roto se avisa y no se sale de la vista."""
+    import app
+
+    src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+    root, window = visible_window()
+    warned = []
+    original = app.messagebox.showwarning
+    app.messagebox.showwarning = lambda title, message, **kw: warned.append(message)
+    try:
+        window.pdf = src
+        window.show_book(convert.analyze(src))
+        k = window.book.candidates[2]
+        window.tree.selection_set(str(k))
+        editor_window = app.TextEditor(window, str(k), *window.section_bounds(k))
+        editor_window.toggle_code()
+        code = editor_window.code.toPlainText()
+        editor_window.code.setPlainText(code.replace("<p>Tercero.</p>", "<p>Tercero <i>cambiado</i>.</p>"))
+        editor_window.toggle_code()
+        sheet_after = editor_window.sheet.isVisible() or not editor_window.code.isVisible()
+        editor_window.toggle_code()
+        editor_window.code.setPlainText(editor_window.code.toPlainText() + "\n<p>Roto <b>sin cerrar</p>")
+        editor_window.toggle_code()
+        still_code = editor_window.code_btn.isChecked()
+        editor_window.code.setPlainText(editor_window.code.toPlainText().replace("\n<p>Roto <b>sin cerrar</p>", ""))
+        editor_window.toggle_code()
+        editor_window.save()
+        html_now = [b.html for b in window.book.blocks]
+    finally:
+        app.messagebox.showwarning = original
+        window.close()
+    assert '<p class="no-indent">Las <i>leyendas</i>' in code and "<h2 id=\"p1\">Parte uno</h2>" in code, code
+    assert sheet_after and still_code and warned and "no se cierra" in warned[0], (sheet_after, still_code, warned)
+    assert "Tercero <i>cambiado</i>." in html_now, [h for h in html_now if "Tercero" in h]
+
+
 def test_editor_draft_recovers_after_crash():
     """El editor escribe un borrador con lo cambiado; si la aplicación se cerró sin aceptar, al abrirlo otra vez
     ofrece recuperarlo: vuelve el texto, el cambio se ve como cambio (F7) y el párrafo igual conserva su página.
@@ -5461,7 +5686,9 @@ def test_editor_focus_mode_edges_drag_and_steady_bar():
     editor.win.resize(1300, 700)
     editor.win.show()
     editor.text_zoom.setValue(60)  # página estrecha: en la pantalla de las pruebas (800 px) hay sitio para ensanchar
-    root.update()
+    editor.fit_ribbon()  # la cinta se ajusta con un temporizador: con la suite en paralelo llegaba entre dos medidas
+    for _ in range(5):
+        root.update()
     desk, sheet = editor.desk, editor.sheet
 
     def drag(start, end):
@@ -6209,7 +6436,7 @@ def test_speaker_reads_every_paragraph_with_powershell():
 
 
 def test_text_editor_ribbon_tabs_like_word():
-    """La cinta va en pestañas como Word (Inicio, Insertar, Revisar, Vista): cada botón está en una sola, el
+    """La cinta va en pestañas como Word (Inicio, Formato, Insertar, Revisar, Vista): cada botón está en una sola, el
     capítulo y Revisado se ven en todas, y «Mostrar cambios» de Vista va a la par con el del menú Cambios."""
     from PySide6.QtWidgets import QAbstractButton
     B = convert.Block
@@ -6231,10 +6458,11 @@ def test_text_editor_ribbon_tabs_like_word():
     big = editor.read_btn.toolButtonStyle(), editor.read_btn.icon().isNull()
     editor.win.done(0)
     window.close()
-    assert names == ["Inicio", "Insertar", "Revisar", "Vista"], names
+    assert names == ["Inicio", "Formato", "Insertar", "Revisar", "Vista"], names
     assert all(len(n) == 1 for n in owners.values()), owners
-    assert (where["N"], where["Símbolos ▾"], where["Leer"], where["Navegación"]) == tuple(names), where
-    assert visible == [(n, True, True) for n in range(4)], visible
+    assert (where["N"], where["Color ▾"], where["Símbolos ▾"], where["Leer"], where["Navegación"]) == tuple(names), where
+    assert where["S"] == where["x₂"] == "Inicio" and where["Furigana"] == "Formato" and where["Código HTML"] == "Vista"
+    assert visible == [(n, True, True) for n in range(5)], visible
     assert from_box and not from_menu, (from_box, from_menu)
     from PySide6.QtCore import Qt
     assert big == (Qt.ToolButtonStyle.ToolButtonTextUnderIcon, False), big

@@ -2,6 +2,7 @@
 escribe el libro copiando el original y parcheando solo lo que cambió (texto, títulos, secciones, portada, datos).
 Así un EPUB hecho a mano (Sigil, Calibre) sale con su CSS, sus fuentes, sus h1-h6, furigana y enlaces."""
 import copy
+import functools
 import html
 import posixpath
 import re
@@ -292,7 +293,8 @@ def read_epub(path, progress=None):
                         found.append(convert.Block("break", page, html_, tag=node.tag, src=spot, orig=html_))
                     else:
                         found.append(convert.Block("heading" if heading else "p", page, html_, tag=node.tag, src=spot,
-                                                   orig=html_, title=plain if heading else ""))
+                                                   orig=html_, title=plain if heading else "",
+                                                   opening=_start_tag(text[node.start:node.inner])))
             if not found:
                 continue
             label = labels.get(name) or (found[0].title if found[0].kind == "heading" else "")
@@ -341,6 +343,68 @@ def _first_pages(path, count):
     return starts
 
 
+# ---------------------------------------------------------------- aspecto (para la hoja del editor)
+
+CSS_RULE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+SIMPLE_SELECTOR = re.compile(r"([a-z][\w-]*)?((?:\.[\w-]+)*)", re.I)
+
+
+class BookStyle:
+    """Lo que la hoja del editor sabe dibujar del CSS de un EPUB: reglas de etiqueta y de clase (h1, .lucida,
+    p.no-indent) y sus fuentes incrustadas. Los selectores compuestos y los @media se ignoran."""
+
+    def __init__(self, path):
+        self.rules, self.fonts = [], {}  # [(especificidad, orden, etiqueta, clases, declaraciones)]; {familia: bytes}
+        try:
+            with zipfile.ZipFile(path) as z:
+                _, _, items, _, _ = package(z)
+                names = set(z.namelist())
+                for href, kind, _ in items.values():
+                    if kind == "text/css" and href in names:
+                        self._read(z, href, z.read(href).decode("utf-8", "replace"), names)
+        except (OSError, zipfile.BadZipFile, KeyError, StopIteration, ET.ParseError, AttributeError):
+            pass  # sin su aspecto: la hoja se ve como la de un PDF
+        self.rules.sort(key=lambda rule: rule[:2])
+        self.cache = {}  # (etiqueta, clases) -> props: se pide por cada trozo de texto de la hoja
+
+    def _read(self, z, href, text, names):
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        text = re.sub(r"@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}", "", text)  # Kindle, Kobo: no son la pantalla
+        for selectors, body in CSS_RULE.findall(text):
+            decls = {k.strip().lower(): v.strip() for k, _, v in (d.partition(":") for d in body.split(";")) if v.strip()}
+            if selectors.strip().lower() == "@font-face":
+                family = decls.get("font-family", "").strip("\"' ")
+                url = re.search(r"url\(\s*['\"]?([^'\")]+)", decls.get("src", ""))
+                target = _resolve(href, url[1]) if url else ""
+                if family and target in names and family not in self.fonts:
+                    self.fonts[family] = z.read(target)
+                continue
+            for selector in selectors.split(","):
+                m = SIMPLE_SELECTOR.fullmatch(selector.strip())
+                if m and (m[1] or m[2]):
+                    classes = tuple(c for c in m[2].split(".") if c)
+                    self.rules.append((bool(m[1]) + 10 * len(classes), len(self.rules), (m[1] or "").lower(), classes,
+                                       decls))
+
+    def props(self, tag, classes):
+        """Declaraciones que tocan a <tag class="classes">, de menos a más específicas."""
+        key = (tag, tuple(classes))
+        if key not in self.cache:
+            out = {}
+            for _, _, rule_tag, rule_classes, decls in self.rules:
+                if (not rule_tag or rule_tag == tag) and all(c in classes for c in rule_classes):
+                    out.update(decls)
+            self.cache[key] = out
+        return self.cache[key]
+
+
+@functools.lru_cache(maxsize=4)
+def book_style(path, stamp):
+    """BookStyle de un EPUB, recordado mientras no cambie (stamp: su fecha y tamaño): leerlo al abrir cada vez el
+    editor tardaba un segundo."""
+    return BookStyle(path)
+
+
 # ---------------------------------------------------------------- escritura
 
 ORIGINAL = convert.ORIGINAL  # estilo y separador: el aspecto del EPUB de entrada, sin tocar su CSS
@@ -353,12 +417,21 @@ MANAGED_DC = ("title", "creator", "contributor", "publisher", "description", "su
 METADATA_ITEM = re.compile(r"<(dc:\w+|meta)\b(?:[^>]*?/>|[^>]*>.*?</\1>)", re.S)
 
 
+OPENING_TAG = re.compile(r"<([\w:.-]+)")
+
+
+def _start_tag(tag):
+    """Etiqueta de apertura en una línea y sin espacios de sobra: así se compara la del editor con la del original."""
+    return " ".join(tag.split())
+
+
 def flattened(book):
     """Copia del libro para rehacerlo con el escritor normal (EPUB 2): sin el original y con solo el HTML que EPUB 2
     admite; el furigana pasa a «base (lectura)»."""
     out = copy.copy(book)
     out.origin = ""
-    out.blocks = [replace(b, html=_flat(b.html)) if b.kind in ("p", "heading") else b for b in book.blocks]
+    out.blocks = [replace(b, html=_flat(b.html), opening="") if b.kind in ("p", "heading") else b
+                  for b in book.blocks]
     return out
 
 
@@ -570,14 +643,20 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
             if b.src and b.src[3] >= 0:
                 text = source(b.src[0])
                 name, i0, i1, o0, o1 = b.src
-                if own and new == b.orig:
+                start = text[o0:text.index(">", o0) + 1]  # etiqueta de apertura del original
+                retag = b.opening and _start_tag(b.opening) != _start_tag(start)  # estilo cambiado en el editor
+                if own and new == b.orig and not retag:
                     return text[o0:o1]
-                opening = text[o0:i0]
+                opening, closing = (b.opening if retag else start), text[i1:o1]
+                if retag:  # otra etiqueta (p -> h3): también el cierre
+                    closing = re.sub(r"</[\w:.-]+>\s*$", f"</{OPENING_TAG.match(b.opening)[1]}>", closing)
                 if not own:  # copia de un párrafo que ya está en su sitio: el id no puede repetirse
                     opening = re.sub(r"\sid\s*=\s*\"[^\"]*\"", "", opening)
                 if b.kind == "heading" and k in titles and titles[k] != b.title and re.search(r"\stitle=", opening):
                     opening = _set_attr(opening, "title", titles[k])
-                return opening + new + text[i1:o1]
+                return opening + text[o0 + len(start):i0] + new + closing
+            if b.opening:  # párrafo nuevo con el estilo que le dio el editor
+                return f"{b.opening}{new}</{OPENING_TAG.match(b.opening)[1]}>"
             if b.kind == "heading":
                 tag = b.tag if b.tag in HEADINGS else ("h1" if k in titles else "h2")
                 return f"<{tag}>{new}</{tag}>"
