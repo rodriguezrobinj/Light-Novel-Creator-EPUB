@@ -6561,6 +6561,23 @@ def test_text_editor_find_box_skips_repeated_lines():
     assert boxes[0] is None and boxes[1] is not None, boxes
 
 
+def test_text_editor_find_box_covers_the_whole_paragraph():
+    """Párrafo de tres líneas con la primera sangrada y la última corta (Date A Live 14, cap. 5): el recuadro llega
+    hasta el final de la línea más larga, la de en medio. Antes solo unía las primeras y las últimas palabras."""
+    import app
+
+    with pymupdf.open() as doc:
+        page = doc.new_page()
+        rows = [(100, 100, "Tohka, cuya apariencia fue espectacularmente mejorada"),
+                (72, 115, "por la magia de los fosforos, amplio sus brillantes ojos mientras miraba al interior"),
+                (72, 130, "mientras inspeccionaban la galeria que capto su atencion.")]
+        for x, y, text in rows:
+            page.insert_text((x, y), text, fontsize=10)
+        widest = max(page.search_for(rows[1][2])[0].x1, 0)
+        box = app.TextEditor.find_box(page, convert.Block("p", 1, " ".join(t for *_, t in rows)))
+    assert box is not None and box.x1 >= widest - 0.5 and box.x0 <= 72.5, (box, widest)
+
+
 def test_text_editor_shows_source_page_and_illustration():
     """El panel sigue al cursor: la página del PDF del párrafo (recuadrado), también en un párrafo nuevo
     escrito debajo; sobre una ilustración, la ilustración. Es grande (al menos el 40 % del ancho), el zoom la
@@ -10361,6 +10378,7 @@ def sigil_epub(path):
                        '</i></span>\n  </h1>\n  <p class="no-indent">Las <em>leyendas</em> dicen<a href="notas.xhtml#nt1" '
                        'id="rf1" epub:type="noteref"><sup>❮01❯</sup></a> que el <strong>cielo</strong> es azul.</p>\n'
                        '  <p>Segundo párrafo &amp; más.</p>\n  <p class="text align-center"><b>※ ・ ※ ・ ※</b></p>\n'
+                       '  <p>—…</p>\n  <p>— ¡...!</p>\n'
                        '  <h2 id="p1">Parte uno</h2>\n  <p>Tercero.</p>\n  <h3>Subparte</h3>\n  <p>Cuarto.</p>\n'
                        '  <figure class="fill"><img src="../Images/lamina%201.jpg" alt=""/></figure>\n</section>'),
         "capitulo02": ("Capítulo 2: Héroe", '<section epub:type="chapter">\n  <h1>Capítulo 2: Héroe</h1>\n'
@@ -10438,6 +10456,7 @@ def test_faithful_epub_read_blocks_titles_and_metadata():
     assert ('Las <i>leyendas</i> dicen<a href="notas.xhtml#nt1" id="rf1" epub:type="noteref"><sup>❮01❯</sup></a> que '
             'el <b>cielo</b> es azul.') in by_html
     assert "Quinto párrafo." in by_html and by_html["<b>※ ・ ※ ・ ※</b>"].kind == "break"
+    assert by_html["—…"].kind == by_html["— ¡...!"].kind == "p", "un diálogo sin letras no es un separador"
     synthetic = book.blocks[book.candidates[1]]
     assert synthetic.src[1] == -1 and synthetic.html == "Página de título"
     assert sum(b.kind == "image" for b in book.blocks) == 3
@@ -10570,6 +10589,38 @@ def test_window_opens_epub_as_original():
     with zipfile.ZipFile(src) as a, zipfile.ZipFile(out) as b:
         differ = [n for n in a.namelist() if a.read(n) != b.read(n)]
     assert differ == [], differ
+
+
+def test_window_epub_ignores_review_from_the_old_reading():
+    """Date A Live 14: la revisión guardada cuando un EPUB se leía como PDF ponía su estilo, su limpieza tipográfica y
+    el autor «橘 公司(Koushi Tachibana)» sobre el libro fiel. Ahora se aparta (también si por casualidad tiene los mismos
+    bloques) y solo pasan el glosario y los reemplazos; una revisión del libro fiel sí se recupera."""
+    import app
+
+    src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+    count = len(convert.analyze(src).blocks)
+    root, window = visible_window()
+    seen = []
+    try:
+        for blocks in (count, count + 7):
+            old = {"pdf": app._fingerprint(src), "blocks": blocks, "rows": {}, "edits": [], "style": "Novela ligera",
+                   "typography": True, "author": "橘 公司(Koushi Tachibana)", "glossary": ["Tohka"],
+                   "replacements": [["Shidou", "Shido"]]}
+            app._write_json(app._review_path(src), old)
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            seen.append((window.style_var.get(), window.typography_var.get(), window.author_var.get(), window.glossary,
+                         window.replacements, window.status.text()[:40]))
+        window.save_review()
+        window.show_book(convert.analyze(src))
+        again = window.status.text()
+    finally:
+        window.close()
+    for style, typography, author, glossary, replacements, status in seen:
+        assert (style, typography, author) == ("Original", False, "Koushi Tachibana"), seen
+        assert glossary == ["Tohka"] and replacements == [["Shidou", "Shido"]], seen
+        assert status.startswith("La revisión guardada era de la lectura"), seen
+    assert again == "Revisión anterior recuperada", again
 
 
 def test_analyze_external_epub_long_toc_and_inline_image():

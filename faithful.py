@@ -287,7 +287,8 @@ def read_epub(path, progress=None):
                     html_ = _normal(inner)
                     plain = _plain(inner)
                     heading = node.tag in HEADINGS
-                    if not heading and plain and len(plain) <= 20 and not any(c.isalnum() for c in plain):
+                    # «※ ・ ※ ・ ※», «* * *»: solo símbolos de separador; «—…» o «— ¡…!» son diálogo
+                    if not heading and plain and convert.SCENE_BREAK.fullmatch(plain.replace("・", "")):
                         found.append(convert.Block("break", page, html_, tag=node.tag, src=spot, orig=html_))
                     else:
                         found.append(convert.Block("heading" if heading else "p", page, html_, tag=node.tag, src=spot,

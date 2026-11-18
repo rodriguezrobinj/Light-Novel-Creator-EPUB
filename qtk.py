@@ -1043,3 +1043,8 @@ def use_caption(window):
     """Pone la barra propia a window (en Windows; sin pantalla, en las pruebas, sigue la del sistema)."""
     if QApplication.platformName() == "windows" and getattr(window, "caption", None) is None:
         window.caption = Caption(window)
+        if window.testAttribute(Qt.WidgetAttribute.WA_WState_Created):
+            # Un diálogo ya creado tiene el marco calculado con la barra de Windows: se veían las dos. FRAMECHANGED
+            # hace que Windows lo vuelva a pedir (WM_NCCALCSIZE, caption_event) sin moverlo ni cambiar su tamaño
+            import ctypes
+            ctypes.windll.user32.SetWindowPos(int(window.winId()), 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
