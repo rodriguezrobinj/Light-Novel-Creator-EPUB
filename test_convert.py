@@ -2817,6 +2817,10 @@ def test_write_pdf_whole_words_never_splits_a_word():
     root, window = visible_window()
     window.show_book(book)
     window.pdf = TMP / "original.pdf"
+    if not window.pdf.exists():  # al cerrar se guarda la revisión, con la huella del PDF: sin él avisaba
+        with pymupdf.open() as doc:
+            doc.new_page()
+            doc.save(window.pdf)
     dialog = window.open_options("PDF", "book")  # la casilla vive en Opciones → PDF
     dialog.parts["widgets"]["whole_words"].setChecked(True)
     dialog.parts["accept"]()
@@ -10855,9 +10859,11 @@ def test_websheet_round_trip_and_editing_reach_the_book():
             ed.do("toggle_bold")
             ribbon = wait_for(lambda: ed.web_state.get("bold") and ed.bold_btn.isChecked(), 5)  # la cinta la sigue
             select("Cuarto")
-            ed.do("set_paragraph_style", "Título 3")
+            ed.do("set_paragraph_style", "Título 3")  # pasa por la hoja de Qt (deshacer) y vuelve
+            wait_for(lambda: not ed.web_busy and ed.web.loaded)
             select("Segundo párrafo")
             ed.do("toggle_center")
+            wait_for(lambda: not ed.web_busy and ed.web.loaded)
             select("azul.")
             js(ed.web, "(function(){var s=getSelection();s.collapseToEnd();document.execCommand('insertParagraph');"
                        "document.execCommand('insertText',false,'Nuevo párrafo.');return true;})()")
@@ -10882,7 +10888,7 @@ def test_websheet_round_trip_and_editing_reach_the_book():
                                                                                unchanged.split("\n\n")) if x[0] != x[1]])
     assert ribbon, "la cinta no marca la negrita de la hoja web"
     assert "<b>Tercero</b>." in edited and "<h3>Cuarto." in edited, edited
-    assert any(line.startswith('<p style="text-align: center; text-indent: 0">Segundo') for line in edited), edited
+    assert "<center>Segundo párrafo & más." in edited, edited  # centrar, como en la hoja
     assert any("Nuevo párrafo.<b>Hola</b> <b>mundo</b>" in line for line in edited), edited
     assert ids == 2, ids  # el párrafo nuevo no repite el id de la nota
     assert "<b>Tercero</b>" in chapter and "<h3>Cuarto.</h3>" in chapter and not convert.check_epub(out), chapter
@@ -10894,6 +10900,8 @@ def test_websheet_marks_spelling_issues_changes_and_menu():
     el aviso de ese punto, y cambiar la palabra desde él la cambia. Editar el párrafo del aviso lo quita (ya no
     vale); ignorar la palabra la desmarca; F7 y F8 van al cambio y al aviso."""
     import app
+    import shiboken6
+    from PySide6.QtCore import QPoint
     with with_chromium():
         src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
         root, window = visible_window()
@@ -10938,6 +10946,24 @@ def test_websheet_marks_spelling_issues_changes_and_menu():
             found_change = js(ed.web, "lnc.next('change')")
             text = js(ed.web, "document.getElementById('lnc-sheet').innerText")
             clicked = [ed.web_issues[i].title for i in at_issue["issues"]]
+            # clic derecho en una palabra aún sin sugerencias: «Buscando…»; al llegar, se ponen en el menú abierto
+            ed.unknown |= {"Templo"}
+            ed.suggestions.pop("Templo", None)
+            x, y = center("Templo")
+            ed.web_menu(QPoint(round(x), round(y)))
+            wait_for(lambda: getattr(ed, "context", None) is not None and shiboken6.isValid(ed.context)
+                     and ed.context.isVisible(), 5)
+            waiting = [a.text() for a in ed.context.actions()][:1]
+            ed.suggestions["Templo"] = ["Tiemplo"]
+            ed.show_late_suggestions("Templo")
+            late = [a.text() for a in ed.context.actions()][:2]
+            more = [a.text() for a in ed.context.actions()]
+            ed.context.close()
+            x, y = center("Segundo")  # un párrafo, ya editado: comentario y volver al original
+            ed.web_menu(QPoint(round(x), round(y)))
+            wait_for(lambda: "Comentario…" in [a.text() for a in ed.context.actions()], 5)
+            paragraph = [a.text() for a in ed.context.actions()]
+            ed.context.close()
             ed.win.done(0)
         finally:
             window.close()
@@ -10945,6 +10971,9 @@ def test_websheet_marks_spelling_issues_changes_and_menu():
     assert at_word["word"] == "cielo" and clicked == ["Palabra dudosa"], (at_word, at_issue, clicked)
     assert "firmamento" in text and "Segundo párrafo & más. Añadido." in text, text
     assert gone and found_change, (gone, found_change)
+    assert waiting == ["Buscando sugerencias…"] and late[0] == "Tiemplo", (waiting, late)
+    assert "Comentario…" not in more, more  # un título: sin comentario
+    assert "Comentario…" in paragraph and "Volver al original" in paragraph, paragraph
 
 
 def test_websheet_find_read_sync_draft_and_cancel():
@@ -11024,6 +11053,8 @@ def test_websheet_find_read_sync_draft_and_cancel():
             draft = app._draft_path(src)
             drafted = wait_for(lambda: draft.exists() and "parágrafo" in draft.read_text(encoding="utf-8")
                                and "Nuevo arriba." in draft.read_text(encoding="utf-8"), 15)
+            why = (draft.read_text(encoding="utf-8")[:400] if draft.exists() else "sin borrador", ed.note.text(),
+                   ed.web_on, ed.current)
             ed.cancel()
             wait_for(lambda: asked, 15)
             still = ed.win.isVisible()
@@ -11034,9 +11065,107 @@ def test_websheet_find_read_sync_draft_and_cancel():
     assert synced and back, (synced, back)
     assert said[:2] == ["Tercero.", "Subparte"] and reading == 1, (said, reading)
     assert other and replaced, (other, replaced)
-    assert dirty and drafted, (dirty, drafted)
+    assert dirty and drafted, (dirty, drafted, why)
     assert "web" in focused and "qt" not in focused, focused
     assert asked and still, (asked, still)  # preguntó y, al decir que no, el editor sigue abierto
+
+
+def test_editor_original_panel_finds_epub_paragraph_page():
+    """Un EPUB: cada párrafo solo sabe la primera página de su archivo, y un capítulo largo ocupa varias. El panel
+    del original va a la página en la que está el párrafo y lo recuadra, la barra de estado la dice, y un clic en
+    una línea de esa página lleva la hoja a su párrafo."""
+    import app
+    from PySide6.QtCore import QPoint
+    src = sigil_epub(TMP / "Sigil corto.epub")
+    out = TMP / "Sigil largo.epub"
+    body = '<section epub:type="chapter">\n  <h1>Capítulo 1: El Templo</h1>\n' + "".join(
+        f"  <p>Párrafo número {n} con bastante texto de relleno para que el capítulo ocupe varias páginas.</p>\n"
+        for n in range(1, 121)) + "</section>"
+    with zipfile.ZipFile(src) as a, zipfile.ZipFile(out, "w") as b:
+        for info in a.infolist():
+            data = a.read(info)
+            if info.filename.endswith("capitulo01.xhtml"):
+                data = SIGIL_PAGE.format(title="Capítulo 1: El Templo", body=body).encode()
+            b.writestr(info, data)
+    root, window = visible_window()
+    try:
+        window.pdf = out
+        window.show_book(convert.analyze(out))
+        blocks = window.book.blocks
+        k = next(n for n, b in enumerate(blocks) if b.html.startswith("Párrafo número 100 "))
+        other = next(n for n, b in enumerate(blocks) if b.html.startswith("Párrafo número 3 "))
+        head = next(c for c in window.book.candidates if c < k and blocks[c].page == blocks[k].page)
+        window.tree.selection_set(str(head))
+        ed = app.TextEditor(window, str(head), *window.section_bounds(head))
+        ed.go_block(k)
+        page, box = ed.page, ed.box
+        found = "número 100" in window.pdf_doc[page].get_text() if box else False
+        status = ed.status.text()
+        ed.go_block(other)
+        center = QPoint(round((box.x0 + 30) * ed.page_zoom), round((box.y0 + 5) * ed.page_zoom))  # su primera línea
+        ed.show_page(page)  # el panel en la página del párrafo 100, como al pasar de página
+        ed.pick_source(center)
+        picked = editor_source(ed)
+        ed.win.done(0)
+    finally:
+        window.close()
+    assert page > blocks[k].page - 1 and found, (page, blocks[k].page, box)
+    assert status.startswith(f"Página {page + 1} del original"), status
+    assert picked == k, (picked, k)
+
+
+def test_websheet_navigation_changes_bar_and_close_follow_typing():
+    """Lo escrito en la hoja web, sin volver a la hoja: el panel de navegación lo lista en «Cambios» y su clic lleva
+    el cursor ahí; con «Mostrar cambios», la barra dice lo puesto; cerrar la ventana justo después de escribir
+    pregunta (no espera al sondeo)."""
+    import app
+    import shiboken6
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil hoja web navegación.epub")
+        root, window = visible_window()
+        asked, original = [], app.messagebox.askyesno
+        app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or False
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = window.book.candidates[2]
+            window.tree.selection_set(str(k))
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            assert wait_for(lambda: ed.web_on and ed.web.loaded), "la hoja web no cargó"
+            if ed.nav.isHidden():
+                ed.toggle_nav()
+            ed.show_changes_action.setChecked(True)
+            js(ed.web, "(function(){var p=Array.from(document.querySelectorAll('#lnc-sheet p')).find(e=>e.textContent"
+                       ".startsWith('Segundo'));var r=document.createRange();r.selectNodeContents(p);r.collapse(false);"
+                       "var s=getSelection();s.removeAllRanges();s.addRange(r);document.execCommand('insertText',false,"
+                       "' Escrito ahora.');return true;})()")
+
+            def changes():
+                group = next((ed.nav.topLevelItem(n) for n in range(ed.nav.topLevelItemCount())
+                              if ed.nav.topLevelItem(n).text(0).startswith("Cambios")), None)
+                return [group.child(n) for n in range(group.childCount())] if group else []
+            listed = wait_for(lambda: any("Escrito ahora" in c.toolTip(0) for c in changes()), 10)
+            groups = [ed.nav.topLevelItem(n).text(0) for n in range(ed.nav.topLevelItemCount())]
+            bar = wait_for(lambda: ed.diff_frame.isVisible() and "Escrito" in ed.diff_label.text(), 10)
+            js(ed.web, "(function(){var s=getSelection();var r=document.createRange();r.setStart(document.getElementById("
+                       "'lnc-sheet'),0);r.collapse(true);s.removeAllRanges();s.addRange(r);return true;})()")
+            ed.nav_go(next(c for c in changes() if "Escrito ahora" in c.toolTip(0)))
+            went = wait_for(lambda: "Escrito ahora" in (ed.web_state.get("text") or ""), 5)
+            js(ed.web, "(function(){document.execCommand('insertText',false,'X');return true;})()")
+            ed.web_dirty = False  # como si el sondeo aún no hubiera pasado
+            closed = window.close()
+            if shiboken6.isValid(ed.win):
+                ed.win.done(0)
+        finally:
+            app.messagebox.askyesno = original
+            window.close()
+    assert listed and bar and went, (listed, bar, went)
+    assert "Títulos (3)" in groups, groups  # h1, h2 y h3 del capítulo
+    assert asked and closed is False, (asked, closed)
+
+
+def editor_source(ed):
+    return ed.sheet.current_source()
 
 
 def test_websheet_positions_skip_what_only_qt_has():
@@ -11076,7 +11205,20 @@ def test_websheet_is_default_and_does_what_chromium_cannot():
             ed.web.loaded = False
             js(ed.web, "(function(){document.getElementById('lnc-sheet').dispatchEvent(new KeyboardEvent('keydown',"
                        "{keyCode:90,ctrlKey:true,bubbles:true,cancelable:true}));return true;})()")
-            undone = wait_for(lambda: ed.web.loaded and "Tercero." in editor_dump(ed).split("\n\n"), 15)
+            undone = wait_for(lambda: not ed.web_busy and ed.web.loaded
+                              and "Tercero." in editor_dump(ed).split("\n\n"), 15)
+            # dos clics seguidos, sin esperar: los dos llegan (la cola de on_sheet), y Ctrl+Z quita el centrado
+            js(ed.web, "(function(){var b=Array.from(document.getElementById('lnc-sheet').children).findIndex("
+                       "e=>e.textContent.startsWith('Tercero'));return lnc.select(b,0,7);})()")
+            ed.do("toggle_small_caps")
+            ed.do("toggle_center")
+            both = wait_for(lambda: not ed.web_busy and any(x.startswith("<center>") and "Tercero" in x
+                                                          and x != "<center>Tercero." for x in editor_dump(ed).split("\n\n")),
+                            15)
+            tercero = [x for x in editor_dump(ed).split("\n\n") if "Tercero" in x]
+            ed.do("undo")
+            uncentered = wait_for(lambda: not ed.web_busy and not any(x.startswith("<center>") and "Tercero" in x
+                                                                      for x in editor_dump(ed).split("\n\n")), 15)
             ed.open_section(*ed.sections[0][1:3])  # «Contenido»
             contents = wait_for(lambda: ed.current[0] < 0 and not ed.web_on and ed.sheet.isVisible(), 15)
             ed.open_section(*window.section_bounds(k))
@@ -11092,6 +11234,7 @@ def test_websheet_is_default_and_does_what_chromium_cannot():
     assert default, "la hoja web no salió sola al abrir el editor"
     assert caps and ribbon and line != "Tercero." and "Tercero" in line, (caps, ribbon, line)
     assert undone, editor_dump(ed)
+    assert both and uncentered, (both, uncentered, tercero)
     assert contents and back, (contents, back)
     assert remembered and window.settings.get("editor_web") is False, window.settings.get("editor_web")
 
@@ -13072,7 +13215,8 @@ def no_modal_dialogs():
     import qtk
 
     def show(icon, title, message, buttons, parent):
-        print("aviso no previsto:", title, "·", (message or "").splitlines()[:1])
+        test = next((f.name for f in reversed(traceback.extract_stack()) if f.name.startswith("test_")), "?")
+        print("aviso no previsto:", title, "·", (message or "").splitlines()[:1], "· en", test)
 
     qtk._MessageBox._show = staticmethod(show)
 

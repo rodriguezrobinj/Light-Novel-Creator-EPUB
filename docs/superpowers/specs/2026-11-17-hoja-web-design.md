@@ -79,3 +79,19 @@ aceptar y generar.
 - **Marcas propias en un EPUB fiel**: `<small class="sc">`, `div.marco`, `p.center`… no tienen regla en el CSS del
   original. Con el aspecto «Original», `write_faithful` añade `convert.MARKUP_CSS` (en `lnc/estilo.css`) solo si un
   texto cambiado usa esas clases (sin cambios sale igual byte a byte); la hoja web la lleva siempre.
+
+## Revisión tras A4 (recorrido de todos los botones)
+
+- **Estilo, alineación y sangría** del párrafo pasan por la hoja de Qt (`on_sheet`): en Chromium se cambiaba su
+  atributo a mano, fuera de su deshacer, y Ctrl+Z no los quitaba. Ctrl+E y Ctrl+D son atajos de Qt. Se quitan
+  `retag`, `align` e `indent` de `window.lnc`.
+- **Cola de `on_sheet`** (`web_busy`, `web_queue`): mientras la web se recarga, lo pulsado espera; si no, volcaba la
+  página vieja y pisaba lo anterior. La web queda lista (`web_settled`) cuando su selección ya está puesta.
+- **Respuestas tardías**: `WebSheet.call` no hace nada con lo que Chromium conteste tras cerrar el editor
+  (`closing`); antes llegaba a botones ya borrados.
+- **Clic derecho**: también Comentario…, Volver al original, Cambiar ilustración…, Sinónimos y Aviso siguiente;
+  `lnc.at` pone el cursor donde se pulsó (fuera de lo elegido). «Arreglar» un aviso conserva la selección.
+- **Panel de navegación** (`web_nav`, `lnc.outline`) y **barra de «Mostrar cambios»** (texto del párrafo en
+  `lnc.state`) siguen lo escrito en la web. Cerrar la ventana principal pregunta a la web en el momento (`sync_web`).
+- **Panel del original con un EPUB** (`source_page`): un bloque solo sabe la primera página de su archivo; su
+  texto se busca en las de ese archivo (con caché), y un clic en la página va al párrafo de la línea pulsada.
