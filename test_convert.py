@@ -10804,6 +10804,94 @@ def test_editor_epub_tab_follows_what_is_written():
     assert found and back, (found, back)
 
 
+def test_websheet_cleans_what_chromium_writes():
+    """Lo que Chromium deja al editar vuelve como lo escribiría la app: <strike> como <s>, sin <font>, sin style
+    vacíos ni xmlns repetidos, &nbsp; como espacio, <br /> como <br/>, sin bloques dentro de un párrafo ni el <br>
+    final de uno vacío; las ilustraciones vuelven como su marca y un párrafo vacío desaparece."""
+    import websheet
+    assert websheet.clean('<strike xmlns="http://www.w3.org/1999/xhtml">a</strike>&nbsp;<font face="x">b</font>'
+                          '<span style="">c</span><br /><div>d</div><br>') == "<s>a</s> bc<br/>d", "limpieza"
+    dumped = json.dumps([{"tag": "h1", "attrs": {"class": "lucida"}, "html": "Título", "token": ""},
+                         {"tag": "figure", "attrs": {"class": "lnc-obj", "contenteditable": "false",
+                                                     "data-token": "[Ilustración 7]"}, "html": "<img/>",
+                          "token": "[Ilustración 7]"},
+                         {"tag": "p", "attrs": {}, "html": "<br>", "token": ""},
+                         {"tag": "p", "attrs": {"class": "no-indent", "style": "text-align: justify"},
+                          "html": "A &amp; B <b>c</b>", "token": ""}])
+    assert websheet.lines_of(dumped) == ('<h1 class="lucida">Título\n\n[Ilustración 7]\n\n'
+                                         '<p class="no-indent" style="text-align: justify">A & B <b>c</b>'), \
+        websheet.lines_of(dumped)
+
+
+def test_websheet_round_trip_and_editing_reach_the_book():
+    """La hoja web carga el capítulo de un EPUB con su CSS y, sin tocar nada, vuelve con las mismas líneas. Editando
+    (como el usuario, con las órdenes de la cinta): negrita, «Título 3» con su clase, Intro sin repetir el id, pegar
+    desde Word (solo negrita y texto), centrar; al volver a la hoja y aceptar, llega al libro y al EPUB."""
+    import app
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = window.book.candidates[2]
+            window.tree.selection_set(str(k))
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            before = editor_dump(ed)
+            ed.toggle_web()
+            assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            family = js(ed.web, "getComputedStyle(document.querySelector('#lnc-sheet h1')).fontFamily")
+            ed.flush_web(lambda: None)
+            wait_for(lambda: False, 1)
+            unchanged = editor_dump(ed)
+
+            def select(text):  # elige text en la hoja web, como con el ratón
+                js(ed.web, "(function(t){var w=document.createTreeWalker(document.getElementById('lnc-sheet'),4),n;"
+                           "while((n=w.nextNode())){var i=n.data.indexOf(t);if(i>=0){var r=document.createRange();"
+                           "r.setStart(n,i);r.setEnd(n,i+t.length);var s=getSelection();s.removeAllRanges();"
+                           "s.addRange(r);return true;}}return false;})(%s)" % json.dumps(text))
+            select("Tercero")
+            ed.do("toggle_bold")
+            ribbon = wait_for(lambda: ed.web_state.get("bold") and ed.bold_btn.isChecked(), 5)  # la cinta la sigue
+            select("Cuarto")
+            ed.do("set_paragraph_style", "Título 3")
+            select("Segundo párrafo")
+            ed.do("toggle_center")
+            select("azul.")
+            js(ed.web, "(function(){var s=getSelection();s.collapseToEnd();document.execCommand('insertParagraph');"
+                       "document.execCommand('insertText',false,'Nuevo párrafo.');return true;})()")
+            js(ed.web, "(function(){var dt=new DataTransfer();dt.setData('text/html','<div style=\"color:red\"><b>Hola"
+                       "</b> <span style=\"font-weight:700\">mundo</span></div>');dt.setData('text/plain','Hola mundo');"
+                       "document.getElementById('lnc-sheet').dispatchEvent(new ClipboardEvent('paste',"
+                       "{clipboardData:dt,bubbles:true,cancelable:true}));return true;})()")
+            ids = js(ed.web, "document.querySelectorAll('#lnc-sheet [id=\"p1\"], #lnc-sheet [id=\"rf1\"]').length")
+            done = []
+            ed.flush_web(lambda: done.append(True))
+            wait_for(lambda: done)
+            edited = editor_dump(ed).split("\n\n")
+            ed.web_done()
+            ed.save()
+            out = TMP / "Sigil hoja web.epub"
+            convert.write_epub(window.book, faithful_chapters(window.book), out, style=convert.ORIGINAL,
+                               typography=False, contents=False, separator="Original del PDF")
+            chapter = epub_file(out, "OEBPS/Text/capitulo01.xhtml")
+        finally:
+            window.close()
+    assert "Lucida" in family and unchanged == before, (family, [x for x in zip(before.split("\n\n"),
+                                                                               unchanged.split("\n\n")) if x[0] != x[1]])
+    assert ribbon, "la cinta no marca la negrita de la hoja web"
+    assert "<b>Tercero</b>." in edited and "<h3>Cuarto." in edited, edited
+    assert any(line.startswith('<p style="text-align: center; text-indent: 0">Segundo') for line in edited), edited
+    assert any("Nuevo párrafo.<b>Hola</b> <b>mundo</b>" in line for line in edited), edited
+    assert ids == 2, ids  # el párrafo nuevo no repite el id de la nota
+    assert "<b>Tercero</b>" in chapter and "<h3>Cuarto.</h3>" in chapter and not convert.check_epub(out), chapter
+
+
+def editor_dump(ed):
+    import editor
+    return editor.dump(ed.sheet.document())
+
+
 def faithful_chapters(book):
     return [(k, book.blocks[k].title) for k in book.candidates]
 
