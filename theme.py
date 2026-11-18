@@ -21,7 +21,7 @@ ICONS = {"warn": "▲", "ok": "✓", "close": "✕", "menu": "▾", "menu_open":
          "first": "◀◀", "last": "▶▶", "undo": "↶", "redo": "↷", "note": "✎", "split": "✂", "center": "≡", "left": "⇤",
          "frame": "▭", "right": "⇥", "join": "⤒", "scene": "❖", "nav": "☰", "search": "⌕", "read": "♪",
          "link": "↗", "doc": "🗎", "dot": "●", "minus": "−", "symbols": "Ω", "changes": "±", "stats": "Σ",
-         "show": "◉", "image": "▣"}
+         "show": "◉", "image": "▣", "justify": "≣", "indent": "↦", "ruby": "ふ", "newline": "↵", "code": "</>", "clear": "⌫"}
 
 # edge: borde de botones, campos y casillas; line: el de tarjetas y separadores. En claro, con el mismo gris
 # para los dos, los controles se perdían sobre el blanco (en oscuro se veían bien)
@@ -196,6 +196,20 @@ def level_colors(dark):
 
 def editor_tags(dark):
     return EDITOR[bool(dark)]
+
+
+# Vista de código del editor: etiquetas, atributos, valores y comentarios (las ilustraciones). 4,5:1 sobre la hoja
+CODE = {False: {"tag": "#1f5fbf", "attr": "#9c4d00", "value": "#2e7d32", "comment": "#6b6b6b"},
+        True: {"tag": "#7099f5", "attr": "#e0a050", "value": "#7bc47f", "comment": "#a0a0a0"}}
+
+
+# Colores de texto del editor (cinta → Formato → Color), como los de Word: (nombre, color o None = el del libro)
+TEXT_COLORS = [("Automático", None), ("Rojo", "#c00000"), ("Azul", "#1f5fbf"), ("Verde", "#2e7d32"),
+               ("Gris", "#6b6b6b"), ("Morado", "#7030a0"), ("Naranja", "#c55a11")]
+
+
+def code_colors(dark):
+    return CODE[bool(dark)]
 
 
 def diff_tags(dark):

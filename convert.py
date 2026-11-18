@@ -97,6 +97,9 @@ class Block:
     orig: str = ""      # html tal como se leyó: si html sigue igual, se copian los bytes originales
     ref: str = ""       # imagen: su archivo dentro del EPUB
     title: str = ""     # título: el nombre de la fila (el del índice del EPUB), si no es su texto
+    # Etiqueta de apertura del párrafo si no es la de siempre: la del EPUB de entrada (<p class="no-indent">) o la que
+    # pone el editor (<h3>, <p style="text-align: justify">). En las líneas del editor va delante del texto
+    opening: str = ""
 
 
 @dataclass
@@ -1377,6 +1380,9 @@ INLINE = re.compile(r"&lt;(/?)(i|b|sup|sc)&gt;")
 # Etiquetas en línea de un EPUB de entrada que el editor muestra como texto (faithful): al guardar vuelven a serlo
 RAW_TAG = re.compile(r'&lt;(/?)(ruby|rb|rt|rp|rtc|span|br|small|sub|abbr|cite|code|q|s|u|mark|big|tt|del|ins|em|'
                      r'strong|img|wbr|i|b|sup)((?:\s+[\w:.-]+="[^"<>]*")*)\s*(/?)&gt;')
+HEADING_TAGS = {f"h{n}" for n in range(1, 7)}
+# Etiqueta de apertura de un párrafo al principio de una línea del editor (Block.opening)
+OPENING = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>')
 RAW_LINK = re.compile(r'&lt;a((?:\s+[\w:.-]+="[^"<>]*")+)\s*&gt;(.*?)&lt;/a&gt;', re.S)  # el par entero
 # nota al pie en el editor de texto; puede llevar corchetes dentro («[Nota: ver [Arco 2].]»)
 NOTE_MARK = re.compile(r"\[Nota: ((?:[^\[\]]|\[[^\[\]]*\])+)\]")
@@ -1400,8 +1406,10 @@ def partial_path(out_path):
 
 
 def split_prefix(line):
-    """(prefijo, resto) de una línea de section_text: "# " de un título o el de una alineación. Todo el que
-    lea líneas lo quita aquí: una alineación nueva solo se añade a ALIGN_PREFIX."""
+    """(prefijo, resto) de una línea de section_text: "# " de un título, el de una alineación o la etiqueta de
+    apertura del párrafo (Block.opening). Todo el que lea líneas lo quita aquí."""
+    if m := OPENING.match(line):
+        return m[0], line[m.end():]
     for prefix in ("# ", *ALIGN_PREFIX.values()):
         if line.startswith(prefix):
             return prefix, line[len(prefix):]
@@ -1420,6 +1428,9 @@ def section_text(book, start, end):
 
 def _line(b, k):
     """Línea de section_text del bloque b, que es el número k del libro."""
+    if b.kind in ("p", "heading") and b.opening:
+        text = NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>")
+        return b.opening + html.unescape(text)
     if b.kind == "p":
         prefix = ALIGN_PREFIX.get(b.align, "")
         text = NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>")
@@ -1504,6 +1515,10 @@ def edit_section(book, start, end, text, folder=None):
         elif line in same:
             new.append(replace(same[line]))  # copia: la línea puede estar dos veces
             page = same[line].page
+        elif (opened := OPENING.match(line)) and line[opened.end():].strip():
+            tag = opened[1].lower()
+            new.append(Block("heading" if tag in HEADING_TAGS else "p", page, _inline(line[opened.end():].strip()),
+                             tag=tag, opening=opened[0]))
         elif line.startswith("# ") and line[2:].strip():
             new.append(Block("heading", page, _inline(line[2:].strip())))
         elif SCENE_BREAK.fullmatch(line):
@@ -1516,8 +1531,9 @@ def edit_section(book, start, end, text, folder=None):
             page = new[-1].page = origin[j].page
             new[-1].rect = origin[j].rect
             was, now = origin[j], new[-1]
-            if was.src and was.kind == now.kind:  # EPUB de entrada: se escribe en el mismo elemento
-                now.tag, now.src, now.orig, now.title = was.tag, was.src, was.orig, was.title
+            if was.src and was.kind in ("p", "heading"):  # EPUB de entrada: se escribe en el mismo elemento
+                now.src, now.orig, now.title = was.src, was.orig, was.title
+                now.tag = now.tag or was.tag
             if was.kind == now.kind == "heading":
                 now.image = was.image  # el título dibujado (Witch 1) sigue con su nombre corregido o traducido
             # Traducido sin la marca (revisiones de antes de los recuadros, o la IA la quitó): sigue en su recuadro
@@ -3896,7 +3912,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             elif b.kind == "break" or k in breaks:
                 parts.append(_separator(b if b.kind == "break" else Block("break", b.page), k, style, separator, images))
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
-                parts.append(f'{mark()}<h2 id="t{k}">{NOTE.sub(noteref, fix(b.html))}</h2>')  # fuera: el título queda limpio
+                level = b.tag if b.tag in HEADING_TAGS - {"h1"} else "h2"  # «Título 3» del editor: <h3>
+                parts.append(f'{mark()}<{level} id="t{k}">{NOTE.sub(noteref, fix(b.html))}</{level}>')  # fuera: el título queda limpio
                 # en el índice, texto solo: <i> no vale en el <text> del NCX y la nota no es del título
                 subtitles.setdefault(name, []).append((f"t{k}", TAGS.sub("", NOTE.sub("", fix(b.html)))))
             else:
@@ -3913,7 +3930,12 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 attr = f' class="{css}"' if css else ""
                 body = NOTE.sub(noteref, ICON.sub(icon_file, fix(b.html, dashes=not framed[at])))  # la nota sale del párrafo: no se parte
                 item = "li" if listed[at] else "p"
-                parts.append(f"<{item}{attr}>{mark()}{_hyphenate(body) if hyphenate else body}</{item}>")
+                body = _hyphenate(body) if hyphenate else body
+                if b.opening and not listed[at] and not framed[at]:  # estilo del editor: justificado, cita, sin sangría
+                    tag = OPENING.match(b.opening)[1]
+                    parts.append(f"{b.opening}{mark()}{body}</{tag}>")
+                else:
+                    parts.append(f"<{item}{attr}>{mark()}{body}</{item}>")
             if listed[at] and (at == len(blocks) - 1 or listed[at + 1] != listed[at]):
                 parts.append("</ul>" if listed[at] in LIST_STYLES[:3] else "</ol>")
             if framed[at] and (at == len(blocks) - 1 or not framed[at + 1]):

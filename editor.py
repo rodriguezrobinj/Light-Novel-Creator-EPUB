@@ -33,11 +33,11 @@ SUB = 18              # sangría de una línea sin viñeta en un recuadro con vi
 MIME = "application/x-lnc-hoja"  # copiar y pegar dentro de la hoja conserva formato e ilustraciones
 WHOLE = MIME + "-parrafos"  # lo copiado acaba en un salto de párrafo: se pegan párrafos enteros
 ICON = _USER + 10     # imagen: la etiqueta <img> de un icono del texto (convert.ICON), que vuelve a section_text
-MARKS = re.compile(r'(</?(?:i|b|sup|sc)>|<a href="[^"]*">|</a>|<img class="icono" [^>]*>)')
-LINK = re.compile(r'<a href="([^"]*)">')
-# Etiquetas de un EPUB de entrada (convert.RAW_TAG, ya sin escapar) que se ven como texto en gris
-RAW = re.compile(r"(</?(?:ruby|rb|rt|rp|rtc|span|br|small|sub|abbr|cite|code|q|s|u|mark|big|tt|del|ins|em|strong|img|"
-                 r"wbr|a|i|b|sup)\b[^<>]*>)")
+STACK = _USER + 11   # letra: etiquetas del libro que la rodean, de fuera adentro (STACK_SEP entre ellas)
+VOID = _USER + 12    # letra invisible (VOID_CHAR): una etiqueta vacía del libro que vuelve tal cual
+OPENING = _USER + 13  # párrafo: su etiqueta de apertura (convert.Block.opening), con el estilo puesto en la cinta
+USER_STYLE = _USER + 14  # letra: tamaño, color o letra puestos en la cinta, en CSS: vuelven como <span style>
+BOOK_LOOK = _USER + 15  # párrafo con el aspecto del libro (su etiqueta y su CSS): sin el título azul de la hoja
 LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; TextEditor pone el azul del tema
 NOTE = re.compile(r"\[Nota: [^\]]*\]")
 THUMB = 160  # alto de las miniaturas de ilustración en la hoja, en píxeles
@@ -56,20 +56,378 @@ def _plain_format():
     return QTextCharFormat()
 
 
-def _runs(text):
-    """Trozos de texto con <i>, <b>, <sup>, <sc> y <a href>: [(texto, cursiva, negrita, enlace, sup, sc)]."""
-    runs, on, href = [], {"i": False, "b": False, "sup": False, "sc": False}, ""
-    for part in MARKS.split(text):
-        tag = part.strip("</>")
-        if tag in on and part in (f"<{tag}>", f"</{tag}>"):
-            on[tag] = not part.startswith("</")
-        elif part == "</a>" and href:  # el cierre de un enlace de un EPUB (nota con id…) sigue siendo texto
-            href = ""
-        elif LINK.fullmatch(part):
-            href = LINK.fullmatch(part).group(1)
-        elif part:
-            runs.append((part, on["i"], on["b"], href, on["sup"], on["sc"]))
-    return runs
+# ------------------------------------------------------------------ texto con formato: lo que se ve es el HTML
+# Cada letra de la hoja recuerda las etiquetas que la rodean en el libro (STACK), tal cual: un <span class>, un
+# <ruby> o una nota <a id=… epub:type=…> vuelven enteros aunque la hoja no sepa dibujarlos. Lo que sí sabe dibujar
+# (cursiva, negrita, subrayado, tachado, superíndice, subíndice, tamaño, color, letra, enlaces) se ve como en el
+# libro; al volcar, lo que se cambió con la cinta añade o quita sus etiquetas (_wanted).
+STACK_SEP = "\x1f"
+VOID_CHAR = "⁠"  # unión de palabras: ni se ve ni separa; lleva una etiqueta vacía del libro (VOID)
+LINE_BREAK = " "  # salto de línea dentro del párrafo: <br/> (Mayús+Intro)
+TAG = re.compile(r'<(/?)([A-Za-z][\w:.-]*)((?:\s+[^\s=<>/"]+(?:\s*=\s*"[^"<>]*")?)*)\s*(/?)>')
+VOID_TAGS = {"br", "img", "wbr", "hr"}
+SIZES = (0.7, 0.8, 1.0, 1.2, 1.5, 2.0, 2.4)  # tamaños relativos de Qt: FontSizeAdjustment de -2 a 4
+HEADING_SIZES = {"h1": "1.5em", "h2": "1.3em", "h3": "1.15em", "h4": "1.05em"}
+CSS = None  # hoja del EPUB de entrada (faithful.BookStyle): sus clases y fuentes se ven en la hoja; None con un PDF
+FAMILIES = {}  # familia del CSS del libro -> familia registrada en Qt (sus fuentes incrustadas)
+
+
+def use_css(style):
+    """La hoja se ve con el CSS de un EPUB de entrada (faithful.BookStyle), con sus fuentes incrustadas; None: la de
+    siempre. Las fuentes se registran en Qt una vez por familia."""
+    global CSS
+    CSS = style
+    for family, data in (style.fonts.items() if style else ()):
+        if family not in FAMILIES:
+            from PySide6.QtCore import QByteArray
+            from PySide6.QtGui import QFontDatabase
+            ident = QFontDatabase.addApplicationFontFromData(QByteArray(data))
+            names = QFontDatabase.applicationFontFamilies(ident) if ident >= 0 else []
+            FAMILIES[family] = names[0] if names else family
+
+
+def _name(raw):
+    """Nombre de una etiqueta: '<span class="x">' -> "span"."""
+    m = TAG.match(raw)
+    return m[2].lower() if m else ""
+
+
+def _attr(raw, name):
+    m = re.search(r"\s" + name + r'\s*=\s*"([^"]*)"', raw or "")
+    return html.unescape(m[1]) if m else ""
+
+
+def _style(text):
+    """Declaraciones de un atributo style: {"font-size": "1.2em", …}."""
+    out = {}
+    for part in (text or "").split(";"):
+        key, _, value = part.partition(":")
+        if key.strip() and value.strip():
+            out[key.strip().lower()] = value.strip()
+    return out
+
+
+def _css(v, decls):
+    """Aplica declaraciones de CSS al aspecto v (las que la hoja sabe dibujar)."""
+    for key, value in decls.items():
+        value = value.lower().replace("!important", "").strip()
+        if value in ("inherit", "initial", "unset", "revert"):  # lo del padre sigue (el reinicio de los EPUB de Sigil)
+            continue
+        if key == "font-style":
+            v["italic"] = value in ("italic", "oblique")
+        elif key == "font-weight":
+            v["bold"] = value in ("bold", "bolder") or (value.isdigit() and int(value) >= 600)
+        elif key == "font-size":
+            m = re.fullmatch(r"([\d.]+)\s*(em|rem|%)", value)
+            if m:
+                v["size"] = v.get("size", 1.0) * float(m[1]) / (100 if m[2] == "%" else 1)
+            elif value in ("smaller", "small", "x-small"):
+                v["size"] = v.get("size", 1.0) * 0.83
+            elif value in ("larger", "large", "x-large"):
+                v["size"] = v.get("size", 1.0) * 1.2
+        elif key == "font-variant" and "small-caps" in value:
+            v["smallcaps"] = True
+        elif key in ("text-decoration", "text-decoration-line"):
+            v["underline"], v["strike"] = "underline" in value, "line-through" in value
+        elif key == "vertical-align" and value in ("super", "sub"):
+            v["valign"] = value
+        elif key == "color" and re.fullmatch(r"#[0-9a-f]{3,8}|[a-z]+|rgb\([^)]*\)", value):
+            v["color"] = value
+        elif key == "font-family":
+            first = decls[key].split(",")[0].strip().strip("\"'")
+            if first.lower() not in ("serif", "sans-serif", "inherit", "monospace"):
+                v["family"] = FAMILIES.get(first, first)
+            elif first.lower() == "monospace":
+                v["family"] = "Consolas"
+
+
+def visual(stack, para=None):
+    """Aspecto de una letra con estas etiquetas encima en un párrafo con el aspecto para."""
+    v = dict(para or {})
+    v.setdefault("size", 1.0)
+    for raw in stack:
+        name = _name(raw)
+        if name in ("i", "em", "cite", "dfn", "var"):
+            v["italic"] = True
+        elif name in ("b", "strong"):
+            v["bold"] = True
+        elif name in ("u", "ins"):
+            v["underline"] = True
+        elif name in ("s", "del", "strike"):
+            v["strike"] = True
+        elif name == "sup":
+            v["valign"] = "super"
+        elif name == "sub":
+            v["valign"] = "sub"
+        elif name == "small":
+            v["size"] *= 0.83
+        elif name == "big":
+            v["size"] *= 1.2
+        elif name == "sc":
+            v["smallcaps"] = True
+        elif name == "rt":  # furigana: la lectura, pequeña y arriba
+            v.update(size=v["size"] * 0.6, valign="super", color="#888888")
+        elif name == "rp":  # los paréntesis para lectores sin furigana: en la hoja no se ven
+            v["hidden"] = True
+        elif name in ("code", "tt", "kbd", "samp"):
+            v["family"] = "Consolas"
+        elif name == "a" and _attr(raw, "href"):
+            v.update(href=_attr(raw, "href"), underline=True)
+        if CSS:
+            _css(v, CSS.props(name, _attr(raw, "class").split()))
+        _css(v, _style(_attr(raw, "style")))
+    return v
+
+
+def look_format(v):
+    """QTextCharFormat de un aspecto de visual()."""
+    f = link_format(v["href"]) if v.get("href") else QTextCharFormat()
+    f.setFontItalic(bool(v.get("italic")))
+    f.setFontWeight(QFont.Weight.Bold if v.get("bold") else QFont.Weight.Normal)
+    f.setFontUnderline(bool(v.get("underline")))
+    f.setFontStrikeOut(bool(v.get("strike")))
+    f.setVerticalAlignment({"super": QTextCharFormat.VerticalAlignment.AlignSuperScript,
+                            "sub": QTextCharFormat.VerticalAlignment.AlignSubScript}.get(
+        v.get("valign"), QTextCharFormat.VerticalAlignment.AlignNormal))
+    f.setFontCapitalization(QFont.Capitalization.SmallCaps if v.get("smallcaps") else QFont.Capitalization.MixedCase)
+    size = 0.7 if v.get("hidden") else v.get("size", 1.0)
+    step = min(range(len(SIZES)), key=lambda n: abs(SIZES[n] - size)) - 2
+    if step:
+        f.setProperty(QTextFormat.Property.FontSizeAdjustment, step)
+    if v.get("family"):
+        f.setFontFamilies([v["family"]])
+    if v.get("hidden"):
+        f.setForeground(QColor(0, 0, 0, 0))
+    elif v.get("color") and not v.get("href"):
+        f.setForeground(QColor(v["color"]))
+    return f
+
+
+def parse_inline(text):
+    """Línea del editor sin su prefijo -> [(tipo, valor, pila)]: ("text", texto), ("br", None), ("void", etiqueta
+    vacía tal cual: <a id="x"></a>, <span …/>) o ("icon", <img> de un icono); pila: las etiquetas abiertas, de fuera
+    adentro, tal cual. Un cierre sin su apertura queda como texto."""
+    items, stack, opened, pos = [], [], [], 0
+
+    def add_text(piece):
+        if piece:
+            items.append(("text", piece, tuple(stack)))
+
+    for m in TAG.finditer(text):
+        add_text(text[pos:m.start()])
+        pos = m.end()
+        raw, name = m[0], m[2].lower()
+        if convert.ICON.fullmatch(raw):
+            items.append(("icon", raw, tuple(stack)))
+        elif m[1]:
+            at = next((n for n in range(len(stack) - 1, -1, -1) if _name(stack[n]) == name), None)
+            if at is None:
+                add_text(raw)
+                continue
+            if at == len(stack) - 1 and opened[at] == len(items):  # vacía: <a id="x"></a>
+                items.append(("void", stack[at] + raw, tuple(stack[:at])))
+            del stack[at:], opened[at:]
+        elif m[4] or name in VOID_TAGS:
+            items.append(("br", None, tuple(stack)) if name == "br" else ("void", raw, tuple(stack)))
+        else:
+            stack.append(raw)
+            opened.append(len(items))
+    add_text(text[pos:])
+    return items
+
+
+def _serialize(seq):
+    """[(tipo, valor, etiquetas)] -> HTML con las etiquetas bien anidadas: entre trozo y trozo se cierra lo justo y
+    se abre lo que falta (las comunes por fuera siguen abiertas)."""
+    out, opened = [], []
+    for kind, value, tags in seq:
+        same = 0
+        while same < min(len(opened), len(tags)) and opened[same] == tags[same]:
+            same += 1
+        out += [f"</{_name(t)}>" for t in reversed(opened[same:])] + list(tags[same:])
+        opened = list(tags)
+        out.append("<br/>" if kind == "br" else value)
+    out += [f"</{_name(t)}>" for t in reversed(opened)]
+    return "".join(out)
+
+
+def _still(raw, f):
+    """¿Sigue la etiqueta raw en una letra con el formato f? Las que la cinta pone o quita (cursiva, negrita…) solo
+    si su formato sigue ahí; las demás (span, ruby…) siempre."""
+    name = _name(raw)
+    va = f.verticalAlignment()
+    owned = {"i": f.fontItalic(), "em": f.fontItalic(), "b": f.fontWeight() >= QFont.Weight.DemiBold,
+             "strong": f.fontWeight() >= QFont.Weight.DemiBold, "u": f.fontUnderline(), "ins": f.fontUnderline(),
+             "s": f.fontStrikeOut(), "del": f.fontStrikeOut(), "strike": f.fontStrikeOut(),
+             "sup": va == QTextCharFormat.VerticalAlignment.AlignSuperScript,
+             "sub": va == QTextCharFormat.VerticalAlignment.AlignSubScript,
+             "sc": f.fontCapitalization() == QFont.Capitalization.SmallCaps}
+    if name in owned:
+        return owned[name]
+    if name == "a" and _attr(raw, "href"):
+        return f.isAnchor() and f.anchorHref() == _attr(raw, "href")
+    return True
+
+
+def _wanted(f, stack, para):
+    """Etiquetas de una letra al volcar: las suyas que siguen y las que pide lo puesto con la cinta."""
+    kept = [t for t in stack if _still(t, f)]
+    v = visual(kept, para)
+    va = f.verticalAlignment()
+    add = []
+    if f.isAnchor() and f.anchorHref() and f.anchorHref() != v.get("href"):
+        add.append(f'<a href="{html.escape(f.anchorHref())}">')
+    if f.fontWeight() >= QFont.Weight.DemiBold and not v.get("bold"):
+        add.append("<b>")
+    if f.fontItalic() and not v.get("italic"):
+        add.append("<i>")
+    if f.fontUnderline() and not v.get("underline") and not f.isAnchor():
+        add.append("<u>")
+    if f.fontStrikeOut() and not v.get("strike"):
+        add.append("<s>")
+    if f.fontCapitalization() == QFont.Capitalization.SmallCaps and not v.get("smallcaps"):
+        add.append("<sc>")
+    if va == QTextCharFormat.VerticalAlignment.AlignSuperScript and v.get("valign") != "super":
+        add.append("<sup>")
+    if va == QTextCharFormat.VerticalAlignment.AlignSubScript and v.get("valign") != "sub":
+        add.append("<sub>")
+    if f.property(USER_STYLE):
+        add.append(f'<span style="{f.property(USER_STYLE)}">')
+    return tuple(kept + add)
+
+
+def _stack_of(f):
+    value = f.property(STACK)
+    return tuple(value.split(STACK_SEP)) if isinstance(value, str) and value else ()
+
+
+def paragraph_look(opening):
+    """(aspecto de sus letras, {"align", "indent", "quote"}) de un párrafo con esa etiqueta de apertura: el de su
+    etiqueta (un título, más grande), el de sus clases en el CSS del libro y el de su style."""
+    m = convert.OPENING.match(opening or "")
+    if not m:
+        return {}, {}
+    tag, attrs = m[1].lower(), m[2] or ""
+    decls = {"font-weight": "bold", "font-size": HEADING_SIZES.get(tag, "1em")} if tag in convert.HEADING_TAGS else {}
+    if CSS:
+        decls.update({k: v for k, v in CSS.props("body", []).items() if k == "font-family"})
+        decls.update(CSS.props(tag, _attr(attrs, "class").split()))
+    decls.update(_style(_attr(attrs, "style")))
+    v = {}
+    _css(v, decls)
+    return v, {"align": decls.get("text-align", "").lower(), "indent": decls.get("text-indent", "").lower(),
+               "quote": tag == "blockquote"}
+
+
+def _retag(opening, tag):
+    """La etiqueta de apertura con otro nombre y los mismos atributos: '<p class="x">' -> '<h3 class="x">'."""
+    m = convert.OPENING.match(opening)
+    return f"<{tag}{m[2] if m and m[2] else ''}>"
+
+
+def _with_style(opening, key, value):
+    """La etiqueta de apertura con key: value en su style (None quita key; sin nada, sin style)."""
+    m = convert.OPENING.match(opening)
+    tag, attrs = (m[1], m[2] or "") if m else ("p", "")
+    decls = _style(_attr(attrs, "style"))
+    if value is None:
+        decls.pop(key, None)
+    else:
+        decls[key] = value
+    style = "; ".join(f"{k}: {v}" for k, v in decls.items())
+    attrs = re.sub(r'\sstyle\s*=\s*"[^"]*"', "", attrs)
+    return f'<{tag}{attrs} style="{style}">' if style else f"<{tag}{attrs}>"
+
+
+# ------------------------------------------------------------------ vista de código
+# Cada línea del editor como el elemento que será en el libro, uno por línea; las alineaciones de la app con sus
+# clases (las de convert.BASE_CSS) y las ilustraciones como comentario, que se mueven o se borran pero no se escriben
+CODE_CLASSES = {"center": '<p class="center">', "right": '<p class="right">', "frame": '<p class="marco">',
+                "frame-center": '<p class="marco center">', "frame-right": '<p class="marco right">'} | {
+    f"list-{style}": f'<li class="lista-{style}">' for style in convert.LIST_STYLES}
+CODE_LINE = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>(.*)</\1>', re.S)
+CODE_TOKEN = re.compile(r"<!--\s*(\[[^\]]+\])\s*-->")
+
+
+def to_code(text):
+    """Texto de la hoja (dump) -> su HTML, un elemento por línea."""
+    out = []
+    for line in (line for line in text.split("\n\n") if line.strip()):
+        bare = line.strip()
+        if convert.TOKEN.fullmatch(bare) or convert.PICTURE.fullmatch(bare):
+            out.append(f"<!-- {bare} -->")
+            continue
+        prefix, rest = convert.split_prefix(line)
+        inner = convert._inline(rest.strip())
+        if convert.OPENING.match(prefix):
+            opening = prefix
+        elif prefix == "# ":
+            opening = "<h1>"
+        else:
+            opening = CODE_CLASSES.get(align_of(line), "<p>")
+        out.append(f"{opening}{inner}</{convert.OPENING.match(opening)[1]}>")
+    return "\n".join(out)
+
+
+def from_code(code):
+    """HTML de la vista de código -> texto para la hoja (como dump). ValueError con la línea que no se entiende o
+    que deja una etiqueta sin cerrar: así no se pierde nada en silencio."""
+    lines = []
+    for n, raw in enumerate(code.splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        token = CODE_TOKEN.fullmatch(line)
+        if token:
+            lines.append(token[1])
+            continue
+        m = CODE_LINE.fullmatch(line)
+        if not m:
+            if line.startswith("<") and convert.OPENING.match(line):
+                raise ValueError(f"Línea {n}: el párrafo no se cierra en la misma línea: {line[:60]}")
+            m = CODE_LINE.fullmatch(f"<p>{line}</p>")  # texto suelto: un párrafo
+        tag, attrs, inner = m[1], m[2] or "", m[3]
+        if not convert._balanced(inner):
+            raise ValueError(f"Línea {n}: una etiqueta no se cierra o se cierra fuera de orden: {line[:60]}")
+        text = html.unescape(convert.NOTE.sub(r"[Nota: \1]", inner).replace(convert.SC_OPEN, "<sc>")
+                             .replace(convert.SC_CLOSE, "</sc>"))
+        opening = f"<{tag}{attrs}>"
+        prefix = ("" if opening == "<p>" else "# " if opening == "<h1>" else
+                  convert.ALIGN_PREFIX.get(next((a for a, o in CODE_CLASSES.items() if o == opening), ""), "") or opening)
+        lines.append(prefix + text.strip())
+    return "\n\n".join(lines)
+
+
+class CodeLook(QSyntaxHighlighter):
+    """Colores de la vista de código: etiquetas, atributos, sus valores y comentarios."""
+
+    def __init__(self, document, colors):
+        super().__init__(document)
+        self.colors = colors  # {"tag", "attr", "value", "comment"}: colores del tema
+
+    def highlightBlock(self, text):
+        def paint(start, size, key):
+            f = QTextCharFormat()
+            f.setForeground(QColor(self.colors[key]))
+            self.setFormat(u16(text, start), u16(text, start + size) - u16(text, start), f)
+        for m in re.finditer(r"<[^<>]*>", text):
+            paint(m.start(), m.end() - m.start(), "tag")
+            for a in re.finditer(r'([\w:.-]+)(=)("[^"]*")', m[0]):
+                paint(m.start() + a.start(1), len(a[1]), "attr")
+                paint(m.start() + a.start(3), len(a[3]), "value")
+        for m in CODE_TOKEN.finditer(text):
+            paint(m.start(), m.end() - m.start(), "comment")
+
+
+def is_heading_line(line):
+    """¿Es un título? «# Nombre» o una línea con su etiqueta <h1>…<h6>."""
+    m = convert.OPENING.match(line)
+    return line.startswith("# ") or bool(m and m[1].lower() in convert.HEADING_TAGS)
+
+
+def block_look(block):
+    """paragraph_look del párrafo de la hoja (su etiqueta de apertura, si la tiene)."""
+    return paragraph_look(block.blockFormat().property(OPENING) or "")
 
 
 def char_format(italic=False, bold=False, href="", sup=False, sc=False):
@@ -96,20 +454,26 @@ def link_format(href, f=None):
     return f
 
 
-def _insert_marked(cursor, text, color="#888888"):
-    """Texto con <i>/<b>/<sup>/<sc>/<a href> como cursiva, negrita, superíndice, versalitas y enlaces reales, y
-    los iconos (convert.ICON) como imagen de la altura de la letra, del color del texto como los separadores."""
-    for part, *marks in _runs(text):
-        m = convert.ICON.fullmatch(part)
-        if not m:
-            # Las etiquetas de un EPUB que la hoja no sabe mostrar (furigana, notas): en gris, que se lea el texto
-            for piece in RAW.split(part):
-                f = char_format(*marks)
-                if RAW.fullmatch(piece):
-                    f.setForeground(QColor(color))
-                if piece:
-                    cursor.insertText(piece, f)
+def _insert_marked(cursor, text, color="#888888", para=None):
+    """Texto de una línea del editor como se ve en el libro (visual): cursiva, negrita, enlaces, furigana… y las
+    etiquetas que no se ven guardadas en cada letra (STACK); los iconos (convert.ICON) como imagen de la altura de
+    la letra, del color del texto como los separadores. para: aspecto del párrafo (paragraph_look)."""
+    for kind, value, stack in parse_inline(text):
+        f = look_format(visual(stack, para))
+        if stack:
+            f.setProperty(STACK, STACK_SEP.join(stack))
+        if kind == "text":
+            cursor.insertText(value, f)
             continue
+        if kind == "br":
+            cursor.insertText(LINE_BREAK, f)
+            continue
+        if kind == "void":
+            f.setProperty(VOID, value)
+            cursor.insertText(VOID_CHAR, f)
+            continue
+        m = convert.ICON.fullmatch(value)
+        marks = f
         picture = QImage.fromData(base64.b64decode(m[1]))
         tinted = QPainter(picture)
         tinted.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
@@ -118,13 +482,13 @@ def _insert_marked(cursor, text, color="#888888"):
         name = f"icono:{hash(m[1])}"
         cursor.document().addResource(QTextDocument.ResourceType.ImageResource, QUrl(name), picture)
         f = QTextImageFormat()
-        f.merge(char_format(*marks))
+        f.merge(marks)
         f.setName(name)
         height = QFontMetrics(cursor.document().defaultFont()).height() * 0.8
         f.setHeight(height)
         f.setWidth(picture.width() * height / max(picture.height(), 1))
         f.setVerticalAlignment(QTextCharFormat.VerticalAlignment.AlignMiddle)
-        f.setProperty(ICON, part)
+        f.setProperty(ICON, value)
         cursor.insertImage(f)
 
 
@@ -260,14 +624,16 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
     for i, (k, line) in enumerate(lines):
         bare = line.strip()
         token = None if raw or not objects else convert.TOKEN.fullmatch(bare) or convert.PICTURE.fullmatch(bare)
-        heading = not raw and line.startswith("# ")
+        opened = None if raw else convert.OPENING.match(line)  # <p class="no-indent">, <h3>: su etiqueta
+        heading = not raw and (line.startswith("# ") or bool(opened and opened[1].lower() in convert.HEADING_TAGS))
+        para, shape = paragraph_look(opened[0]) if opened else ({}, {})
         align = "" if raw else align_of(line)
         centered, right = side_of(align) == "center", side_of(align) == "right"
         listed = align[5:] if align.startswith("list-") else None
         framed = i in frames
         scene = not raw and not token and bool(bare) and bool(convert.SCENE_BREAK.fullmatch(bare))
         drawn = pictures.get(f"título {k}") if heading and k is not None else None
-        special = bool(token or heading or scene or centered or framed or right or listed)
+        special = bool(token or heading or scene or centered or framed or right or listed or opened)
         if i or (special and cursor.block().length() > 1):
             cursor.insertBlock(QTextBlockFormat(), _plain_format())
         if i or special or remember:
@@ -288,6 +654,10 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
                 f.setTopMargin(SPACE * 2)
                 if levels and levels.get(k):
                     f.setProperty(LEVEL, levels[k])
+            if opened:
+                f.setProperty(OPENING, opened[0])
+                f.setProperty(BOOK_LOOK, True)
+                shape_format(f, shape)
             cursor.setBlockFormat(f)
         if listed:
             group = cursor.block().previous().textList() if listed == before else None
@@ -304,7 +674,7 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
         elif raw:
             cursor.insertText(line, _plain_format())
         else:
-            _insert_marked(cursor, line if raw else _strip(line), color)
+            _insert_marked(cursor, line if raw else _strip(line), color, para)
         if remember:
             f = cursor.blockFormat()
             f.setProperty(ORIGINAL, line)
@@ -320,26 +690,16 @@ def load(document, lines, pictures, color="#888888", levels=None):
     document.clearUndoRedoStacks()
 
 
-def _marked(runs):
-    """[(texto, cursiva, negrita, enlace, sup, sc)] -> texto con <a href>/<b>/<i>/<sc>/<sup> bien anidados: se
-    cierra lo justo y se abre lo que falta (enlace fuera, luego negrita, cursiva, versalitas, superíndice dentro)."""
-    def opening(t):
-        return f'<a href="{t[2:]}">' if t.startswith("a:") else f"<{t}>"
-
-    out, stack = [], []
-    for text, italic, bold, href, sup, sc in runs:
-        want = ([f"a:{href}"] if href else []) + [t for t, on in (("b", bold), ("i", italic), ("sc", sc),
-                                                                  ("sup", sup)) if on]
-        while any(t not in want for t in stack):
-            t = stack.pop()
-            out.append("</a>" if t.startswith("a:") else f"</{t}>")
-        for t in want:
-            if t not in stack:
-                out.append(opening(t))
-                stack.append(t)
-        out.append(text)
-    out += ["</a>" if t.startswith("a:") else f"</{t}>" for t in reversed(stack)]
-    return "".join(out)
+def shape_format(f, shape):
+    """Formato de párrafo de un aspecto de paragraph_look: alineación, sangría de primera línea y cita."""
+    align = {"center": Qt.AlignmentFlag.AlignHCenter, "right": Qt.AlignmentFlag.AlignRight,
+             "justify": Qt.AlignmentFlag.AlignJustify}.get(shape.get("align"), Qt.AlignmentFlag.AlignLeft)
+    f.setAlignment(align)
+    m = re.fullmatch(r"([\d.]+)\s*(em|px|%)?", shape.get("indent", "") or "")
+    f.setTextIndent(0 if not m else float(m[1]) * {"em": FONT_SIZE * 1.33, "%": 4.2}.get(m[2], 1))
+    f.setLeftMargin(36 if shape.get("quote") else 0)
+    f.setRightMargin(36 if shape.get("quote") else 0)
+    return f
 
 
 def _canonical(line):
@@ -347,23 +707,26 @@ def _canonical(line):
     bare = line.strip()
     if convert.TOKEN.fullmatch(bare):
         return bare
-    text = _marked(_runs(_strip(line))).strip()
+    text = _serialize(parse_inline(_strip(line))).strip()
     return line[:len(line) - len(_strip(line))] + text if text else ""
 
 
 def _lines(block):
-    """Líneas de section_text de un párrafo de la hoja: su texto con marcas, y cada objeto en su línea."""
+    """Líneas de section_text de un párrafo de la hoja: su texto con sus etiquetas (las que tenía y las que pide
+    lo puesto con la cinta), y cada objeto en su línea."""
     f = block.blockFormat()
     heading = bool(f.property(HEADING))
     side = "center" if f.property(CENTERED) else "right" if f.property(RIGHTED) else ""
     align = (f"frame-{side}".rstrip("-") if f.property(FRAMED) else f"list-{list_style(block)}" if block.textList()
              else side)
-    prefix = "# " if heading else convert.ALIGN_PREFIX.get(align, "")
-    out, runs = [], []
+    opening = f.property(OPENING)
+    prefix = opening if opening else "# " if heading else convert.ALIGN_PREFIX.get(align, "")
+    para = paragraph_look(opening)[0] if opening else {}
+    out, seq = [], []
 
     def flush():
-        text = _marked(runs).strip()
-        runs.clear()
+        text = _serialize(seq).strip()
+        seq.clear()
         if text:
             out.append(prefix + text)
 
@@ -377,13 +740,20 @@ def _lines(block):
             flush()
             out.append(f"[{name}]")
             continue
+        tags = _wanted(f, _stack_of(f), para)
         icon = f.property(ICON) if f.isImageFormat() else None
-        text = icon or fragment.text().replace(" ", " ").replace("￼", "")
-        if text:
-            runs.append((text, f.fontItalic(), f.fontWeight() >= QFont.Weight.DemiBold,
-                         f.anchorHref() if f.isAnchor() else "",
-                         f.verticalAlignment() == QTextCharFormat.VerticalAlignment.AlignSuperScript,
-                         f.fontCapitalization() == QFont.Capitalization.SmallCaps))
+        if icon:
+            seq.append(("icon", icon, tags))
+            continue
+        if f.property(VOID):
+            seq += [("void", f.property(VOID), tags)] * fragment.text().count(VOID_CHAR)
+            continue
+        text = fragment.text().replace("￼", "").replace(VOID_CHAR, "")
+        for n, piece in enumerate(text.split(LINE_BREAK)):  # Mayús+Intro: <br/>
+            if n:
+                seq.append(("br", None, tags))
+            if piece:
+                seq.append(("text", piece, tags))
     flush()
     return out
 
@@ -413,7 +783,7 @@ def dump_levels(document):
     while block.isValid():
         f = block.blockFormat()
         level = (f.property(LEVEL) or "Capítulo") if f.property(HEADING) else None
-        out += [(line, level if line.startswith("# ") else None) for line in block_lines(block) if line.strip()]
+        out += [(line, level if is_heading_line(line) else None) for line in block_lines(block) if line.strip()]
         block = block.next()
     return out
 
@@ -524,7 +894,9 @@ def match_case(model, word):
 
 def plain_line(line):
     """Texto de una línea de section_text como se ve en la hoja: sin su prefijo ni sus marcas de formato."""
-    return MARKS.sub("", convert.ICON.sub("￼", _strip(line)))  # el icono es un objeto: un carácter
+    # el icono es un objeto: un carácter; una etiqueta vacía, el invisible que la lleva
+    shown = {"text": None, "br": LINE_BREAK, "void": VOID_CHAR, "icon": "￼"}
+    return "".join(shown[kind] or value for kind, value, _ in parse_inline(_strip(line)))
 
 
 def added_spans(before, after):
@@ -615,7 +987,7 @@ class Look(QSyntaxHighlighter):
 
         def at(i):
             return u16(text, i) if wide else i
-        if block.blockFormat().property(HEADING):
+        if block.blockFormat().property(HEADING) and not block.blockFormat().property(BOOK_LOOK):  # el libro manda
             f = QTextCharFormat()
             f.setFontWeight(QFont.Weight.Bold)
             # Capítulo grande; subtítulo un punto menor, como Título 1 y Título 2 en Word
@@ -1075,6 +1447,266 @@ class Sheet(QTextEdit):
         sc, mixed = QFont.Capitalization.SmallCaps, QFont.Capitalization.MixedCase
         self._toggle(lambda f: f.fontCapitalization() == sc, lambda f, on: f.setFontCapitalization(sc if on else mixed))
 
+    def set_text(self, text):
+        """Pone text (como dump) en la hoja, en un solo deshacer: lo que vuelve de la vista de código. Un párrafo
+        igual que uno de antes sigue siendo de su bloque (su página) y, si es el cargado, recuerda su línea."""
+        doc = self.document()
+        before, levels, block = [], {}, doc.firstBlock()
+        while block.isValid():
+            for line in block_lines(block):
+                if line.strip():
+                    before.append((source_of(block), line))
+            if block.blockFormat().property(LEVEL):
+                levels[source_of(block)] = block.blockFormat().property(LEVEL)
+            block = block.next()
+        lines = [line for line in text.split("\n\n") if line.strip()]
+        pairs, last = [], None
+        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, [line for _, line in before], lines,
+                                                          autojunk=False).get_opcodes():
+            for n in range(j2 - j1):
+                same = op == "equal" or (op == "replace" and i2 - i1 == j2 - j1)
+                k = before[i1 + n][0] if same else last
+                pairs.append((k, lines[j1 + n]))
+                last = k if k is not None else last
+        loaded = {line for _, line in self.origins.get(doc, [])}
+        cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.SelectionType.Document)
+        cursor.removeSelectedText()
+        insert_lines(cursor, pairs, self.pictures, remember=True, color=self.color, levels=levels)
+        block = doc.firstBlock()
+        while block.isValid():  # solo los párrafos como al cargar recuerdan su línea (Volver al original, cambios)
+            f = block.blockFormat()
+            if f.property(ORIGINAL) is not None and f.property(ORIGINAL) not in loaded:
+                f.clearProperty(ORIGINAL)
+                f.clearProperty(CANON)
+                cursor.setPosition(block.position())
+                cursor.setBlockFormat(f)
+            block = block.next()
+        cursor.endEditBlock()
+
+    def toggle_underline(self):
+        self._toggle(lambda f: f.fontUnderline() and not f.isAnchor(), lambda f, on: f.setFontUnderline(on))
+
+    def toggle_strike(self):
+        self._toggle(lambda f: f.fontStrikeOut(), lambda f, on: f.setFontStrikeOut(on))
+
+    def toggle_sub(self):
+        """Subíndice (H₂O), como Ctrl+= de Word."""
+        sub, normal = QTextCharFormat.VerticalAlignment.AlignSubScript, QTextCharFormat.VerticalAlignment.AlignNormal
+        self._toggle(lambda f: f.verticalAlignment() == sub, lambda f, on: f.setVerticalAlignment(sub if on else normal))
+
+    def is_sub(self):
+        return self.currentCharFormat().verticalAlignment() == QTextCharFormat.VerticalAlignment.AlignSubScript
+
+    def _each_piece(self, change):
+        """change(formato) -> formato nuevo en cada trozo de la selección (o en lo que se escriba, sin selección).
+        Un deshacer."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            self.setCurrentCharFormat(change(QTextCharFormat(self.currentCharFormat())))
+            return
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        piece = QTextCursor(self.document())
+        piece.beginEditBlock()
+        block = self.document().findBlock(start)
+        while block.isValid() and block.position() < end:
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                it += 1
+                a, b = max(start, fragment.position()), min(end, fragment.position() + fragment.length())
+                if a < b and not fragment.charFormat().isImageFormat():
+                    piece.setPosition(a)
+                    piece.setPosition(b, QTextCursor.MoveMode.KeepAnchor)
+                    piece.setCharFormat(change(QTextCharFormat(fragment.charFormat())))
+            block = block.next()
+        piece.endEditBlock()
+
+    def _user_style(self, f, key, value):
+        """f con la declaración key: value (None la quita) en lo puesto con la cinta (USER_STYLE)."""
+        decls = _style(f.property(USER_STYLE) or "")
+        if value is None:
+            decls.pop(key, None)
+        else:
+            decls[key] = value
+        text = "; ".join(f"{k}: {v}" for k, v in decls.items())
+        if text:
+            f.setProperty(USER_STYLE, text)
+        else:
+            f.clearProperty(USER_STYLE)
+        return f
+
+    def grow_font(self, step):
+        """Letra un paso más grande (1) o más pequeña (-1), como Ctrl+Mayús+> y < de Word: sale como font-size."""
+        def change(f):
+            now = f.property(QTextFormat.Property.FontSizeAdjustment) or 0
+            new = max(-2, min(4, int(now) + step))
+            f.setProperty(QTextFormat.Property.FontSizeAdjustment, new)
+            return self._user_style(f, "font-size", None if new == 0 else f"{SIZES[new + 2]:g}em")
+        self._each_piece(change)
+
+    def set_color(self, color):
+        """Color del texto (QColor) o el de siempre (None): sale como color en un <span style>."""
+        def change(f):
+            if color is None:
+                f.clearForeground()
+            else:
+                f.setForeground(QColor(color))
+            return self._user_style(f, "color", QColor(color).name() if color is not None else None)
+        self._each_piece(change)
+
+    def set_family(self, family):
+        """Tipo de letra (nombre) o la del libro (None): sale como font-family en un <span style>."""
+        def change(f):
+            if family:
+                f.setFontFamilies([family])
+            else:
+                f.clearProperty(QTextFormat.Property.FontFamilies)
+            return self._user_style(f, "font-family", f'"{family}"' if family else None)
+        self._each_piece(change)
+
+    def clear_format(self):
+        """«Borrar formato» de Word: sin cursiva, negrita, subrayado, tamaño ni color; los enlaces y lo que no se
+        dibuja (furigana, notas del libro) se quedan."""
+        para = block_look(self.textCursor().block())[0]
+
+        def change(f):
+            keep = tuple(t for t in _stack_of(f) if _name(t) not in ("i", "em", "b", "strong", "u", "ins", "s", "del",
+                                                                     "strike", "sup", "sub", "sc", "small", "big"))
+            new = look_format(visual(keep, para))
+            if f.isAnchor():
+                link_format(f.anchorHref(), new)
+            if keep:
+                new.setProperty(STACK, STACK_SEP.join(keep))
+            if f.property(VOID):
+                new.setProperty(VOID, f.property(VOID))
+            return new
+        self._each_piece(change)
+
+    def insert_line_break(self):
+        """Salto de línea dentro del párrafo (Mayús+Intro): en el libro, <br/>."""
+        self.textCursor().insertText(LINE_BREAK)
+
+    def insert_ruby(self, base, reading):
+        """Furigana: base con su lectura encima (<ruby>), en el cursor."""
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.removeSelectedText()
+        _insert_marked(cursor, f"<ruby>{html.escape(base, quote=False)}<rp>(</rp><rt>{html.escape(reading, quote=False)}"
+                               f"</rt><rp>)</rp></ruby>", self.color, block_look(cursor.block())[0])
+        cursor.endEditBlock()
+
+    # Estilo de párrafo con su etiqueta: Título 3, Cita, justificado, sin sangría
+    def paragraph_style(self):
+        """«Normal», «Capítulo», «Subtítulo», «Título 3», «Título 4» o «Cita» del párrafo del cursor."""
+        f = self.textCursor().blockFormat()
+        tag = (convert.OPENING.match(f.property(OPENING) or "") or [None, ""])[1].lower()
+        if tag == "blockquote":
+            return "Cita"
+        if tag in ("h3", "h4", "h5", "h6") and f.property(HEADING):
+            return "Título 3" if tag == "h3" else "Título 4"
+        return self.heading_level() or "Normal"
+
+    def set_paragraph_style(self, name):
+        """Cambia el estilo del párrafo del cursor: Normal, Capítulo y Subtítulo como siempre (su fila); Título 3 y 4
+        son subtítulos con <h3>/<h4>; Cita, un <blockquote>. Si el párrafo tiene su etiqueta (EPUB), cambia la etiqueta
+        y se conservan sus atributos."""
+        block = self.textCursor().block()
+        f = block.blockFormat()
+        if objects_of(block) or not block.text().strip():
+            QApplication.beep()
+            return
+        opening = f.property(OPENING) or ""
+        tag = (convert.OPENING.match(opening) or [None, ""])[1].lower()
+        heading = tag in convert.HEADING_TAGS
+        new_tag = {"Normal": "p", "Cita": "blockquote", "Título 3": "h3", "Título 4": "h4",
+                   "Capítulo": tag if heading else "h1", "Subtítulo": tag if heading and tag != "h1" else "h2"}[name]
+        level = {"Capítulo": "Capítulo", "Subtítulo": "Subtítulo", "Título 3": "Subtítulo", "Título 4": "Subtítulo"}.get(name)
+        cursor = QTextCursor(block)
+        cursor.beginEditBlock()
+        if opening or name in ("Título 3", "Título 4", "Cita"):
+            new = _retag(opening or "<p>", new_tag)
+            self._restyle(block, opening, new)
+            f = block.blockFormat()
+            if level:
+                f.setProperty(HEADING, True)
+                f.setProperty(LEVEL, level)
+            else:
+                f.clearProperty(HEADING)
+                f.clearProperty(LEVEL)
+            f.setTopMargin(SPACE * 2 if level else 0)
+            cursor.setBlockFormat(f)
+        else:
+            self.set_heading(level)
+        cursor.endEditBlock()
+        self.look.rehighlightBlock(block)
+
+    def _restyle(self, block, old, new):
+        """Pone al párrafo la etiqueta de apertura new (antes old): su aspecto nuevo, también en sus letras, que
+        conservan sus etiquetas (las que pedía lo puesto con la cinta pasan a ser suyas)."""
+        old_para, new_para = paragraph_look(old)[0], paragraph_look(new)
+        cursor = QTextCursor(self.document())
+        it = block.begin()
+        while not it.atEnd():
+            fragment = it.fragment()
+            it += 1
+            f = fragment.charFormat()
+            if f.isImageFormat():
+                continue
+            tags = _wanted(f, _stack_of(f), old_para)
+            g = look_format(visual(tags, new_para[0]))
+            if tags:
+                g.setProperty(STACK, STACK_SEP.join(tags))
+            if f.property(VOID):
+                g.setProperty(VOID, f.property(VOID))
+            cursor.setPosition(fragment.position())
+            cursor.setPosition(fragment.position() + fragment.length(), QTextCursor.MoveMode.KeepAnchor)
+            cursor.setCharFormat(g)
+        f = block.blockFormat()
+        f.setProperty(OPENING, new)
+        f.setProperty(BOOK_LOOK, True)
+        shape_format(f, new_para[1])
+        f.setObjectIndex(-1)  # ni en una lista
+        cursor.setPosition(block.position())
+        cursor.setBlockFormat(f)
+
+    def set_paragraph_css(self, key, value):
+        """Una declaración de CSS en el style de los párrafos elegidos (text-align: justify, text-indent: 0); value
+        None la quita. Un párrafo sin etiqueta propia (PDF) la recibe: <p style="…">."""
+        blocks = self._selected_text_blocks() or ([self.textCursor().block()]
+                                                  if self.textCursor().blockFormat().property(OPENING) else [])
+        if not blocks:
+            QApplication.beep()
+            return
+        edit = QTextCursor(self.document())
+        edit.beginEditBlock()
+        for block in blocks:
+            f = block.blockFormat()
+            old = f.property(OPENING) or ""
+            if not old:  # un párrafo de un PDF: deja su centrado o su recuadro y pasa a llevar su etiqueta
+                f.clearProperty(CENTERED)
+                f.clearProperty(RIGHTED)
+                edit.setPosition(block.position())
+                edit.setBlockFormat(f)
+            self._restyle(block, old, _with_style(old or "<p>", key, value))
+        edit.endEditBlock()
+        self.viewport().update()
+
+    def paragraph_css(self, key):
+        """Valor de key en el aspecto del párrafo del cursor (su CSS y su style), o ""."""
+        return block_look(self.textCursor().block())[1].get({"text-align": "align", "text-indent": "indent"}[key], "")
+
+    def toggle_justify(self):
+        self.set_paragraph_css("text-align", None if self.paragraph_css("text-align") == "justify" else "justify")
+
+    def toggle_indent(self):
+        """Con sangría de primera línea o sin ella (text-indent). Sin nada dicho, el párrafo la lleva (el estilo de la
+        app y casi todos los EPUB sangran): el primer clic la quita."""
+        indent = self.paragraph_css("text-indent")
+        flat = bool(indent) and re.fullmatch(r"0+(\.0+)?\s*(em|px|%)?", indent)
+        self.set_paragraph_css("text-indent", "1.5em" if flat else "0")
+
     def is_sup(self):
         return self.currentCharFormat().verticalAlignment() == QTextCharFormat.VerticalAlignment.AlignSuperScript
 
@@ -1136,6 +1768,13 @@ class Sheet(QTextEdit):
         edit = QTextCursor(self.document())
         edit.beginEditBlock()
         for block in blocks:
+            old = block.blockFormat().property(OPENING)
+            if old:  # con su etiqueta (EPUB, o estilo de la cinta): en su style, que gana a sus clases
+                new = _with_style(old, "text-align", how)
+                if not how and paragraph_look(new)[1]["align"] not in ("", "left", "start"):
+                    new = _with_style(old, "text-align", "left")
+                self._restyle(block, old, new)
+                continue
             f = align_format(block.blockFormat(), how)
             if how:
                 f.setObjectIndex(-1)
@@ -1196,10 +1835,12 @@ class Sheet(QTextEdit):
         self.viewport().update()
 
     def is_centered(self):
-        return bool(self.textCursor().blockFormat().property(CENTERED))
+        f = self.textCursor().blockFormat()
+        return self.paragraph_css("text-align") == "center" if f.property(OPENING) else bool(f.property(CENTERED))
 
     def is_right(self):
-        return bool(self.textCursor().blockFormat().property(RIGHTED))
+        f = self.textCursor().blockFormat()
+        return self.paragraph_css("text-align") == "right" if f.property(OPENING) else bool(f.property(RIGHTED))
 
     def toggle_frame(self):
         """Mete en un recuadro los párrafos de la selección (ventana de estado, cartel) o los saca. Solo texto."""
@@ -1538,7 +2179,7 @@ class Sheet(QTextEdit):
         cursor.setPosition(block.position())
         cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
         cursor.removeSelectedText()
-        _insert_marked(cursor, line, self.color)  # los iconos, del color de los de la hoja
+        _insert_marked(cursor, line, self.color, block_look(block)[0])  # los iconos, del color de los de la hoja
 
     # Cambios frente a lo cargado
     def changed_blocks(self):
@@ -1577,8 +2218,9 @@ class Sheet(QTextEdit):
     def restore(self, block):
         """Devuelve el párrafo a su línea original (título, centrado y texto): un paso de deshacer."""
         original = original_of(block)
-        heading, align = original.startswith("# "), align_of(original)
+        heading, align = is_heading_line(original), align_of(original)
         framed = align.startswith("frame")
+        opened = convert.OPENING.match(original)
         cursor = QTextCursor(self.document())
         cursor.setPosition(block.position())
         cursor.beginEditBlock()
@@ -1589,6 +2231,13 @@ class Sheet(QTextEdit):
             f.clearProperty(HEADING)
             f.clearProperty(LEVEL)
         align_format(f, side_of(align))
+        if opened:  # su etiqueta de entonces (estilo, alineación y sangría del libro)
+            f.setProperty(OPENING, opened[0])
+            f.setProperty(BOOK_LOOK, True)
+            shape_format(f, paragraph_look(opened[0])[1])
+        else:
+            f.clearProperty(OPENING)
+            f.clearProperty(BOOK_LOOK)
         if framed:
             frame_format(f, not block.previous().blockFormat().property(FRAMED),
                          not block.next().blockFormat().property(FRAMED))
@@ -1710,12 +2359,20 @@ class Sheet(QTextEdit):
             self.command.emit("diagnose")
         elif ctrl and not alt and key in (Qt.Key.Key_Equal, Qt.Key.Key_Plus) and mods & Qt.KeyboardModifier.ShiftModifier:
             self.toggle_sup()  # Ctrl+Mayús+= de Word; en el teclado español «=» es Mayús+0
+        elif ctrl and not alt and key == Qt.Key.Key_Equal:
+            self.toggle_sub()  # Ctrl+= de Word
+        elif ctrl and not alt and key in (Qt.Key.Key_Greater, Qt.Key.Key_Less):
+            self.grow_font(1 if key == Qt.Key.Key_Greater else -1)  # Ctrl+Mayús+> y < de Word
+        elif ctrl and not alt and key == Qt.Key.Key_S:
+            self.toggle_underline()  # Ctrl+S de Word en español
         elif ctrl and not alt and key in actions:
             actions[key]()
         elif key == Qt.Key.Key_F3 and mods & Qt.KeyboardModifier.ShiftModifier:
             self.change_case()
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and mods & Qt.KeyboardModifier.ShiftModifier:
+            self.insert_line_break()  # Mayús+Intro: nueva línea en el mismo párrafo (<br/>)
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.split_here()  # también con Mayús: el formato no tiene saltos de línea dentro de un párrafo
+            self.split_here()
         else:
             super().keyPressEvent(event)
 

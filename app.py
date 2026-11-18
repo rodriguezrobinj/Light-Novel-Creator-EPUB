@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFra
 
 import convert
 import editor
+import faithful
 import options
 import qtk
 import theme
@@ -66,8 +67,9 @@ POWERSHELL = str(WINDOWS / "System32" / "WindowsPowerShell" / "v1.0" / "powershe
 
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
 SEP = "Separador"                                   # título que se escribe como separador de escena
-STYLES = ["Normal", "Capítulo", "Subtítulo"]          # estilos de párrafo en la cinta del editor de texto
-STYLE_LEVELS = [None, "Capítulo", "Subtítulo"]
+# Estilos de párrafo en la cinta del editor de texto (editor.Sheet.set_paragraph_style)
+STYLES = ["Normal", "Capítulo", "Subtítulo", "Título 3", "Título 4", "Cita"]
+
 FRONT = "Inicio del libro"                           # lo que va antes del primer capítulo, en el editor
 TOC_PAGE = "Contenido"  # en el editor, la página de títulos: cambiar uno renombra su capítulo (sección -1..-1)
 CHAPTER_WIDTHS = (300, 180, 170, 140)  # botón de capítulo del editor en cada nivel de la cinta (fit_ribbon)
@@ -7140,6 +7142,10 @@ class TextEditor:
         self.colors = theme.colors(app.dark)
         editor.IMAGES = _images()
         editor.LINK_COLOR = self.colors["acc"]  # el azul fijo apenas se leía sobre la hoja oscura (3:1)
+        # Un EPUB se ve con su CSS y sus fuentes (las clases de sus párrafos); un PDF, con la hoja de siempre
+        origin = app.book.origin
+        stamp = (os.path.getmtime(origin), os.path.getsize(origin)) if origin and os.path.exists(origin) else None
+        editor.use_css(faithful.book_style(origin, stamp) if stamp else None)
         self.sheet = sheet = editor.Sheet()
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
         sheet.mark_current = True
@@ -7184,6 +7190,13 @@ class TextEditor:
         desk_row.addWidget(self.focus_prev, 0, Qt.AlignmentFlag.AlignVCenter)
         desk_row.addStretch(1)
         desk_row.addWidget(sheet, 20)
+        # Vista «Código HTML» (Vista → Código): el mismo capítulo como su HTML, en lugar de la hoja
+        self.code = QPlainTextEdit(objectName="code")
+        self.code.setFont(QFont("Consolas", 10))
+        self.code.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.code_look = editor.CodeLook(self.code.document(), theme.code_colors(app.dark))
+        self.code.hide()
+        desk_row.addWidget(self.code, 20)
         desk_row.addStretch(1)
         desk_row.addWidget(self.focus_next, 0, Qt.AlignmentFlag.AlignVCenter)
         # El borde de la hoja se arrastra para estrecharla o ensancharla, hasta el ancho de la página (set_text_zoom)
@@ -7417,6 +7430,9 @@ class TextEditor:
         sheet = self.sheet
         bold_font, italic_font = QFont("Segoe UI", 11, QFont.Weight.Bold), QFont("Segoe UI", 11)
         italic_font.setItalic(True)
+        underline_font, strike_font = QFont("Segoe UI", 11), QFont("Segoe UI", 10)
+        underline_font.setUnderline(True)
+        strike_font.setStrikeOut(True)
 
         page("Inicio")
         self.undo_btn = tool("Deshacer", "Deshacer (Ctrl+Z)", sheet.undo, glyph="undo")
@@ -7431,12 +7447,32 @@ class TextEditor:
         self.sup_btn = tool("x²", "Superíndice: 1.ᵉʳ, m² (Ctrl+Mayús+=)", sheet.toggle_sup, True)
         self.caps_btn = tool("Vᴇʀs", "Versalitas: rangos, habilidades, sonidos en letra pequeña", sheet.toggle_small_caps,
                              True)
-        group("Fuente", [self.bold_btn, self.italic_btn, self.sup_btn], [self.case_btn, self.caps_btn])
+        self.underline_btn = tool("S", "Subrayado (Ctrl+S)", sheet.toggle_underline, True, underline_font)
+        self.strike_btn = tool("abc", "Tachado", sheet.toggle_strike, True, strike_font)
+        self.sub_btn = tool("x₂", "Subíndice: H₂O (Ctrl+=)", sheet.toggle_sub, True)
+        group("Fuente", [self.bold_btn, self.italic_btn, self.underline_btn, self.strike_btn, self.sup_btn, self.sub_btn],
+              [self.case_btn, self.caps_btn])
+        # Letra, tamaño y color: como en Word, sobre lo elegido; salen en el libro como <span style>. En su pestaña:
+        # en Inicio no cabían en 1366 px con el nombre de cada botón
+        self.family_box = QComboBox()
+        self.family_box.setEditable(True)
+        self.family_box.setToolTip("Tipo de letra de lo elegido (las del libro primero)")
+        self.family_box.setMinimumContentsLength(12)
+        self.family_box.lineEdit().setPlaceholderText("Letra")
+        self.family_box.addItems(["(La del libro)"] + sorted(editor.FAMILIES.values()) + list(convert.FONTS))
+        self.family_box.setCurrentIndex(-1)
+        self.family_box.activated.connect(lambda n: (sheet.set_family(None if n == 0 else self.family_box.itemText(n)),
+                                                     sheet.setFocus(), self.update_tools()))
+        grow = tool("A⁺", "Agrandar la letra (Ctrl+Mayús+>)", lambda: sheet.grow_font(1))
+        shrink = tool("A⁻", "Reducir la letra (Ctrl+Mayús+<)", lambda: sheet.grow_font(-1))
+        self.color_btn, _ = menu_tool("Color ▾", "Color del texto elegido",
+                                      [(name, lambda c=color: sheet.set_color(c)) for name, color in theme.TEXT_COLORS])
+        letter = [self.family_box], [grow, shrink, self.color_btn]
         self.style = QComboBox()
         self.style.addItems(STYLES)
-        self.style.setToolTip("Estilo del párrafo: título de capítulo o subtítulo (Ctrl+T: capítulo o normal)")
+        self.style.setToolTip("Estilo del párrafo: capítulo, subtítulo, título 3 y 4 o cita (Ctrl+T: capítulo o normal)")
         self.style.setMinimumWidth(110)
-        self.style.activated.connect(lambda n: (sheet.set_heading(STYLE_LEVELS[n]), sheet.setFocus(),
+        self.style.activated.connect(lambda n: (sheet.set_paragraph_style(STYLES[n]), sheet.setFocus(),
                                                 self.update_tools()))
         # Las tres alineaciones, también dentro de un recuadro; sin texto: son tres y la cinta no da para más
         self.left_btn = tool("", "Alinear el párrafo a la izquierda", lambda: sheet.set_align(None), True,
@@ -7457,11 +7493,25 @@ class TextEditor:
             ("i.  Romanos en minúsculas", lambda: sheet.set_list("lower-roman")),
             ("I.  Romanos", lambda: sheet.set_list("upper-roman")), None,
             ("Quitar la lista", lambda: sheet.set_list(None))])
-        group("Párrafo", [self.style, self.left_btn, self.center_btn, self.right_btn], [self.frame_btn, self.list_btn,
-              tool("Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
-                   sheet.join_next, level=2, glyph="join")])
+        self.justify_btn = tool("", "Justificar el párrafo: el texto llega a los dos márgenes", sheet.toggle_justify,
+                                True, glyph="justify")
+        indent = tool("Sangría", "Con o sin sangría en la primera línea del párrafo", sheet.toggle_indent,
+                      icon="indent")
+        group("Párrafo", [self.style, self.left_btn, self.center_btn, self.right_btn, self.justify_btn],
+              [self.frame_btn, self.list_btn,
+               tool("Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
+                    sheet.join_next, level=2, glyph="join")])
         group("Edición", [tool("Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
                                lambda: self.show_find_bar(False), icon="search")])
+
+        page("Formato")
+        group("Letra", *letter)
+        group("Limpiar", [tool("Borrar\nformato", "Quita cursiva, negrita, subrayado, tamaño y color de lo elegido; los "
+                               "enlaces y el furigana se quedan", sheet.clear_format, icon="clear")])
+        group("Párrafo", [indent, tool("Salto de\nlínea", "Nueva línea dentro del mismo párrafo, como en una carta o "
+                                       "un poema (Mayús+Intro)", sheet.insert_line_break, icon="newline")])
+        group("Japonés", [tool("Furigana", "Lectura pequeña encima de un nombre o una palabra japonesa (<ruby>): "
+                                           "elige el texto y escribe su lectura", self.add_ruby, icon="ruby")])
 
         page("Insertar")
         self.symbols_btn, _ = menu_tool("Símbolos ▾", "Raya, comillas, signos de apertura y tipografía española", [
@@ -7516,6 +7566,9 @@ class TextEditor:
         self.show_changes_box.toggled.connect(self.show_changes_action.setChecked)
         self.show_changes_action.toggled.connect(self.show_changes_box.setChecked)
         group("Mostrar", [self.nav_btn, self.show_changes_box])
+        self.code_btn = tool("Código HTML", "Ver y editar el capítulo como su HTML: cada párrafo, su etiqueta y sus "
+                             "atributos. Pulsa otra vez para volver a la hoja", self.toggle_code, True, icon="code")
+        group("Código", [self.code_btn])
         for row in self.ribbon_rows:
             row.addStretch(1)
 
@@ -7537,6 +7590,8 @@ class TextEditor:
         """Tema cambiado con el editor abierto: los iconos de la cinta, dibujados con el color del texto, se
         quedaban con el del tema anterior (apenas se veían)."""
         self.colors = theme.colors(dark)
+        self.code_look.colors = theme.code_colors(dark)
+        self.code_look.rehighlight()
         for button, glyph, size in self.glyphs:
             if shiboken6.isValid(button):
                 button.setIcon(_glyph_icon(glyph, self.colors["ink"], size))
@@ -8689,6 +8744,47 @@ class TextEditor:
             self.split.setSizes([240, 10 ** 4, 10 ** 4])  # panel de navegación (si se ve), hoja y PDF a medias
             self.sheet.ensureCursorVisible()
 
+    def toggle_code(self):
+        """Vista «Código HTML»: el capítulo de la hoja como su HTML, editable; al volver, lo cambiado pasa a la hoja
+        (un deshacer). Una línea que no se entiende o deja una etiqueta sin cerrar se avisa y no se sale."""
+        if not self.code.isVisible():
+            self.code.setPlainText(editor.to_code(editor.dump(self.sheet.document())))
+            self.code_text = self.code.toPlainText()
+            self.sheet.hide()
+            self.code.show()
+            self.code.setFocus()
+            for n in range(self.ribbon_pages.count() - 1):  # lo de la hoja no vale aquí; Vista sí, para volver
+                self.ribbon_pages.widget(n).setEnabled(False)
+            self.code_btn.setChecked(True)
+            return
+        if self.code.toPlainText() != self.code_text:
+            try:
+                text = editor.from_code(self.code.toPlainText())
+            except ValueError as e:
+                self.code_btn.setChecked(True)
+                messagebox.showwarning("Código HTML", f"{e}\n\nArréglalo para volver a la hoja.", parent=self.win)
+                return
+            self.sheet.set_text(text)
+        self.code.hide()
+        self.sheet.show()
+        self.sheet.setFocus()
+        for n in range(self.ribbon_pages.count()):
+            self.ribbon_pages.widget(n).setEnabled(True)
+        self.code_btn.setChecked(False)
+        self.update_tools()
+
+    def add_ruby(self):
+        """Furigana: la lectura encima del texto elegido (o de lo que se escriba)."""
+        cursor = self.sheet.textCursor()
+        base = cursor.selectedText().strip() if cursor.hasSelection() else ""
+        if not base:
+            base, ok = QInputDialog.getText(self.win, "Furigana", "Texto (el nombre o la palabra):")
+            if not ok or not base.strip():
+                return
+        reading, ok = QInputDialog.getText(self.win, "Furigana", f"Lectura de «{base}» (sale pequeña encima):")
+        if ok and reading.strip():
+            self.sheet.insert_ruby(base.strip(), reading.strip())
+
     def update_tools(self):
         """La cinta sigue al cursor, como en Word: N y K marcadas si lo están, y el estilo del párrafo."""
         if not shiboken6.isValid(self.sheet) or not shiboken6.isValid(self.style):
@@ -8696,8 +8792,11 @@ class TextEditor:
         f = self.sheet.currentCharFormat()
         self.bold_btn.setChecked(f.fontWeight() >= QFont.Weight.DemiBold)
         self.italic_btn.setChecked(f.fontItalic())
-        level = self.sheet.heading_level()
-        self.style.setCurrentIndex(0 if level is None else 1 if level == ON else 2)
+        self.style.setCurrentIndex(STYLES.index(self.sheet.paragraph_style()))
+        self.underline_btn.setChecked(f.fontUnderline() and not f.isAnchor())
+        self.strike_btn.setChecked(f.fontStrikeOut())
+        self.sub_btn.setChecked(self.sheet.is_sub())
+        self.justify_btn.setChecked(self.sheet.paragraph_css("text-align") == "justify")
         self.sup_btn.setChecked(self.sheet.is_sup())
         self.caps_btn.setChecked(self.sheet.is_small_caps())
         self.left_btn.setChecked(not self.sheet.is_centered() and not self.sheet.is_right())
@@ -8758,8 +8857,9 @@ class TextEditor:
             heads = [i for i in tree.get_children() if book.blocks[int(i)].kind == "heading"
                      and tree.set(i, "inc") in (ON, OFF)]
             return [(int(i), "# " + tree.set(i, "title")) for i in heads], {int(i): tree.set(i, "inc") for i in heads}
+        # Un título con su etiqueta (EPUB: <h1 class="lucida">) se ve como en el libro; los demás, con el nombre de la fila
         lines = [(k, "# " + tree.set(str(k), "title") if book.blocks[k].kind == "heading" and tree.exists(str(k))
-                  else convert.section_text(book, k, k + 1)) for k in range(start, end)]
+                  and not book.blocks[k].opening else convert.section_text(book, k, k + 1)) for k in range(start, end)]
         levels = {k: tree.set(str(k), "inc") for k in range(start, end)
                   if book.blocks[k].kind == "heading" and tree.exists(str(k))}
         return lines, levels
@@ -9337,7 +9437,7 @@ class TextEditor:
                     continue
                 else:
                     edits.append([start + i1, start + i2, "\n\n".join(new[j1:j2])])
-                    kinds[start + i1] = [level for line, level in pairs[j1:j2] if line.startswith("# ")]
+                    kinds[start + i1] = [level for line, level in pairs[j1:j2] if editor.is_heading_line(line)]
         edits.sort(reverse=True)
         return edits, titles, [kinds[e[0]] for e in edits], retype
 
