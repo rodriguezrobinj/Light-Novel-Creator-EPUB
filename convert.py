@@ -3402,6 +3402,11 @@ div.logo img { width: 54%; }
 @media amzn-kf8 { h1, h2 { line-height: 1.2; page-break-inside: auto; } }
 @media amzn-mobi { h1 { font-size: xx-large; } h2 { font-size: x-large; } }
 """
+# Lo que el editor escribe con clases propias (versalitas, recuadro, centrar, listas): un EPUB de entrada no trae sus
+# reglas, y con su aspecto original el escritor fiel las añade solo si un texto cambiado las usa
+MARKUP_CSS = "".join(rule.strip() + "\n" for rule in re.findall(r"[^{}]+\{[^}]*\}", BASE_CSS)
+                     if re.match(r"\s*(?:p\.center|p\.right|small\.sc|img\.icono|div\.marco|\.lista)\b", rule))
+MARKUP_CLASS = re.compile(r'class="(?:[^"]* )?(?:sc|center|right|marco|icono|lista)(?: [^"]*)?"')
 STYLES = {  # nombre en la ventana -> CSS propio del estilo
     "Clásico": """body { font-family: serif; }
 p { text-indent: 1.5em; text-align: justify; }

@@ -708,6 +708,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
 
         # Hoja de la app sobre el original: solo si se eligió otro aspecto
         css = "" if style in (ORIGINAL, "", None) else convert.BASE_CSS + convert.STYLES.get(style, "")
+        if not css and any(convert.MARKUP_CLASS.search(text) for text in texts.values()):
+            css = convert.MARKUP_CSS  # versalitas, recuadros… escritos en el editor: el original no trae sus reglas
         fonts = {}
         if font in convert.FONTS:
             for weight, slant in (("400", "normal"), ("400", "italic"), ("700", "normal"), ("700", "italic")):
