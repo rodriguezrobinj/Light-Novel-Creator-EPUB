@@ -9,10 +9,10 @@ import html
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QMimeData, QObject, QRect, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QBuffer, QEvent, QMimeData, QObject, QRect, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat, QTextListFormat)
-from PySide6.QtWidgets import QApplication, QPlainTextEdit, QTextEdit, QWidget
+from PySide6.QtWidgets import QApplication, QPlainTextEdit, QTextEdit, QToolTip, QWidget
 
 import convert
 from qtk import u16
@@ -37,6 +37,8 @@ STACK = _USER + 11   # letra: etiquetas del libro que la rodean, de fuera adentr
 VOID = _USER + 12    # letra invisible (VOID_CHAR): una etiqueta vacía del libro que vuelve tal cual
 OPENING = _USER + 13  # párrafo: su etiqueta de apertura (convert.Block.opening), con el estilo puesto en la cinta
 USER_STYLE = _USER + 14  # letra: tamaño, color o letra puestos en la cinta, en CSS: vuelven como <span style>
+TABLE_ROW = _USER + 17  # fila de tabla («Nivel | 5»): "table" o "table-head" (cabecera)
+FRAME_KIND = _USER + 16  # párrafo en recuadro: su tipo (convert.BOX_KINDS), "" el de siempre
 BOOK_LOOK = _USER + 15  # párrafo con el aspecto del libro (su etiqueta y su CSS): sin el título azul de la hoja
 LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; TextEditor pone el azul del tema
 NOTE = re.compile(r"\[Nota: [^\]]*\]")
@@ -344,7 +346,10 @@ def _with_style(opening, key, value):
 # clases (las de convert.BASE_CSS) y las ilustraciones como comentario, que se mueven o se borran pero no se escriben
 CODE_CLASSES = {"center": '<p class="center">', "right": '<p class="right">', "frame": '<p class="marco">',
                 "frame-center": '<p class="marco center">', "frame-right": '<p class="marco right">'} | {
-    f"list-{style}": f'<li class="lista-{style}">' for style in convert.LIST_STYLES}
+    f"list-{style}": f'<li class="lista-{style}">' for style in convert.LIST_STYLES} | {
+    f"frame{'-' + side if side else ''}:{kind}": f'<p class="marco {kind}{" " + side if side else ""}">'
+    for kind in convert.BOX_KINDS for side in ("", "center", "right")} | {
+    "table": '<p class="tabla">', "table-head": '<p class="tabla cabecera">'}
 CODE_LINE = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>(.*)</\1>', re.S)
 CODE_TOKEN = re.compile(r"<!--\s*(\[[^\]]+\])\s*-->")
 
@@ -667,9 +672,12 @@ def list_style(block):
     return next((name for name, qt in LISTS.items() if qt == style), "disc")  # pegada de fuera, con otro estilo
 
 
-def frame_format(f, first=False, last=False, sub=False):
-    """Formato de un párrafo en recuadro: cerca unos de otros y con sitio para el borde. Conserva su alineación."""
+def frame_format(f, first=False, last=False, sub=False, kind=None):
+    """Formato de un párrafo en recuadro: cerca unos de otros y con sitio para el borde. Conserva su alineación.
+    kind: tipo del recuadro (convert.BOX_KINDS, "" el de siempre); None lo deja como estaba."""
     f.setProperty(FRAMED, True)
+    if kind is not None:
+        f.setProperty(FRAME_KIND, kind)
     f.setLeftMargin(FRAME_PAD + (SUB if sub else 0))
     f.setRightMargin(FRAME_PAD)
     f.setTopMargin(FRAME_PAD if first else FRAME_GAP)
@@ -677,9 +685,21 @@ def frame_format(f, first=False, last=False, sub=False):
     return f
 
 
+def table_format(f, row):
+    """Fila de tabla (row: "table" o "table-head"): con fondo, como una celda, y letra fija para ver sus « | »."""
+    f.setProperty(TABLE_ROW, row)
+    f.setTopMargin(0)
+    f.setBottomMargin(2)
+    tint = QColor(QApplication.palette().color(QPalette.ColorRole.Highlight))
+    tint.setAlpha(40 if row == "table-head" else 20)
+    f.setBackground(tint)
+    return f
+
+
 def unframe_format(f):
     """Saca el párrafo del recuadro: sus márgenes de párrafo normal."""
     f.clearProperty(FRAMED)
+    f.clearProperty(FRAME_KIND)
     f.setLeftMargin(0)
     f.setRightMargin(0)
     f.setTopMargin(0)
@@ -691,7 +711,9 @@ def _frame_runs(lines):
     """{posición en lines: (primera de su recuadro, última, sangrada)} de las líneas con <marco>."""
     out, run = {}, []
     for i, (_, line) in enumerate(lines + [(None, "")]):
-        if align_of(line).startswith("frame"):
+        align = align_of(line)
+        # seguidas y del mismo tipo: un recuadro; otro tipo empieza otro
+        if align.startswith("frame") and (not run or convert.box_kind(align) == convert.box_kind(align_of(lines[run[0]][1]))):
             run.append(i)
             continue
         bulleted = any(_strip(lines[j][1]).lstrip()[:1] in convert.BULLETS for j in run)
@@ -721,7 +743,8 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
         framed = i in frames
         scene = not raw and not token and bool(bare) and bool(convert.SCENE_BREAK.fullmatch(bare))
         drawn = pictures.get(f"título {k}") if heading and k is not None else None
-        special = bool(token or heading or scene or centered or framed or right or listed or opened)
+        table = align if align in ("table", "table-head") else None
+        special = bool(token or heading or scene or centered or framed or right or listed or opened or table)
         if i or (special and cursor.block().length() > 1):
             cursor.insertBlock(QTextBlockFormat(), _plain_format())
         if i or special or remember:
@@ -734,7 +757,9 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
             if centered or right:
                 align_format(f, "center" if centered else "right")
             if framed:
-                frame_format(f, *frames[i])
+                frame_format(f, *frames[i], kind=convert.box_kind(align))
+            if table:
+                table_format(f, table)
             if heading:
                 f.setProperty(HEADING, True)
                 if drawn is not None:  # el dibujo del título va centrado, como en el libro
@@ -805,8 +830,9 @@ def _lines(block):
     f = block.blockFormat()
     heading = bool(f.property(HEADING))
     side = "center" if f.property(CENTERED) else "right" if f.property(RIGHTED) else ""
-    align = (f"frame-{side}".rstrip("-") if f.property(FRAMED) else f"list-{list_style(block)}" if block.textList()
-             else side)
+    kind = f.property(FRAME_KIND) or ""
+    align = f.property(TABLE_ROW) or (f"frame-{side}".rstrip("-") + (f":{kind}" if kind else "") if f.property(FRAMED)
+             else f"list-{list_style(block)}" if block.textList() else side)
     opening = f.property(OPENING)
     prefix = opening if opening else "# " if heading else convert.ALIGN_PREFIX.get(align, "")
     para = paragraph_look(opening)[0] if opening else {}
@@ -1399,17 +1425,18 @@ class Sheet(QTextEdit):
                 painter.drawRect(QRectF(margin + 2 + inset - dx, top + inset - dy,
                                         width - 2 * margin - 4 - 2 * inset, bottom - top - 2 * inset))
 
-        block, top, bottom = doc.firstBlock(), None, None
+        block, top, bottom, kind = doc.firstBlock(), None, None, None
         while block.isValid():
             text = block.layout()
             y = text.position().y()
-            if block.blockFormat().property(FRAMED):
-                if top is None:
-                    top = y - gap
-                bottom = y + text.boundingRect().height() + gap
-            elif top is not None:
-                draw(top, bottom)
+            framed = block.blockFormat().property(FRAMED)
+            if top is not None and (not framed or (block.blockFormat().property(FRAME_KIND) or "") != kind):
+                draw(top, bottom)  # acaba el recuadro: el párrafo ya no va en uno, o va en uno de otro tipo
                 top = None
+            if framed:
+                if top is None:
+                    top, kind = y - gap, block.blockFormat().property(FRAME_KIND) or ""
+                bottom = y + text.boundingRect().height() + gap
             if y - dy > area.bottom():  # lo de más abajo no se ve: el recuadro abierto sigue fuera de la vista
                 break
             block = block.next()
@@ -1730,6 +1757,27 @@ class Sheet(QTextEdit):
         cursor.endEditBlock()
         self.look.rehighlightBlock(block)
 
+    def set_opening(self, opening):
+        """Estilo del original (EPUB): la etiqueta de apertura opening («<p class="no-indent">», o "" para un párrafo
+        normal) en los párrafos elegidos o el del cursor, en un deshacer. Títulos, ilustraciones y separadores no."""
+        cursor = self.textCursor()
+        first = self.document().findBlock(cursor.selectionStart())
+        last = self.document().findBlock(cursor.selectionEnd())
+        edit = QTextCursor(self.document())
+        edit.beginEditBlock()
+        block = first
+        while block.isValid():
+            f = block.blockFormat()
+            old = f.property(OPENING) or ""
+            tag = (convert.OPENING.match(old) or [None, "p"])[1].lower()
+            if not objects_of(block) and block.text().strip() and not f.property(HEADING) and tag == "p":
+                self._restyle(block, old, opening)
+                self.look.rehighlightBlock(block)
+            if block == last:
+                break
+            block = block.next()
+        edit.endEditBlock()
+
     def _restyle(self, block, old, new):
         """Pone al párrafo la etiqueta de apertura new (antes old): su aspecto nuevo, también en sus letras, que
         conservan sus etiquetas (las que pedía lo puesto con la cinta pasan a ser suyas)."""
@@ -1932,6 +1980,24 @@ class Sheet(QTextEdit):
 
     def toggle_frame(self):
         """Mete en un recuadro los párrafos de la selección (ventana de estado, cartel) o los saca. Solo texto."""
+        self.set_frame(None if self.is_framed() else "")
+
+    def insert_table(self, columns, rows, head=True):
+        """Tabla tras el párrafo del cursor: una línea por fila y « | » entre las celdas, para escribir encima; con
+        head, la primera es la cabecera. Un deshacer."""
+        cells = lambda word: " | ".join(f"{word} {n + 1}" for n in range(columns))
+        lines = ([(None, convert.ALIGN_PREFIX["table-head"] + cells("Columna"))] if head else []) + [
+            (None, convert.ALIGN_PREFIX["table"] + cells("Celda")) for _ in range(rows)]
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        insert_lines(cursor, lines, self.pictures)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    def set_frame(self, kind):
+        """Los párrafos de la selección en un recuadro del tipo kind (convert.BOX_KINDS, "" el de siempre), o fuera
+        de él con None. Solo texto; un deshacer."""
         cursor = self.textCursor()
         doc = self.document()
         first, last = doc.findBlock(cursor.selectionStart()), doc.findBlock(cursor.selectionEnd())
@@ -1945,7 +2011,7 @@ class Sheet(QTextEdit):
         if not blocks:
             QApplication.beep()
             return
-        on = not first.blockFormat().property(FRAMED)
+        on = kind is not None
         edit = QTextCursor(doc)
         edit.beginEditBlock()
         for n, block in enumerate(blocks):
@@ -1955,7 +2021,7 @@ class Sheet(QTextEdit):
                 f.clearProperty(LEVEL)
                 f.setObjectIndex(-1)  # un elemento de lista sale de ella
                 frame_format(f, n == 0 and not block.previous().blockFormat().property(FRAMED),
-                             n == len(blocks) - 1 and not block.next().blockFormat().property(FRAMED))
+                             n == len(blocks) - 1 and not block.next().blockFormat().property(FRAMED), kind=kind)
             else:
                 unframe_format(f)
             edit.setPosition(block.position())
@@ -2009,6 +2075,40 @@ class Sheet(QTextEdit):
                     it += 1
                 block = block.next()
         cursor.endEditBlock()
+
+    def note_at(self, position):
+        """(inicio, fin, texto) de la nota «[Nota: …]» que contiene position, o None."""
+        block = self.document().findBlock(position)
+        text, offset = block.text(), position - block.position()
+        for m in convert.NOTE_MARK.finditer(text):
+            if m.start() <= offset <= m.end():
+                return block.position() + m.start(), block.position() + m.end(), m[1]
+        return None
+
+    def set_note(self, text, where=None):
+        """Pone la nota text: en where (inicio, fin) de una que ya está, o en el cursor. Vacía, quita la de where."""
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        if where:
+            cursor.setPosition(where[0])
+            cursor.setPosition(where[1], QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        else:
+            cursor.clearSelection()
+        text = " ".join(text.replace("[", "(").replace("]", ")").split())  # dentro, sin corchetes que la corten
+        if text:
+            cursor.insertText(f"[Nota: {text}]", _plain_format())
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    def event(self, event):
+        """Al pasar el ratón por una nota, su texto entero (en la hoja puede ser largo)."""
+        if event.type() == QEvent.Type.ToolTip:
+            note = self.note_at(self.cursorForPosition(self.viewport().mapFromGlobal(event.globalPos())).position())
+            if note:
+                QToolTip.showText(event.globalPos(), f"Nota: {note[2]}", self)
+                return True
+        return super().event(event)
 
     def insert_note(self):
         """Nota del traductor en el cursor, con el cursor dentro para escribirla: «[Nota: |]»."""
@@ -2328,7 +2428,7 @@ class Sheet(QTextEdit):
             f.clearProperty(BOOK_LOOK)
         if framed:
             frame_format(f, not block.previous().blockFormat().property(FRAMED),
-                         not block.next().blockFormat().property(FRAMED))
+                         not block.next().blockFormat().property(FRAMED), kind=convert.box_kind(align))
         elif f.property(FRAMED):
             unframe_format(f)
         f.setObjectIndex(-1)

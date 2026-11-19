@@ -734,17 +734,21 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                 if b.kind == "heading" and k in titles and titles[k] != b.title and re.search(r"\stitle=", opening):
                     opening = _set_attr(opening, "title", titles[k])
                 return opening + text[o0 + len(start):i0] + new + closing
+            if b.align in ("table", "table-head"):  # fila de tabla del editor
+                return convert.table_row(new, b.align == "table-head")
             if b.opening:  # párrafo nuevo con el estilo que le dio el editor
                 return f"{b.opening}{new}</{OPENING_TAG.match(b.opening)[1]}>"
             if b.kind == "heading":
                 tag = b.tag if b.tag in HEADINGS else ("h1" if k in titles else "h2")
                 return f"<{tag}>{new}</{tag}>"
             style_ = {"center": "text-align: center; text-indent: 0", "right": "text-align: right; text-indent: 0"}.get(
-                b.align.removeprefix("frame-"), "")
-            if b.align.startswith("frame"):
-                style_ = (style_ + "; " if style_ else "") + "border: 1px solid #777777; padding: 0.4em 0.8em"
+                b.align.partition(":")[0].removeprefix("frame-"), "")
+            if b.align.startswith("frame"):  # recuadro: el de siempre o el de su tipo (convert.BOX_INLINE)
+                style_ = (style_ + "; " if style_ else "") + convert.BOX_INLINE.get(
+                    convert.box_kind(b.align), "border: 1px solid #777777; padding: 0.4em 0.8em")
             return f'<p{f" style={chr(34)}{style_}{chr(34)}" if style_ else ""}>{new}</p>'
 
+        chapter_src = {title: book.blocks[k].src[0] for k, title in chapters if book.blocks[k].src}
         texts = {}  # archivo -> texto nuevo
         for name in file_order:
             if name is None or name in gone:
@@ -772,7 +776,9 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                 out += [text[cursor:n.start], placed.get(n.start, ""), "".join("\n" + p for p in inserts.get(n.start, []))]
                 cursor = n.end
             out.append(text[cursor:])
-            new = "".join(out)
+            # enlaces internos del editor (lnc:cap:Título): el archivo del capítulo con ese título, desde este
+            new = convert.link_targets("".join(out), lambda title, base=name: _rel(base, chapter_src[title])
+                                       if title in chapter_src else "#")
             if notes:
                 back = f'<p><a href="#lnc-ref{{}}" role="doc-backlink">{{}}</a> {{}}</p>'
                 asides = "".join(f'\n<aside epub:type="footnote" id="lnc-nota{n}">{back.format(n, note_mark(n), body)}</aside>'

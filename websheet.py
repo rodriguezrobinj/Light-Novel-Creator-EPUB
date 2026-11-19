@@ -18,6 +18,19 @@ SHEET_CSS = """
 #lnc-sheet .lnc-obj { user-select: none; cursor: default; opacity: 0.95; }
 #lnc-sheet .lnc-obj img { max-width: 100%; max-height: 60vh; -webkit-user-drag: none; }
 #lnc-sheet p.lnc-break { text-align: center; text-indent: 0; color: #888888; }
+#lnc-sheet p.marco { text-indent: 0; margin: 0; padding: 0.3em 0.9em; border-left: 3px double #777777;
+                     border-right: 3px double #777777; font-family: sans-serif; }
+#lnc-sheet p.marco.juego { background: #000000; color: #ffffff; border-color: #00219b; }
+#lnc-sheet p.marco.carta { background: #fbf6e9; color: #3a3226; border: 0; border-left: 1px solid #b9a77f;
+                           border-right: 1px solid #b9a77f; font-family: serif; font-style: italic; }
+#lnc-sheet p.marco.nota { background: #f2f2f2; color: #333333; border: 0; border-left: 4px solid #8a8a8a;
+                          font-size: 0.85em; }
+#lnc-sheet span.nota { font-size: 0.8em; color: #6b5a1e; background: #fff3cd; border-radius: 3px; padding: 0 0.3em; }
+#lnc-sheet span.nota::before { content: "Nota: "; font-weight: bold; }
+#lnc-sheet p.tabla { text-indent: 0; margin: 0; padding: 0.15em 0.5em; font-family: monospace;
+                     background: #f3f3f3; border-left: 1px solid #bbbbbb; border-right: 1px solid #bbbbbb; }
+#lnc-sheet p.tabla.cabecera { font-weight: bold; background: #e6e6e6; border-top: 1px solid #bbbbbb; }
+#lnc-sheet p.marco.cita { border: 0; font-family: serif; font-style: italic; font-size: 1.1em; text-align: center; }
 html { background: #ffffff; } body { margin: 24px 36px !important; }
 """
 
