@@ -98,7 +98,8 @@ QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QListWidget {{ border: 1px solid
     background: {base}; selection-background-color: {acc}; selection-color: {acc_ink}; }}
 QLineEdit, QComboBox, QSpinBox {{ padding: 3px 6px; }}
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus {{ border: 1px solid {acc}; }}
-QPlainTextEdit#code, QPlainTextEdit#code:focus {{ border: 0; border-radius: 0; }}
+QTextEdit#code, QTextEdit#code:focus {{ border: 0; border-radius: 0; background: {base}; selection-background-color: {acc};
+    selection-color: {acc_ink}; }}
 QComboBox:hover {{ background: {hover}; }}
 QComboBox:on {{ background: {base}; border-bottom-color: {base}; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }}
 QComboBox {{ combobox-popup: 0; }}

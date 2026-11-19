@@ -9,10 +9,10 @@ import html
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QEvent, QMimeData, QObject, QRect, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QBuffer, QEvent, QMimeData, QObject, QPoint, QRect, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat, QTextListFormat)
-from PySide6.QtWidgets import QApplication, QPlainTextEdit, QTextEdit, QToolTip, QWidget
+from PySide6.QtWidgets import QApplication, QTextEdit, QToolTip, QWidget
 
 import convert
 from qtk import u16
@@ -441,20 +441,51 @@ class _Gutter(QWidget):
         self.code.paint_gutter(event)
 
 
-class CodeEdit(QPlainTextEdit):
+class CodeEdit(QTextEdit):
     """Vista «Código HTML» como un editor de código: número de cada línea a la izquierda, la línea del cursor marcada,
-    los colores de CodeLook y la barra de desplazamiento siempre a la vista."""
+    los colores de CodeLook, un poco de aire entre párrafos y la barra de desplazamiento siempre a la vista. Un
+    QTextEdit y no un QPlainTextEdit: este no dibuja el margen de los párrafos."""
 
     def __init__(self, colors):
         super().__init__(objectName="code")
+        self.setAcceptRichText(False)
         self.look = CodeLook(self.document(), colors)
         self.gutter = _Gutter(self)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.blockCountChanged.connect(lambda _: self.fit_gutter())
-        self.updateRequest.connect(self.scroll_gutter)
+        self.document().blockCountChanged.connect(lambda _: self.fit_gutter())
+        self.verticalScrollBar().valueChanged.connect(lambda _: self.gutter.update())
+        self.textChanged.connect(self.gutter.update)
         self.cursorPositionChanged.connect(self.mark_line)
         self.fit_gutter()
         self.mark_line()
+
+    def blockCount(self):
+        return self.document().blockCount()
+
+    def setPlainText(self, text):
+        super().setPlainText(text)
+        self.space_paragraphs()
+
+    def space_paragraphs(self):
+        """Medio renglón bajo cada párrafo (una línea del código): pegados costaban de leer. Es el aspecto, no un
+        cambio: sin paso de deshacer, y por eso no se toca con algo que deshacer (el aire de antes se queda)."""
+        doc = self.document()
+        if doc.isUndoAvailable():
+            return
+        fmt = QTextBlockFormat()
+        fmt.setBottomMargin(round(self.fontMetrics().height() * 0.5))
+        cursor = QTextCursor(doc)
+        cursor.select(QTextCursor.SelectionType.Document)
+        self.blockSignals(True)  # el código no cambió: nada de aplicarlo en vivo
+        doc.setUndoRedoEnabled(False)
+        cursor.mergeBlockFormat(fmt)
+        doc.setUndoRedoEnabled(True)
+        self.blockSignals(False)
+
+    def centerCursor(self):
+        self.ensureCursorVisible()
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.value() + self.cursorRect().center().y() - self.viewport().height() // 2)
 
     def set_colors(self, colors):
         self.look.colors = colors
@@ -468,12 +499,6 @@ class CodeEdit(QPlainTextEdit):
     def fit_gutter(self):
         self.setViewportMargins(self.gutter_width(), 0, 0, 0)
 
-    def scroll_gutter(self, rect, dy):
-        if dy:
-            self.gutter.scroll(0, dy)
-        else:
-            self.gutter.update(0, rect.y(), self.gutter.width(), rect.height())
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
         area = self.contentsRect()
@@ -482,6 +507,7 @@ class CodeEdit(QPlainTextEdit):
     def setFont(self, font):
         super().setFont(font)
         self.fit_gutter()
+        self.space_paragraphs()  # el aire va con el tamaño de la letra
 
     def mark_line(self):
         line = QTextEdit.ExtraSelection()
@@ -499,15 +525,16 @@ class CodeEdit(QPlainTextEdit):
         painter = QPainter(self.gutter)
         painter.fillRect(event.rect(), QColor(self.look.colors["gutter"]))
         painter.setFont(self.font())
-        block, here = self.firstVisibleBlock(), self.textCursor().blockNumber()
-        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
-        height = self.fontMetrics().height()
-        while block.isValid() and top <= event.rect().bottom():
+        block, here = self.cursorForPosition(QPoint(0, 0)).block(), self.textCursor().blockNumber()
+        scroll, height = self.verticalScrollBar().value(), self.fontMetrics().height()
+        while block.isValid():
+            top = round(block.layout().position().y()) - scroll
+            if top > event.rect().bottom():
+                break
             if block.isVisible():
                 painter.setPen(QColor(self.look.colors["number_on" if block.blockNumber() == here else "number"]))
                 painter.drawText(0, top, self.gutter.width() - 8, height, Qt.AlignmentFlag.AlignRight,
                                  str(block.blockNumber() + 1))
-            top += round(self.blockBoundingRect(block).height())
             block = block.next()
         painter.end()
 
@@ -2265,6 +2292,23 @@ class Sheet(QTextEdit):
         insert_lines(cursor, [(source_of(cursor.block()), "* * *")], self.pictures, color=self.color)
         cursor.endEditBlock()
         self.setTextCursor(cursor)
+
+    def insert_hidden_title(self, text):
+        """Título de capítulo que no se ve en el EPUB (sí en el índice), antes del párrafo del cursor: un capítulo de
+        solo una ilustración («Contenido») con su nombre. Un deshacer."""
+        block = self.textCursor().block()
+        cursor = QTextCursor(block)
+        cursor.beginEditBlock()
+        # el párrafo de ahora pasa entero (con su formato, su línea original) al de abajo; el de arriba es el título
+        cursor.insertBlock(block.blockFormat(), cursor.charFormat())
+        cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock)
+        insert_lines(cursor, [(None, convert.HIDDEN_TITLE + text)], self.pictures, color=self.color)
+        f = cursor.blockFormat()
+        f.setProperty(LEVEL, "Capítulo")
+        cursor.setBlockFormat(f)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self.look.rehighlightBlock(cursor.block())
 
     def store_picture(self, data):
         """Guarda la imagen en IMAGES con el nombre de su contenido; devuelve el nombre de [Imagen nombre]."""
