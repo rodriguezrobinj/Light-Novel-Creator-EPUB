@@ -5434,7 +5434,7 @@ def test_window_editor_code_view_reaches_the_book():
         editor_window.toggle_code()
         editor_window.code.setPlainText(editor_window.code.toPlainText() + "\n<p>Roto <b>sin cerrar</p>")
         editor_window.toggle_code()
-        still_code = editor_window.code_btn.isChecked()
+        still_code = editor_window.view_tabs.currentIndex() == 1 and editor_window.code.isVisibleTo(editor_window.win)
         editor_window.code.setPlainText(editor_window.code.toPlainText().replace("\n<p>Roto <b>sin cerrar</p>", ""))
         editor_window.toggle_code()
         editor_window.save()
@@ -6478,7 +6478,7 @@ def test_text_editor_ribbon_tabs_like_word():
     assert names == ["Inicio", "Formato", "Insertar", "Revisar", "Vista"], names
     assert all(len(n) == 1 for n in owners.values()), owners
     assert (where["N"], where["Color ▾"], where["Símbolos ▾"], where["Leer"], where["Navegación"]) == tuple(names), where
-    assert where["S"] == where["x₂"] == "Inicio" and where["Furigana"] == "Formato" and where["Código HTML"] == "Vista"
+    assert where["S"] == where["x₂"] == "Inicio" and where["Furigana"] == "Formato" and where["Navegación"] == "Vista"
     assert visible == [(n, True, True) for n in range(5)], visible
     assert from_box and not from_menu, (from_box, from_menu)
     from PySide6.QtCore import Qt
@@ -11293,6 +11293,14 @@ def test_websheet_is_default_and_does_what_chromium_cannot():
             contents = wait_for(lambda: ed.current[0] < 0 and not ed.web_on and ed.sheet.isVisible(), 15)
             ed.open_section(*window.section_bounds(k))
             back = wait_for(lambda: ed.web_on and ed.web.loaded, 10)
+            # pestañas sobre la hoja: «Código HTML» quita la hoja web (una vista a la vez); al volver, carga lo cambiado
+            ed.view_tabs.setCurrentIndex(1)
+            coded = wait_for(lambda: ed.code.isVisible() and not ed.web.isVisible() and not ed.sheet.isVisible(), 15)
+            ed.code.setPlainText(ed.code.toPlainText().replace("Tercero", "Tercerísimo", 1))
+            ed.view_tabs.setCurrentIndex(0)
+            reweb = wait_for(lambda: ed.web_on and ed.web.loaded and ed.web.isVisible() and not ed.code.isVisible()
+                             and "Tercerísimo" in (js(ed.web, "document.getElementById('lnc-sheet').innerText") or ""),
+                             15)
             ed.toggle_web()
             wait_for(lambda: not ed.web_on, 15)
             ed.win.done(0)
@@ -11306,6 +11314,7 @@ def test_websheet_is_default_and_does_what_chromium_cannot():
     assert undone, editor_dump(ed)
     assert both and uncentered, (both, uncentered, tercero)
     assert contents and back, (contents, back)
+    assert coded and reweb, (coded, reweb)
     assert remembered and window.settings.get("editor_web") is False, window.settings.get("editor_web")
 
 

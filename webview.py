@@ -118,6 +118,11 @@ if AVAILABLE:
             # la vuelve a crear al mostrarse la vista (parpadeaba como si se abriera dos veces)
             self.setHtml("")
 
+        def sizeHint(self):
+            """El tamaño máximo que le da la ventana (la página del lector), si lo tiene."""
+            biggest = self.maximumSize()
+            return biggest if biggest.height() < 10000 else super().sizeHint()
+
         def hold(self):
             """Deja a la vista lo que se ve ahora hasta unveil(): se llama antes de cargar otra página."""
             if self.isVisible() and self.url().scheme() == SCHEME.decode():
