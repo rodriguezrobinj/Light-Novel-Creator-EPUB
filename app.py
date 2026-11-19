@@ -9826,7 +9826,12 @@ class TextEditor:
         try:
             convert.edit_section(draft, start, end, text, editor.IMAGES)
             stop = end + len(draft.blocks) - len(book.blocks)
-            part = convert.Book(book.title, "", book.cover, draft.blocks[start:stop], [], origin=book.origin)
+            # Con un EPUB, también el archivo de sus notas (notas.xhtml): sin él, la vista previa quitaba el enlace de
+            # cada llamada y la nota emergente no salía
+            here = book.blocks[start].src[0] if book.origin and book.blocks[start].src else ""
+            wanted = {faithful._resolve(here, m[1]) for m in re.finditer(r'href="([^"#:]+)#', text)} - {here}
+            notes = [b for b in book.blocks if here and b.src and b.src[0] in wanted]
+            part = convert.Book(book.title, "", book.cover, draft.blocks[start:stop] + notes, [], origin=book.origin)
             first = part.blocks[0] if part.blocks else None
             chapters = [(0, self.app.tree.set(str(start), "title") if self.app.tree.exists(str(start))
                          else convert._plain(first))] if first is not None and first.kind == "heading" else []

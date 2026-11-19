@@ -83,6 +83,54 @@ CLICK_JS = """
   return true;
 })()
 """
+# Notas emergentes, como en un lector: un clic en la llamada (epub:type o role «noteref») pide la nota a Python, que la
+# saca del EPUB (también de otro archivo, notas.xhtml), y sale en un recuadro bajo la llamada. Los demás enlaces no
+# se siguen: la vista se quedaba en otro archivo. Clic fuera o Esc la cierran
+NOTE_JS = """
+(function () {
+  if (window.lncNotes) return true;
+  window.lncNotes = true;
+  function close() { var n = document.getElementById('lnc-note'); if (n) n.remove(); }
+  function noteref(a) {
+    var t = (a.getAttributeNS('http://www.idpf.org/2007/ops', 'type') || a.getAttribute('epub:type') || '') + ' ' +
+            (a.getAttribute('role') || '');
+    return /noteref/.test(t);
+  }
+  document.addEventListener('click', function (e) {
+    var inNote = e.target.closest && e.target.closest('#lnc-note');
+    var a = e.target.closest && e.target.closest('a[href]');
+    if (!inNote) close();
+    if (!a) return;
+    e.preventDefault();
+    if (inNote || !noteref(a)) return;
+    window.lncNoteLink = a;
+    console.log('lnc-note ' + a.getAttribute('href'));
+  }, true);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+  window.lncShowNote = function (html, dark) {
+    close();
+    var a = window.lncNoteLink;
+    if (!a || !html) return false;
+    var box = document.createElement('div');
+    box.id = 'lnc-note';
+    try { box.innerHTML = html; } catch (e) { box.textContent = html.replace(/<[^>]*>/g, ''); }
+    var r = a.getBoundingClientRect(), root = document.documentElement.getBoundingClientRect();
+    box.style.cssText = 'position:absolute;z-index:20;box-sizing:border-box;max-width:min(92vw,32em);' +
+      'padding:0.6em 0.9em;border-radius:6px;font-size:0.9em;line-height:1.4;text-indent:0;' +
+      'box-shadow:0 4px 16px rgba(0,0,0,0.35);border:1px solid ' + (dark ? '#555' : '#bbb') + ';' +
+      'background:' + (dark ? '#222' : '#fff') + ';color:' + (dark ? '#ddd' : '#222') + ';';
+    document.documentElement.appendChild(box);  // fuera del <body>: el modo oscuro no la vuelve transparente
+    var left = Math.max(8, Math.min(r.left - root.left - 20, document.documentElement.clientWidth - box.offsetWidth - 8));
+    box.style.left = left + 'px';
+    box.style.top = (r.bottom - root.top + 6) + 'px';
+    var below = r.bottom + 6 + box.offsetHeight;
+    if (below > window.innerHeight && r.top > box.offsetHeight + 12)  // sin sitio debajo: encima
+      box.style.top = (r.top - root.top - box.offsetHeight - 6) + 'px';
+    return true;
+  };
+  return true;
+})()
+"""
 # El párrafo del cursor en la vista del EPUB: recuadrado como en el panel del original, y a la vista
 MARK_JS = """
 (function (t, color) {
@@ -140,9 +188,12 @@ if AVAILABLE:
         """Página que recoge los avisos de desplazamiento de SCROLL_JS."""
         scrolled = Signal(int, int, int)  # arriba, alto del documento y de la vista, en px de CSS
         clicked = Signal(str)  # texto del párrafo pulsado (CLICK_JS)
+        note = Signal(str)  # href de la llamada a nota pulsada (NOTE_JS)
 
         def javaScriptConsoleMessage(self, level, message, line, source):
-            if message.startswith("lnc-click "):
+            if message.startswith("lnc-note "):
+                self.note.emit(message[len("lnc-note "):])
+            elif message.startswith("lnc-click "):
                 self.clicked.emit(message[len("lnc-click "):])
             elif message.startswith("lnc-scroll "):
                 top, height, view = (int(x) for x in message.split()[1:4])
@@ -170,6 +221,7 @@ if AVAILABLE:
             self.bar.setRange(0, 0)
             self.bar.valueChanged.connect(lambda v: self.page().runJavaScript(f"window.scrollTo(0, {v})"))
             self.page().scrolled.connect(self._scrolled)
+            self.page().note.connect(self._note)
             self.scale = 1.0  # el zoom de quien la mira (− y +), sobre el del tamaño del lector
             self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # solo se mira: el teclado sigue en la lista
@@ -230,6 +282,17 @@ if AVAILABLE:
             self.page_ = min(self.pages - 1, round(top / max(1, view)))
             self.moved.emit()
 
+        def _note(self, href):
+            """La nota de la llamada href, sacada del EPUB que se muestra, en su recuadro."""
+            from urllib.parse import unquote, urlsplit
+            here = unquote(self.url().path()).lstrip("/")
+            target = urlsplit(href)
+            path = posixpath.normpath(posixpath.join(posixpath.dirname(here), unquote(target.path))) if target.path else here
+            data = self.zip.files.get(path, b"").decode("utf-8", "replace")
+            inner = note_html(data, unquote(target.fragment))
+            if inner:
+                self.page().runJavaScript(f"window.lncShowNote({json.dumps(inner)}, {json.dumps(self.dark)})", 0)
+
         def mark(self, text, color):
             """Recuadra el párrafo donde sale text y lo trae a la vista (o quita el recuadro, sin text)."""
             self.page().runJavaScript(MARK_JS % (json.dumps(text), json.dumps(color)), 0)
@@ -245,6 +308,7 @@ if AVAILABLE:
             css += DARK if self.dark else ""
             self.page().runJavaScript(SCROLL_JS, 0)
             self.page().runJavaScript(CLICK_JS, 0)
+            self.page().runJavaScript(NOTE_JS, 0)
             script = ("(function(){var s=document.createElement('style');s.textContent=%s;"
                       "(document.head||document.documentElement).appendChild(s);"
                       "return Math.max(1,Math.ceil(document.documentElement.scrollHeight/window.innerHeight));})()"
@@ -337,6 +401,24 @@ if AVAILABLE:
             # la respuesta puede llegar con la ventana ya cerrada: entonces no se hace nada con ella
             self.page().runJavaScript(script, 0, lambda result: done and shiboken6.isValid(self) and not self.closing
                                       and done(result))
+
+
+def note_html(xhtml, note_id):
+    """HTML de dentro del elemento con id note_id en xhtml, sin el enlace de vuelta a la llamada ("" si no está)."""
+    import re
+    start = re.search(r'<([\w:]+)\b[^>]*\bid="%s"[^>]*>' % re.escape(note_id), xhtml) if note_id else None
+    if not start:
+        return ""
+    tag, depth, pos = start[1], 1, start.end()
+    for m in re.compile(r"<(/?)%s\b[^>]*?(/?)>" % re.escape(tag)).finditer(xhtml, pos):
+        if m[2]:  # <tag/>: no abre ni cierra
+            continue
+        depth += -1 if m[1] else 1
+        if depth == 0:
+            inner = xhtml[pos:m.start()]
+            # la flecha de vuelta (↩ o «Volver») no sirve en el recuadro
+            return re.sub(r'<a\b[^>]*(?:backlink|doc-backlink|rearnote)[^>]*>.*?</a>', "", inner, flags=re.S).strip()
+    return ""
 
 
 def section_path(data):
