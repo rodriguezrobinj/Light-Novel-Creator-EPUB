@@ -10818,12 +10818,29 @@ def test_editor_epub_tab_follows_what_is_written():
             cursor.insertText(" Final escrito ahora.")
             found = wait_for(lambda: (js(ed.side_web, "document.body.innerText.indexOf('Final escrito ahora')")
                                       or -1) >= 0)
+            # la llamada a nota sale como nota emergente (su archivo de notas va en la vista previa), sin salir de la página
+            js(ed.side_web, "(function(){var a=document.querySelector('a[href*=\"#nt1\"]');"
+                            "if(a)a.click();return !!a;})()")
+            note = wait_for(lambda: "nota" in (js(ed.side_web, "(function(){var n=document.getElementById('lnc-note');"
+                                                               "return n?n.textContent:'';})()") or "").lower(), 15)
+            stayed = ed.side_web.url().path().endswith("capitulo01.xhtml")
             ed.side_tabs.setCurrentIndex(0)
             back = (ed.scroll.isVisible() or not ed.side_web.isVisible())
             ed.win.done(0)
         finally:
             window.close()
     assert found and back, (found, back)
+    assert note and stayed, (note, stayed)
+
+
+def test_note_html_takes_the_note_without_its_backlink():
+    """La nota emergente de la vista del EPUB: lo de dentro del elemento con su id (con sus anidados), sin la flecha
+    de vuelta a la llamada."""
+    import webview
+    xhtml = ('<ol><li id="nt9"><p><a href="c.xhtml#rf9" role="doc-backlink"><sup>9</sup></a> Una <i>nota</i>.</p>'
+             '<li id="x"><p>anidada</p></li></li><li id="nt10"><p>Otra.</p></li></ol>')
+    assert webview.note_html(xhtml, "nt9") == '<p> Una <i>nota</i>.</p><li id="x"><p>anidada</p></li>',         webview.note_html(xhtml, "nt9")
+    assert webview.note_html(xhtml, "nt10") == "<p>Otra.</p>" and webview.note_html(xhtml, "zz") == ""
 
 
 def test_websheet_cleans_what_chromium_writes():
