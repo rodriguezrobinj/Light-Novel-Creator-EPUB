@@ -3212,7 +3212,18 @@ def test_window_more_data_title_page_and_options_reach_the_epub():
         while window.done and time.time() < deadline:
             root.update()
             time.sleep(0.05)
-        editable = window.separator_box.isEditable()
+        # el separador: una lista que no se escribe; «Otro…» pide el propio y lo deja en la lista
+        box, asked = window.separator_box, []
+        saved_ask = app._ask_line
+        app._ask_line = lambda parent, title, label, text: asked.append(text) or "§ § §"
+        try:
+            box.setCurrentIndex(box.count() - 1)
+            box.activated.emit(box.count() - 1)
+        finally:
+            app._ask_line = saved_ask
+        own_separator = (box.isEditable(), box.currentText(), window.separator_var.get(), box.itemText(box.count() - 1))
+        window.separator_var.set("◇")  # uno propio guardado en la revisión: sale en la lista
+        loaded = box.currentText()
         options = window.open_options("Ilustraciones")
         labels = [w.text() for w in options.win.findChildren(QLabel) if w.isVisible()]
         options.cancel()
@@ -3241,7 +3252,8 @@ def test_window_more_data_title_page_and_options_reach_the_epub():
                                   "note_style": "otra", "box_style": "otra"})
     assert (options["logo"], options["heading_font"]) == (str(logo), str(own)), options
     assert (options["note_style"], options["box_style"], options["synopsis"]) == ("1", "Sencillo", True), options
-    assert editable
+    assert own_separator == (False, "§ § §", "§ § §", "Otro…") and len(asked) == 1, (own_separator, asked)
+    assert loaded == "◇", loaded
 
 
 def two_color(width, height):
@@ -7084,6 +7096,8 @@ def test_window_options_search_profile_and_missing_font():
     lang.setCurrentIndex(lang.findText("Inglés"))
     lang.activated.emit(lang.currentIndex())
     lang_put = dialog.get("lang")
+    window.update_header()
+    header = window.book_line.text()  # la cabecera del libro dice el idioma por su nombre
     dialog.parts["put"]("profile", "Kindle")
     dialog.parts["show"]("Texto")
     note = dialog.parts["notes"]["hyphenate"].text()
@@ -7097,6 +7111,7 @@ def test_window_options_search_profile_and_missing_font():
     assert empty and "Fijada por el perfil Kindle" in note and profile == "Personalizado", (empty, note, profile)
     assert copied is False, copied
     assert (lang_shown, lang_editable, lang_put) == ("Español", False, "en"), (lang_shown, lang_editable, lang_put)
+    assert header.endswith("Español") or header.endswith("Inglés"), header
 
 
 def test_window_close_button_closes_at_first_click():
@@ -7106,6 +7121,18 @@ def test_window_close_button_closes_at_first_click():
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
     window.root.close()
     assert window.closed and not window.root.isVisible(), (window.closed, window.root.isVisible())
+
+
+def test_dialog_close_button_closes_at_first_click():
+    """La ✕ de la barra de título de un diálogo (Opciones, que cancela en on_reject) lo cierra con un clic: su
+    close() de dentro no cerraba (Qt no cierra dos veces a la vez) y hacía falta un segundo clic."""
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
+    dialog = window.open_options()
+    dialog.win.close()  # lo que hace la ✕ de qtk.Caption
+    shown = dialog.win.isVisible()
+    window.close()
+    assert not shown
 
 
 def test_window_options_app_pages():
@@ -7187,7 +7214,7 @@ def test_window_bar_style_changes_preview_at_once():
     other = next(n for n in range(style.count()) if style.itemText(n) != window.style_var.get())
     style.setCurrentIndex(other)
     style.activated.emit(other)
-    last = separator.count() - 1
+    last = separator.count() - 2  # el último es «Otro…», que pide uno escrito
     separator.setCurrentIndex(last)
     separator.activated.emit(last)
     got = (window.style_var.get(), window.separator_var.get())
@@ -11139,6 +11166,10 @@ def test_editor_original_panel_finds_epub_paragraph_page():
         page, box = ed.page, ed.box
         found = "número 100" in window.pdf_doc[page].get_text() if box else False
         status = ed.status.text()
+        ed.step_page(1)  # ▶: la página siguiente del capítulo, no el capítulo siguiente
+        stepped = (ed.current == window.section_bounds(head), ed.page)
+        ed.step_page(-1)
+        back = ed.page
         ed.go_block(other)
         center = QPoint(round((box.x0 + 30) * ed.page_zoom), round((box.y0 + 5) * ed.page_zoom))  # su primera línea
         ed.show_page(page)  # el panel en la página del párrafo 100, como al pasar de página
@@ -11150,6 +11181,7 @@ def test_editor_original_panel_finds_epub_paragraph_page():
     assert page > blocks[k].page - 1 and found, (page, blocks[k].page, box)
     assert status.startswith(f"Página {page + 1} del original"), status
     assert picked == k, (picked, k)
+    assert stepped == (True, page + 1) and back == page, (stepped, back, page)
 
 
 def test_websheet_navigation_changes_bar_and_close_follow_typing():
@@ -13208,12 +13240,14 @@ def test_window_translate_models_and_book_language():
         parts["key"].setText("k")
         parts["models"]()
         end = time.time() + 5
-        while parts["model"].count() < 2 and time.time() < end:
+        while parts["model"].count() < 3 and time.time() < end:
             root.update()
             time.sleep(0.02)
+        # una lista que no se escribe: los modelos de la API y «Otro…» para uno a mano
         assert [parts["model"].itemText(n) for n in range(parts["model"].count())] == ["deepseek-flash",
-                                                                                     "deepseek-v4-pro"]
+                                                                                     "deepseek-v4-pro", "Otro…"]
         assert parts["model"].currentText() == "deepseek-flash" and "2 modelos" in parts["status"].text()
+        assert not parts["model"].isEditable()
         parts["engine"].setCurrentIndex(parts["engine"].findText("Google Cloud (clave)"))
         parts["engine"].activated.emit(parts["engine"].currentIndex())
         assert parts["key"].isVisible() and not parts["model"].isVisible()
