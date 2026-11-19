@@ -9,8 +9,8 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QPushButton, QRadioButton, QScrollArea, QSpinBox,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QRadioButton, QScrollArea, QSpinBox,
                                QSplitter, QVBoxLayout, QWidget)
 import shiboken6
 
@@ -350,8 +350,11 @@ class OptionsDialog:
         src, dst, status = QComboBox(), QComboBox(), QLabel("")
         engine.addItems(list(translate.ENGINES))
         engine.setCurrentIndex(max(0, engine.findText(str(data.get("engine", "")))))
-        model.setEditable(True)  # se escribe a mano o se elige de los que da «Buscar modelos»
+        # Se elige de los que da «Buscar modelos» u «Otro…» para escribirlo
         model.setMinimumContentsLength(22)
+        model.setPlaceholderText("Elige uno")
+        qtk.ask_other(model, lambda now: (lambda r: r[0] if r[1] else None)(
+            QInputDialog.getText(self.win, "Modelo", "Nombre del modelo:", text=now)))
         base.setPlaceholderText("http://localhost:11434/v1")
         base.setMinimumWidth(260)
         key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -410,8 +413,7 @@ class OptionsDialog:
             info = translate.ENGINES[name]
             for widget in (model, base, key):
                 widget.blockSignals(True)  # poner los valores del motor no es escribir
-            model.clear()  # la lista buscada era de otro motor
-            model.setEditText(data["models"].get(name) or info.get("model", ""))
+            qtk.fill_choices(model, [], data["models"].get(name) or info.get("model", ""))  # la buscada era de otro motor
             key.setText(translate.unprotect(data["keys"].get(name, "")))
             base.setText(data.get("base") or info.get("base", ""))
             for widget in (model, base, key):
@@ -455,10 +457,7 @@ class OptionsDialog:
                     if engine.currentText() == name:
                         status.setText(result or f"{name} no devolvió ningún modelo.")
                     return
-                current = model.currentText().strip()
-                model.clear()
-                model.addItems(result)
-                model.setEditText(current or result[0])
+                qtk.fill_choices(model, result, model.currentText().strip() or result[0])
                 keep()
                 count = f"{len(result)} modelo" + ("s" if len(result) != 1 else "")
                 status.setText(f"{name} ofrece {count}: elige uno en «Modelo».")

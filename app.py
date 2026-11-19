@@ -1885,13 +1885,15 @@ def _attach(button, menu):
                  and time.monotonic() - closed[0] < 0.25)
 
 
-def _combo(var, values, width, editable=False, changed=None):
+def _combo(var, values, width, other=None, changed=None):
+    """Desplegable de var. other: el último elemento («Otro…»), que pide uno propio con other(el de antes)."""
     box = QComboBox()
-    box.addItems(values)
-    box.setEditable(editable)
+    box.addItems(values + (["Otro…"] if other else []))
     box.setMinimumContentsLength(width)
     box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-    var.combo(box)
+    var.combo(box, own=bool(other))
+    if other:
+        qtk.ask_other(box, other)
     if changed:
         box.activated.connect(lambda _: changed())
     return box
@@ -2331,12 +2333,11 @@ class App:
         # «Original» solo con un EPUB de entrada (show_book la pone o la quita): su CSS, sin tocar
         self.style_box = _combo(self.style_var, list(convert.STYLES), 10, changed=self.update_preview)
         self.style_box.setToolTip("«Original»: el aspecto del EPUB abierto, con su CSS y sus fuentes")
-        # Editable: lo que se escriba (Intro) es el separador, tal cual
-        self.separator_box = _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12, editable=True,
-                                    changed=self.update_preview)
-        self.separator_box.setToolTip("Elige uno o escribe el tuyo y pulsa Intro")
-        self.separator_box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)  # el propio no se suma a la lista
-        self.separator_box.lineEdit().editingFinished.connect(self.update_preview)
+        # «Otro…»: el texto que se escriba es el separador, tal cual
+        self.separator_box = _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12, changed=self.update_preview,
+                                    other=lambda now: _ask_line(root, "Separador", "Separador de escena (se pone tal "
+                                                                "cual entre las escenas):", now))
+        self.separator_box.setToolTip("Elige uno, u «Otro…» para escribir el tuyo")
         index = qtk.Var.check(self.contents_var, QCheckBox("Índice"))
         index.setToolTip("Página «Contenido» tras la portada, con los capítulos y sus subtítulos")
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
@@ -2507,7 +2508,9 @@ class App:
         series = self.series_var.get().strip()
         if series and self.volume_var.get().strip():
             series += f" · vol. {self.volume_var.get().strip()}"
-        parts = [self.author_var.get().strip(), self.publisher_var.get().strip(), series, self.lang_var.get().strip()]
+        lang = self.lang_var.get().strip()
+        parts = [self.author_var.get().strip(), self.publisher_var.get().strip(), series,
+                 translate.LANGS.get(lang, lang)]  # «Español», no «es»
         self.book_line.setText(" · ".join(p for p in parts if p))
 
     def update_cover(self):
@@ -4276,8 +4279,8 @@ class App:
         places = QListWidget()
         side.addWidget(places, 1)
         side.addWidget(_label("Cambiar por", "muted"))
-        fix = QComboBox()
-        fix.setEditable(True)
+        fix = QComboBox()  # las sugerencias y, al final, «Otra palabra…» para escribirla
+        qtk.ask_other(fix, lambda now: _ask_line(win, "Cambiar por", "Palabra que la sustituye:", now))
         side.addWidget(fix)
         change_btn = _button("Cambiar todas", lambda: change(), "primary")
         add_btn = _button("Añadir al diccionario", lambda: add())
@@ -4312,7 +4315,7 @@ class App:
             if not entry:
                 return
             word, _, suggestions = entry
-            fix.addItems(suggestions or [word])
+            fix.addItems((suggestions or [word]) + ["Otra palabra…"])
             pattern = re.compile(rf"(?<!\w){re.escape(word)}(?!\w)", re.I)
             for k, block in enumerate(self.book.blocks):
                 plain = convert._plain(block) if block.kind == "p" else ""
@@ -5735,9 +5738,11 @@ class App:
         scope.setMinimumContentsLength(34)
         scope.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         model, base, api_key = QComboBox(), QLineEdit(), QLineEdit()
-        model.setEditable(True)  # se escribe a mano o se elige de los que da «Buscar modelos»
+        # Se elige de los que da «Buscar modelos» u «Otro…» para escribirlo
         model.setMinimumContentsLength(22)
         model.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        model.setPlaceholderText("Elige uno")
+        qtk.ask_other(model, lambda now: _ask_line(win, "Modelo", "Nombre del modelo:", now))
         models_btn = _button("Buscar modelos", lambda: find_models())
         api_key.setEchoMode(QLineEdit.EchoMode.Password)
         base.setPlaceholderText("http://localhost:11434/v1")
@@ -5917,8 +5922,8 @@ class App:
         def show_engine():
             name = work["engine"] = engine.currentText()
             info = translate.ENGINES[name]
-            model.clear()  # la lista buscada era de otro motor
-            model.setEditText(prefs["models"].get(name) or info.get("model", ""))
+            # la lista buscada era de otro motor
+            qtk.fill_choices(model, [], prefs["models"].get(name) or info.get("model", ""))
             api_key.setText(translate.unprotect(prefs["keys"].get(name, "")))
             base.setText(prefs.get("base") or info.get("base", ""))
             api_key.setPlaceholderText("Opcional" if info.get("custom") else "Clave API")
@@ -6550,10 +6555,7 @@ class App:
                     if engine.currentText() == name:
                         messagebox.showerror("Traducir", result or f"{name} no devolvió ningún modelo.", parent=win)
                     return
-                current = model.currentText().strip()
-                model.clear()
-                model.addItems(result)
-                model.setEditText(current)
+                qtk.fill_choices(model, result, model.currentText().strip())
                 status.setText(f"{name} ofrece {convert.counted(len(result), 'modelo')}: elige uno en «Modelo».")
 
             qtk.after(200, wait)
@@ -7154,6 +7156,22 @@ class Dialog(QDialog):
     abrirse cabe en la pantalla (con el zoom de Windows a 125 % en 1366x768 solo quedan 1093x582)."""
     on_reject = None
     caption = None
+    closing = asked = False  # dentro de closeEvent; on_reject pidió cerrar ahí dentro
+
+    def close(self):
+        if self.closing:  # Qt no cierra dos veces a la vez: lo acepta closeEvent (la ✕ pedía un segundo clic)
+            self.asked = True
+            return True
+        return super().close()
+
+    def closeEvent(self, event):
+        self.closing, self.asked = True, False
+        try:
+            super().closeEvent(event)  # reject() -> on_reject
+        finally:
+            self.closing = False
+        if self.asked:
+            event.accept()
 
     def nativeEvent(self, kind, message):
         handled, result = qtk.caption_event(self, kind, message)
@@ -7578,10 +7596,9 @@ class TextEditor:
         # Letra, tamaño y color: como en Word, sobre lo elegido; salen en el libro como <span style>. En su pestaña:
         # en Inicio no cabían en 1366 px con el nombre de cada botón
         self.family_box = QComboBox()
-        self.family_box.setEditable(True)
         self.family_box.setToolTip("Tipo de letra de lo elegido (las del libro primero)")
         self.family_box.setMinimumContentsLength(12)
-        self.family_box.lineEdit().setPlaceholderText("Letra")
+        self.family_box.setPlaceholderText("Letra")
         self.family_box.addItems(["(La del libro)"] + sorted(editor.FAMILIES.values()) + list(convert.FONTS))
         self.family_box.setCurrentIndex(-1)
         self.family_box.activated.connect(lambda n: (self.do("set_family", None if n == 0 else self.family_box.itemText(n)),
@@ -9727,6 +9744,22 @@ class TextEditor:
         if self.web_shown():
             self.side_web.go(self.side_web.page_ + delta)
             self.page_label.setText(f"Página {self.side_web.page_ + 1} de {self.side_web.pages}")
+            return
+        if self.app.book.origin and self.app.pdf_doc is not None:
+            # Un EPUB: sus bloques solo saben la primera página de su archivo, y con ella ◀ ▶ saltaban de capítulo
+            order = [k for _, start, end, _ in self.sections for k in range(start, end)]
+            k = self.source_block()
+            here, i = self.source_page(k), order.index(k) if k in order else 0
+            ahead = order[i + 1:] if delta > 0 else order[i - 1::-1] if i else []
+            target = next((j for j in ahead if (self.source_page(j) > here if delta > 0
+                                                else self.source_page(j) < here)), None)
+            if target is not None and delta < 0:  # al primer párrafo de esa página
+                n = order.index(target)
+                while n and self.source_page(order[n - 1]) == self.source_page(target):
+                    n -= 1
+                target = order[n]
+            if target is not None:
+                self.go_block(target)
             return
         here, starts = self.app.book.blocks[self.source_block()].page, self.page_starts()
         pages = [p for p in starts if (p > here if delta > 0 else p < here)]

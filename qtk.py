@@ -481,9 +481,11 @@ class Var:
         widget.textChanged.connect(lambda text: self.set(text, widget))
         return widget
 
-    def combo(self, widget):
-        widget.setCurrentText(str(self.value))
-        self.setters.append((widget, lambda v: widget.setCurrentText(str(v))))
+    def combo(self, widget, own=False):
+        """own: un valor que no está en la lista (uno propio de «Otro…») se añade antes de «Otro…» (set_choice)."""
+        put = (lambda v: set_choice(widget, str(v))) if own else (lambda v: widget.setCurrentText(str(v)))
+        put(self.value)
+        self.setters.append((widget, put))
         widget.currentTextChanged.connect(lambda text: self.set(text, widget))
         return widget
 
@@ -493,6 +495,38 @@ class Var:
         self.setters.append((widget, widget.setChecked))
         widget.toggled.connect(lambda on: self.set(on, widget))
         return widget
+
+
+def set_choice(box, text):
+    """Elige text en un desplegable que no se escribe; si no está (uno propio, de «Otro…»), lo pone antes de
+    «Otro…». Vacío: nada elegido (se ve su placeholderText)."""
+    n = box.findText(text) if text else -1
+    if n < 0 and text:
+        n = box.count() - 1 if box.count() and box.itemText(box.count() - 1).endswith("…") else box.count()
+        box.insertItem(n, text)
+    box.setCurrentIndex(n)
+    box.setProperty("chosen", text)  # al que vuelve «Otro…» si se cancela, también con las señales paradas
+
+
+def fill_choices(box, items, current, other="Otro…"):
+    """items y, al final, other (ask_other), con current elegido aunque no esté entre ellos."""
+    box.clear()
+    box.addItems([i for i in items if i] + [other])
+    set_choice(box, current)
+
+
+def ask_other(box, ask):
+    """El último elemento del desplegable («Otro…») pide el texto propio: ask(el de antes) -> texto, o None si se
+    cancela (vuelve el de antes). Un desplegable que se escribe parecía una caja de texto. Conectar antes que los
+    demás activated, que así ven ya lo elegido."""
+    box.setProperty("chosen", box.currentText())
+    box.currentTextChanged.connect(lambda text: text != box.itemText(box.count() - 1) and box.setProperty("chosen", text))
+
+    def picked(n):
+        if n == box.count() - 1:
+            before = box.property("chosen") or ""
+            set_choice(box, (ask(before) or "").strip() or before)
+    box.activated.connect(picked)
 
 
 def qimage(pix, ink=None):
