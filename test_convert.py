@@ -11422,6 +11422,98 @@ def faithful_chapters(book):
     return [(k, book.blocks[k].title) for k in book.candidates]
 
 
+def kadokawa_epub(path):
+    """EPUB japonés como los de Kadokawa: cada página un archivo con el nombre del libro en <title>, la portadilla
+    del capítulo (una imagen) en uno y su texto en el siguiente, el índice solo con las portadillas, y un dibujo
+    (区切り) repetido como separador de escena."""
+    def jpeg(w, h, gray):
+        pic = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, w, h), False)
+        pic.clear_with(gray)
+        return pic.tobytes("jpeg")
+    page = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" '
+            'xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="ja"><head><meta charset="UTF-8"/>'
+            '<title>陰の本 ０７</title><link rel="stylesheet" type="text/css" href="../style/book.css"/></head>'
+            '<body><div class="main">{}</div></body></html>')
+    cut = '<p><img class="fit" src="../image/kugiri.jpg" alt=""/></p>'
+    files = {"p-001": '<p><img class="fit" src="../image/t1.jpg" alt=""/></p>',
+             "p-002": f'<p>一つ目の段落。</p><p><br/></p>{cut}<p>二つ目の段落。</p>{cut}<p>三つ目。</p>',
+             "p-003": '<p id="toc-002"><img class="fit" src="../image/t2.jpg" alt=""/></p>',
+             "p-004": f'<p>四つ目の段落。</p>{cut}<p>終わり。</p>'}
+    nav = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" '
+           'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Navigation</title></head><body>'
+           '<nav epub:type="toc" id="toc"><ol><li><a href="xhtml/p-001.xhtml">序章 春</a></li>'
+           '<li><a href="xhtml/p-003.xhtml#toc-002">一章 夏</a></li></ol></nav></body></html>')
+    manifest = "".join(f'<item id="{n}" href="xhtml/{n}.xhtml" media-type="application/xhtml+xml"/>' for n in files)
+    manifest += ('<item id="nav" href="navigation-documents.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+                 + "".join(f'<item id="{n}" href="image/{n}.jpg" media-type="image/jpeg"/>' for n in ("t1", "t2", "kugiri")))
+    opf = ('<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+           'unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x'
+           '</dc:identifier><dc:title>陰の本 ０７</dc:title><dc:language>ja</dc:language></metadata>'
+           f'<manifest>{manifest}</manifest><spine page-progression-direction="rtl">'
+           + "".join(f'<itemref idref="{n}"/>' for n in files) + '</spine></package>')
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        z.writestr("META-INF/container.xml", '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:'
+                   'tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="item/standard.opf" media-type='
+                   '"application/oebps-package+xml"/></rootfiles></container>')
+        z.writestr("item/standard.opf", opf)
+        z.writestr("item/navigation-documents.xhtml", nav)
+        for n, body in files.items():
+            z.writestr(f"item/xhtml/{n}.xhtml", page.format(body))
+        z.writestr("item/image/t1.jpg", jpeg(40, 60, 60))
+        z.writestr("item/image/t2.jpg", jpeg(40, 60, 120))
+        z.writestr("item/image/kugiri.jpg", jpeg(4, 80, 200))
+        z.writestr("item/style/book.css", "html { writing-mode: vertical-rl; -epub-writing-mode: vertical-rl; }")
+    return path
+
+
+def test_faithful_epub_pages_without_index_entry_continue_their_chapter():
+    """Un EPUB japonés de Kadokawa (陰の実力者になりたくて！ 07): cada página es un archivo con el nombre del libro
+    como <title>, y salían 44 «capítulos» con ese nombre. Los del índice son los capítulos (con su nombre) y la
+    página siguiente, sin entrada ni título propio, es su texto. El dibujo repetido (区切り) es un separador, no una
+    ilustración. El EPUB que sale lo deja todo en su sitio."""
+    src = kadokawa_epub(TMP / "Kadokawa.epub")
+    book = convert.analyze(src)
+    titles = [book.blocks[c].title for c in book.candidates]
+    kinds = [b.kind for b in book.blocks]
+    out = TMP / "Kadokawa (LNC).epub"
+    convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], out, style=convert.ORIGINAL,
+                       separator="Original del PDF", typography=False, contents=False)
+    assert titles == ["序章 春", "一章 夏"], titles
+    assert kinds.count("break") == 3 and kinds.count("image") == 2, kinds
+    assert book.candidates[1] > kinds.index("break"), book.candidates  # el texto de p-002 va en el primer capítulo
+    assert not convert.check_epub(out), convert.check_epub(out)
+    assert epub_file(out, "item/xhtml/p-002.xhtml").count("kugiri.jpg") == 2
+    # en vertical (de derecha a izquierda): sale en horizontal, con las páginas de izquierda a derecha y el
+    # separador (una raya vertical) girado; sin la opción, como el original
+    with zipfile.ZipFile(out) as z:
+        opf, css = z.read("item/standard.opf").decode(), z.read("item/lnc/estilo.css").decode()
+        cut = pymupdf.Pixmap(z.read("item/image/kugiri.jpg"))
+    kept = TMP / "Kadokawa vertical.epub"
+    convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], kept, style=convert.ORIGINAL,
+                       separator="Original del PDF", typography=False, contents=False, horizontal=False)
+    with zipfile.ZipFile(kept) as z:
+        vertical_opf = z.read("item/standard.opf").decode()
+    assert book.vertical and 'page-progression-direction="ltr"' in opf and "horizontal-tb" in css, opf
+    assert cut.width > cut.height, (cut.width, cut.height)
+    assert 'page-progression-direction="rtl"' in vertical_opf, vertical_opf
+
+
+def test_page_pixmap_dark_keeps_illustrations():
+    """Modo oscuro de las vistas (ventana y panel del original del editor): papel y letra invertidos, la ilustración
+    tal cual."""
+    import app
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=200)
+    page.insert_text((20, 40), "Texto", fontsize=20)
+    pic = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40), False)
+    pic.clear_with(255)
+    page.insert_image(pymupdf.Rect(100, 100, 180, 180), pixmap=pic)
+    dark = app._page_pixmap(page, pymupdf.Matrix(1, 1), True)
+    assert dark.pixel(5, 5)[:3] == (0, 0, 0), dark.pixel(5, 5)  # el papel, negro
+    assert dark.pixel(140, 140)[:3] == (255, 255, 255), dark.pixel(140, 140)  # la ilustración blanca, igual
+
+
 def test_faithful_epub_read_blocks_titles_and_metadata():
     """Un EPUB de Sigil se lee por su HTML: un capítulo por archivo con el nombre del índice (la portada sin título
     visible también), h2/h3 como subtítulos, furigana, enlaces y notas tal cual, <em>/<strong> como <i>/<b>, el

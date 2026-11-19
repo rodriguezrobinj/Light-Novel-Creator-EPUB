@@ -95,7 +95,7 @@ LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
-             "contents", "credits", "profile", "replacements", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes",
+             "contents", "credits", "profile", "replacements", "horizontal", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes",
              "book_type", "franchise", "author_native", "illustrator_native", "relay", "epub_by", "distributor", "links",
              "synopsis", "endnotes", "note_style", "heading_font", "heading_font_file", "box_style", "logo")
 # De INHERITED, lo que es de toda la serie aunque el tomo ya tenga revisión: glosarios, diccionario y personajes
@@ -612,6 +612,7 @@ def _write_options(state, breaks=()):
             "font": font if font in convert.FONTS
             else path if path and Path(path).name == font and Path(path).is_file() else "",
             "epub2": bool(state.get("epub2")), "reading": bool(state.get("reading")), "kepub": bool(state.get("kepub")),
+            "horizontal": bool(state.get("horizontal", True)),
             "contents": bool(state.get("contents", True)), "hyphenate": bool(state.get("hyphenate")), "breaks": list(breaks),
             "synopsis": bool(state.get("synopsis", True)), "endnotes": bool(state.get("endnotes")),
             "note_style": note if (note := str(state.get("note_style", "1"))) in convert.NOTE_STYLES else "1",
@@ -1039,6 +1040,25 @@ def _review_for(pdf, book):
     return (_migrate_review(old, book) if book.credit_pages else None) or _migrate_dropped(old, book)
 
 
+def websheet_text_file(blocks):
+    import websheet  # aquí: websheet trae editor y Qt
+    return websheet.text_file(blocks)
+
+
+def _page_pixmap(page, matrix, dark=False):
+    """Pixmap de una página; dark: como el modo oscuro de los lectores, invierte el papel y el texto, no las
+    ilustraciones."""
+    pix = page.get_pixmap(matrix=matrix)
+    if dark:
+        art = pymupdf.Pixmap(pix, 0)  # copia, sin alfa como pix (copy exige el mismo)
+        pix.invert_irect()
+        for info in page.get_image_info():
+            box = (pymupdf.Rect(info["bbox"]) * matrix).irect & pix.irect
+            if not box.is_empty:
+                pix.copy(art, box)
+    return pix
+
+
 def _fit_review(pdf, book):
     """Si la revisión de antes tocaba la página del grupo (Eminence 7 editó la suya) y no se puede trasladar, el
     libro vuelve a llevar esas páginas como texto: así la revisión coincide entera y no se pierde nada."""
@@ -1084,6 +1104,7 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "typography": "Limpieza tipográfica", "gray": "Imágenes en gris", "shrink": "Reducir imágenes",
                 "shrink_size": "Tamaño de las imágenes", "trim": "Recortar márgenes blancos",
                 "credits": "Página de título y créditos", "reading": "Minutos de lectura", "contents": "Índice", "epub2": "EPUB 2",
+                "horizontal": "Texto en horizontal",
                 "kepub": "Formato Kobo (KEPUB)", "hyphenate": "Partir palabras con guiones",
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
                 "words": "Diccionario de la serie", "glossary": "Glosario", "tr_glossary": "Glosario de traducción",
@@ -2139,6 +2160,7 @@ class App:
         self.shrink_var = qtk.Var(True)  # las imágenes son casi todo el peso del EPUB
         self.shrink_size_var = qtk.Var(convert.SHRINK)  # lado mayor de las imágenes reducidas
         self.trim_var, self.credits_var, self.reading_var = qtk.Var(False), qtk.Var(False), qtk.Var(False)
+        self.horizontal_var = qtk.Var(True)  # un EPUB japonés en vertical sale de izquierda a derecha
         self.epub2_var, self.kepub_var = qtk.Var(False), qtk.Var(False)
         self.contents_var = qtk.Var(True)  # página «Contenido» tras la portada, con capítulos y subtítulos
         self.contents_var.listeners.append(lambda: self.book is not None and self.contents_row())  # su fila
@@ -2228,8 +2250,6 @@ class App:
         self.data_panel.setWidgetResizable(True)
         self.data_panel.setFrameShape(QFrame.Shape.NoFrame)
         self.data_panel.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.data_panel.setMinimumHeight(90)
-        self.data_panel.setMaximumHeight(self.data_panel.widget().sizeHint().height() + 2)
         self.data_panel.hide()
         body.addWidget(self.data_panel)
         for var in (self.title_var, self.author_var, self.publisher_var, self.lang_var, self.series_var,
@@ -2504,6 +2524,12 @@ class App:
 
     def toggle_data(self):
         shown = not self.data_panel.isVisible()
+        if shown:  # entera si cabe (la lista y las vistas previas se encogen); con barra solo en pantallas muy bajas.
+            # Medida al abrirla: al crear la ventana el tema aún no estaba puesto y salía más baja
+            full = self.data_panel.widget().sizeHint().height() + 12  # holgura: con la barra, el texto se parte más
+            room = self.root.screen().availableGeometry().height() if self.root.screen() else full
+            self.data_panel.setMaximumHeight(full)
+            self.data_panel.setMinimumHeight(min(full, int(room * 0.45)))
         self.data_panel.setVisible(shown)
         self.data_btn.setText("Ocultar datos ▴" if shown else "Editar datos ▾")
 
@@ -2781,15 +2807,7 @@ class App:
         width, height = self.box_size()
         zoom = min(width / page.rect.width, height / page.rect.height)
         matrix = pymupdf.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=matrix)
-        if dark:  # como el modo oscuro de los lectores: invierte el papel y el texto, no las ilustraciones
-            art = pymupdf.Pixmap(pix, 0)  # copia, sin alfa como pix (copy exige el mismo)
-            pix.invert_irect()
-            for info in page.get_image_info():
-                box = (pymupdf.Rect(info["bbox"]) * matrix).irect & pix.irect
-                if not box.is_empty:
-                    pix.copy(art, box)
-        return qtk.qimage(pix), zoom
+        return qtk.qimage(_page_pixmap(page, matrix, dark)), zoom
 
     def cover_page(self):
         """Página del PDF de donde sale la portada (desde 0): la elegida o la primera. None si no sale del PDF
@@ -2906,7 +2924,9 @@ class App:
                     part_blocks = self.book.blocks[index:end]
                     inner = {k - index: self.tree.set(str(k), "inc") for k in range(index + 1, end)
                              if self.tree.exists(str(k)) and self.is_title(str(k))}
-                part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [], origin=self.book.origin)
+                # Una ilustración sola, sin el EPUB de origen: la copia fiel solo sabe escribir bloques de sus archivos
+                part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [],
+                                    origin=None if is_image else self.book.origin, vertical=self.book.vertical)
                 options = self.write_options([0] * (kind == SEP) + [k for k, v in inner.items() if v == SEP])
                 options["removed"] = [k for k, v in inner.items() if v == CUT]
                 # rápido: solo lo que se ve; sin página de índice: el capítulo 1 es la sección
@@ -2933,7 +2953,7 @@ class App:
         self.draw_pdf()
         try:
             epub, pages = self.preview_epub()
-            self.epub_page = next((n for n in range(pages) if epub.load_page((1, n)).search_for(term)), 0)
+            self.epub_page = next((n for n in range(pages) if self.epub_load(n).search_for(term)), 0)
         except Exception:
             pass  # sin vista previa del EPUB: se queda en su primera página
         self.draw_epub()
@@ -2964,8 +2984,15 @@ class App:
             # Desde los bytes: abierto por ruta, Windows no dejaría reescribir el archivo
             epub = pymupdf.open(stream=Path(self.preview_path).read_bytes(), filetype="epub")
             epub.layout(width=size[0], height=size[1], fontsize=11)
-            self.preview_doc = size, epub, epub.chapter_page_count(1)  # el capítulo 0 es la portada
-        return self.preview_doc[1:]
+            # Todas las páginas tras la portada (capítulo 0): un capítulo de un EPUB puede ocupar varios archivos
+            # (portadilla y texto), y antes solo se veía el primero
+            pages = [(c, p) for c in range(1, epub.chapter_count) for p in range(epub.chapter_page_count(c))]
+            self.preview_doc = size, epub, pages
+        return self.preview_doc[1], len(self.preview_doc[2])
+
+    def epub_load(self, n):
+        """Página n (desde 0) de la sección en la vista previa del EPUB."""
+        return self.preview_doc[1].load_page(self.preview_doc[2][n])
 
     def draw_epub(self):
         view = self.epub_view
@@ -2976,7 +3003,7 @@ class App:
         try:
             epub, self.epub_pages = self.preview_epub()
             self.epub_page = max(0, min(self.epub_page, self.epub_pages - 1))
-            image, _ = self.render(epub.load_page((1, self.epub_page)), dark=self.dark_var.get())
+            image, _ = self.render(self.epub_load(self.epub_page), dark=self.dark_var.get())
         except Exception:
             self.blank(view, "Sin vista previa")
             return
@@ -5428,6 +5455,7 @@ class App:
                 "typography": self.typography_var, "shrink": self.shrink_var, "shrink_size": self.shrink_size_var,
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
+                "horizontal": self.horizontal_var,
                 "contents": self.contents_var,
                 "autocase": self.autocase_var, "kepub": self.kepub_var,
                 "hyphenate": self.hyphenate_var, "whole_words": self.whole_words_var, "pdf_size": self.pdf_size_var,
@@ -7253,6 +7281,7 @@ class TextEditor:
         import webview
         if webview.available():
             self.web = webview.WebSheet()
+            self.web.dark = bool(app.settings.get("editor_dark", False))  # Vista → Modo oscuro, al cargar
             self.web.hide()
             self.web_poll = QTimer(win)  # la cinta sigue al cursor de la hoja web (negrita, estilo, alineación)
             self.web_poll.timeout.connect(self.poll_web)
@@ -7709,7 +7738,14 @@ class TextEditor:
         self.show_changes_box.setToolTip("Marca en la hoja los párrafos que editaste")
         self.show_changes_box.toggled.connect(self.show_changes_action.setChecked)
         self.show_changes_action.toggled.connect(self.show_changes_box.setChecked)
-        group("Mostrar", [self.nav_btn, self.show_changes_box])
+        # Original, EPUB y hoja web con fondo oscuro y letra clara (las ilustraciones, tal cual); se recuerda
+        self.side_dark = bool(self.app.settings.get("editor_dark", False))
+        self.dark_box = QCheckBox("Modo oscuro")
+        self.dark_box.setToolTip("Original, EPUB y hoja web con fondo oscuro y letra clara, como el modo noche de los "
+                                 "lectores; las ilustraciones no cambian")
+        self.dark_box.setChecked(self.side_dark)
+        self.dark_box.toggled.connect(self.set_side_dark)
+        group("Mostrar", [self.nav_btn, self.show_changes_box, self.dark_box])
         for row in self.ribbon_rows:
             row.addStretch(1)
 
@@ -9150,10 +9186,14 @@ class TextEditor:
             m = convert.PICTURE.fullmatch(line.strip())
             if m and editor.IMAGES and (Path(editor.IMAGES) / m[2]).is_file():
                 pictures[line.strip()] = (Path(editor.IMAGES) / m[2]).read_bytes()
-        files, objects, path, head, body = websheet.sources(self.app.book, start, end, lines, pictures)
+        files, objects, path, head, body = websheet.sources(self.app.book, start, end, lines, pictures,
+                                                            self.app.horizontal_var.get())
         if "webview" in self.pending:  # una carga para ver, pendiente: esta la sustituye
             qtk.cancel(self.pending.pop("webview"))
-        self.web.load_sheet(files, path, websheet.page(lines, objects, head, body, path))
+        text = websheet.page(lines, objects, head, body, path)
+        if self.app.book.vertical and self.app.horizontal_var.get():  # como saldrá: de izquierda a derecha
+            text = text.replace("</head>", f"<style>{faithful.HORIZONTAL_CSS}</style></head>", 1)
+        self.web.load_sheet(files, path, text)
         self.web_on, self.web_dirty, self.web_home = active, False, None
         self.web_base, self.web_section, self.web_rev = None, self.current, self.doc_rev()
         if active:
@@ -9831,7 +9871,8 @@ class TextEditor:
             here = book.blocks[start].src[0] if book.origin and book.blocks[start].src else ""
             wanted = {faithful._resolve(here, m[1]) for m in re.finditer(r'href="([^"#:]+)#', text)} - {here}
             notes = [b for b in book.blocks if here and b.src and b.src[0] in wanted]
-            part = convert.Book(book.title, "", book.cover, draft.blocks[start:stop] + notes, [], origin=book.origin)
+            part = convert.Book(book.title, "", book.cover, draft.blocks[start:stop] + notes, [], origin=book.origin,
+                                vertical=book.vertical)
             first = part.blocks[0] if part.blocks else None
             chapters = [(0, self.app.tree.set(str(start), "title") if self.app.tree.exists(str(start))
                          else convert._plain(first))] if first is not None and first.kind == "heading" else []
@@ -9840,14 +9881,24 @@ class TextEditor:
                            logo="", kepub=False)
             convert.write_epub(part, chapters, self.web_path, **options)
             data = Path(self.web_path).read_bytes()
-            path = webview.section_path(data)
+            path, override = webview.section_path(data), None
+            # Un capítulo de varios archivos (portadilla de página fija y texto, como en los EPUB de Kadokawa): todos
+            # en una página, sobre el de texto, que trae su hoja de estilo
+            mine = {b.src[0] for b in part.blocks[:stop - start] if b.src}
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                _, _, items, order, _ = faithful.package(z)
+                spine = [items[i][0] for i in order if "html" in items[i][1] and items[i][0] in mine]
+                base = websheet_text_file(part.blocks[:stop - start])
+                if len(spine) > 1 and base in spine:
+                    files = {name: z.read(name) for name in spine}
+                    path, override = base, {base: webview.merge_files(files, spine, base)}
         except Exception:
             _log(traceback.format_exc())
             self.page_label.setText("Sin vista del EPUB")
             return
         width, height = DEVICES[self.app.device_var.get()]
-        self.side_web.show_file(data, path, (round(width * 16 / 11), round(height * 16 / 11)),
-                                self.app.dark_var.get())
+        self.side_web.show_file(data, path, (round(width * 16 / 11), round(height * 16 / 11)), self.side_dark,
+                                override=override)
 
     def mark_epub(self):
         """Pestaña EPUB: el párrafo del cursor recuadrado como en el panel del original, y a la vista. Se busca por su
@@ -10148,6 +10199,18 @@ class TextEditor:
         self.zoom_label.setText(f"{round(self.pdf_zoom * 100)} %")
         self.redraw()
 
+    def set_side_dark(self, on):
+        """Modo oscuro de las vistas del panel: se vuelven a dibujar el original y el EPUB, y la hoja web lo pone."""
+        self.side_dark = on
+        self.app.settings["editor_dark"] = on
+        self.app.save_settings()
+        self.drawn = None
+        self.redraw()
+        if self.web_shown():
+            self.draw_web()
+        if self.web is not None:
+            self.web.set_dark(on)
+
     def show_web_page(self, view):
         """«Página n de m» de la pestaña EPUB u hoja web: lo que cabe en la vista es una página."""
         self.page_label.setText(f"Página {view.page_ + 1} de {view.pages}")
@@ -10282,10 +10345,10 @@ class TextEditor:
             return QRectF(box.x0 - 3, top + box.y0 - 3, box.width + 6, box.height + 6), MARK_COLORS["current"]
 
         marks = [mark(self.box)] if self.box else []
-        image = qtk.qimage(page.get_pixmap(matrix=matrix))
+        image = qtk.qimage(_page_pixmap(page, matrix, self.side_dark))
         self.below = None  # (página de debajo, dónde empieza en píxeles)
         if self.more and self.more[0] == index + 1:
-            second = qtk.qimage(self.app.pdf_doc[index + 1].get_pixmap(matrix=matrix))
+            second = qtk.qimage(_page_pixmap(self.app.pdf_doc[index + 1], matrix, self.side_dark))
             top = image.height() + PAGE_GAP
             both = QImage(max(image.width(), second.width()), top + second.height(), QImage.Format.Format_ARGB32)
             both.fill(Qt.GlobalColor.transparent)
