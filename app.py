@@ -1040,6 +1040,23 @@ def _review_for(pdf, book):
     return (_migrate_review(old, book) if book.credit_pages else None) or _migrate_dropped(old, book)
 
 
+def _epub_block_page(book, doc, k):
+    """Página (desde 0) del original de MuPDF donde está el bloque k de un EPUB: el bloque solo sabe la primera
+    página de su archivo, y un capítulo ocupa varias. Se busca su texto (o el del párrafo siguiente, si es una
+    ilustración o un separador) en las páginas de su archivo."""
+    block = book.blocks[k]
+    start = block.page - 1
+    if doc is None or not block.src:
+        return start
+    probe = next((b for b in book.blocks[k:k + 8] if b.kind == "p" and b.src and b.src[0] == block.src[0]
+                  and len(convert._plain(b)) >= 4), None)
+    if probe is None:
+        return start
+    words = " ".join(convert._plain(probe).split())[:24]
+    end = next((b.page - 1 for b in book.blocks[k:] if b.src and b.src[0] != block.src[0]), doc.page_count)
+    return next((i for i in range(start, min(end + 1, doc.page_count)) if doc[i].search_for(words)), start)
+
+
 def websheet_text_file(blocks):
     import websheet  # aquí: websheet trae editor y Qt
     return websheet.text_file(blocks)
@@ -1052,6 +1069,8 @@ def _page_pixmap(page, matrix, dark=False):
     if dark:
         art = pymupdf.Pixmap(pix, 0)  # copia, sin alfa como pix (copy exige el mismo)
         pix.invert_irect()
+        if pix.colorspace and pix.colorspace.n in (1, 3):  # el papel del gris de la hoja, la letra la del tema
+            pix.tint_with(int(theme.DARK["sheet"][1:], 16), int(theme.DARK["ink"][1:], 16))
         for info in page.get_image_info():
             box = (pymupdf.Rect(info["bbox"]) * matrix).irect & pix.irect
             if not box.is_empty:
@@ -2904,7 +2923,7 @@ class App:
         item = selected[0]
         index = int(item)
         block = self.book.blocks[index]
-        self.pdf_page = block.page - 1
+        self.pdf_page = _epub_block_page(self.book, self.pdf_doc, index) if self.book.origin else block.page - 1
         self.highlight = (self.pdf_page, block.rect) if block.rect else None
         self.draw_pdf()
         self.epub_page, self.epub_pages, self.next_page = self.next_page, 0, 0
@@ -2927,13 +2946,16 @@ class App:
                 # Una ilustración sola, sin el EPUB de origen: la copia fiel solo sabe escribir bloques de sus archivos
                 part = convert.Book(self.book.title, "", self.book.cover, part_blocks, [],
                                     origin=None if is_image else self.book.origin, vertical=self.book.vertical)
-                options = self.write_options([0] * (kind == SEP) + [k for k, v in inner.items() if v == SEP])
+                # una fila de separador que ya es un separador (el dibujo de un EPUB) va como es, no como título
+                options = self.write_options([0] * (kind == SEP and block.kind != "break")
+                                             + [k for k, v in inner.items() if v == SEP])
                 options["removed"] = [k for k, v in inner.items() if v == CUT]
                 # rápido: solo lo que se ve; sin página de índice: el capítulo 1 es la sección
                 options.update(shrink=False, trim=False, epub2=False, credits=False, contents=False, synopsis=False,
                                logo="")
                 chapters = [(0, self.tree.set(item, "title"))] if kind == ON else []
                 options["fit"] = DEVICES[self.device_var.get()]  # ilustraciones que caben en la página de MuPDF
+                options["preview"] = True  # un EPUB de entrada: sin las imágenes del resto del libro
                 key = (self.book.title, self.book.cover, chapters, sorted(options.items()),
                        [(b.kind, b.page, b.html, b.image, b.layout, b.align, b.keep) for b in part_blocks])
                 if key != self.preview_key:  # lo mismo que ya está escrito y maquetado: no se rehace
@@ -9878,7 +9900,7 @@ class TextEditor:
                          else convert._plain(first))] if first is not None and first.kind == "heading" else []
             options = self.app.write_options([])
             options.update(shrink=False, trim=False, epub2=False, credits=False, contents=False, synopsis=False,
-                           logo="", kepub=False)
+                           logo="", kepub=False, preview=True)
             convert.write_epub(part, chapters, self.web_path, **options)
             data = Path(self.web_path).read_bytes()
             path, override = webview.section_path(data), None
@@ -10285,8 +10307,12 @@ class TextEditor:
         sabe la primera página de su archivo (faithful._first_pages): su texto se busca en las de ese archivo."""
         block, doc = self.app.book.blocks[k], self.app.pdf_doc
         start = block.page - 1
-        if not self.app.book.origin or doc is None or block.kind not in ("p", "heading"):
+        if not self.app.book.origin or doc is None:
             return start
+        if block.kind not in ("p", "heading"):  # ilustración o separador: la página del párrafo que le sigue
+            if k not in self.page_cache:
+                self.page_cache[k] = _epub_block_page(self.app.book, doc, k)
+            return self.page_cache[k]
         if k not in self.page_cache:
             if self.file_starts is None:  # primera página de cada archivo, en orden
                 self.file_starts = sorted({b.page for b in self.app.book.blocks})

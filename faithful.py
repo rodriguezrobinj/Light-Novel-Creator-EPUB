@@ -608,7 +608,7 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                    separator=ORIGINAL, shrink=False, replacements=(), credits=False, gray=False, breaks=(), trim=False,
                    font="", reading=False, kepub=False, hyphenate=False, alts=None, progress=None, fit=None,
                    whole_words=False, css_extra="", synopsis=False, title_image=None, logo="", endnotes=False,
-                   note_style="1", heading_font="", box_style="Sencillo", horizontal=True):
+                   note_style="1", heading_font="", box_style="Sencillo", horizontal=True, preview=False):
     """Escribe el libro leído por read_epub copiando su EPUB original (book.origin) y parcheando solo lo que cambió:
     un XHTML sin cambios sale con los mismos bytes. Mismas opciones que convert.write_epub; style, font y separator
     con ORIGINAL (o vacíos) dejan el aspecto del original."""
@@ -810,6 +810,23 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
             css += HORIZONTAL_CSS
             turned = {b.ref: _turned(b.image) for b in book.blocks if b.kind == "break" and b.image and b.ref}
             turned = {ref: data for ref, data in turned.items() if data}
+            # girado, el separador es una raya ancha y baja: con el alto de página de su clase («fit») ocupaba una
+            # página en blanco
+            # página en blanco. Clase propia en su <img> (MuPDF no entiende [src$=…]), sin la del original
+            if turned:
+                css += ("img.lnc-sep { width: 60% !important; height: auto !important; max-height: none !important; "
+                        "display: block !important; margin: 1em auto !important; }\n")
+                sep = re.compile(r'<img\b[^>]*?src="[^"]*?(?:%s)"[^>]*>'
+                                 % "|".join(re.escape(posixpath.basename(ref)) for ref in turned))
+
+                def as_sep(m):
+                    return re.sub(r'\sclass="[^"]*"', "", m[0]).replace("<img", '<img class="lnc-sep"', 1)
+                for name in spine:
+                    if "html" in kinds.get(name, "") and name in names and name not in gone:
+                        text = texts.get(name) or source(name)
+                        new = sep.sub(as_sep, text)
+                        if new != text:
+                            texts[name] = new
         for src, path in fonts.items():
             add(f"{lnc}/{src}", convert.Path(path).read_bytes(), "font/ttf" if src.endswith(".ttf") else "font/otf")
         if css:
@@ -912,6 +929,26 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
         meta_cover = next((m.get("content") for m in opf.iter(OPF_NS + "meta") if m.get("name") == "cover"), None)
         cover_item = cover_item or (items[meta_cover][0] if meta_cover in items else None)
         images = {p for p, kind, _ in items.values() if kind in ("image/jpeg", "image/png") and p in names}
+        unused = set()
+        if preview:  # la sección empieza a mitad de archivo: sin las líneas en blanco de lo que se quitó delante
+            blank = re.compile(r"(<body\b[^>]*>(?:\s|<div\b[^>]*>)*)(?:<p\b[^>]*>\s*(?:<br\s*/?>)?\s*</p>\s*)+")
+            for name in spine:
+                if "html" in kinds.get(name, "") and name in names and name not in gone:
+                    text = texts.get(name) or source(name)
+                    new = blank.sub(r"\1", text, count=1)
+                    if new != text:
+                        texts[name] = new
+        if preview:  # solo una sección: sin las imágenes que no usa ninguno de sus archivos ni sus hojas de estilo
+            used = {cover_item}
+            for name in spine:
+                if "html" in kinds.get(name, "") and name in names and name not in gone:
+                    used.update(_resolve(name, href) for href in re.findall(
+                        r'(?:src|href)="([^"#]+)', texts.get(name) or source(name)))
+            for name in names:
+                if name.lower().endswith(".css"):
+                    used.update(_resolve(name, url) for url in re.findall(
+                        r"url\(\s*[\"']?([^\"')]+)", z.read(name).decode("utf-8", "replace")))
+            unused = images - used
         tmp = convert.partial_path(out_path)
         total, done = len(names) + len(added), 0
         try:
@@ -921,7 +958,7 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                     done += 1
                     if progress:
                         progress(done, total)
-                    if name == "mimetype" or name in gone:
+                    if name == "mimetype" or name in gone or name in unused:
                         continue
                     if name == opf_path:
                         out.writestr(name, new_opf)
