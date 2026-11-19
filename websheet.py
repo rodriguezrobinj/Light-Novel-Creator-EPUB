@@ -16,7 +16,7 @@ import editor
 SHEET_CSS = """
 #lnc-sheet { outline: none; min-height: 90vh; }
 #lnc-sheet .lnc-obj { user-select: none; cursor: default; opacity: 0.95; }
-#lnc-sheet .lnc-obj img { max-width: 100%; max-height: 60vh; }
+#lnc-sheet .lnc-obj img { max-width: 100%; max-height: 60vh; -webkit-user-drag: none; }
 #lnc-sheet p.lnc-break { text-align: center; text-indent: 0; color: #888888; }
 html { background: #ffffff; } body { margin: 24px 36px !important; }
 """
@@ -50,6 +50,13 @@ SHEET_JS = r"""
     sheet.focus(); var s = getSelection(); s.removeAllRanges(); s.addRange(r);
     (p[0].nodeType === 3 ? p[0].parentElement : b).scrollIntoView({block: 'center'});
   }
+  // Una ilustración no se arrastra: ni a otro programa ni a otro sitio del capítulo (tampoco dentro de lo elegido)
+  sheet.addEventListener('dragstart', function (e) {
+    var t = e.target.nodeType === 1 ? e.target : e.target.parentElement, s = getSelection();
+    var objs = sheet.querySelectorAll('.lnc-obj');
+    for (var i = 0; i < objs.length; i++)
+      if ((t && objs[i].contains(t)) || (s.rangeCount && s.getRangeAt(0).intersectsNode(objs[i]))) { e.preventDefault(); return; }
+  });
   // Intro: Chromium copia el párrafo con su id; el nuevo no puede llevarlo
   var repaint = null;
   sheet.addEventListener('input', function () {

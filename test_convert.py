@@ -7078,6 +7078,12 @@ def test_window_options_search_profile_and_missing_font():
     dialog.parts["search"].setText("zzz")
     empty = not dialog.parts["empty"].isHidden()
     dialog.parts["search"].clear()
+    dialog.parts["show"]("Perfil y formato")
+    lang = dialog.parts["widgets"]["lang"]  # el idioma por su nombre, en una lista que no se escribe
+    lang_shown, lang_editable = lang.currentText(), lang.isEditable()
+    lang.setCurrentIndex(lang.findText("Inglés"))
+    lang.activated.emit(lang.currentIndex())
+    lang_put = dialog.get("lang")
     dialog.parts["put"]("profile", "Kindle")
     dialog.parts["show"]("Texto")
     note = dialog.parts["notes"]["hyphenate"].text()
@@ -7090,6 +7096,16 @@ def test_window_options_search_profile_and_missing_font():
     assert shown == ["EL LIBRO", "Texto", "PDF"] and page == "Texto", (shown, page)
     assert empty and "Fijada por el perfil Kindle" in note and profile == "Personalizado", (empty, note, profile)
     assert copied is False, copied
+    assert (lang_shown, lang_editable, lang_put) == ("Español", False, "en"), (lang_shown, lang_editable, lang_put)
+
+
+def test_window_close_button_closes_at_first_click():
+    """La X de la barra de título cierra la ventana (QWidget.close, no App.close) con un clic: antes App.close
+    limpiaba y su root.close() de dentro no cerraba, y hacía falta un segundo clic."""
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
+    window.root.close()
+    assert window.closed and not window.root.isVisible(), (window.closed, window.root.isVisible())
 
 
 def test_window_options_app_pages():
@@ -10843,8 +10859,15 @@ def test_websheet_round_trip_and_editing_reach_the_book():
             window.tree.selection_set(str(k))
             ed = app.TextEditor(window, str(k), *window.section_bounds(k))
             before = editor_dump(ed)
-            # la hoja web sale sola al abrir el editor (A4)
+            # la hoja web sale sola al abrir el editor (A4), en cuanto está dibujada: hasta entonces, la de Qt
             assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            swapped = ed.web.isVisibleTo(ed.win) and not ed.sheet.isVisibleTo(ed.win)
+            # una ilustración no se arrastra (a otro programa, ni dentro del capítulo)
+            dragged = js(ed.web, "(function(){var f=document.createElement('figure');f.className='lnc-obj';"
+                                 "var i=document.createElement('img');f.appendChild(i);"
+                                 "document.getElementById('lnc-sheet').appendChild(f);"
+                                 "var e=new DragEvent('dragstart',{bubbles:true,cancelable:true});i.dispatchEvent(e);"
+                                 "f.remove();return e.defaultPrevented;})()")
             family = js(ed.web, "getComputedStyle(document.querySelector('#lnc-sheet h1')).fontFamily")
             ed.flush_web(lambda: None)
             wait_for(lambda: False, 1)
@@ -10884,6 +10907,7 @@ def test_websheet_round_trip_and_editing_reach_the_book():
             chapter = epub_file(out, "OEBPS/Text/capitulo01.xhtml")
         finally:
             window.close()
+    assert swapped and dragged is True, (swapped, dragged)
     assert "Lucida" in family and unchanged == before, (family, [x for x in zip(before.split("\n\n"),
                                                                                unchanged.split("\n\n")) if x[0] != x[1]])
     assert ribbon, "la cinta no marca la negrita de la hoja web"
@@ -10915,8 +10939,15 @@ def test_websheet_marks_spelling_issues_changes_and_menu():
             ed.issues[second] = [convert.Issue("prueba", second, 1, "Grave", "Palabra dudosa", "Una explicación.", "",
                                                span=(0, 7))]
             ed.unknown |= {"cielo"}
-            # la hoja web sale sola al abrir el editor (A4)
+            # la hoja web sale sola al abrir el editor (A4), en cuanto está dibujada: hasta entonces, la de Qt
             assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            swapped = ed.web.isVisibleTo(ed.win) and not ed.sheet.isVisibleTo(ed.win)
+            # una ilustración no se arrastra (a otro programa, ni dentro del capítulo)
+            dragged = js(ed.web, "(function(){var f=document.createElement('figure');f.className='lnc-obj';"
+                                 "var i=document.createElement('img');f.appendChild(i);"
+                                 "document.getElementById('lnc-sheet').appendChild(f);"
+                                 "var e=new DragEvent('dragstart',{bubbles:true,cancelable:true});i.dispatchEvent(e);"
+                                 "f.remove();return e.defaultPrevented;})()")
             count = "(function(n){var h=CSS.highlights.get(n);return h?h.size:0;})(%s)"
             painted = wait_for(lambda: js(ed.web, count % '"lnc-spell"') == 1 and js(ed.web, count % '"lnc-issue-0"') >= 1)
             inner = js(ed.web, "document.getElementById('lnc-sheet').innerHTML")
@@ -11012,8 +11043,15 @@ def test_websheet_find_read_sync_draft_and_cancel():
             fourth = next(n for n, b in enumerate(blocks) if b.html.startswith("Cuarto"))
             window.tree.selection_set(str(k))
             ed = app.TextEditor(window, str(k), *window.section_bounds(k))
-            # la hoja web sale sola al abrir el editor (A4)
+            # la hoja web sale sola al abrir el editor (A4), en cuanto está dibujada: hasta entonces, la de Qt
             assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            swapped = ed.web.isVisibleTo(ed.win) and not ed.sheet.isVisibleTo(ed.win)
+            # una ilustración no se arrastra (a otro programa, ni dentro del capítulo)
+            dragged = js(ed.web, "(function(){var f=document.createElement('figure');f.className='lnc-obj';"
+                                 "var i=document.createElement('img');f.appendChild(i);"
+                                 "document.getElementById('lnc-sheet').appendChild(f);"
+                                 "var e=new DragEvent('dragstart',{bubbles:true,cancelable:true});i.dispatchEvent(e);"
+                                 "f.remove();return e.defaultPrevented;})()")
             here = "(function(){var b=getSelection().anchorNode;while(b&&b.parentNode&&b.parentNode.id!=='lnc-sheet')" \
                    "b=b.parentNode;return b&&b.textContent?b.textContent.trim():'';})()"
             # un párrafo nuevo arriba y el cursor en «Cuarto.»: la hoja de Qt (el panel) va a su párrafo

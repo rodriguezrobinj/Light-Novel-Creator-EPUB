@@ -1778,9 +1778,8 @@ class Window(QMainWindow):
         return (handled, result) if handled else super().nativeEvent(kind, message)
 
     def closeEvent(self, event):
-        if self.on_close:  # App.close decide; si sigue adelante, vuelve a cerrar sin on_close
-            event.ignore()
-            self.on_close()
+        if self.on_close:  # App.close decide. Su root.close() de dentro no cierra (Qt no cierra dos veces a la
+            event.setAccepted(bool(self.on_close()))  # vez): la X de la barra pedía un segundo clic
 
     def dragEnterEvent(self, event):
         if _dropped_pdf(event.mimeData()):
@@ -4247,7 +4246,8 @@ class App:
             return
         if not self.spanish():
             messagebox.showinfo("Ortografía", f"La ortografía solo revisa libros en español, y este está en "
-                                              f"«{self.lang_var.get().strip()}» (Editar datos › Idioma).")
+                                              f"{translate.LANGS.get(self.lang_var.get().strip(), self.lang_var.get().strip()).lower()} "
+                                              f"(Herramientas › Opciones › Idioma del libro).")
             return
         texts = [convert._plain(b) for b in self.book.blocks if b.kind == "p"]
         if self.run(convert.unknown_words, (texts, self.words), self.spelling_dialog):
@@ -9099,16 +9099,22 @@ class TextEditor:
             if m and editor.IMAGES and (Path(editor.IMAGES) / m[2]).is_file():
                 pictures[line.strip()] = (Path(editor.IMAGES) / m[2]).read_bytes()
         files, objects, path, head, body = websheet.sources(self.app.book, start, end, lines, pictures)
+        if not self.win.isVisible():  # al abrir el editor: la hoja web desde el principio, en blanco hasta que carga
+            self.sheet.hide()
+            self.web.show()
+        elif not self.web.isVisible():  # Vista → Hoja web: carga detrás de la hoja de Qt, que se ve hasta web_ready
+            self.web.setGeometry(self.sheet.geometry())
         self.web.load_sheet(files, path, websheet.page(lines, objects, head, body, path))
         self.web_on, self.web_dirty, self.web_home = True, False, None
-        self.sheet.hide()
-        self.web.show()
-        self.web.setFocus()
         self.web_btn.setChecked(True)
         self.web_poll.start(400)
 
     def web_ready(self):
         """La hoja web cargó: sus marcas, el cursor en el párrafo del de la hoja y lo que esperaba (buscar)."""
+        if not self.web.isVisible():  # ya dibujada: ahora sí reemplaza a la hoja de Qt, sin verse en blanco
+            self.sheet.hide()
+            self.web.show()
+            self.web.setFocus()
         self.web_marks()
         self.web.setZoomFactor(self.text_zoom.value() / 100)  # load_sheet la deja al 100 %
         self.web.call("goHome", self.web_index(self.sheet.textCursor().block()))
@@ -9396,12 +9402,15 @@ class TextEditor:
             then()
         self.web.call("dump", done=back)
 
-    def web_done(self):
+    def web_done(self, show_sheet=True):
+        """Deja la hoja web. show_sheet=False: se va a cargar otro capítulo en ella, que sigue a la vista con el de
+        antes hasta que esté listo (sin pasar por la hoja de Qt)."""
         self.web_on, self.web_dirty, self.web_busy, self.web_queue = False, False, False, []
         self.web_poll.stop()
-        self.web.hide()
-        self.sheet.show()
-        self.sheet.setFocus()
+        if show_sheet:
+            self.web.hide()
+            self.sheet.show()
+            self.sheet.setFocus()
         self.web_btn.setChecked(False)
         self.update_tools()
 
@@ -9502,7 +9511,7 @@ class TextEditor:
         if getattr(self, "web_on", False) and self.current and (start, end) != self.current:
             # con la hoja web: lo escrito pasa a su capítulo, se abre el otro y se vuelve a la hoja web con él;
             # «Contenido» (la lista de capítulos) va en la hoja, y al salir de él se vuelve a la web
-            self.flush_web(lambda: (self.web_done(), self.open_section(start, end, focus),
+            self.flush_web(lambda: (self.web_done(start < 0), self.open_section(start, end, focus),
                                     self.load_web() if start >= 0 else setattr(self, "web_resume", True)))
             return
         if self.reading is not None:
