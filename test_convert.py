@@ -10794,7 +10794,7 @@ def test_web_preview_paginates_with_the_whole_css():
     assert columns == "auto" and paged[0] >= 1, (columns, paged)  # sin columnas: seguido
     assert left == (1 if view.pages > 1 else 0), (left, view.pages)
     assert found and 0 <= found[0] < view.pages, found
-    assert color == "rgb(221, 221, 221)", color
+    assert color == "rgb(236, 236, 236)", color  # la letra clara del tema oscuro
 
 
 def test_editor_epub_tab_follows_what_is_written():
@@ -11499,6 +11499,25 @@ def test_faithful_epub_pages_without_index_entry_continue_their_chapter():
     assert 'page-progression-direction="rtl"' in vertical_opf, vertical_opf
 
 
+def test_faithful_preview_of_a_section_is_light():
+    """Vista previa de una sección de un EPUB: sin las imágenes del resto del libro (copiaba 14 MB en cada fila) y,
+    si empieza a mitad de archivo, sin las líneas en blanco de lo quitado delante (salía una página en blanco)."""
+    src = kadokawa_epub(TMP / "Kadokawa vista.epub")
+    book = convert.analyze(src)
+    k = next(n for n, b in enumerate(book.blocks) if b.kind == "break" and b.src[0].endswith("p-002.xhtml"))
+    end = book.candidates[1]
+    part = convert.Book(book.title, "", book.cover, book.blocks[k:end], [], origin=book.origin, vertical=book.vertical)
+    out = TMP / "Kadokawa vista (LNC).epub"
+    convert.write_epub(part, [], out, style=convert.ORIGINAL, separator="Original del PDF", typography=False,
+                       contents=False, preview=True)
+    with zipfile.ZipFile(out) as z:
+        files = z.namelist()
+        body = z.read("item/xhtml/p-002.xhtml").decode()
+    body = body[body.index("<body"):]
+    assert "item/image/t2.jpg" not in files and "item/image/kugiri.jpg" in files, files
+    assert "<br" not in body.split("kugiri", 1)[0], body[:300]
+
+
 def test_page_pixmap_dark_keeps_illustrations():
     """Modo oscuro de las vistas (ventana y panel del original del editor): papel y letra invertidos, la ilustración
     tal cual."""
@@ -11510,7 +11529,7 @@ def test_page_pixmap_dark_keeps_illustrations():
     pic.clear_with(255)
     page.insert_image(pymupdf.Rect(100, 100, 180, 180), pixmap=pic)
     dark = app._page_pixmap(page, pymupdf.Matrix(1, 1), True)
-    assert dark.pixel(5, 5)[:3] == (0, 0, 0), dark.pixel(5, 5)  # el papel, negro
+    assert dark.pixel(5, 5)[:3] == (0x1a, 0x1a, 0x1a), dark.pixel(5, 5)  # el papel, del gris de la hoja (no negro)
     assert dark.pixel(140, 140)[:3] == (255, 255, 255), dark.pixel(140, 140)  # la ilustración blanca, igual
 
 

@@ -57,8 +57,8 @@ img, svg, video { -webkit-user-drag: none !important; max-width: 100%% !importan
 """
 # Hoja web en modo oscuro: como DARK, sobre la hoja
 SHEET_DARK = """
-html, body { background: #1b1b1b !important; color: #dddddd !important; }
-#lnc-sheet, #lnc-sheet *:not(img):not(svg):not(image) { color: #dddddd !important; background-color: transparent !important;
+html, body { background: #1a1a1a !important; color: #ececec !important; }
+#lnc-sheet, #lnc-sheet *:not(img):not(svg):not(image) { color: #ececec !important; background-color: transparent !important;
                                                         border-color: #555555 !important; }
 #lnc-sheet a { color: #8fb4ff !important; }
 """
@@ -158,7 +158,7 @@ MARK_JS = """
 """
 # Modo oscuro de lector: fondo oscuro y letra clara; las ilustraciones, tal cual
 DARK = """
-html, body { background: #111111 !important; color: #dddddd !important; }
+html, body { background: #1a1a1a !important; color: #ececec !important; }
 body *:not(img):not(svg):not(image) { color: inherit !important; background-color: transparent !important;
                                       border-color: #555555 !important; }
 a { color: #8fb4ff !important; }
