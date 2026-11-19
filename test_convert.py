@@ -10727,6 +10727,17 @@ class with_chromium:
             os.environ["LNC_SIN_CHROMIUM"] = self.was
 
 
+def web_editor(window, k):
+    """El editor con la pestaña «Hoja web» del panel y el cursor en ella (lo que hace un clic en la web)."""
+    import app
+    window.settings["editor_web"] = True
+    ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+    wait_for(lambda: ed.web.loaded)
+    ed.activate_web()
+    wait_for(lambda: ed.web_on and ed.web.loaded)
+    return ed
+
+
 def wait_for(condition, seconds=20):
     """Deja correr la ventana hasta que condition() sea verdad (Chromium contesta por señales)."""
     import time
@@ -10749,8 +10760,9 @@ def js(view, script):
 
 def test_web_preview_paginates_with_the_whole_css():
     """Chromium dibuja la sección con todo el CSS del libro, también lo que la hoja del editor no sabe (p + p), con
-    su fuente incrustada, paginada como un lector (columnas del ancho de la vista); go() pasa de página, find_page
-    encuentra la de un texto y el modo oscuro aclara la letra. Sin pantalla no hay píxeles: se mira el DOM."""
+    su fuente incrustada, seguida y con barra de desplazamiento (una página: lo que cabe en la vista); go() baja una
+    página, find_page encuentra la de un texto y el modo oscuro aclara la letra. Sin pantalla no hay píxeles: se mira
+    el DOM."""
     import qtk
     with with_chromium() as webview:
         qtk.app()
@@ -10768,7 +10780,7 @@ def test_web_preview_paginates_with_the_whole_css():
                                       ".map(p => getComputedStyle(p).textIndent))") or "[]")
         columns = js(view, "getComputedStyle(document.body).columnWidth")
         view.go(1)
-        left = js(view, "document.scrollingElement.scrollLeft / window.innerWidth")
+        left = js(view, "Math.round(document.scrollingElement.scrollTop / window.innerHeight)")
         found = []
         view.find_page("Cuarto.", found.append)
         wait_for(lambda: found)
@@ -10779,48 +10791,10 @@ def test_web_preview_paginates_with_the_whole_css():
         view.close()
     assert "Lucida" in family, family
     assert indents[0] == "0px" and indents[1] != "0px", indents  # p + p, que la hoja no aplica
-    assert columns != "auto" and paged[0] >= 1, (columns, paged)
+    assert columns == "auto" and paged[0] >= 1, (columns, paged)  # sin columnas: seguido
     assert left == (1 if view.pages > 1 else 0), (left, view.pages)
     assert found and 0 <= found[0] < view.pages, found
     assert color == "rgb(221, 221, 221)", color
-
-
-def test_window_web_preview_shows_section_pages_and_cover():
-    """En la ventana, la sección elegida se ve en Chromium: la leyenda dice sus páginas, ▶ pasa de página sin
-    recargar y la fila «Portada» vuelve a la hoja de MuPDF."""
-    with with_chromium():
-        src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
-        root, window = visible_window()
-        try:
-            window.pdf = src
-            book = convert.analyze(src)
-            k = book.candidates[2]
-            book.blocks[k + 1:k + 1] = [convert.Block("p", 1, "Un párrafo largo de prueba. " * 30) for _ in range(12)]
-            book.candidates = [c + 12 if c > k else c for c in book.candidates]  # un capítulo de varias páginas
-            window.show_book(book)
-            window.tree.selection_set(str(k))
-            window.device_var.set("Celular")
-            window.update_preview()
-            shown = wait_for(lambda: window.epub_web.isVisible() and "/" in window.epub_caption.text())
-            caption = window.epub_caption.text()
-            pages = window.epub_pages
-            key = window.web_key
-            window.epub_step(1)
-            stepped = window.epub_caption.text()
-            same = window.web_key == key
-            window.tree.selection_set(app_cover())
-            window.update_preview()
-            cover = (window.epub_web.isVisible(), window.epub_view.isVisible())
-        finally:
-            window.close()
-    assert shown and caption.endswith(f"1/{pages}") and pages > 1, (caption, pages)
-    assert stepped.endswith(f"2/{pages}") and same, (stepped, same)  # sin recargar la sección
-    assert cover == (False, True), cover
-
-
-def app_cover():
-    import app
-    return app.COVER
 
 
 def test_editor_epub_tab_follows_what_is_written():
@@ -10884,11 +10858,11 @@ def test_websheet_round_trip_and_editing_reach_the_book():
             window.show_book(convert.analyze(src))
             k = window.book.candidates[2]
             window.tree.selection_set(str(k))
-            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            ed = web_editor(window, k)
             before = editor_dump(ed)
-            # la hoja web sale sola al abrir el editor (A4), en cuanto está dibujada: hasta entonces, la de Qt
+            # la hoja a la izquierda y la hoja web en su pestaña del panel derecho, las dos a la vista
             assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
-            swapped = ed.web.isVisibleTo(ed.win) and not ed.sheet.isVisibleTo(ed.win)
+            swapped = ed.web.isVisibleTo(ed.win) and ed.sheet.isVisibleTo(ed.win)
             # una ilustración no se arrastra (a otro programa, ni dentro del capítulo)
             dragged = js(ed.web, "(function(){var f=document.createElement('figure');f.className='lnc-obj';"
                                  "var i=document.createElement('img');f.appendChild(i);"
@@ -10961,14 +10935,15 @@ def test_websheet_marks_spelling_issues_changes_and_menu():
             window.show_book(convert.analyze(src))
             k = window.book.candidates[2]
             window.tree.selection_set(str(k))
-            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            ed = web_editor(window, k)
             second = next(n for n, b in enumerate(window.book.blocks) if b.html.startswith("Segundo"))
             ed.issues[second] = [convert.Issue("prueba", second, 1, "Grave", "Palabra dudosa", "Una explicación.", "",
                                                span=(0, 7))]
             ed.unknown |= {"cielo"}
-            # la hoja web sale sola al abrir el editor (A4), en cuanto está dibujada: hasta entonces, la de Qt
+            ed.web_marks()  # la web ya estaba cargada: se pintan las marcas de ahora
+            # la hoja a la izquierda y la hoja web en su pestaña del panel derecho, las dos a la vista
             assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
-            swapped = ed.web.isVisibleTo(ed.win) and not ed.sheet.isVisibleTo(ed.win)
+            swapped = ed.web.isVisibleTo(ed.win) and ed.sheet.isVisibleTo(ed.win)
             # una ilustración no se arrastra (a otro programa, ni dentro del capítulo)
             dragged = js(ed.web, "(function(){var f=document.createElement('figure');f.className='lnc-obj';"
                                  "var i=document.createElement('img');f.appendChild(i);"
@@ -11069,7 +11044,7 @@ def test_websheet_find_read_sync_draft_and_cancel():
             third = next(n for n, b in enumerate(blocks) if b.html.startswith("Tercero"))
             fourth = next(n for n, b in enumerate(blocks) if b.html.startswith("Cuarto"))
             window.tree.selection_set(str(k))
-            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            ed = web_editor(window, k)
             # la hoja web sale sola al abrir el editor (A4), en cuanto está dibujada: hasta entonces, la de Qt
             assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
             swapped = ed.web.isVisibleTo(ed.win) and not ed.sheet.isVisibleTo(ed.win)
@@ -11200,7 +11175,7 @@ def test_websheet_navigation_changes_bar_and_close_follow_typing():
             window.show_book(convert.analyze(src))
             k = window.book.candidates[2]
             window.tree.selection_set(str(k))
-            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            ed = web_editor(window, k)
             assert wait_for(lambda: ed.web_on and ed.web.loaded), "la hoja web no cargó"
             if ed.nav.isHidden():
                 ed.toggle_nav()
@@ -11238,6 +11213,49 @@ def editor_source(ed):
     return ed.sheet.current_source()
 
 
+def test_websheet_beside_the_sheet_follows_both():
+    """La hoja web va en su pestaña del panel derecho, junto a la hoja: lo escrito en la web pasa a la hoja al volver
+    el cursor a ella (sin moverlo de donde se pulsó), y lo escrito luego en la hoja sale en la web; al volver a la web,
+    nada se pisa."""
+    from PySide6.QtGui import QTextCursor
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil dos hojas.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = window.book.candidates[2]
+            window.tree.selection_set(str(k))
+            ed = web_editor(window, k)
+            js(ed.web, "(function(){var w=document.createTreeWalker(document.getElementById('lnc-sheet'),4),n;"
+                       "while((n=w.nextNode())){var i=n.data.indexOf('Tercero');if(i>=0){var r=document.createRange();"
+                       "r.setStart(n,i+7);r.collapse(true);var g=getSelection();g.removeAllRanges();g.addRange(r);"
+                       "document.execCommand('insertText',false,' Desde la web.');return true;}}return false;})()")
+            cursor = ed.sheet.textCursor()
+            cursor.setPosition(3)
+            ed.sheet.setTextCursor(cursor)
+            ed.on_focus(ed.web, ed.sheet)  # clic en la hoja
+            left = wait_for(lambda: not ed.web_on and "Desde la web." in editor_dump(ed), 15)
+            kept = ed.sheet.textCursor().position() == 3
+            cursor = ed.sheet.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(" Desde la hoja.")
+            text = "document.getElementById('lnc-sheet').innerText"
+            shown = wait_for(lambda: "Desde la hoja." in (js(ed.web, text) or ""), 15)
+            ed.on_focus(ed.sheet, ed.web)  # clic en la web
+            back = wait_for(lambda: ed.web_on and ed.web.loaded, 15)
+            done = []
+            ed.flush_web(lambda: done.append(True))
+            wait_for(lambda: done)
+            both = editor_dump(ed)
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert left and kept, (left, kept)
+    assert shown and back, (shown, back)
+    assert "Desde la web." in both and "Desde la hoja." in both, both
+
+
 def test_websheet_positions_skip_what_only_qt_has():
     """La selección pasa de la web a la hoja de Qt y vuelve: la hoja de Qt tiene de más el salto de línea (<br/> no
     es texto en Chromium) y las marcas vacías; un espacio duro vale como uno normal."""
@@ -11262,8 +11280,8 @@ def test_websheet_is_default_and_does_what_chromium_cannot():
             window.show_book(convert.analyze(src))
             k = window.book.candidates[2]
             window.tree.selection_set(str(k))
-            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
-            default = wait_for(lambda: ed.web_on and ed.web.loaded)
+            ed = web_editor(window, k)
+            default = wait_for(lambda: ed.web_on and ed.web.loaded and ed.side_tabs.currentIndex() == app.WEB_TAB)
             js(ed.web, "(function(){var b=Array.from(document.getElementById('lnc-sheet').children).findIndex("
                        "e=>e.textContent.startsWith('Tercero'));return lnc.select(b,0,7);})()")
             ed.web.loaded = False
@@ -11292,13 +11310,15 @@ def test_websheet_is_default_and_does_what_chromium_cannot():
             ed.open_section(*ed.sections[0][1:3])  # «Contenido»
             contents = wait_for(lambda: ed.current[0] < 0 and not ed.web_on and ed.sheet.isVisible(), 15)
             ed.open_section(*window.section_bounds(k))
-            back = wait_for(lambda: ed.web_on and ed.web.loaded, 10)
-            # pestañas sobre la hoja: «Código HTML» quita la hoja web (una vista a la vez); al volver, carga lo cambiado
+            back = wait_for(lambda: ed.web.loaded and ed.web_section == ed.current, 10)  # la web enseña el capítulo
+            # pestañas sobre la hoja: «Código HTML» en lugar de la hoja (una a la vez); la web, quieta mientras tanto, y
+            # al volver enseña lo cambiado
             ed.view_tabs.setCurrentIndex(1)
-            coded = wait_for(lambda: ed.code.isVisible() and not ed.web.isVisible() and not ed.sheet.isVisible(), 15)
+            coded = wait_for(lambda: ed.code.isVisible() and not ed.sheet.isVisible() and not ed.web.isEnabled(), 15)
             ed.code.setPlainText(ed.code.toPlainText().replace("Tercero", "Tercerísimo", 1))
             ed.view_tabs.setCurrentIndex(0)
-            reweb = wait_for(lambda: ed.web_on and ed.web.loaded and ed.web.isVisible() and not ed.code.isVisible()
+            reweb = wait_for(lambda: ed.web.loaded and ed.web.isEnabled() and ed.sheet.isVisible()
+                             and not ed.code.isVisible()
                              and "Tercerísimo" in (js(ed.web, "document.getElementById('lnc-sheet').innerText") or ""),
                              15)
             ed.toggle_web()
