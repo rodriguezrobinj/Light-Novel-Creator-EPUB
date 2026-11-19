@@ -1384,6 +1384,8 @@ RAW_TAG = re.compile(r'&lt;(/?)(ruby|rb|rt|rp|rtc|span|br|small|sub|abbr|cite|co
 HEADING_TAGS = {f"h{n}" for n in range(1, 7)}
 # Etiqueta de apertura de un párrafo al principio de una línea del editor (Block.opening)
 OPENING = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>')
+# Título de capítulo que no se ve (sí en el índice): un capítulo de solo una ilustración con su nombre
+HIDDEN_TITLE = '<h1 class="oculto" style="display: none">'
 RAW_LINK = re.compile(r'&lt;a((?:\s+[\w:.-]+="[^"<>]*")+)\s*&gt;(.*?)&lt;/a&gt;', re.S)  # el par entero
 # nota al pie en el editor de texto; puede llevar corchetes dentro («[Nota: ver [Arco 2].]»)
 NOTE_MARK = re.compile(r"\[Nota: ((?:[^\[\]]|\[[^\[\]]*\])+)\]")
@@ -3878,6 +3880,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     skip = skipped(book, chapters, removed)
     sections = []  # [título, es_capítulo, [(índice, bloque)]]
     drawn = {}  # número de sección -> (bloque, imagen) de su título dibujado (Witch 1)
+    veiled = set()  # números de sección con el título oculto del editor
     for k, b in enumerate(book.blocks):
         if k in skip or (b.kind == "image" and not b.keep):  # sección quitada o imagen descartada
             continue
@@ -3885,6 +3888,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             sections.append([starts[k], True, []])
             if b.kind == "heading" and b.image:
                 drawn[len(sections)] = k, b.image
+            if b.kind == "heading" and b.opening == HIDDEN_TITLE:
+                veiled.add(len(sections))
         else:
             if not sections:
                 sections.append(["Inicio", False, []])
@@ -3916,6 +3921,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         # quote=False: la limpieza tipográfica ve las comillas («"Hola"» -> «“Hola”»), no &quot;
         heading = fix(html.escape(title, quote=False))
         parts = [_chapter_heading(heading).replace("<h1", '<h1 id="titulo"', 1)] if is_chapter else []
+        if n in veiled:  # en el índice y para los lectores de voz, pero no se ve
+            parts = [f'<h1 id="titulo" class="oculto" style="display: none">{heading}</h1>']
         if n in drawn:  # el dibujo del PDF en lugar del texto; el nombre queda para el índice y los lectores de voz
             k, data = drawn[n]
             data = title_picture(data, title)  # traducido o corregido: el dibujo dice el título de ahora

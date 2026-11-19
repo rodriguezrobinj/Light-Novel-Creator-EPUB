@@ -47,7 +47,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFra
                                QAbstractItemView, QButtonGroup, QHeaderView, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTabWidget,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabBar,
-                               QLayout, QTextEdit, QToolButton, QVBoxLayout, QWidget, QWidgetAction)
+                               QLayout, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
 import convert
 import editor
@@ -2143,6 +2143,9 @@ class App:
         self.tr_notes = ""                     # personajes y estilo para la IA que traduce, de la serie
         self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
         self.editor_at = None                  # bloque del cursor al cerrar el editor: «Lo dejaste en…»
+        # texto de un capítulo aceptado en el editor -> (el de antes, para su deshacer; el del principio, para
+        # «Ver todos los cambios»)
+        self.editor_history = {}
         self.work = {}                         # trabajo en el editor por día: {"AAAA-MM-DD": {"minutes", …}}
         self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
         # Proceso de las miniaturas de recientes y archivos ya probados (self.thumbs es la tira de páginas)
@@ -3295,6 +3298,7 @@ class App:
         # Son del libro: llegan con la revisión (el glosario, también heredado de otro tomo)
         self.glossary, self.tr_glossary, self.comments, self.alts = [], [], [], {}
         self.tr_notes, self.editor_at, self.work = "", None, {}
+        self.editor_history = {}
         if report is not None and not self.echoes_var.get() and self.spanish():  # el del proceso: sin opciones, en español
             self.reports[self.report_key()] = report
         if memos:
@@ -7211,6 +7215,9 @@ class Dialog(QDialog):
 WEB_TAB = 2  # «Hoja web» en el panel derecho del editor, tras «Original» y «EPUB»
 
 
+HISTORY_STEPS = 20  # aceptados que el deshacer del editor recuerda por capítulo
+
+
 class TextEditor:
     """Editor del texto como Word, capítulo a capítulo: la cinta dice en qué capítulo se está y lleva a los
     demás (menú y ◀ ▶); la hoja (editor.Sheet) muestra cursiva, negrita, títulos, enlaces, ilustraciones y
@@ -7289,7 +7296,7 @@ class TextEditor:
                                       and self.later("codelive", 600, self.apply_code_live))
         self.applying_code = False  # la hoja cambia por el código: el código no se vuelve a escribir
         self.code.setFont(QFont("Consolas", 10))
-        self.code.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.code.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.code.hide()
         desk_row.addWidget(self.code, 20)
         # Pestaña «Hoja web» del panel derecho: el capítulo en Chromium, editable, con el aspecto del libro. web_on: el
@@ -7741,12 +7748,18 @@ class TextEditor:
                                 "(Ctrl+Alt+K)", self.show_link_bar, icon="link")])
         group("Tabla", [tool("Tabla…", "Tabla de filas y columnas (pantallas de estado, listas de objetos): una fila por "
                              "línea, con « | » entre las celdas", self.table_dialog, icon="table")])
-        group("Capítulo", [tool("Dividir\ncapítulo", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo "
-                                "que el PDF unió con el anterior", self.show_split_bar, icon="split")])
+        # un botón con menú: dos grandes ensanchaban «Insertar» más que la pantalla
+        chapter_tools, _ = menu_tool("Capítulo ▾", "Dividir el capítulo en el cursor, o un capítulo nuevo con el "
+                                     "título oculto (en el índice, no en la página)", [
+            ("Dividir el capítulo aquí", self.show_split_bar),
+            ("Título oculto…   (capítulo de solo una ilustración: «Contenido», un mapa)", self.hidden_title_dialog)],
+            icon="split")
+        group("Estructura", [chapter_tools])
 
         page("Revisar")
         self.changes_btn, self.changes_menu = menu_tool("Cambios ▾", "Párrafos que editaste en este capítulo", [
             ("Cambio siguiente   (F7)", self.next_change),
+            ("Ver todos los cambios…", self.show_all_changes),
             ("Volver al original", lambda: self.on_sheet(self.restore_current))],
             icon="changes")
         self.issues_btn, self.issues_menu = menu_tool("Avisos ▾", "Avisos del informe de calidad en este capítulo", [
@@ -8704,6 +8717,12 @@ class TextEditor:
             self.update_review()
             return
         mark = "" if tree.set(item, "ok") else "✓"
+        # marcar es dar el capítulo por terminado: un clic o un Ctrl+Intro sin querer no lo hace
+        if mark and not messagebox.askyesno(
+                "Marcar como revisado", f"¿Diste por terminado «{tree.set(item, 'title')}»?\n\nSe marcará como "
+                "revisado (✓ en la lista) y se abrirá el siguiente capítulo sin revisar.", parent=self.win):
+            self.update_review()
+            return
         tree.set(item, "ok", mark)
         done, total = self.app.update_reviewed()
         row = next((n for n, s in enumerate(self.sections) if s[1:3] == self.current), 0)
@@ -8780,6 +8799,85 @@ class TextEditor:
         column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
         win.show()
         self.stats_window = win
+
+    def all_changes(self):
+        """[(título, inicio, fin, [(antes, después, línea de la hoja)])] de cada capítulo cambiado: lo escrito sin
+        aceptar y lo aceptado antes en esta sesión (editor_history), frente a como estaba al principio."""
+        history, found = self.app.editor_history, []
+        for title, start, end, _ in self.sections:
+            page = self.pages.get((start, end))
+            if start < 0 or (page is None and not history):
+                continue
+            loaded = [line for _, line in (page["lines"] if page else self.section_lines(start, end)[0])]
+            now = [line for line in editor.dump(page["doc"]).split("\n\n") if line.strip()] if page else loaded
+            here = "\n\n".join(loaded)
+            old = [line for line in history.get(here, (here, here))[1].split("\n\n") if line.strip()]
+            diffs = []
+            for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, now, autojunk=False).get_opcodes():
+                if op == "replace" and i2 - i1 == j2 - j1:  # párrafos seguidos cambiados: uno a uno
+                    diffs += [(old[i1 + n], now[j1 + n], j1 + n) for n in range(i2 - i1)]
+                elif op != "equal":
+                    diffs.append(("\n".join(old[i1:i2]), "\n".join(now[j1:j2]), j1))
+            if diffs:
+                found.append((title, start, end, diffs))
+        return found
+
+    def show_all_changes(self, flushed=False):
+        """Revisar → Cambios → «Ver todos los cambios»: cada párrafo cambiado del libro, con lo quitado tachado y lo
+        puesto subrayado, por capítulos; «Ir» lleva la hoja a él. La ventana se queda abierta mientras se revisa."""
+        if self.web_on and not flushed:
+            self.flush_web(lambda: self.show_all_changes(True))
+            return
+        found = self.all_changes()
+        if not found:
+            self.tell("Sin cambios en el libro desde que se abrió")
+            return
+        colors = theme.mark_colors(self.app.dark)
+        parts, count = [], 0
+        for title, start, end, diffs in found:
+            parts.append(f"<h3>{html.escape(title)} <span style='font-weight:normal'>· "
+                         f"{convert.counted(len(diffs), 'cambio')}</span></h3>")
+            for before, after, line in diffs:
+                count += 1
+                if not before:
+                    body = f'<u style="color:{colors["changed"]}">{html.escape(editor.plain_line(after))}</u>'
+                elif not after:
+                    body = f'<s style="color:{colors["Grave"]}">{html.escape(editor.plain_line(before))}</s>'
+                else:
+                    body = "".join(f'<s style="color:{colors["Grave"]}">{html.escape(text)}</s>' if tag == "old" else
+                                   f'<u style="color:{colors["changed"]}">{html.escape(text)}</u>' if tag == "new"
+                                   else html.escape(text)
+                                   for text, tag in _word_diff(editor.plain_line(before), editor.plain_line(after)))
+                parts.append(f'<p>{body} &nbsp;<a href="{start}-{end}-{line}">Ir</a></p>')
+        if getattr(self, "changes_window", None) is not None and shiboken6.isValid(self.changes_window):
+            self.changes_window.close()
+        win = Dialog(self.win)
+        win.setWindowTitle("Todos los cambios")
+        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        column = QVBoxLayout(win)
+        column.addWidget(_label(f"{convert.counted(count, 'cambio')} en {convert.counted(len(found), 'capítulo')}: "
+                                "lo quitado tachado y lo puesto subrayado, también lo aceptado antes", "muted"))
+        view = QTextBrowser()
+        view.setOpenLinks(False)
+        view.setHtml("".join(parts))
+        view.anchorClicked.connect(lambda url: self.goto_change(*map(int, url.toString().split("-"))))
+        column.addWidget(view, 1)
+        column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
+        win.resize(640, 480)
+        win.show()
+        self.changes_window = win
+
+    def goto_change(self, start, end, line):
+        """«Ir» de «Todos los cambios»: el capítulo y el párrafo n.º line de su hoja."""
+        if self.web_on:
+            self.flush_web(lambda: (self.web_done(), self.goto_change(start, end, line)))
+            return
+        if (start, end) != self.current:
+            self.open_section(start, end)
+        self.sheet.setTextCursor(QTextCursor(self.web_block(line)))
+        self.sheet.ensureCursorVisible()
+        self.win.activateWindow()
+        self.sheet.setFocus()
 
     # Buscar: opciones y todos los resultados
     def find_options(self):
@@ -9062,6 +9160,9 @@ class TextEditor:
         if k is not None and editor._is_text(block) and self.app.book.blocks[k].kind == "p":
             has = any(i.kind == "comment" for i in self.block_issues(block))
             menu.addAction("Cambiar comentario…" if has else "Comentario…", lambda: self.edit_comment(block))
+        if not note and not editor.objects_of(block):  # nota nueva donde se hizo clic, escrita en un cuadro
+            menu.addAction("Insertar nota aquí…", lambda: (sheet.textCursor().hasSelection() or sheet.setTextCursor(here),
+                                                         self.note_dialog()))
         if sheet.can_restore(block, self.loaded()):
             menu.addAction("Volver al original", lambda: (sheet.setTextCursor(QTextCursor(block)), self.restore_current()))
         # Sinónimos de una palabra bien escrita, tras los avisos: como en Word, lo que hay que arreglar va primero
@@ -9699,6 +9800,19 @@ class TextEditor:
                 self.sheet.set_note(text, here[:2] if here else None)
         self.on_sheet(run)
 
+    def hidden_title_dialog(self):
+        """«Título oculto…»: el nombre del capítulo nuevo (el del de ahora, para empezar) y va antes del cursor."""
+        def run():
+            if not self.current or self.current[0] < 0:  # «Contenido», la lista de capítulos: solo se renombra
+                self.tell("El título oculto va en un capítulo del libro, no en «Contenido»")
+                return
+            row = next((s for s in self.sections if s[1:3] == self.current), None)
+            name, ok = QInputDialog.getText(self.win, "Título oculto", "Nombre del capítulo en el índice (no se ve "
+                                            "en la página):", text=row[0] if row and row[1] >= 0 else "")
+            if ok and name.strip():
+                self.sheet.insert_hidden_title(" ".join(name.split()))
+        self.on_sheet(run)
+
     def add_ruby(self):
         """Furigana: la lectura encima del texto elegido (o de lo que se escriba), en la hoja a la vista."""
         if self.web_on:
@@ -9777,6 +9891,8 @@ class TextEditor:
             lines, levels = self.section_lines(start, end)
             doc, look = self.sheet.set_content(lines, self.pictures(start, end), self.colors["muted"], levels)
             page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
+            if start >= 0:
+                self.replay_history(doc, lines)
             if self.show_changes_action.isChecked():
                 look.show_changes(theme.mark_colors(self.app.dark)["changed"])
         else:
@@ -9800,6 +9916,26 @@ class TextEditor:
         self.sheet.setFocus()
         if self.web is not None and not self.web_on:  # la hoja web enseña el capítulo nuevo
             self.later("webview", 0, self.refresh_web)
+
+    def replay_history(self, doc, lines):
+        """Lo aceptado antes en este capítulo, en el deshacer de su hoja: al reabrir el editor, Ctrl+Z y Ctrl+Y
+        siguen por lo que se cambió la otra vez. Cada versión es un paso; la hoja acaba como está el libro."""
+        text = "\n\n".join(line for _, line in lines)
+        versions, seen = [], {text}
+        while len(versions) < HISTORY_STEPS:
+            older = self.app.editor_history.get(versions[0] if versions else text, (None,))[0]
+            if older is None or older in seen:
+                break
+            versions.insert(0, older)
+            seen.add(older)
+        if not versions:
+            return
+        doc.setUndoRedoEnabled(False)  # la más vieja es el principio: no se deshace más allá
+        self.sheet.set_text(versions[0])
+        doc.setUndoRedoEnabled(True)
+        for version in versions[1:] + [text]:
+            self.sheet.set_text(version)
+        self.sheet.moveCursor(QTextCursor.MoveOperation.Start)
 
     def section_lines(self, start, end):
         """Líneas de la sección como se cargan en la hoja, [(bloque, línea)], y {bloque: tipo} de sus títulos. Un
@@ -9903,10 +10039,13 @@ class TextEditor:
         self.chapter_btn.setFixedWidth(width)
         self.update_review()  # la lista de capítulos («•» en los cambiados) se rehace al abrirla
 
-    def step_section(self, delta):
+    def step_section(self, delta, at_end=False):
+        """Capítulo anterior o siguiente; at_end: con el cursor en su último párrafo (se llegó pasando páginas hacia
+        atrás, y las vistas se quedan al final)."""
         row = next((n for n, s in enumerate(self.sections) if s[1:3] == self.current), None)
         if row is not None and 0 <= row + delta < len(self.sections):
-            self.open_section(*self.sections[row + delta][1:3])
+            start, end = self.sections[row + delta][1:3]
+            self.open_section(start, end, end - 1 if at_end and start >= 0 else None)
 
     def page_starts(self):
         """{página del PDF: primer bloque que empieza en ella}, solo de lo que sale en los capítulos."""
@@ -9995,15 +10134,27 @@ class TextEditor:
                                 override=override)
 
     def mark_epub(self):
-        """Pestaña EPUB: el párrafo del cursor recuadrado como en el panel del original, y a la vista. Se busca por su
-        principio: la limpieza tipográfica cambia comillas y rayas, y por eso se prueba también más corto."""
+        """Pestaña EPUB: el párrafo del cursor recuadrado como en el panel del original, y a la vista. Se busca por sus
+        letras (un párrafo repetido, por su orden); una ilustración, por su número en el capítulo."""
         if not self.web_shown():
             return
-        text = " ".join(self.sheet.textCursor().block().text().split())
-        words = text[:40]
-        if len(text) > 15:  # un trozo del medio: cambia menos con la tipografía que el principio
-            words = text[len(text) // 4:][:24].strip()
-        self.side_web.mark(words, MARK_COLORS["current"])
+        def letters(b):  # solo las letras: comillas, rayas, notas «01» y <br/> cambian en el EPUB
+            return "".join(c for c in editor.NOTE.sub("", b.text()).lower() if c.isalpha())
+        block = self.sheet.textCursor().block()
+        before = [b for b in self.blocks() if b.blockNumber() < block.blockNumber()]
+        objects = " ".join(editor.objects_of(block))
+        if "Ilustración" in objects:
+            image = sum(1 for b in before if "Ilustración" in " ".join(editor.objects_of(b)))
+            self.side_web.mark("", MARK_COLORS["current"], image=image)
+            return
+        if objects or not block.text().strip():  # un separador o una línea vacía: nada que recuadrar
+            self.side_web.mark(None, MARK_COLORS["current"])
+            return
+        text = letters(block)
+        words = text if len(text) <= 40 else text[len(text) // 4:][:30]  # un trozo del medio
+        nth = sum(1 for b in before if not editor.objects_of(b) and b.text().strip()
+                  and (words in letters(b) if words else not letters(b)))
+        self.side_web.mark(words, MARK_COLORS["current"], nth)
 
     def epub_clicked(self, text):
         """Clic en un párrafo de la pestaña EPUB: la hoja va al párrafo con ese texto (el más cercano al cursor, si
@@ -10055,11 +10206,13 @@ class TextEditor:
         """◀ ▶ bajo el PDF: la hoja va al primer párrafo de la página anterior o siguiente (abriendo su capítulo si
         es otro) y el panel la dibuja. Las páginas sin nada del libro se saltan: no hay qué mostrar en la hoja.
         En la pestaña «EPUB», las páginas del capítulo como saldrá."""
-        if self.web_shown():  # una pantalla más abajo o más arriba, como la barra
-            self.side_web.step(delta)
-            return
-        if self.web_tab():
-            self.web.step(delta)
+        if self.web_shown() or self.web_tab():  # una pantalla más abajo o más arriba, como la barra
+            view = self.side_web if self.web_shown() else self.web
+            bar = view.bar
+            if bar.value() >= bar.maximum() if delta > 0 else bar.value() <= 0:  # al final: el capítulo de al lado
+                self.step_section(delta, at_end=delta < 0)
+            else:
+                view.step(delta)
             return
         if self.app.book.origin and self.app.pdf_doc is not None:
             # Un EPUB: sus bloques solo saben la primera página de su archivo, y con ella ◀ ▶ saltaban de capítulo
@@ -10697,7 +10850,14 @@ class TextEditor:
         if self.dirty():
             self.saved_paragraphs = self.changed_count()
             edits, titles, kinds, retype = self.changes()
+            done = [("\n\n".join(line for _, line in page["lines"]), editor.dump(page["doc"]))
+                    for (start, _), page in self.pages.items() if start >= 0 and self.page_dirty(page)]
             self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype)
+            for before, after in done:  # al reabrir el editor, su deshacer vuelve a lo de antes (replay_history)
+                after = "\n\n".join(line for line in after.split("\n\n") if line.strip())
+                if after != before:
+                    first = self.app.editor_history.get(before, (before, before))[1]
+                    self.app.editor_history[after] = (before, first)
         self.win.done(0)
 
     def cancel(self, _=None, asked=False):

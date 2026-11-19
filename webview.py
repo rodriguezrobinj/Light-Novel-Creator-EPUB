@@ -140,21 +140,31 @@ NOTE_JS = """
 """
 # El párrafo del cursor en la vista del EPUB: recuadrado como en el panel del original, y a la vista
 MARK_JS = """
-(function (t, color) {
+(function (t, color, nth, img) {
   if (window.lncMarked) { window.lncMarked.style.outline = ''; window.lncMarked = null; }
-  if (!t) return false;
-  // por el texto de cada párrafo entero: una cursiva o una nota parten el texto en varios trozos
-  var all = document.body.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption');
-  for (var i = 0; i < all.length; i++) {
-    var b = all[i];
-    if (b.textContent.replace(/\\s+/g, ' ').indexOf(t) < 0) continue;
-    b.style.outline = '2px solid ' + color; b.style.outlineOffset = '3px';
-    window.lncMarked = b;
-    b.scrollIntoView({block: 'center'});
-    return true;
+  var b = null;
+  if (img >= 0) {  // una ilustración: la n.º img del capítulo
+    var pics = document.body.querySelectorAll('img, svg');
+    b = pics[Math.min(img, pics.length - 1)] || null;
+  } else if (t !== null) {
+    // solo las letras: la tipografía cambia comillas y rayas, y una nota o un <br/> parten el texto. Sin letras
+    // («—…»), los párrafos sin letras
+    var all = document.body.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, div, td');
+    var found = [];
+    for (var i = 0; i < all.length; i++) {
+      var e = all[i], letters = e.textContent.toLowerCase().replace(/[^\\p{L}]+/gu, '');
+      if (t ? letters.indexOf(t) >= 0 : !letters && e.textContent.trim() && !e.querySelector('img, svg')) found.push(e);
+    }
+    // el de más dentro: un <div> que envuelve el capítulo también contiene el texto
+    found = found.filter(function (e) { return !found.some(function (o) { return o !== e && e.contains(o); }); });
+    b = found[Math.min(nth, found.length - 1)] || null;
   }
-  return false;
-})(%s, %s)
+  if (!b) return false;
+  b.style.outline = '2px solid ' + color; b.style.outlineOffset = '3px';
+  window.lncMarked = b;
+  b.scrollIntoView({block: 'center'});
+  return true;
+})(%s, %s, %s, %s)
 """
 # Modo oscuro de lector: fondo oscuro y letra clara; las ilustraciones, tal cual
 DARK = """
@@ -301,9 +311,10 @@ if AVAILABLE:
             if inner:
                 self.page().runJavaScript(f"window.lncShowNote({json.dumps(inner)}, {json.dumps(self.dark)})", 0)
 
-        def mark(self, text, color):
-            """Recuadra el párrafo donde sale text y lo trae a la vista (o quita el recuadro, sin text)."""
-            self.page().runJavaScript(MARK_JS % (json.dumps(text), json.dumps(color)), 0)
+        def mark(self, text, color, nth=0, image=-1):
+            """Recuadra el párrafo n.º nth cuyas letras (minúsculas, sin lo demás) contienen text ("": el n.º nth sin
+            letras) y lo trae a la vista; con image, la ilustración n.º image. text None quita el recuadro."""
+            self.page().runJavaScript(MARK_JS % (json.dumps(text), json.dumps(color), int(nth), int(image)), 0)
 
         def _loaded(self, ok):
             if not ok:

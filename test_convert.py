@@ -5327,6 +5327,83 @@ def test_sheet_replace_sources_and_split_chapter():
     assert refused
 
 
+def test_window_editor_hidden_chapter_title():
+    """Insertar → «Título oculto»: un capítulo nuevo antes del párrafo del cursor, en la lista y en el índice del
+    EPUB, pero sin verse en su página. El párrafo de abajo queda como estaba (sin cambios) y Ctrl+Z lo quita."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos.")], [0])
+    sheet = editor.sheet
+    before = sheet.content()
+    sheet.setTextCursor(QTextCursor(sheet.document().findBlockByNumber(2)))
+    sheet.insert_hidden_title("Contenido")
+    changed = [b.text() for b in sheet.changed_blocks()]
+    sheet.undo()
+    undone = sheet.content()
+    sheet.redo()
+    editor.save()
+    root.update()
+    rows = [(window.tree.set(i, "title"), window.tree.set(i, "inc")) for i in window.tree.get_children()]
+    epub = TMP / "titulo-oculto.epub"
+    chapters, removed, _ = app._plan(window.book, window.rows())
+    convert.write_epub(window.book, chapters, epub, removed=removed)
+    window.close()
+    names = zipfile.ZipFile(epub).namelist()
+    second = next(epub_file(epub, n) for n in names if n.endswith("sec002.xhtml"))
+    nav = next(epub_file(epub, n) for n in names if n.endswith("nav.xhtml"))
+    assert changed == ["Contenido"] and undone == before, (changed, undone)
+    assert ("Contenido", app.ON) in rows, rows
+    assert '<h1 id="titulo" class="oculto" style="display: none">Contenido</h1>' in second, second
+    assert "Dos." in second and "Contenido" in nav, nav
+    assert not convert.check_epub(epub), convert.check_epub(epub)
+
+
+def test_window_editor_undo_survives_accept():
+    """Lo aceptado en el editor se deshace al reabrirlo: la hoja abre como el libro (sin cambios), Ctrl+Z vuelve a lo
+    de antes de aceptar, Ctrl+Y lo rehace, y aceptar lo deshecho deja el libro como estaba."""
+    import app
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos.")], [0])
+    cursor = QTextCursor(editor.sheet.document().findBlockByNumber(1))
+    cursor.insertText("Primero: ")
+    editor.save()
+    root.update()
+    edited = [b.html for b in window.book.blocks]
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    clean = not editor.dirty() and editor.undo_btn.isEnabled()
+    editor.sheet.undo()
+    undone = editor.sheet.document().findBlockByNumber(1).text()
+    editor.sheet.redo()
+    redone = editor.sheet.document().findBlockByNumber(1).text()
+    editor.sheet.undo()
+    editor.save()
+    root.update()
+    back = [b.html for b in window.book.blocks]
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    editor.sheet.undo()  # el deshacer de la otra vez: vuelve a «Primero:»
+    again = editor.sheet.document().findBlockByNumber(1).text()
+    # «Ver todos los cambios»: lo aceptado y lo de ahora, frente al principio; «Ir» lleva la hoja al párrafo
+    cursor = QTextCursor(editor.sheet.document().findBlockByNumber(2))
+    cursor.insertText("Y ")
+    editor.show_all_changes()
+    view = editor.changes_window.findChild(app.QTextBrowser)
+    listed = view.toPlainText()
+    editor.sheet.moveCursor(QTextCursor.MoveOperation.Start)
+    view.anchorClicked.emit(QUrl(f"{editor.current[0]}-{editor.current[1]}-2"))
+    went = editor.sheet.textCursor().block().text()
+    editor.changes_window.close()
+    editor.win.done(0)
+    window.close()
+    assert "2 cambios" in listed and "Primero:" in listed and "Y" in listed and "Ir" in listed, listed
+    assert went == "Y Dos.", went
+    assert edited[1] == "Primero: Uno.", edited
+    assert clean and undone == "Uno." and redone == "Primero: Uno.", (clean, undone, redone)
+    assert back[1] == "Uno." and again == "Primero: Uno.", (back, again)
+
+
 def editor_on(blocks, candidates, dark=False):
     """Ventana con un libro hecho a mano (y un PDF de una página por bloque) y su editor en la primera sección;
     dark: con el tema oscuro."""
@@ -5548,6 +5625,10 @@ def test_window_editor_code_view_reaches_the_book():
         editor_window = app.TextEditor(window, str(k), *window.section_bounds(k))
         editor_window.toggle_code()
         code = editor_window.code.toPlainText()
+        # aire entre párrafos (una línea del código cada uno), sin paso de deshacer
+        doc = editor_window.code.document()
+        spaced = all(doc.findBlockByNumber(n).blockFormat().bottomMargin() > 0 for n in range(doc.blockCount()))
+        spaced = spaced and not doc.isUndoAvailable()
         editor_window.code.setPlainText(code.replace("<p>Tercero.</p>", "<p>Tercero <i>cambiado</i>.</p>"))
         editor_window.toggle_code()
         sheet_after = editor_window.sheet.isVisible() or not editor_window.code.isVisible()
@@ -5563,6 +5644,7 @@ def test_window_editor_code_view_reaches_the_book():
         app.messagebox.showwarning = original
         window.close()
     assert '<p class="no-indent">Las <i>leyendas</i>' in code and "<h2 id=\"p1\">Parte uno</h2>" in code, code
+    assert spaced, "los párrafos del código, pegados"
     assert sheet_after and still_code and warned and "no se cierra" in warned[0], (sheet_after, still_code, warned)
     assert "Tercero <i>cambiado</i>." in html_now, [h for h in html_now if "Tercero" in h]
 
@@ -6023,7 +6105,12 @@ def test_editor_work_log():
     c.setPosition(editor.sheet.document().findBlockByNumber(1).position())
     c.insertText("Cambiado. ")
     editor.opened -= 120  # dos minutos abierto
-    editor.toggle_reviewed()
+    yes_no = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda *_, **__: True  # «¿Diste por terminado…?»
+    try:
+        editor.toggle_reviewed()
+    finally:
+        app.messagebox.askyesno = yes_no
     editor.open_section(*window.section_bounds(0))
     editor.toggle_reviewed()  # desmarcar
     editor.show_stats()
@@ -6805,8 +6892,22 @@ def test_text_editor_review_split_find_and_stats():
     root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "—Él dijo algo. Aquél no."),
                                       B("p", 1, "Narración de él y del Él grande."),
                                       B("heading", 2, "Capítulo 2"), B("p", 2, "Más texto aquí.")], [0, 3])
-    editor.toggle_reviewed()
-    reviewed = window.tree.set("0", "ok") == "✓" and editor.current == window.section_bounds(3)
+    asked, answer = [], [False]
+    yes_no = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or answer[0]
+    try:
+        editor.toggle_reviewed()  # se pregunta antes: «No» lo deja sin marcar
+        refused = window.tree.set("0", "ok") == "" and editor.current == window.section_bounds(0)
+        refused = refused and not editor.review_btn.isChecked()
+        answer[0] = True
+        editor.toggle_reviewed()
+        reviewed = window.tree.set("0", "ok") == "✓" and editor.current == window.section_bounds(3)
+        editor.open_section(*window.section_bounds(0))
+        editor.toggle_reviewed()  # desmarcar no pregunta
+        editor.toggle_reviewed()
+    finally:
+        app.messagebox.askyesno = yes_no
+    assert refused and len(asked) == 3 and "Capítulo 1" in asked[0], asked
     label = editor.review_btn.toolTip()
     editor.open_section(*window.section_bounds(0))
     editor.find_entry.setText("él")
@@ -10951,6 +11052,55 @@ def test_editor_epub_tab_follows_what_is_written():
             window.close()
     assert found and back, (found, back)
     assert note and stayed, (note, stayed)
+
+
+def test_editor_epub_tab_marks_every_paragraph_and_pages_into_next_chapter():
+    """Pestaña «EPUB» del editor: el recuadro del párrafo del cursor sale en todos, también en el título de dos líneas
+    (<br/>), en uno con nota, en «— ¡...!» (sin letras, y la tipografía lo cambia) y en la ilustración. Pasar página al
+    final del capítulo abre el siguiente, y hacia atrás al principio, el anterior por su final."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    marked = "window.lncMarked ? window.lncMarked.textContent.replace(/\\s+/g, ' ').trim() || window.lncMarked.tagName : ''"
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = next(c for c in window.book.candidates if window.book.blocks[c].title.startswith("Capítulo 1"))
+            window.settings["editor_web"] = False
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            first = ed.current
+            ed.side_tabs.setCurrentIndex(1)
+            assert wait_for(lambda: ed.side_web.pages > 0), "la pestaña EPUB no cargó"
+            missing = []
+            for b in list(ed.blocks()):
+                if not b.text().strip() or (editor_objects(b) and "Ilustración" not in " ".join(editor_objects(b))):
+                    continue
+                js(ed.side_web, "window.lncMarked && (window.lncMarked.style.outline = ''); window.lncMarked = null")
+                ed.sheet.setTextCursor(QTextCursor(b))
+                ed.mark_epub()
+                if not wait_for(lambda: js(ed.side_web, marked), 5):
+                    missing.append(b.text())
+            # al final del capítulo, «Página siguiente» abre el siguiente; al principio, «anterior» vuelve por el final
+            bar = ed.side_web.bar
+            bar.setValue(bar.maximum())
+            ed.step_page(1)
+            ahead = ed.current
+            ed.side_web.bar.setValue(0)
+            ed.step_page(-1)
+            back = ed.current
+            at_end = ed.sheet.textCursor().block() == ed.sheet.document().lastBlock()
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert not missing, missing
+    assert ahead != first and back == first and at_end, (first, ahead, back, at_end)
+
+
+def editor_objects(block):
+    import editor
+    return editor.objects_of(block)
 
 
 def test_note_html_takes_the_note_without_its_backlink():
