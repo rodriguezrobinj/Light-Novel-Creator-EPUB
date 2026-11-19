@@ -14,7 +14,7 @@ try:
     from PySide6.QtWebEngineCore import (QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestJob,
                                          QWebEngineUrlScheme, QWebEngineUrlSchemeHandler)
     from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWidgets import QLabel
+    from PySide6.QtWidgets import QLabel, QScrollBar
     AVAILABLE, ERROR = True, ""
 except ImportError as e:  # sin PySide6-WebEngine (o sin una de sus DLL): la vista previa sigue con MuPDF
     AVAILABLE, ERROR = False, str(e)
@@ -55,6 +55,40 @@ body { box-sizing: border-box !important; margin: 0 !important; padding: %(pad_y
 img, svg, video { -webkit-user-drag: none !important; max-width: 100%% !important;
                   max-height: calc(100vh - %(pad_y2)spx) !important; object-fit: contain; }
 """
+# Chromium avisa de su desplazamiento por la consola (sin QWebChannel): la barra de Qt de fuera lo sigue
+SCROLL_JS = """
+(function () {
+  if (window.lncScroll) return true;
+  window.lncScroll = true;
+  function report() {
+    console.log('lnc-scroll ' + Math.round(window.scrollY) + ' ' +
+                Math.round(document.documentElement.scrollHeight) + ' ' + window.innerHeight);
+  }
+  addEventListener('scroll', report, {passive: true});
+  addEventListener('resize', report);
+  try { new ResizeObserver(report).observe(document.body || document.documentElement); } catch (e) {}
+  report();
+  return true;
+})()
+"""
+# El párrafo del cursor en la vista del EPUB: recuadrado como en el panel del original, y a la vista
+MARK_JS = """
+(function (t, color) {
+  if (window.lncMarked) { window.lncMarked.style.outline = ''; window.lncMarked = null; }
+  if (!t) return false;
+  // por el texto de cada párrafo entero: una cursiva o una nota parten el texto en varios trozos
+  var all = document.body.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption');
+  for (var i = 0; i < all.length; i++) {
+    var b = all[i];
+    if (b.textContent.replace(/\\s+/g, ' ').indexOf(t) < 0) continue;
+    b.style.outline = '2px solid ' + color; b.style.outlineOffset = '3px';
+    window.lncMarked = b;
+    b.scrollIntoView({block: 'center'});
+    return true;
+  }
+  return false;
+})(%s, %s)
+"""
 # Modo oscuro de lector: fondo oscuro y letra clara; las ilustraciones, tal cual
 DARK = """
 html, body { background: #111111 !important; color: #dddddd !important; }
@@ -90,11 +124,22 @@ if AVAILABLE:
             media = MEDIA.get(ext) or mimetypes.guess_type(path)[0] or "application/octet-stream"
             job.reply(media.encode(), buffer)
 
+    class _Page(QWebEnginePage):
+        """Página que recoge los avisos de desplazamiento de SCROLL_JS."""
+        scrolled = Signal(int, int, int)  # arriba, alto del documento y de la vista, en px de CSS
+
+        def javaScriptConsoleMessage(self, level, message, line, source):
+            if message.startswith("lnc-scroll "):
+                top, height, view = (int(x) for x in message.split()[1:4])
+                self.scrolled.emit(top, height, view)
+
     class EpubView(QWebEngineView):
         """Un archivo del EPUB como en un lector de size=(ancho, alto) en px de CSS, encogido o agrandado a lo que
         mide la vista, seguido y con barra de desplazamiento. paged(páginas) avisa al cargar (una página: lo que cabe
-        en la vista); go(n) va a una, step(±1) a la de al lado de donde se esté."""
+        en la vista); go(n) va a una, step(±1) a la de al lado de donde se esté. La barra de desplazamiento (bar) es
+        de Qt y va fuera, donde la ponga quien la usa, como la del panel del original; moved() avisa al moverse."""
         paged = Signal(int)
+        moved = Signal()
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -102,10 +147,15 @@ if AVAILABLE:
             self.profile_.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
             self.zip = _Zip(self)
             self.profile_.installUrlSchemeHandler(SCHEME, self.zip)
-            self.setPage(QWebEnginePage(self.profile_, self))
+            self.setPage(_Page(self.profile_, self))
             settings = self.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, False)  # la de Qt, fuera
+            self.bar = QScrollBar(Qt.Orientation.Vertical)
+            self.bar.setRange(0, 0)
+            self.bar.valueChanged.connect(lambda v: self.page().runJavaScript(f"window.scrollTo(0, {v})"))
+            self.page().scrolled.connect(self._scrolled)
+            self.scale = 1.0  # el zoom de quien la mira (− y +), sobre el del tamaño del lector
             self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # solo se mira: el teclado sigue en la lista
             self.page().setBackgroundColor(Qt.GlobalColor.white)
@@ -142,12 +192,32 @@ if AVAILABLE:
             self.hold()
             self.zip.load(data)
             self.size_, self.dark, self.page_, self.target = tuple(size), dark, page, find
-            self.setZoomFactor(max(0.25, min(5.0, self.width() / max(size[0], 1))))
+            self.fit()
             self.setUrl(QUrl("epub:///" + path))
+
+        def fit(self):
+            """El zoom: el ancho del lector al de la vista, por el de quien la mira."""
+            self.setZoomFactor(max(0.25, min(5.0, self.width() / max(self.size_[0], 1) * self.scale)))
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
-            self.setZoomFactor(max(0.25, min(5.0, self.width() / max(self.size_[0], 1))))
+            self.fit()
+
+        def _scrolled(self, top, height, view):
+            """Chromium se desplazó (o cambió de alto): la barra de fuera y la página de ahora."""
+            self.bar.blockSignals(True)
+            self.bar.setRange(0, max(0, height - view))
+            self.bar.setPageStep(max(1, view))
+            self.bar.setSingleStep(max(1, view // 12))
+            self.bar.setValue(top)
+            self.bar.blockSignals(False)
+            self.pages = max(1, -(-height // max(1, view)))
+            self.page_ = min(self.pages - 1, round(top / max(1, view)))
+            self.moved.emit()
+
+        def mark(self, text, color):
+            """Recuadra el párrafo donde sale text y lo trae a la vista (o quita el recuadro, sin text)."""
+            self.page().runJavaScript(MARK_JS % (json.dumps(text), json.dumps(color)), 0)
 
         def _loaded(self, ok):
             if not ok:
@@ -158,6 +228,7 @@ if AVAILABLE:
             pad_x, pad_y = round(self.size_[0] * 0.06), round(self.size_[1] * 0.04)
             css = SCROLLED % {"pad_x": pad_x, "pad_y": pad_y, "pad_y2": pad_y * 2}
             css += DARK if self.dark else ""
+            self.page().runJavaScript(SCROLL_JS, 0)
             script = ("(function(){var s=document.createElement('style');s.textContent=%s;"
                       "(document.head||document.documentElement).appendChild(s);"
                       "return Math.max(1,Math.ceil(document.documentElement.scrollHeight/window.innerHeight));})()"
@@ -178,13 +249,9 @@ if AVAILABLE:
             self.page().runJavaScript(f"document.scrollingElement.scrollTop = {self.page_} * window.innerHeight;", 0,
                                       lambda _: self.unveil())
 
-        def step(self, delta, done=None):
-            """A la página de al lado de la que se ve ahora (la barra pudo moverla); done() después."""
-            def at(n):
-                self.go(int(n or 0) + delta)
-                if done:
-                    done()
-            self.page().runJavaScript("Math.round(document.scrollingElement.scrollTop / window.innerHeight)", 0, at)
+        def step(self, delta):
+            """Una pantalla más abajo (o más arriba) de donde se está, como la barra de fuera."""
+            self.bar.setValue(self.bar.value() + delta * self.bar.pageStep())
 
         def find_page(self, text, done):
             """done(página) de la primera vez que sale text (o 0)."""
@@ -220,11 +287,11 @@ if AVAILABLE:
             self.zip.files = dict(files)
             self.zip.files[path] = text.encode("utf-8")
             self.loaded = False
-            self.setZoomFactor(1.0)
+            self.setZoomFactor(self.scale)
             self.setUrl(QUrl("epub:///" + path))
 
-        def resizeEvent(self, event):
-            QWebEngineView.resizeEvent(self, event)  # sin la escala del lector: se lee a su tamaño
+        def fit(self):
+            self.setZoomFactor(self.scale)  # sin la escala del lector: se lee a su tamaño, por el zoom del panel
 
         def show_note(self, text):
             """Un aviso en lugar del capítulo (lo que no se edita aquí)."""
@@ -235,6 +302,7 @@ if AVAILABLE:
         def _loaded(self, ok):
             import websheet
             if ok:
+                self.page().runJavaScript(SCROLL_JS, 0)
                 self.page().runJavaScript(websheet.SHEET_JS, 0, lambda _: self._ready())
 
         def _ready(self):

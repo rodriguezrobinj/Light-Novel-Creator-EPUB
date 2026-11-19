@@ -11089,10 +11089,15 @@ def test_websheet_find_read_sync_draft_and_cancel():
             next(b for b in ed.find_frame.findChildren(QPushButton) if b.text() == "✕").click()
             del ed.web.setFocus, ed.sheet.setFocus
             dirty = wait_for(lambda: ed.dirty(), 15)
-            ed.write_draft()
             draft = app._draft_path(src)
-            drafted = wait_for(lambda: draft.exists() and "parágrafo" in draft.read_text(encoding="utf-8")
-                               and "Nuevo arriba." in draft.read_text(encoding="utf-8"), 15)
+            tries = []  # con carga, Chromium contesta tarde: el borrador se vuelve a pedir cada medio segundo
+
+            def drafted_now():
+                if len(tries) % 25 == 0:
+                    ed.write_draft()
+                tries.append(1)
+                return draft.exists() and all(w in draft.read_text(encoding="utf-8") for w in ("parágrafo", "Nuevo arriba."))
+            drafted = wait_for(drafted_now, 30)
             why = (draft.read_text(encoding="utf-8")[:400] if draft.exists() else "sin borrador", ed.note.text(),
                    ed.web_on, ed.current)
             ed.cancel()
@@ -11248,9 +11253,39 @@ def test_websheet_beside_the_sheet_follows_both():
             ed.flush_web(lambda: done.append(True))
             wait_for(lambda: done)
             both = editor_dump(ed)
+            ed.on_focus(ed.web, ed.sheet)
+            wait_for(lambda: not ed.web_on, 15)
+            # la banda del párrafo del cursor en la web (fuera de la hoja: su HTML no cambia)
+            cursor = QTextCursor(ed.sheet.document().findBlockByNumber(2))
+            ed.sheet.setTextCursor(cursor)
+            ed.follow_cursor()
+            band = wait_for(lambda: js(ed.web, "(function(){var m=document.getElementById('lnc-here');return m ? "
+                                               "[m.style.display, document.getElementById('lnc-sheet').contains(m)]"
+                                               ".join(',') : 'no';})()") == ",false", 10)
+            # el tamaño de abajo es el de la hoja y el código; la web lleva el suyo (− y + del panel)
+            zoom = ed.web.zoomFactor()
+            ed.text_zoom.setValue(150)
+            sizes = (ed.web.zoomFactor() == zoom, ed.code.font().pointSize())
+            ed.zoom(25)
+            panel = round(ed.web.zoomFactor(), 2)
+            # el código abre en la línea del párrafo del cursor, y moverse en él lleva la hoja a ese párrafo
+            ed.view_tabs.setCurrentIndex(1)
+            line = ed.code.textCursor().blockNumber()
+            target = next(n for n, x in enumerate(ed.code.toPlainText().splitlines()) if "Segundo" in x)
+            ed.code.setTextCursor(QTextCursor(ed.code.document().findBlockByNumber(target)))
+            ed.code_moved()
+            followed = ed.web_index(ed.sheet.textCursor().block())
+            ed.view_tabs.setCurrentIndex(0)
+            # la pestaña EPUB recuadra ese párrafo
+            ed.side_tabs.setCurrentIndex(1)
+            marked = wait_for(lambda: bool(js(ed.side_web, "window.lncMarked ? 1 : 0")), 20)
             ed.win.done(0)
         finally:
             window.close()
+    assert band, "sin la banda del párrafo en la hoja web"
+    assert sizes == (True, 15) and panel == 1.25, (sizes, panel)
+    assert line == 2 and followed == target, (line, followed, target)
+    assert marked, "la pestaña EPUB no recuadra el párrafo del cursor"
     assert left and kept, (left, kept)
     assert shown and back, (shown, back)
     assert "Desde la web." in both and "Desde la hoja." in both, both
