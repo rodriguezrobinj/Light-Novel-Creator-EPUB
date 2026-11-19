@@ -1038,6 +1038,12 @@ class Caption(QWidget):
             self.setGeometry(0, 0, obj.width(), CAPTION)
             self.raise_()
         elif kind == QEvent.Type.WindowStateChange:
+            full = obj.isFullScreen()
+            if full != self.isHidden():  # a pantalla completa, sin barra ni su sitio
+                margins = obj.contentsMargins()
+                obj.setContentsMargins(margins.left(), margins.top() + (-CAPTION if full else CAPTION),
+                                       margins.right(), margins.bottom())
+                self.setVisible(not full)
             maximized = obj.isMaximized()
             self.buttons["max"].setText("" if maximized else "")
             self.buttons["max"].setToolTip("Restaurar" if maximized else "Maximizar")
@@ -1056,11 +1062,15 @@ def caption_event(window, kind, message):
     from ctypes import wintypes
     msg = wintypes.MSG.from_address(int(message))
     user32 = ctypes.windll.user32
-    if msg.message == 0x0083 and msg.wParam:  # WM_NCCALCSIZE: el área de la ventana menos los bordes, sin barra
+    if msg.message == 0x0083:  # WM_NCCALCSIZE: el área de la ventana menos los bordes, sin barra
+        # También sin wParam (lParam es entonces el RECT): sin atenderlo, Windows calculaba su marco con barra de
+        # título y la dibujaba encima de la propia (una barra fantasma). A pantalla completa, todo es ventana
+        if window.isFullScreen():
+            return True, 0
         dpi = user32.GetDpiForWindow(msg.hWnd)
         pad = user32.GetSystemMetricsForDpi(92, dpi)  # SM_CXPADDEDBORDER
         side, foot = user32.GetSystemMetricsForDpi(32, dpi) + pad, user32.GetSystemMetricsForDpi(33, dpi) + pad
-        rect = ctypes.cast(msg.lParam, ctypes.POINTER(wintypes.RECT)).contents  # NCCALCSIZE_PARAMS.rgrc[0]
+        rect = ctypes.cast(msg.lParam, ctypes.POINTER(wintypes.RECT)).contents  # el RECT o NCCALCSIZE_PARAMS.rgrc[0]
         rect.left += side
         rect.right -= side
         rect.bottom -= foot

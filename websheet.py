@@ -319,14 +319,19 @@ SHEET_JS = r"""
       lnc.placeHere(scroll);
     },
     placeHere: function (scroll) {
-      var mark = document.getElementById('lnc-here');
-      if (!mark) { mark = document.createElement('div'); mark.id = 'lnc-here'; document.body.appendChild(mark); }
+      // en <html> y medido desde él: el CSS del libro puede dar posición o margen al <body>, y la banda bajaba
+      var root = document.documentElement, mark = document.getElementById('lnc-here');
+      if (!mark) { mark = document.createElement('div'); mark.id = 'lnc-here'; root.appendChild(mark); }
+      root.style.position = 'relative';
       var b = lnc.hereAt === undefined ? null : sheet.children[lnc.hereAt];
       if (!b) { mark.style.display = 'none'; return; }
-      var r = b.getBoundingClientRect(), s = sheet.getBoundingClientRect();
+      var r = b.getBoundingClientRect(), s = sheet.getBoundingClientRect(), o = root.getBoundingClientRect();
       mark.style.cssText = 'position:absolute;pointer-events:none;z-index:0;border-radius:4px;background:' +
-        (lnc.hereColor || 'rgba(31,111,209,0.1)') + ';left:' + (s.left + scrollX - 10) + 'px;top:' +
-        (r.top + scrollY - 3) + 'px;width:' + (s.width + 20) + 'px;height:' + (r.height + 6) + 'px';
+        (lnc.hereColor || 'rgba(31,111,209,0.1)') + ';left:' + (s.left - o.left - 10) + 'px;top:' +
+        (r.top - o.top - 3) + 'px;width:' + (s.width + 20) + 'px;height:' + (r.height + 6) + 'px';
+      var d = mark.getBoundingClientRect();  // donde quedó de verdad: se corrige lo que desplace su contenedor
+      mark.style.top = (parseFloat(mark.style.top) + r.top - 3 - d.top) + 'px';
+      mark.style.left = (parseFloat(mark.style.left) + s.left - 10 - d.left) + 'px';
       if (scroll) b.scrollIntoView({block: 'center'});
     },
     takeText: function () { var t = lnc.dirty ? sheet.innerText : ''; lnc.dirty = false; return t; },
@@ -345,6 +350,9 @@ SHEET_JS = r"""
   });
   sheet.addEventListener('input', function () { lnc.placeHere(false); });
   addEventListener('resize', function () { lnc.placeHere(false); });
+  try { new ResizeObserver(function () { lnc.placeHere(false); }).observe(sheet); } catch (e) {}
+  if (document.fonts) document.fonts.ready.then(function () { lnc.placeHere(false); });
+  addEventListener('load', function () { lnc.placeHere(false); });
   return true;
 })()
 """
