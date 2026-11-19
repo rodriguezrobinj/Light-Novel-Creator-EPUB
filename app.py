@@ -2221,7 +2221,15 @@ class App:
         text.addWidget(self.book_line)
         card.setLayout(_row(self.cover_thumb, text, 1, self.data_btn, margins=(10, 8, 10, 8), spacing=10))
         body.addWidget(card)
-        self.data_panel = self.book_data()
+        # Con barra de desplazamiento si no cabe: la tarjeta entera subía el alto mínimo de la ventana por encima de la
+        # pantalla, y la ventana crecía por debajo de la barra de tareas
+        self.data_panel = QScrollArea(objectName="dataScroll")
+        self.data_panel.setWidget(self.book_data())
+        self.data_panel.setWidgetResizable(True)
+        self.data_panel.setFrameShape(QFrame.Shape.NoFrame)
+        self.data_panel.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.data_panel.setMinimumHeight(90)
+        self.data_panel.setMaximumHeight(self.data_panel.widget().sizeHint().height() + 2)
         self.data_panel.hide()
         body.addWidget(self.data_panel)
         for var in (self.title_var, self.author_var, self.publisher_var, self.lang_var, self.series_var,
@@ -2998,7 +3006,10 @@ class App:
         """La sección del EPUB de la vista previa en Chromium, del tamaño del dispositivo; misma sección, mismo
         dispositivo y mismo modo: solo se pasa de página."""
         web, (width, height) = self.epub_web, DEVICES[self.device_var.get()]
-        key = (self.preview_key, self.device_var.get(), self.dark_var.get())
+        box_w, box_h = self.box_size()
+        scale = min(box_w / width, box_h / height)
+        shown = (max(60, round(width * scale)), max(80, round(height * scale)))
+        key = (self.preview_key, self.device_var.get(), self.dark_var.get(), shown)  # otro sitio: se vuelve a paginar
         if key == self.web_key and self.epub_pages > 0:
             web.go(self.epub_page)
             self.web_paged(self.epub_pages)
@@ -3010,9 +3021,10 @@ class App:
         except Exception:
             self.blank(self.epub_view, "Sin vista previa")
             return
-        box_w, box_h = self.box_size()
-        scale = min(box_w / width, box_h / height)
-        web.setFixedSize(max(60, round(width * scale)), max(80, round(height * scale)))
+        # Como mucho ese tamaño, sin mínimo: fijo, subía el alto mínimo de la ventana y al abrir «Editar datos» la
+        # ventana crecía por debajo de la barra de tareas
+        web.setMinimumSize(60, 80)
+        web.setMaximumSize(*shown)
         self.epub_view.hide()
         web.show()
         self.web_key = key
@@ -7372,9 +7384,21 @@ class TextEditor:
         side_column.addLayout(_row(prev_btn, self.prev_page, self.page_label, self.next_page, next_btn,
                                    self.source_note, 1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
                                    _button("+", lambda: self.zoom(25))))
+        # Sobre la hoja, como «Original | EPUB» del panel: una sola vista a la vez, la hoja o su código HTML
+        self.view_tabs = QTabBar()
+        self.view_tabs.addTab("Hoja web" if self.web is not None else "Hoja")
+        self.view_tabs.addTab("Código HTML")
+        self.view_tabs.setDrawBase(False)
+        self.view_tabs.currentChanged.connect(self.show_view)
+        left = QWidget()
+        left_column = QVBoxLayout(left)
+        left_column.setContentsMargins(0, 8, 0, 0)
+        left_column.setSpacing(0)
+        left_column.addWidget(self.view_tabs, 0, Qt.AlignmentFlag.AlignLeft)
+        left_column.addWidget(desk, 1)
         self.split = QSplitter()
         self.split.addWidget(self.nav_panel())
-        self.split.addWidget(desk)
+        self.split.addWidget(left)
         self.split.addWidget(side)
         self.split.setStretchFactor(1, 1)
         self.split.setStretchFactor(2, 1)
@@ -7708,13 +7732,6 @@ class TextEditor:
         self.show_changes_box.toggled.connect(self.show_changes_action.setChecked)
         self.show_changes_action.toggled.connect(self.show_changes_box.setChecked)
         group("Mostrar", [self.nav_btn, self.show_changes_box])
-        self.code_btn = tool("Código HTML", "Ver y editar el capítulo como su HTML: cada párrafo, su etiqueta y sus "
-                             "atributos. Pulsa otra vez para volver a la hoja", self.toggle_code, True, icon="code")
-        self.web_btn = tool("Hoja web", "Escribir sobre el capítulo tal como se verá en el libro (Chromium, con todo su "
-                            "CSS). Pulsa otra vez para volver a la hoja", self.toggle_web, True, icon="web")
-        import webview
-        self.web_btn.setEnabled(webview.available())
-        group("Código", [self.code_btn, self.web_btn])
         for row in self.ribbon_rows:
             row.addStretch(1)
 
@@ -7978,8 +7995,9 @@ class TextEditor:
             self.tabs_row.insertWidget(2, self.chapter_btn)
             self.tabs_row.insertWidget(3, self.review_btn)
         if self.focused:
-            self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.find_frame, self.link_frame,
-                                             self.split_frame, self.issue_frame, self.resume_frame, self.diff_frame)
+            self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.view_tabs, self.find_frame,
+                                             self.link_frame, self.split_frame, self.issue_frame, self.resume_frame,
+                                             self.diff_frame)
                                  if not w.isHidden()]
             for widget in self.before_focus:
                 widget.hide()
@@ -9090,7 +9108,6 @@ class TextEditor:
         if self.reading is not None:  # la voz iba por párrafos de la otra hoja
             self.stop_reading()
         if not self.web_on and self.current[0] < 0:
-            self.web_btn.setChecked(False)
             self.tell("«Contenido» es la lista de capítulos: se edita en la hoja")
             return
         self.app.settings["editor_web"] = not self.web_on  # la próxima vez, el editor abre en la misma hoja
@@ -9099,7 +9116,6 @@ class TextEditor:
             if self.code.isVisible():
                 self.toggle_code()
                 if self.code.isVisible():  # el código no se pudo aplicar: se sigue en él
-                    self.web_btn.setChecked(False)
                     return
             self.load_web()
             return
@@ -9123,7 +9139,6 @@ class TextEditor:
             self.web.setGeometry(self.sheet.geometry())
         self.web.load_sheet(files, path, websheet.page(lines, objects, head, body, path))
         self.web_on, self.web_dirty, self.web_home = True, False, None
-        self.web_btn.setChecked(True)
         self.web_poll.start(400)
 
     def web_ready(self):
@@ -9428,7 +9443,6 @@ class TextEditor:
             self.web.hide()
             self.sheet.show()
             self.sheet.setFocus()
-        self.web_btn.setChecked(False)
         self.update_tools()
 
     def toggle_code(self):
@@ -9440,15 +9454,15 @@ class TextEditor:
             self.sheet.hide()
             self.code.show()
             self.code.setFocus()
-            for n in range(self.ribbon_pages.count() - 1):  # lo de la hoja no vale aquí; Vista sí, para volver
+            for n in range(self.ribbon_pages.count() - 1):  # lo de la hoja no vale aquí; Vista sí
                 self.ribbon_pages.widget(n).setEnabled(False)
-            self.code_btn.setChecked(True)
+            self.sync_view()
             return
         if self.code.toPlainText() != self.code_text:
             try:
                 text = editor.from_code(self.code.toPlainText())
             except ValueError as e:
-                self.code_btn.setChecked(True)
+                self.sync_view()
                 messagebox.showwarning("Código HTML", f"{e}\n\nArréglalo para volver a la hoja.", parent=self.win)
                 return
             self.sheet.set_text(text)
@@ -9457,8 +9471,27 @@ class TextEditor:
         self.sheet.setFocus()
         for n in range(self.ribbon_pages.count()):
             self.ribbon_pages.widget(n).setEnabled(True)
-        self.code_btn.setChecked(False)
+        self.sync_view()
         self.update_tools()
+
+    def show_view(self, index):
+        """Pestañas sobre la hoja: la hoja (web, si está) o «Código HTML», una sola a la vista. El código sale de la
+        hoja de Qt: lo escrito en la web pasa antes a ella; al volver, la web se carga con lo cambiado."""
+        if (index == 1) == self.code.isVisible():
+            return
+        if index == 1 and self.web_on:
+            self.flush_web(lambda: (self.web_done(), self.toggle_code()))
+            return
+        self.toggle_code()
+        if (not self.code.isVisible() and self.web is not None and self.app.settings.get("editor_web", True)
+                and self.current[0] >= 0):
+            self.load_web()
+
+    def sync_view(self):
+        """La pestaña elegida sobre la hoja, la de lo que se ve (sin volver a pedir el cambio)."""
+        self.view_tabs.blockSignals(True)
+        self.view_tabs.setCurrentIndex(1 if self.code.isVisible() else 0)
+        self.view_tabs.blockSignals(False)
 
     def add_ruby(self):
         """Furigana: la lectura encima del texto elegido (o de lo que se escriba), en la hoja a la vista."""
