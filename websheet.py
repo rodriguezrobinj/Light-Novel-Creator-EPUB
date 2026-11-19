@@ -456,13 +456,21 @@ def lines_of(dumped):
     return editor.from_code("\n".join(code))
 
 
-def sources(book, start, end, lines, pictures):
+def text_file(blocks):
+    """Archivo del EPUB con más párrafos de blocks: el del texto del capítulo, no su portadilla de página fija (con
+    su hoja de estilo, que en los libros de Kadokawa pone la letra a 0)."""
+    import collections
+    count = collections.Counter(b.src[0] for b in blocks if b.src and b.kind == "p")
+    return count.most_common(1)[0][0] if count else next((b.src[0] for b in blocks if b.src), None)
+
+
+def sources(book, start, end, lines, pictures, horizontal=False):
     """Lo que la hoja web necesita para dibujar el capítulo start..end del libro: (archivos del zip, ruta de la
     página, su <head>, atributos de su <body>). Con un EPUB de entrada, los del original (su CSS, sus fuentes, sus
     imágenes) y la página en el sitio de su archivo; si no, la hoja de estilo de la app."""
     files, objects = {}, {}
     origin = book.origin
-    first = next((b.src[0] for b in book.blocks[start:end] if b.src), None) if origin else None
+    first = text_file(book.blocks[start:end]) if origin else None
     head, body_attrs = "", ""
     if origin and first:
         with zipfile.ZipFile(origin) as z:
@@ -486,6 +494,14 @@ def sources(book, start, end, lines, pictures):
         token = convert.TOKEN.fullmatch(bare)
         if token and token[1] == "Ilustración" and 0 <= int(token[2]) < len(book.blocks):
             data = book.blocks[int(token[2])].image
+            name = posixpath.join(folder, f"lnc-obj/{token[2]}.{'png' if data[:4] == b'\x89PNG' else 'jpg'}")
+            files[name], objects[bare] = data, (name, data)
+        elif token and 0 <= int(token[2]) < len(book.blocks) and book.blocks[int(token[2])].image:
+            # separador dibujado: su imagen (girada, si el libro vertical se lee en horizontal)
+            data = book.blocks[int(token[2])].image
+            if horizontal and book.vertical:
+                import faithful
+                data = faithful._turned(data) or data
             name = posixpath.join(folder, f"lnc-obj/{token[2]}.{'png' if data[:4] == b'\x89PNG' else 'jpg'}")
             files[name], objects[bare] = data, (name, data)
         elif token:  # separador: su texto

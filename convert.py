@@ -145,6 +145,7 @@ class Book:
     links: str = ""              # «Texto = https://…», uno por línea: enlaces de la página de título
     revised: str = ""            # fecha de la última corrección del texto
     origin: str = ""             # EPUB de entrada leído por read_epub: write_epub lo parchea en vez de rehacerlo
+    vertical: bool = False       # EPUB japonés escrito en vertical (de derecha a izquierda)
 
 
 VOLUME = re.compile(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*0*(\d+(?:[.,]\d+)?)", re.I)
@@ -3781,8 +3782,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
                breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
                progress=None, fit=None, whole_words=False, css_extra="", synopsis=False, title_image=None, logo="",
-               endnotes=False, note_style="1", heading_font="", box_style="Sencillo"):
+               endnotes=False, note_style="1", heading_font="", box_style="Sencillo", horizontal=True):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
+    horizontal: un EPUB japonés en vertical sale de izquierda a derecha (faithful.HORIZONTAL_CSS).
     removed: índices de títulos cuya sección se quita (agradecimientos, enlaces del grupo…).
     Un capítulo se lleva todo hasta el siguiente capítulo, subtítulos incluidos; un subtítulo,
     hasta el siguiente título.

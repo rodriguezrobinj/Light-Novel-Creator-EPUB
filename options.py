@@ -34,6 +34,8 @@ OPTIONS = (
            "Comillas «», puntos suspensivos, raya de diálogo y espacios, al estilo RAE."),
     Option("Texto", "hyphenate", "check", "Partir palabras con guiones (Kindle)",
            "El Kindle apenas parte palabras en español: sin esto el texto justificado queda con huecos."),
+    Option("Texto", "horizontal", "check", "Texto en horizontal (EPUB japoneses)",
+           "Un EPUB japonés escrito en vertical sale de izquierda a derecha, como un libro en español."),
     Option("Texto", "reading", "check", "Minutos de lectura en el índice",
            "Cuánto se tarda en leer cada capítulo, en la página «Contenido»."),
     Option("Texto", "credits", "check", "Página de título y créditos",

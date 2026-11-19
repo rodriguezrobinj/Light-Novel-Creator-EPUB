@@ -55,6 +55,13 @@ body { box-sizing: border-box !important; margin: 0 !important; padding: %(pad_y
 img, svg, video { -webkit-user-drag: none !important; max-width: 100%% !important;
                   max-height: calc(100vh - %(pad_y2)spx) !important; object-fit: contain; }
 """
+# Hoja web en modo oscuro: como DARK, sobre la hoja
+SHEET_DARK = """
+html, body { background: #1b1b1b !important; color: #dddddd !important; }
+#lnc-sheet, #lnc-sheet *:not(img):not(svg):not(image) { color: #dddddd !important; background-color: transparent !important;
+                                                        border-color: #555555 !important; }
+#lnc-sheet a { color: #8fb4ff !important; }
+"""
 # Chromium avisa de su desplazamiento por la consola (sin QWebChannel): la barra de Qt de fuera lo sigue
 SCROLL_JS = """
 (function () {
@@ -253,11 +260,12 @@ if AVAILABLE:
             from PySide6.QtCore import QTimer
             QTimer.singleShot(60, self.cover.hide)
 
-        def show_file(self, data, path, size, dark=False, page=0, find=None):
+        def show_file(self, data, path, size, dark=False, page=0, find=None, override=None):
             """Muestra path del EPUB data (bytes) como en un lector de size; page: la página (-1: la última);
-            find: un texto que buscar, y se va a su página."""
+            find: un texto que buscar, y se va a su página. override: {ruta: bytes} que sustituyen a los del zip."""
             self.hold()
             self.zip.load(data)
+            self.zip.files.update(override or {})
             self.size_, self.dark, self.page_, self.target = tuple(size), dark, page, find
             self.fit()
             self.setUrl(QUrl("epub:///" + path))
@@ -373,6 +381,15 @@ if AVAILABLE:
         def fit(self):
             self.setZoomFactor(self.scale)  # sin la escala del lector: se lee a su tamaño, por el zoom del panel
 
+        def set_dark(self, on):
+            """Fondo oscuro y letra clara (las ilustraciones, tal cual); se vuelve a poner al cargar otra página."""
+            self.dark = on
+            css = (SHEET_DARK if on else "")
+            self.page().runJavaScript(
+                "(function(c){var s=document.getElementById('lnc-dark');if(!s){s=document.createElement('style');"
+                "s.id='lnc-dark';document.documentElement.appendChild(s);}s.textContent=c;return true;})(%s)"
+                % json.dumps(css), 0)
+
         def show_note(self, text):
             """Un aviso en lugar del capítulo (lo que no se edita aquí)."""
             import html
@@ -386,6 +403,8 @@ if AVAILABLE:
                 self.page().runJavaScript(websheet.SHEET_JS, 0, lambda _: self._ready())
 
         def _ready(self):
+            if self.dark:
+                self.set_dark(True)
             self.loaded = True
             self.ready.emit()
             self.unveil()
@@ -419,6 +438,23 @@ def note_html(xhtml, note_id):
             # la flecha de vuelta (↩ o «Volver») no sirve en el recuadro
             return re.sub(r'<a\b[^>]*(?:backlink|doc-backlink|rearnote)[^>]*>.*?</a>', "", inner, flags=re.S).strip()
     return ""
+
+
+def merge_files(files, order, base):
+    """El archivo base con el <body> de los demás de order delante o detrás, en su orden: un capítulo de varios
+    archivos (portadilla y texto) en una sola página, con la hoja de estilo del de texto."""
+    import re
+
+    def inner(name):
+        text = files.get(name, b"").decode("utf-8", "replace")
+        m = re.search(r"<body\b[^>]*>(.*)</body>", text, re.S)
+        return m[1] if m else ""
+    at = order.index(base)
+    text = files[base].decode("utf-8", "replace")
+    before, after = "".join(inner(n) for n in order[:at]), "".join(inner(n) for n in order[at + 1:])
+    text = re.sub(r"(<body\b[^>]*>)", lambda m: m[1] + before, text, count=1)
+    cut = text.rfind("</body>")
+    return (text[:cut] + after + text[cut:]).encode("utf-8")
 
 
 def section_path(data):

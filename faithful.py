@@ -241,9 +241,72 @@ def _meta(opf, book):
         pass
 
 
+# Texto en horizontal sobre un EPUB japonés en vertical: se lee de izquierda a derecha, como un libro en español
+HORIZONTAL_CSS = """
+html, body, html * { writing-mode: horizontal-tb !important; -epub-writing-mode: horizontal-tb !important;
+                     -webkit-writing-mode: horizontal-tb !important; }
+"""
+VERTICAL = re.compile(r"writing-mode\s*:\s*(?:tb-rl|vertical-rl)", re.I)
+ORNAMENT_USES = 3  # una imagen que sale tantas veces o más en el texto es un adorno: separador de escena
+
+
+def _repeated(z, items, order, names):
+    """(imágenes que salen ORNAMENT_USES veces o más en el spine: los separadores dibujados (区切り), <title> que se
+    repiten en tres archivos o más: el nombre del libro en cada página, que no nombra ningún capítulo)."""
+    import collections
+    uses, titles, most = collections.Counter(), collections.Counter(), collections.Counter()
+    for ident in order:
+        name, kind, _ = items[ident]
+        if "html" in kind and name in names:
+            text = z.read(name).decode("utf-8", "replace")
+            here = collections.Counter(_resolve(name, href) for href in
+                                       re.findall(r"<(?:img|image)\b[^>]*?(?:src|href)=\"([^\"]+)\"", text))
+            uses.update(here)
+            for ref, n in here.items():
+                most[ref] = max(most[ref], n)
+            titles[_file_title(text)] += 1
+
+    def ornament(ref):
+        """Entre escenas: sale dos veces en un mismo archivo, o es una raya. La misma ilustración una vez por
+        capítulo (una cabecera) no lo es."""
+        if most[ref] >= 2:
+            return True
+        try:
+            pix = convert.pymupdf.Pixmap(z.read(ref))
+        except Exception:
+            return False
+        return max(pix.width, pix.height) >= 4 * min(pix.width, pix.height)
+    return ({ref for ref, n in uses.items() if n >= ORNAMENT_USES and ref in names and ornament(ref)},
+            {title for title, n in titles.items() if n >= 3})
+
+
+def _turned(image):
+    """La imagen de un separador alto y estrecho (una raya vertical) girada un cuarto de vuelta, en su formato; o b""
+    si no es alta (ya va bien en horizontal)."""
+    try:
+        pix = convert.pymupdf.Pixmap(image)
+    except Exception:
+        return b""
+    if pix.height < 2 * pix.width:
+        return b""
+    from PIL import Image
+    import io
+    picture = Image.open(io.BytesIO(image))
+    out = io.BytesIO()
+    picture.rotate(90, expand=True).save(out, format=picture.format or "PNG")
+    return out.getvalue()
+
+
+def _file_title(text):
+    m = re.search(r"<title>(.*?)</title>", text, re.S)
+    return _plain(m.group(1)) if m else ""
+
+
 def read_epub(path, progress=None):
     """Libro de un EPUB: cada párrafo, título, ilustración y separador del spine como un bloque que recuerda su
-    elemento (Block.src) y cada archivo del spine como un capítulo, con el nombre de su índice."""
+    elemento (Block.src). Cada archivo del spine es un capítulo, con el nombre de su índice; si el EPUB tiene índice,
+    un archivo que no sale en él ni empieza con título es la continuación del anterior (el texto de un capítulo tras
+    su portadilla, una ilustración suelta). Una imagen repetida es un separador."""
     try:
         z = zipfile.ZipFile(path)
     except (OSError, zipfile.BadZipFile) as e:
@@ -255,6 +318,7 @@ def read_epub(path, progress=None):
             raise ValueError(f"El EPUB está dañado: no se puede leer su lista de archivos ({e}).") from e
         names = set(z.namelist())
         labels = toc_labels(z, items, ncx_id)
+        ornaments, generic = _repeated(z, items, order, names)
         starts = _first_pages(path, len(order))
         blocks, candidates = [], []
         for n, ident in enumerate(order):
@@ -280,7 +344,10 @@ def read_epub(path, progress=None):
                     href = _attr(node.attrs, "src") or next(
                         (_attr(c.attrs, "href") for c in _descendants(node) if c.tag == "image"), "")
                     ref = _resolve(name, href) if href and not href.startswith("data:") else ""
-                    if ref in names:
+                    if ref in ornaments:  # el mismo dibujo entre escenas: separador, con su imagen
+                        found.append(convert.Block("break", page, "", image=z.read(ref), tag=node.tag, src=spot,
+                                                   orig="", ref=ref))
+                    elif ref in names:
                         found.append(convert.Block("image", page, image=z.read(ref), tag=node.tag, src=spot, ref=ref))
                 elif what == "break":
                     found.append(convert.Block("break", page, "", tag="hr", src=spot, orig=""))
@@ -301,6 +368,12 @@ def read_epub(path, progress=None):
             if not found:
                 continue
             label = labels.get(name) or (found[0].title if found[0].kind == "heading" else "")
+            # fuera del índice, sin título y con el <title> de todas las páginas: sigue el capítulo de antes
+            if not label and labels and candidates and _file_title(text) in generic | {""}:
+                blocks += found
+                if progress:
+                    progress(n + 1, len(order))
+                continue
             if found[0].kind != "heading":  # sin título al principio: uno sintético, que no se escribe
                 title = label or _plain(re.search(r"<title>(.*?)</title>", text, re.S).group(1)
                                         if re.search(r"<title>(.*?)</title>", text, re.S) else "") or posixpath.basename(name)
@@ -316,6 +389,9 @@ def read_epub(path, progress=None):
         if not any(b.kind in ("p", "heading") for b in blocks):
             raise ValueError("El EPUB no tiene texto.")
         book = convert.Book("", "", b"", blocks, candidates, origin=str(path))
+        # En vertical: el spine de derecha a izquierda o alguna hoja de estilo con writing-mode vertical
+        book.vertical = 'page-progression-direction="rtl"' in z.read(opf_path).decode("utf-8", "replace") or any(
+            VERTICAL.search(z.read(n).decode("utf-8", "replace")) for n in names if n.lower().endswith(".css"))
         _meta(opf, book)
         if not book.series:
             book.series, book.volume = convert._series_volume(convert.Path(path).stem, book.title)
@@ -532,7 +608,7 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                    separator=ORIGINAL, shrink=False, replacements=(), credits=False, gray=False, breaks=(), trim=False,
                    font="", reading=False, kepub=False, hyphenate=False, alts=None, progress=None, fit=None,
                    whole_words=False, css_extra="", synopsis=False, title_image=None, logo="", endnotes=False,
-                   note_style="1", heading_font="", box_style="Sencillo"):
+                   note_style="1", heading_font="", box_style="Sencillo", horizontal=True):
     """Escribe el libro leído por read_epub copiando su EPUB original (book.origin) y parcheando solo lo que cambió:
     un XHTML sin cambios sale con los mismos bytes. Mismas opciones que convert.write_epub; style, font y separator
     con ORIGINAL (o vacíos) dejan el aspecto del original."""
@@ -729,6 +805,11 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
             css += (f'@font-face {{ font-family: "Titulos"; src: url("{src}"); }}\n'
                     'h1, h1 span, h2, h3 { font-family: "Titulos", serif; }\n')
         css += convert.BOX_STYLES.get(box_style, "") + css_extra
+        turned = {}  # separadores dibujados en vertical (区切り), girados para el texto en horizontal
+        if horizontal and book.vertical:
+            css += HORIZONTAL_CSS
+            turned = {b.ref: _turned(b.image) for b in book.blocks if b.kind == "break" and b.image and b.ref}
+            turned = {ref: data for ref, data in turned.items() if data}
         for src, path in fonts.items():
             add(f"{lnc}/{src}", convert.Path(path).read_bytes(), "font/ttf" if src.endswith(".ttf") else "font/otf")
         if css:
@@ -823,6 +904,9 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
         opf_text = z.read(opf_path).decode("utf-8")
         new_opf = _patch_opf(opf_text, opf, opf_path, items, order, gone, file_order, new_items,
                              cover_page and cover_page[0], [p for p, _ in pages], notes_page and notes_page[0], book, lang)
+        if horizontal and book.vertical:  # las páginas se pasan de izquierda a derecha
+            new_opf = new_opf.replace('page-progression-direction="rtl"', 'page-progression-direction="ltr"')
+            new_opf = re.sub(r'(<meta\b[^>]*name="primary-writing-mode"[^>]*content=")[^"]*', r"\1horizontal-lr", new_opf)
 
         cover_item = next((p for p, kind, props in items.values() if "cover-image" in props.split()), None)
         meta_cover = next((m.get("content") for m in opf.iter(OPF_NS + "meta") if m.get("name") == "cover"), None)
@@ -843,6 +927,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                         out.writestr(name, new_opf)
                     elif name in texts:
                         out.writestr(name, texts[name])
+                    elif name in turned:
+                        out.writestr(name, turned[name])
                     elif name in images and (gray or trim or limit or name == cover_item):
                         data = z.read(name)
                         new = data
