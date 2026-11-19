@@ -4327,6 +4327,126 @@ def test_editor_sheet_superscript_small_caps_right():
     assert line(0).startswith("<sup>El</sup> 1.<sup>er</sup>"), line(0)
 
 
+def test_editor_sheet_note_box_sets_edits_and_removes():
+    """«Nota…» de la cinta: la nota se escribe en un cuadro y va a la hoja como «[Nota: …]» (corchetes de dentro,
+    entre paréntesis: cortarían la nota); con el cursor en ella se encuentra, se edita y, vacía, se quita."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Dijo hola al llegar.")], {})
+    cursor = sheet.textCursor()
+    cursor.setPosition(9)
+    sheet.setTextCursor(cursor)
+    sheet.set_note("Saludo [informal]")
+    added = sheet.content()
+    note = sheet.note_at(12)
+    sheet.set_note("Saludo de Kansai", note[:2])
+    edited = sheet.content()
+    sheet.set_note("", sheet.note_at(12)[:2])
+    assert added == "Dijo hola[Nota: Saludo (informal)] al llegar.", added
+    assert note[2] == "Saludo (informal)" and edited == "Dijo hola[Nota: Saludo de Kansai] al llegar.", edited
+    assert sheet.content() == "Dijo hola al llegar." and sheet.note_at(3) is None, sheet.content()
+
+
+def test_editor_sheet_original_class_on_paragraphs():
+    """«Estilo del original» (EPUB): la clase de párrafo del libro va a los párrafos elegidos sin escribir código; los
+    títulos no cambian, y «Párrafo normal» la quita."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "<h2>Parte uno"), (2, '<p class="no-indent">Uno.'), (3, "Dos.")], {})
+    cursor = sheet.textCursor()
+    cursor.setPosition(0)
+    cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+    sheet.setTextCursor(cursor)
+    sheet.set_opening('<p class="space-1">')
+    styled = sheet.content()
+    sheet.set_opening("")
+    plain = sheet.content()
+    assert styled == '<h2>Parte uno\n\n<p class="space-1">Uno.\n\n<p class="space-1">Dos.', styled
+    assert plain == '<h2>Parte uno\n\nUno.\n\nDos.', plain
+
+
+def test_editor_frame_kinds_reach_the_epub():
+    """«Recuadro ▾»: cada recuadro con su tipo (carta, pantalla de juego…) sin escribir CSS. En la hoja va como
+    «<marco carta>»; dos tipos seguidos son dos recuadros; en el EPUB, <div class="marco carta"> con su aspecto."""
+    import qtk
+    from PySide6.QtGui import QTextCursor
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Querida Teto:"), (2, "Te escribo."), (3, "[Nivel 5]"), (4, "Fin.")], {})
+    cursor = sheet.textCursor()
+    cursor.setPosition(0)
+    cursor.setPosition(sheet.document().findBlockByNumber(1).position() + 2, QTextCursor.MoveMode.KeepAnchor)
+    sheet.setTextCursor(cursor)
+    sheet.set_frame("carta")
+    sheet.setTextCursor(QTextCursor(sheet.document().findBlockByNumber(2)))
+    sheet.set_frame("juego")
+    lines = sheet.content().split("\n\n")
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [
+        convert.Block("p", 1, convert.split_prefix(x)[1], align=editor.align_of(x)) for x in lines]
+    book = convert.Book("Cartas", "", b"", blocks, [0])
+    out = TMP / "Recuadros.epub"
+    convert.write_epub(book, [(0, "Capítulo 1")], out, contents=False)
+    chapter = next(epub_file(out, n) for n in zipfile.ZipFile(out).namelist() if "Cap" in epub_file(out, n)
+                   and n.endswith(".xhtml") and "nav" not in n)
+    css = "".join(epub_file(out, n) for n in zipfile.ZipFile(out).namelist() if n.endswith(".css"))
+    assert lines == ["<marco carta>Querida Teto:", "<marco carta>Te escribo.", "<marco juego>[Nivel 5]", "Fin."], lines
+    assert chapter.count('<div class="marco carta">') == 1 and chapter.count('<div class="marco juego">') == 1, chapter
+    assert "div.marco.carta" in css and not convert.check_epub(out), convert.check_epub(out)
+
+
+def test_editor_table_and_chapter_link_reach_the_epub():
+    """«Tabla…»: una fila por línea («<tabla>Nivel | 5») que en el EPUB es una tabla de verdad, con su cabecera.
+    «Enlace» a otro capítulo: se guarda por su título (lnc:cap:…) y en el EPUB lleva a su archivo, también en el
+    escritor fiel de un EPUB de entrada."""
+    import qtk
+
+    import editor
+
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(1, "Estado:")], {})
+    sheet.insert_table(2, 1)
+    lines = sheet.content().split("\n\n")
+    lines[2] = "<tabla>Nivel | 5"
+    link = '<a href="lnc:cap:Cap%C3%ADtulo%202">el siguiente</a>'
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [
+        convert.Block("p", 1, convert._inline(convert.split_prefix(x)[1]), align=editor.align_of(x)) for x in lines] + [
+        convert.Block("p", 1, f"Ver {link}."), convert.Block("heading", 2, "Capítulo 2"), convert.Block("p", 2, "Dos.")]
+    book = convert.Book("Tablas", "", b"", blocks, [0, 5])
+    out = TMP / "Tablas.epub"
+    convert.write_epub(book, [(0, "Capítulo 1"), (5, "Capítulo 2")], out, contents=False)
+    names = zipfile.ZipFile(out).namelist()
+    first = next(epub_file(out, n) for n in names if n.endswith("sec001.xhtml"))
+    # escritor fiel: el enlace a otro capítulo, a su archivo del EPUB
+    src = sigil_epub(TMP / "Sigil enlaces.epub")
+    faithful_book = convert.analyze(src)
+    k = next(n for n, b in enumerate(faithful_book.blocks) if b.html.startswith("Tercero"))
+    faithful_book.blocks[k].html = '<a href="lnc:cap:Cap%C3%ADtulo%202%3A%20H%C3%A9roe">Tercero</a>.'
+    faithful_out = TMP / "Sigil enlaces (LNC).epub"
+    chapters = [(c, faithful_book.blocks[c].title) for c in faithful_book.candidates]
+    convert.write_epub(faithful_book, chapters, faithful_out, style=convert.ORIGINAL, typography=False,
+                       contents=False, separator="Original del PDF")
+    chapter1 = epub_file(faithful_out, "OEBPS/Text/capitulo01.xhtml")
+    assert lines[:2] == ["Estado:", "<tabla cabecera>Columna 1 | Columna 2"], lines
+    assert "<table class=\"tabla\"><tr><th>Columna 1</th><th>Columna 2</th></tr></table>" in first, first
+    assert "<td>Nivel</td><td>5</td>" in first and 'href="sec002.xhtml"' in first, first
+    assert not convert.check_epub(out), convert.check_epub(out)
+    assert '<a href="capitulo02.xhtml">Tercero</a>' in chapter1, chapter1
+
+
 def test_editor_sheet_links_center_levels_case_and_search():
     """Enlaces, párrafos centrados y tipo de título se ven en la hoja y vuelven al formato del texto; Mayús+F3
     cambia mayúsculas; buscar y reemplazar en la hoja, con un solo deshacer."""

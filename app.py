@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFra
                                QProgressBar,
                                QAbstractItemView, QButtonGroup, QHeaderView, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTabWidget,
-                               QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QStackedWidget, QTabBar,
+                               QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTabBar,
                                QLayout, QTextEdit, QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
 import convert
@@ -7672,8 +7672,13 @@ class TextEditor:
                              glyph="left")
         self.center_btn = tool("", "Centrar el párrafo: cartas, carteles (Ctrl+E)", lambda: self.do("toggle_center"), True,
                                glyph="center")
-        self.frame_btn = tool("Recuadro", "Meter los párrafos elegidos en un recuadro, como las ventanas de estado, "
-                              "o sacarlos de él", lambda: self.do("toggle_frame"), True, level=2, glyph="frame")
+        self.frame_btn, _ = menu_tool("Recuadro ▾", "Meter los párrafos elegidos en un recuadro (ventana de estado, "
+                                      "carta, nota del traductor, cita) o sacarlos de él",
+                                      [("Recuadro", lambda: self.on_sheet(lambda: self.sheet.set_frame("")))]
+                                      + [(name, lambda k=kind: self.on_sheet(lambda: self.sheet.set_frame(k)))
+                                         for kind, name in convert.BOX_KINDS.items()]
+                                      + [None, ("Quitar recuadro", lambda: self.on_sheet(lambda: self.sheet.set_frame(None)))])
+        self.frame_btn.setCheckable(True)
         self.right_btn = tool("", "Alinear el párrafo a la derecha: firmas y fechas de cartas (Ctrl+D)",
                               lambda: self.do("toggle_right"), True, glyph="right")
         self.list_btn, _ = menu_tool("Lista ▾", "Lista de viñetas o numerada con los párrafos elegidos, como en Word. "
@@ -7705,6 +7710,14 @@ class TextEditor:
                                        "un poema (Mayús+Intro)", lambda: self.do("insert_line_break"), icon="newline")])
         group("Japonés", [tool("Furigana", "Lectura pequeña encima de un nombre o una palabra japonesa (<ruby>): "
                                            "elige el texto y escribe su lectura", self.add_ruby, icon="ruby")])
+        openings = self.book_openings()
+        if openings:  # EPUB de entrada: sus clases de párrafo, para no escribir <p class="…"> en el código
+            classes, _ = menu_tool("Estilo del\noriginal ▾", "Clases de párrafo que usa el libro (sin sangría, "
+                                   "centrado, espacio arriba…): al párrafo del cursor o a los elegidos",
+                                   [("Párrafo normal (sin clase)", lambda: self.on_sheet(lambda: self.sheet.set_opening("")))]
+                                   + [None] + [(label, lambda o=opening: self.on_sheet(lambda: self.sheet.set_opening(o)))
+                                               for label, opening in openings], icon="style")
+            group("Original", [classes])
 
         page("Insertar")
         self.symbols_btn, _ = menu_tool("Símbolos ▾", "Raya, comillas, signos de apertura y tipografía española", [
@@ -7715,7 +7728,8 @@ class TextEditor:
             ("Corregir tipografía del capítulo", lambda: self.on_sheet(self.fix_typography))], icon="symbols")
         group("Símbolos", [self.symbols_btn])
         group("Texto", [tool("Separador", "Separador de escena tras el párrafo", lambda: self.do("insert_break"), icon="scene"),
-                        tool("Nota", "Nota del traductor: en el EPUB sale al tocar la llamada", lambda: self.do("insert_note"),
+                        tool("Nota…", "Nota al pie: se escribe en un cuadro; en el EPUB sale al tocar su llamada. Con "
+                             "el cursor en una nota, la edita", self.note_dialog,
                              icon="note")])
         # Un botón con menú: dos botones grandes ensanchaban «Insertar» más que la pantalla de 1366 px
         self.picture_btn, _ = menu_tool("Imagen ▾", "Imagen tras el párrafo del cursor; también se pega una copiada "
@@ -7723,8 +7737,10 @@ class TextEditor:
             ("Desde un archivo…", lambda: self.on_sheet(self.insert_image)),
             ("Página del original que se ve a la derecha", lambda: self.on_sheet(self.page_as_image))], icon="image")
         group("Ilustraciones", [self.picture_btn])
-        group("Vínculos", [tool("Enlace", "Enlace a una página web en el texto elegido (Ctrl+Alt+K)",
-                                self.show_link_bar, icon="link")])
+        group("Vínculos", [tool("Enlace", "Enlace en el texto elegido: a una página web o a otro capítulo del libro "
+                                "(Ctrl+Alt+K)", self.show_link_bar, icon="link")])
+        group("Tabla", [tool("Tabla…", "Tabla de filas y columnas (pantallas de estado, listas de objetos): una fila por "
+                             "línea, con « | » entre las celdas", self.table_dialog, icon="table")])
         group("Capítulo", [tool("Dividir\ncapítulo", "Dividir el capítulo: uno nuevo desde el cursor, para un capítulo "
                                 "que el PDF unió con el anterior", self.show_split_bar, icon="split")])
 
@@ -7967,7 +7983,14 @@ class TextEditor:
         self.link_entry.setPlaceholderText("Dirección del enlace: https://…")
         self.link_entry.returnPressed.connect(self.apply_link)
         self.link_info = _label("", "muted")
-        bar.setLayout(_row(_label("Enlace:"), self.link_entry, _button("Aplicar", self.apply_link, "primary"),
+        # o a otro capítulo del libro: se guarda por su título y el EPUB lleva a su archivo
+        self.link_chapter = QComboBox()
+        self.link_chapter.setPlaceholderText("o a un capítulo…")
+        self.link_chapter.setMinimumContentsLength(18)
+        self.link_chapter.activated.connect(lambda n: self.apply_link(
+            "lnc:cap:" + urllib.parse.quote(self.link_chapter.itemText(n))))
+        bar.setLayout(_row(_label("Enlace:"), self.link_entry, self.link_chapter,
+                           _button("Aplicar", self.apply_link, "primary"),
                            _button("Quitar enlace", lambda: self.apply_link("")), self.link_info, 1,
                            _button("✕", lambda: (bar.hide(), self.focus_page())), margins=(10, 6, 10, 6)))
         self.escape_closes(bar, self.link_entry)
@@ -8141,6 +8164,9 @@ class TextEditor:
         else:
             self.link_info.setText("")
         self.link_entry.setText(self.sheet.link_at() or "https://")
+        self.link_chapter.clear()
+        self.link_chapter.addItems([title for title, start, _, _ in self.sections if start >= 0])
+        self.link_chapter.setCurrentIndex(-1)
         self.hide_bars()
         self.link_frame.show()
         self.link_entry.setFocus()
@@ -8149,7 +8175,7 @@ class TextEditor:
     def apply_link(self, href=None):
         """Pone (o quita, con "") el enlace en lo elegido al abrir la barra. Solo direcciones web."""
         href = self.link_entry.text().strip() if href is None else href
-        if href and not re.fullmatch(r"https?://[^\s\"<>]+\.[^\s\"<>]+", href):
+        if href and not href.startswith("lnc:cap:") and not re.fullmatch(r"https?://[^\s\"<>]+\.[^\s\"<>]+", href):
             self.link_info.setText("La dirección debe empezar por http:// o https://")
             return
         self.sheet.setTextCursor(self.link_selection)
@@ -8996,6 +9022,11 @@ class TextEditor:
             menu.addAction("Ignorar", lambda: self.ignore_word(word))
             menu.addAction("Añadir al diccionario de la serie", lambda: self.add_word(word))
             menu.addSeparator()
+        note = sheet.note_at(here.position())
+        if note:  # una nota: editarla o quitarla sin tocar «[Nota: …]» a mano
+            menu.addAction("Editar nota…", lambda: self.note_dialog(note))
+            menu.addAction("Quitar nota", lambda: self.on_sheet(lambda: self.sheet.set_note("", note[:2])))
+            menu.addSeparator()
         block = here.block()
         for name in editor.objects_of(block):
             if name.startswith("Ilustración "):
@@ -9626,6 +9657,47 @@ class TextEditor:
         on = not self.code.isVisible() or self.web_on
         for n in range(self.ribbon_pages.count() - 1):
             self.ribbon_pages.widget(n).setEnabled(on)
+
+    def book_openings(self):
+        """[(clase, etiqueta)] de los párrafos <p class="…"> del EPUB de entrada, de más a menos usadas (15 como mucho)."""
+        if not self.app.book or not self.app.book.origin:
+            return []
+        count = collections.Counter(b.opening for b in self.app.book.blocks if b.kind == "p" and b.opening
+                                    and (convert.OPENING.match(b.opening) or [None, ""])[1].lower() == "p"
+                                    and 'class="' in b.opening)
+        return [(re.search(r'class="([^"]*)"', o)[1], o) for o, _ in count.most_common(15)]
+
+    def table_dialog(self):
+        """«Tabla…»: columnas, filas y cabecera; la tabla va tras el párrafo del cursor, lista para escribir encima."""
+        win = Dialog(self.win)
+        win.setWindowTitle("Tabla")
+        columns, rows, head = QSpinBox(), QSpinBox(), QCheckBox("Primera fila de cabecera")
+        columns.setRange(1, 8)
+        columns.setValue(2)
+        rows.setRange(1, 40)
+        rows.setValue(3)
+        head.setChecked(True)
+        ok, cancel = _button("Insertar", win.accept, "primary"), _button("Cancelar", win.reject)
+        column = QVBoxLayout(win)
+        column.addLayout(_row(_label("Columnas:"), columns, _label("Filas:"), rows, 1))
+        column.addWidget(head)
+        column.addWidget(_label("En la hoja cada fila es una línea, con « | » entre las celdas: se escribe encima.",
+                                "muted"))
+        column.addLayout(_row(1, ok, cancel))
+        if win.exec():
+            self.on_sheet(lambda: self.sheet.insert_table(columns.value(), rows.value(), head.isChecked()))
+
+    def note_dialog(self, note=None):
+        """Nota al pie en un cuadro: nueva en el cursor o, con el cursor en una (o note), la de ahí. En la hoja va como
+        «[Nota: …]»; en el EPUB, nota emergente."""
+        def run():
+            here = note or self.sheet.note_at(self.sheet.textCursor().position())
+            text, ok = QInputDialog.getMultiLineText(
+                self.win, "Nota al pie", "Texto de la nota (en el EPUB sale al tocar su llamada; vacío la quita):",
+                here[2] if here else "")
+            if ok and (text.strip() or here):
+                self.sheet.set_note(text, here[:2] if here else None)
+        self.on_sheet(run)
 
     def add_ruby(self):
         """Furigana: la lectura encima del texto elegido (o de lo que se escriba), en la hoja a la vista."""

@@ -1396,8 +1396,41 @@ RIGHT = "<derecha>"  # al principio de una línea del editor: párrafo a la dere
 LIST_STYLES = ("disc", "circle", "square", "decimal", "lower-alpha", "upper-alpha", "lower-roman", "upper-roman")
 # alineación de Block -> prefijo de su línea. Un recuadro puede ir centrado o a la derecha; un elemento de lista
 # lleva el estilo de su lista ("list-decimal")
+# Tipos de recuadro de la cinta («Recuadro ▾»): cada recuadro el suyo, sin escribir CSS
+BOX_KINDS = {"juego": "Pantalla de juego", "carta": "Carta o mensaje", "nota": "Nota del traductor",
+             "cita": "Cita destacada"}
+# Su aspecto en un párrafo suelto (el escritor fiel parchea el párrafo, no lo mete en un <div>)
+BOX_INLINE = {"juego": "background-color: #000000; color: #ffffff; padding: 0.4em 0.8em",
+              "carta": "border: 1px solid #b9a77f; background-color: #fbf6e9; color: #3a3226; font-style: italic; "
+                       "padding: 0.4em 0.8em",
+              "nota": "border-left: 4px solid #8a8a8a; background-color: #f2f2f2; color: #333333; font-size: 0.85em; "
+                      "padding: 0.3em 0.8em",
+              "cita": "font-style: italic; font-size: 1.1em; padding: 0.3em 0.8em"}
+TABLE_CELL = re.compile(r"\s+\|\s+")  # « | » entre las celdas de una fila de tabla del editor
 ALIGN_PREFIX = ({"center": CENTER, "frame": FRAME, "right": RIGHT, "frame-center": "<marco centro>",
-                 "frame-right": "<marco derecha>"} | {f"list-{style}": f"<lista {style}>" for style in LIST_STYLES})
+                 "frame-right": "<marco derecha>", "table": "<tabla>", "table-head": "<tabla cabecera>"}
+                | {f"list-{style}": f"<lista {style}>" for style in LIST_STYLES}
+                | {f"frame{'-' + side if side else ''}:{kind}": f"<marco {kind}{' ' + word if word else ''}>"
+                   for kind in BOX_KINDS for side, word in (("", ""), ("center", "centro"), ("right", "derecha"))})
+
+
+def table_row(body, head=False):
+    """Fila de tabla del editor («Nivel | 5») en XHTML: una tabla de una fila de ancho fijo, para que las de un mismo
+    número de columnas casen unas con otras (el escritor fiel parchea párrafo a párrafo, sin agruparlos)."""
+    tag = "th" if head else "td"
+    cells = "".join(f"<{tag}>{cell.strip()}</{tag}>" for cell in TABLE_CELL.split(body))
+    return f'<table class="tabla"><tr>{cells}</tr></table>'
+
+
+def link_targets(text, resolve):
+    """Enlaces internos del editor (href="lnc:cap:Título") con su archivo: resolve(título) -> href ("#" si no está)."""
+    from urllib.parse import unquote
+    return re.sub(r'href="lnc:cap:([^"]*)"', lambda m: f'href="{html.escape(resolve(unquote(m[1])) or "#")}"', text)
+
+
+def box_kind(align):
+    """Tipo del recuadro de una alineación («frame-center:carta» -> «carta»); "" si es el de siempre o no es uno."""
+    return align.partition(":")[2] if align.startswith("frame") else ""
 
 
 def partial_path(out_path):
@@ -3378,6 +3411,20 @@ div.marco p.right { text-align: right; }
 .lista li { text-indent: 0; margin: 0.2em 0; }
 div.marco p.sub { padding-left: 1.3em; }
 div.marco p.head { margin-top: 0.6em; }
+div.marco.juego { border: 0; border-radius: 5px; background-color: #000000; box-shadow: 0 0 10px 1px #00219b;
+  color: #ffffff; padding: 0.6em 1.2em; }
+div.marco.juego p { text-shadow: -1px 0 10px #004fff, -1px 0 6px #002775; }
+div.marco.carta { border: 1px solid #b9a77f; border-radius: 3px; background-color: #fbf6e9; color: #3a3226;
+  font-family: serif; font-style: italic; }
+div.marco.nota { border: 0; border-left: 4px solid #8a8a8a; background-color: #f2f2f2; color: #333333;
+  font-size: 0.85em; }
+div.marco.cita { border: 0; border-top: 1px solid #999999; border-bottom: 1px solid #999999; font-family: serif;
+  font-size: 1.1em; font-style: italic; }
+div.marco.cita p { text-align: center; }
+table.tabla { width: 100%; table-layout: fixed; border-collapse: collapse; margin: 0; }
+table.tabla td, table.tabla th { border: 1px solid #888888; padding: 0.2em 0.4em; text-align: left;
+  vertical-align: top; text-indent: 0; font-size: 0.95em; }
+table.tabla th { background-color: #eeeeee; font-weight: bold; }
 p.status { text-indent: 0; text-align: center; font-family: sans-serif; font-size: 0.9em; margin: 0.8em 8%;
   padding: 0.4em; border: 1px solid #888888; }
 p.status + p.status { margin-top: -0.85em; border-top: 0; }
@@ -3406,8 +3453,9 @@ div.logo img { width: 54%; }
 # Lo que el editor escribe con clases propias (versalitas, recuadro, centrar, listas): un EPUB de entrada no trae sus
 # reglas, y con su aspecto original el escritor fiel las añade solo si un texto cambiado las usa
 MARKUP_CSS = "".join(rule.strip() + "\n" for rule in re.findall(r"[^{}]+\{[^}]*\}", BASE_CSS)
-                     if re.match(r"\s*(?:p\.center|p\.right|small\.sc|img\.icono|div\.marco|\.lista)\b", rule))
-MARKUP_CLASS = re.compile(r'class="(?:[^"]* )?(?:sc|center|right|marco|icono|lista)(?: [^"]*)?"')
+                     if re.match(r"\s*(?:p\.center|p\.right|small\.sc|img\.icono|div\.marco|\.lista|table\.tabla)\b",
+                                 rule))
+MARKUP_CLASS = re.compile(r'class="(?:[^"]* )?(?:sc|center|right|marco|icono|lista|tabla)(?: [^"]*)?"')
 STYLES = {  # nombre en la ventana -> CSS propio del estilo
     "Clásico": """body { font-family: serif; }
 p { text-indent: 1.5em; text-align: justify; }
@@ -3855,6 +3903,11 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         images[src] = data
         return f'<img class="icono" src="{src}" alt=""/>'
 
+    # enlaces internos del editor (lnc:cap:Título): el archivo de cada capítulo, por su título
+    chapter_file = {}
+    for n, (title, is_chapter, _) in enumerate(sections, 1):
+        if is_chapter:
+            chapter_file.setdefault(title, f"sec{n:03d}.xhtml")
     subtitles = {}  # archivo -> [(ancla, título escapado)]: subentradas del índice
     pages, marked = [], set()  # [(archivo, página)] de la lista de páginas; páginas ya marcadas
     noted = 0  # notas al pie escritas: numeración seguida en todo el libro, ids únicos
@@ -3904,8 +3957,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             if b.page not in marked:
                 marked.add(b.page)
                 pending = b.page
-            if framed[at] and (at == 0 or not framed[at - 1]):
-                parts.append('<div class="marco">')
+            kind = box_kind(b.align) if framed[at] else None
+            if framed[at] and (at == 0 or not framed[at - 1] or box_kind(blocks[at - 1][1].align) != kind):
+                parts.append(f'<div class="marco{" " + kind if kind else ""}">')
             if listed[at] and (at == 0 or listed[at - 1] != listed[at]):
                 tag = "ul" if listed[at] in LIST_STYLES[:3] else "ol"
                 parts.append(f'<{tag} class="lista" style="list-style-type: {listed[at]}">')
@@ -3929,7 +3983,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     bullet = _plain(b)[:1] in BULLETS  # un apartado nuevo del recuadro («◆ Equipment») se separa
                     css = ("sub" if at in bulleted and not bullet else "head" if bullet and at and framed[at - 1]
                            else "")
-                    css = f"{css} {b.align[6:]}".strip()  # "frame-center": centrado dentro del recuadro
+                    css = f"{css} {b.align.partition(':')[0][6:]}".strip()  # "frame-center": centrado dentro
                 elif listed[at]:
                     css = ""
                 else:
@@ -3939,14 +3993,17 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 body = NOTE.sub(noteref, ICON.sub(icon_file, fix(b.html, dashes=not framed[at])))  # la nota sale del párrafo: no se parte
                 item = "li" if listed[at] else "p"
                 body = _hyphenate(body) if hyphenate else body
-                if b.opening and not listed[at] and not framed[at]:  # estilo del editor: justificado, cita, sin sangría
+                if b.align in ("table", "table-head"):  # fila de tabla del editor
+                    parts.append(mark() + table_row(body, b.align == "table-head"))
+                elif b.opening and not listed[at] and not framed[at]:  # estilo del editor: justificado, cita, sin sangría
                     tag = OPENING.match(b.opening)[1]
                     parts.append(f"{b.opening}{mark()}{body}</{tag}>")
                 else:
                     parts.append(f"<{item}{attr}>{mark()}{body}</{item}>")
             if listed[at] and (at == len(blocks) - 1 or listed[at + 1] != listed[at]):
                 parts.append("</ul>" if listed[at] in LIST_STYLES[:3] else "</ol>")
-            if framed[at] and (at == len(blocks) - 1 or not framed[at + 1]):
+            if framed[at] and (at == len(blocks) - 1 or not framed[at + 1]
+                               or box_kind(blocks[at + 1][1].align) != box_kind(b.align)):
                 parts.append("</div>")
         # Los lectores con notas emergentes (Kobo, Kindle, Apple Books) ocultan el aside y lo muestran
         # al tocar la llamada; los demás lo dejan al final de la sección, con enlace de vuelta.
@@ -3957,7 +4014,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             parts += [f'<{tag}{kind} class="nota" id="nota{k}"><p><a href="#ref{k}">{note_mark(k)}</a>'
                       f'{"." if note_style == "1" else ""} {text}</p></{tag}>' for k, text in notes]
         kinds[name] = _section_kind(title, is_chapter)
-        files[name] = _xhtml(html.unescape(heading), "\n".join(parts), lang, epub2, kinds[name])
+        files[name] = link_targets(_xhtml(html.unescape(heading), "\n".join(parts), lang, epub2, kinds[name]),
+                                   chapter_file.get)
 
     title_src = logo_src = ""  # ilustración de la página de título y logo, si van
     # por su image_key: el índice del bloque cambia al editar, la ilustración no
