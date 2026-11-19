@@ -14,7 +14,7 @@ import convert
 import editor
 
 SHEET_CSS = """
-#lnc-sheet { outline: none; min-height: 90vh; }
+#lnc-sheet { outline: none; min-height: 90vh; position: relative; z-index: 1; }
 #lnc-sheet .lnc-obj { user-select: none; cursor: default; opacity: 0.95; }
 #lnc-sheet .lnc-obj img { max-width: 100%; max-height: 60vh; -webkit-user-drag: none; }
 #lnc-sheet p.lnc-break { text-align: center; text-indent: 0; color: #888888; }
@@ -311,6 +311,24 @@ SHEET_JS = r"""
       (target.startContainer.parentElement || sheet).scrollIntoView({block: 'center'});
       return true;
     },
+    // El párrafo del cursor con la banda de la hoja de Qt: un div fuera de la hoja, detrás del texto (el HTML de la
+    // hoja no cambia). Lo pone el cursor al moverse aquí, o here(n) cuando se escribe en la otra hoja
+    here: function (n, scroll, color) {
+      lnc.hereAt = n;
+      if (color) lnc.hereColor = color;
+      lnc.placeHere(scroll);
+    },
+    placeHere: function (scroll) {
+      var mark = document.getElementById('lnc-here');
+      if (!mark) { mark = document.createElement('div'); mark.id = 'lnc-here'; document.body.appendChild(mark); }
+      var b = lnc.hereAt === undefined ? null : sheet.children[lnc.hereAt];
+      if (!b) { mark.style.display = 'none'; return; }
+      var r = b.getBoundingClientRect(), s = sheet.getBoundingClientRect();
+      mark.style.cssText = 'position:absolute;pointer-events:none;z-index:0;border-radius:4px;background:' +
+        (lnc.hereColor || 'rgba(31,111,209,0.1)') + ';left:' + (s.left + scrollX - 10) + 'px;top:' +
+        (r.top + scrollY - 3) + 'px;width:' + (s.width + 20) + 'px;height:' + (r.height + 6) + 'px';
+      if (scroll) b.scrollIntoView({block: 'center'});
+    },
     takeText: function () { var t = lnc.dirty ? sheet.innerText : ''; lnc.dirty = false; return t; },
     dump: function () {  // [{tag, attrs, html, token}] de cada párrafo, en orden
       return JSON.stringify(Array.prototype.map.call(sheet.children, function (b) {
@@ -321,6 +339,12 @@ SHEET_JS = r"""
     }
   };
   lnc.rehome();
+  document.addEventListener('selectionchange', function () {
+    var b = here();
+    if (b) { lnc.hereAt = index(b); lnc.placeHere(false); }
+  });
+  sheet.addEventListener('input', function () { lnc.placeHere(false); });
+  addEventListener('resize', function () { lnc.placeHere(false); });
   return true;
 })()
 """

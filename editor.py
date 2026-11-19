@@ -480,10 +480,13 @@ class CodeEdit(QPlainTextEdit):
 
     def mark_line(self):
         line = QTextEdit.ExtraSelection()
-        line.format.setBackground(QColor(self.look.colors["current"]))
+        tint = QColor(QApplication.palette().color(QPalette.ColorRole.Highlight))
+        tint.setAlpha(26)  # la banda del párrafo del cursor de la hoja (Sheet.paintEvent)
+        line.format.setBackground(tint)
         line.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
         line.cursor = self.textCursor()
-        line.cursor.clearSelection()
+        line.cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)  # el párrafo entero, con sus líneas partidas
+        line.cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
         self.setExtraSelections([line])
         self.gutter.update()  # el número de la línea del cursor, resaltado
 
