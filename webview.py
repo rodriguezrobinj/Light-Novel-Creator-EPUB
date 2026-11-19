@@ -71,6 +71,18 @@ SCROLL_JS = """
   return true;
 })()
 """
+# Clic en un párrafo de la vista del EPUB (solo se mira): su texto, para llevar ahí la hoja y las demás vistas
+CLICK_JS = """
+(function () {
+  if (window.lncClick) return true;
+  window.lncClick = true;
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption');
+    if (b) console.log('lnc-click ' + b.textContent.replace(/\\s+/g, ' ').trim().slice(0, 200));
+  });
+  return true;
+})()
+"""
 # El párrafo del cursor en la vista del EPUB: recuadrado como en el panel del original, y a la vista
 MARK_JS = """
 (function (t, color) {
@@ -127,9 +139,12 @@ if AVAILABLE:
     class _Page(QWebEnginePage):
         """Página que recoge los avisos de desplazamiento de SCROLL_JS."""
         scrolled = Signal(int, int, int)  # arriba, alto del documento y de la vista, en px de CSS
+        clicked = Signal(str)  # texto del párrafo pulsado (CLICK_JS)
 
         def javaScriptConsoleMessage(self, level, message, line, source):
-            if message.startswith("lnc-scroll "):
+            if message.startswith("lnc-click "):
+                self.clicked.emit(message[len("lnc-click "):])
+            elif message.startswith("lnc-scroll "):
                 top, height, view = (int(x) for x in message.split()[1:4])
                 self.scrolled.emit(top, height, view)
 
@@ -229,6 +244,7 @@ if AVAILABLE:
             css = SCROLLED % {"pad_x": pad_x, "pad_y": pad_y, "pad_y2": pad_y * 2}
             css += DARK if self.dark else ""
             self.page().runJavaScript(SCROLL_JS, 0)
+            self.page().runJavaScript(CLICK_JS, 0)
             script = ("(function(){var s=document.createElement('style');s.textContent=%s;"
                       "(document.head||document.documentElement).appendChild(s);"
                       "return Math.max(1,Math.ceil(document.documentElement.scrollHeight/window.innerHeight));})()"
