@@ -7325,9 +7325,8 @@ class TextEditor:
             self.epub_box = QWidget()
             row = QHBoxLayout(self.epub_box)
             row.setContentsMargins(0, 0, 0, 0)
-            row.addStretch(1)
-            row.addWidget(self.side_web, 0, Qt.AlignmentFlag.AlignTop)
-            row.addStretch(1)
+            row.setSpacing(0)
+            row.addWidget(self.side_web, 1)  # del ancho del panel, como la hoja web
             row.addWidget(self.side_web.bar)
             self.epub_box.hide()
             side_column.addWidget(self.epub_box, 1)
@@ -7953,6 +7952,12 @@ class TextEditor:
         """F11: modo concentración, solo la hoja a pantalla completa, sin cinta, barras ni paneles. Se cambia de
         capítulo con dos flechas a los lados de la hoja, y el capítulo y Revisado pasan a la barra de abajo (sin
         ellos no había cómo cambiar de capítulo). F11 o Esc vuelven como estaba."""
+        if not self.focused and self.code.isVisible():  # pantalla completa: solo la hoja, sin el código
+            self.toggle_code()
+            if self.code.isVisible():  # el código tiene un error: se arregla antes
+                return
+        if not self.focused and self.web_on:  # la hoja web se oculta: lo escrito en ella, a la hoja
+            self.flush_web(lambda: (self.web_done(), self.sheet.setFocus()))
         self.focused = not self.focused
         self.drop_ribbon()
         for button in (self.focus_prev, self.focus_next):
@@ -9078,7 +9083,8 @@ class TextEditor:
             self.side_tabs.setCurrentIndex(0 if self.web_tab() else WEB_TAB)
 
     def web_tab(self):
-        return self.web is not None and self.side_tabs.currentIndex() == WEB_TAB
+        # al cerrarse el editor aún llegan cambios de foco, con las pestañas ya borradas
+        return self.web is not None and shiboken6.isValid(self.side_tabs) and self.side_tabs.currentIndex() == WEB_TAB
 
     def doc_rev(self):
         doc = self.sheet.document()
@@ -9788,9 +9794,6 @@ class TextEditor:
             self.page_label.setText("Sin vista del EPUB")
             return
         width, height = DEVICES[self.app.device_var.get()]
-        room_w, room_h = max(120, self.side.width() - 24), max(160, self.side.height() - 90)
-        scale = min(room_w / width, room_h / height)
-        self.side_web.setFixedSize(round(width * scale), round(height * scale))
         self.side_web.show_file(data, path, (round(width * 16 / 11), round(height * 16 / 11)),
                                 self.app.dark_var.get())
 

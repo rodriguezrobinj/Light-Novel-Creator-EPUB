@@ -11259,9 +11259,14 @@ def test_websheet_beside_the_sheet_follows_both():
             cursor = QTextCursor(ed.sheet.document().findBlockByNumber(2))
             ed.sheet.setTextCursor(cursor)
             ed.follow_cursor()
+            wait_for(lambda: False, 1.5)  # que la página se asiente (fuentes, reflujo) antes de medir la banda
             band = wait_for(lambda: js(ed.web, "(function(){var m=document.getElementById('lnc-here');return m ? "
                                                "[m.style.display, document.getElementById('lnc-sheet').contains(m)]"
                                                ".join(',') : 'no';})()") == ",false", 10)
+            # y sobre su párrafo (el CSS del libro puede desplazar al <body>: antes bajaba al de al lado)
+            aligned = js(ed.web, "(function(){var m=document.getElementById('lnc-here').getBoundingClientRect(),b="
+                                 "document.getElementById('lnc-sheet').children[2].getBoundingClientRect();"
+                                 "return String(Math.abs(m.top+3-b.top)<2);})()") == "true"
             # el tamaño de abajo es el de la hoja y el código; la web lleva el suyo (− y + del panel)
             zoom = ed.web.zoomFactor()
             ed.text_zoom.setValue(150)
@@ -11282,7 +11287,7 @@ def test_websheet_beside_the_sheet_follows_both():
             ed.win.done(0)
         finally:
             window.close()
-    assert band, "sin la banda del párrafo en la hoja web"
+    assert band and aligned, ("sin la banda del párrafo en la hoja web", band, aligned)
     assert sizes == (True, 15) and panel == 1.25, (sizes, panel)
     assert line == 2 and followed == target, (line, followed, target)
     assert marked, "la pestaña EPUB no recuadra el párrafo del cursor"
