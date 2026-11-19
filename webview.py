@@ -14,6 +14,7 @@ try:
     from PySide6.QtWebEngineCore import (QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestJob,
                                          QWebEngineUrlScheme, QWebEngineUrlSchemeHandler)
     from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWidgets import QLabel
     AVAILABLE, ERROR = True, ""
 except ImportError as e:  # sin PySide6-WebEngine (o sin una de sus DLL): la vista previa sigue con MuPDF
     AVAILABLE, ERROR = False, str(e)
@@ -53,7 +54,7 @@ html { height: 100vh !important; overflow: hidden !important; margin: 0 !importa
 body { box-sizing: border-box !important; height: 100vh !important; margin: 0 !important;
        padding: %(pad_y)spx %(pad_x)spx !important;
        column-width: calc(100vw - %(gap)spx) !important; column-gap: %(gap)spx !important; column-fill: auto !important; }
-img, svg, video { max-width: 100%% !important; max-height: calc(100vh - %(pad_y2)spx) !important; object-fit: contain; }
+img, svg, video { -webkit-user-drag: none !important; max-width: 100%% !important; max-height: calc(100vh - %(pad_y2)spx) !important; object-fit: contain; }
 """
 # Modo oscuro de lector: fondo oscuro y letra clara; las ilustraciones, tal cual
 DARK = """
@@ -109,11 +110,31 @@ if AVAILABLE:
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # solo se mira: el teclado sigue en la lista
             self.page().setBackgroundColor(Qt.GlobalColor.white)
             self.size_, self.dark, self.page_, self.pages, self.target = (300, 400), False, 0, 0, None
-            self.loadFinished.connect(self._loaded)
+            # Lo que se ve de antes tapa la página mientras carga la nueva: sin el blanco de una web que recarga
+            self.cover = QLabel(self)
+            self.cover.hide()
+            self.loadFinished.connect(lambda ok: self.url().scheme() == SCHEME.decode() and self._loaded(ok))
+            # Una página vacía ya crea la superficie de Chromium: la ventana nace preparada para ella. Si no, Windows
+            # la vuelve a crear al mostrarse la vista (parpadeaba como si se abriera dos veces)
+            self.setHtml("")
+
+        def hold(self):
+            """Deja a la vista lo que se ve ahora hasta unveil(): se llama antes de cargar otra página."""
+            if self.isVisible() and self.url().scheme() == SCHEME.decode():
+                self.cover.setPixmap(self.grab())
+                self.cover.setGeometry(self.rect())
+                self.cover.show()
+                self.cover.raise_()
+
+        def unveil(self):
+            """Quita lo tapado por hold() cuando Chromium ya dibujó la página nueva."""
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(60, self.cover.hide)
 
         def show_file(self, data, path, size, dark=False, page=0, find=None):
             """Muestra path del EPUB data (bytes) como en un lector de size; page: la página (-1: la última);
             find: un texto que buscar, y se va a su página."""
+            self.hold()
             self.zip.load(data)
             self.size_, self.dark, self.page_, self.target = tuple(size), dark, page, find
             self.setZoomFactor(max(0.25, min(5.0, self.width() / max(size[0], 1))))
@@ -126,6 +147,7 @@ if AVAILABLE:
         def _loaded(self, ok):
             if not ok:
                 self.pages = 0
+                self.cover.hide()
                 self.paged.emit(0)
                 return
             pad_x, pad_y = round(self.size_[0] * 0.06), round(self.size_[1] * 0.04)
@@ -148,7 +170,8 @@ if AVAILABLE:
 
         def go(self, n):
             self.page_ = max(0, min(n, self.pages - 1))
-            self.page().runJavaScript(f"document.scrollingElement.scrollLeft = {self.page_} * window.innerWidth;", 0)
+            self.page().runJavaScript(f"document.scrollingElement.scrollLeft = {self.page_} * window.innerWidth;", 0,
+                                      lambda _: self.unveil())
 
         def find_page(self, text, done):
             """done(página) de la primera vez que sale text (o 0)."""
@@ -180,6 +203,7 @@ if AVAILABLE:
         def load_sheet(self, files, path, text):
             """Muestra text (la página de websheet.page) como el archivo path, con files (ruta -> bytes) a mano."""
             import websheet  # noqa: F401  (solo para que el .exe lo incluya junto a esta vista)
+            self.hold()
             self.zip.files = dict(files)
             self.zip.files[path] = text.encode("utf-8")
             self.loaded = False
@@ -197,6 +221,7 @@ if AVAILABLE:
         def _ready(self):
             self.loaded = True
             self.ready.emit()
+            self.unveil()
 
         def contextMenuEvent(self, event):
             """El clic derecho lo pone el editor (sugerencias, avisos), en español."""

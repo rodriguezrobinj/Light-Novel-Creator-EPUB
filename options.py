@@ -300,13 +300,17 @@ class OptionsDialog:
             else:
                 widget = QComboBox()
                 values = list(self.choices.get(key, []))
-                widget.addItems(values)
-                widget.setEditable(option.kind == "language")
-                widget.setCurrentText(str(value))
                 widget.setMinimumContentsLength(18)
-                if option.kind == "language":
-                    widget.currentTextChanged.connect(lambda text, key=key: self.put(key, text.strip()))
+                if option.kind == "language":  # el nombre a la vista, el código («es») en el libro
+                    if str(value) not in values:  # uno puesto a mano en un libro viejo («es-MX»): se conserva
+                        values.append(str(value))
+                    for code in values:
+                        widget.addItem(translate.LANGS.get(code, code), code)
+                    widget.setCurrentIndex(max(0, widget.findData(str(value))))
+                    widget.activated.connect(lambda _, w=widget, key=key: self.put(key, w.currentData()))
                 else:
+                    widget.addItems(values)
+                    widget.setCurrentText(str(value))
                     widget.activated.connect(lambda _, w=widget, key=key: self.put(key, w.currentText()))
             row = QWidget()
             line = QHBoxLayout(row)
