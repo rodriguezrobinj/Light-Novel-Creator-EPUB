@@ -9,10 +9,10 @@ import html
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QMimeData, QObject, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QBuffer, QMimeData, QObject, QRect, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QSyntaxHighlighter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat, QTextListFormat)
-from PySide6.QtWidgets import QApplication, QTextEdit
+from PySide6.QtWidgets import QApplication, QPlainTextEdit, QTextEdit, QWidget
 
 import convert
 from qtk import u16
@@ -399,24 +399,109 @@ def from_code(code):
 
 
 class CodeLook(QSyntaxHighlighter):
-    """Colores de la vista de código: etiquetas, atributos, sus valores y comentarios."""
+    """Colores de la vista de código, como un editor de código: < > y /, nombre de la etiqueta, atributos, sus
+    valores, entidades (&amp;) y comentarios."""
 
     def __init__(self, document, colors):
         super().__init__(document)
-        self.colors = colors  # {"tag", "attr", "value", "comment"}: colores del tema
+        self.colors = colors  # theme.CODE: colores del tema
 
     def highlightBlock(self, text):
         def paint(start, size, key):
             f = QTextCharFormat()
             f.setForeground(QColor(self.colors[key]))
             self.setFormat(u16(text, start), u16(text, start + size) - u16(text, start), f)
-        for m in re.finditer(r"<[^<>]*>", text):
-            paint(m.start(), m.end() - m.start(), "tag")
-            for a in re.finditer(r'([\w:.-]+)(=)("[^"]*")', m[0]):
-                paint(m.start() + a.start(1), len(a[1]), "attr")
-                paint(m.start() + a.start(3), len(a[3]), "value")
-        for m in CODE_TOKEN.finditer(text):
+        for m in re.finditer(r"&#?\w+;", text):
+            paint(m.start(), m.end() - m.start(), "entity")
+        for m in re.finditer(r"(</?)([\w:-]*)([^<>]*?)(/?>)", text):
+            paint(m.start(1), len(m[1]), "punct")
+            paint(m.start(2), len(m[2]), "tag")
+            paint(m.start(4), len(m[4]), "punct")
+            for a in re.finditer(r'([\w:.-]+)(=)("[^"]*")', m[3]):
+                paint(m.start(3) + a.start(1), len(a[1]), "attr")
+                paint(m.start(3) + a.start(2), 1, "punct")
+                paint(m.start(3) + a.start(3), len(a[3]), "value")
+        for m in re.finditer(r"<!--.*?-->", text):
             paint(m.start(), m.end() - m.start(), "comment")
+
+
+class _Gutter(QWidget):
+    """Columna de los números de línea de CodeEdit."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+    def paintEvent(self, event):
+        self.code.paint_gutter(event)
+
+
+class CodeEdit(QPlainTextEdit):
+    """Vista «Código HTML» como un editor de código: número de cada línea a la izquierda, la línea del cursor marcada,
+    los colores de CodeLook y la barra de desplazamiento siempre a la vista."""
+
+    def __init__(self, colors):
+        super().__init__(objectName="code")
+        self.look = CodeLook(self.document(), colors)
+        self.gutter = _Gutter(self)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.blockCountChanged.connect(lambda _: self.fit_gutter())
+        self.updateRequest.connect(self.scroll_gutter)
+        self.cursorPositionChanged.connect(self.mark_line)
+        self.fit_gutter()
+        self.mark_line()
+
+    def set_colors(self, colors):
+        self.look.colors = colors
+        self.look.rehighlight()
+        self.mark_line()
+        self.gutter.update()
+
+    def gutter_width(self):
+        return 16 + self.fontMetrics().horizontalAdvance("9") * max(3, len(str(self.blockCount())))
+
+    def fit_gutter(self):
+        self.setViewportMargins(self.gutter_width(), 0, 0, 0)
+
+    def scroll_gutter(self, rect, dy):
+        if dy:
+            self.gutter.scroll(0, dy)
+        else:
+            self.gutter.update(0, rect.y(), self.gutter.width(), rect.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        area = self.contentsRect()
+        self.gutter.setGeometry(QRect(area.left(), area.top(), self.gutter_width(), area.height()))
+
+    def setFont(self, font):
+        super().setFont(font)
+        self.fit_gutter()
+
+    def mark_line(self):
+        line = QTextEdit.ExtraSelection()
+        line.format.setBackground(QColor(self.look.colors["current"]))
+        line.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+        line.cursor = self.textCursor()
+        line.cursor.clearSelection()
+        self.setExtraSelections([line])
+        self.gutter.update()  # el número de la línea del cursor, resaltado
+
+    def paint_gutter(self, event):
+        painter = QPainter(self.gutter)
+        painter.fillRect(event.rect(), QColor(self.look.colors["gutter"]))
+        painter.setFont(self.font())
+        block, here = self.firstVisibleBlock(), self.textCursor().blockNumber()
+        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        height = self.fontMetrics().height()
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible():
+                painter.setPen(QColor(self.look.colors["number_on" if block.blockNumber() == here else "number"]))
+                painter.drawText(0, top, self.gutter.width() - 8, height, Qt.AlignmentFlag.AlignRight,
+                                 str(block.blockNumber() + 1))
+            top += round(self.blockBoundingRect(block).height())
+            block = block.next()
+        painter.end()
 
 
 def is_heading_line(line):

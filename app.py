@@ -2295,15 +2295,6 @@ class App:
         panes.setContentsMargins(0, 0, 0, 0)
         self.pdf_pane, self.pdf_caption, self.pdf_view = self.preview_pane("PDF", self.pdf_step)
         self.epub_pane, self.epub_caption, self.epub_view = self.preview_pane("EPUB", self.epub_step)
-        # Chromium dibuja la sección con todo su HTML y CSS, paginada como en un lector; la hoja de MuPDF queda para
-        # los avisos y la portada (y para todo, si QtWebEngine no está)
-        self.epub_web, self.web_key = None, None
-        import webview  # aquí y no arriba: los procesos de trabajo no cargan Chromium
-        if webview.available():
-            self.epub_web = webview.EpubView()
-            self.epub_web.hide()
-            self.epub_web.paged.connect(self.web_paged)
-            self.epub_pane.layout().addWidget(self.epub_web, 1, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         panes.addWidget(self.pdf_pane)
         panes.addWidget(self.epub_pane)
         views.addWidget(self.pages, 1)
@@ -2750,16 +2741,7 @@ class App:
 
     def blank(self, view, text):
         """Hoja en blanco del tamaño de la vista previa, con un aviso tenue en el centro."""
-        if view is self.epub_view:
-            self.web_off()
         view.show_blank(self.box_size(), text, theme.colors(self.dark))
-
-    def web_off(self):
-        """La vista previa del EPUB vuelve a la hoja de MuPDF (aviso, portada)."""
-        if self.epub_web is not None and self.epub_web.isVisible():
-            self.epub_web.hide()
-            self.epub_view.show()
-        self.web_key = None
 
     def redraw(self):
         """Vuelve a dibujar las vistas previas (al iniciar, al cargar un libro o al cambiar de tamaño)."""
@@ -2821,7 +2803,6 @@ class App:
         self.pdf_page, self.highlight = self.cover_page() or 0, None
         self.draw_pdf()
         self.epub_cut, self.epub_pages = False, 0
-        self.web_off()
         image = QImage.fromData(self.book.cover) if self.book.cover else QImage()
         if image.isNull():
             self.blank(self.epub_view, "El EPUB llevará una portada con el título")
@@ -2943,10 +2924,6 @@ class App:
         self.find_target = None
         self.pdf_page, self.highlight = page - 1, None
         self.draw_pdf()
-        if self.epub_web is not None:  # Chromium busca el texto en la sección y va a su página
-            self.web_key, self.web_find = None, term
-            self.draw_epub()
-            return
         try:
             epub, pages = self.preview_epub()
             self.epub_page = next((n for n in range(pages) if epub.load_page((1, n)).search_for(term)), 0)
@@ -2989,9 +2966,6 @@ class App:
             self.blank(view, self.epub_message if self.epub_cut else "Sin vista previa")
             self.epub_caption.setText("EPUB")
             return
-        if self.epub_web is not None:
-            self.draw_web()
-            return
         try:
             epub, self.epub_pages = self.preview_epub()
             self.epub_page = max(0, min(self.epub_page, self.epub_pages - 1))
@@ -3000,43 +2974,6 @@ class App:
             self.blank(view, "Sin vista previa")
             return
         view.show_image(self.box_size(), image)
-        self.epub_caption.setText(f"EPUB · {self.device_var.get()} · {self.epub_page + 1}/{self.epub_pages}")
-
-    def draw_web(self):
-        """La sección del EPUB de la vista previa en Chromium, del tamaño del dispositivo; misma sección, mismo
-        dispositivo y mismo modo: solo se pasa de página."""
-        web, (width, height) = self.epub_web, DEVICES[self.device_var.get()]
-        box_w, box_h = self.box_size()
-        scale = min(box_w / width, box_h / height)
-        shown = (max(60, round(width * scale)), max(80, round(height * scale)))
-        key = (self.preview_key, self.device_var.get(), self.dark_var.get(), shown)  # otro sitio: se vuelve a paginar
-        if key == self.web_key and self.epub_pages > 0:
-            web.go(self.epub_page)
-            self.web_paged(self.epub_pages)
-            return
-        try:
-            import webview
-            data = Path(self.preview_path).read_bytes()
-            path = webview.section_path(data)
-        except Exception:
-            self.blank(self.epub_view, "Sin vista previa")
-            return
-        # Como mucho ese tamaño, sin mínimo: fijo, subía el alto mínimo de la ventana y al abrir «Editar datos» la
-        # ventana crecía por debajo de la barra de tareas
-        web.setMinimumSize(60, 80)
-        web.setMaximumSize(*shown)
-        self.epub_view.hide()
-        web.show()
-        self.web_key = key
-        # En puntos con letra de 11 (MuPDF); Chromium lee a 16 px: la misma página en px de CSS
-        size = (round(width * 16 / 11), round(height * 16 / 11))
-        web.show_file(data, path, size, self.dark_var.get(), self.epub_page, getattr(self, "web_find", None))
-        self.web_find = None
-        self.epub_caption.setText(f"EPUB · {self.device_var.get()}")
-
-    def web_paged(self, pages):
-        """Chromium paginó la sección: el total y la página en la leyenda, como con MuPDF."""
-        self.epub_pages, self.epub_page = max(1, pages), self.epub_web.page_
         self.epub_caption.setText(f"EPUB · {self.device_var.get()} · {self.epub_page + 1}/{self.epub_pages}")
 
     def pdf_step(self, delta):
@@ -7214,6 +7151,9 @@ class Dialog(QDialog):
             super().reject()
 
 
+WEB_TAB = 2  # «Hoja web» en el panel derecho del editor, tras «Original» y «EPUB»
+
+
 class TextEditor:
     """Editor del texto como Word, capítulo a capítulo: la cinta dice en qué capítulo se está y lleva a los
     demás (menú y ◀ ▶); la hoja (editor.Sheet) muestra cursiva, negrita, títulos, enlaces, ilustraciones y
@@ -7284,23 +7224,23 @@ class TextEditor:
         desk_row.addStretch(1)
         desk_row.addWidget(sheet, 20)
         # Vista «Código HTML» (Vista → Código): el mismo capítulo como su HTML, en lugar de la hoja
-        self.code = QPlainTextEdit(objectName="code")
+        self.code = editor.CodeEdit(theme.code_colors(app.dark))  # con números de línea y colores de código
         self.code.setFont(QFont("Consolas", 10))
         self.code.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        self.code_look = editor.CodeLook(self.code.document(), theme.code_colors(app.dark))
         self.code.hide()
         desk_row.addWidget(self.code, 20)
-        # Vista «Hoja web» (Vista → Hoja web): el capítulo en Chromium, editable, con el aspecto del libro
+        # Pestaña «Hoja web» del panel derecho: el capítulo en Chromium, editable, con el aspecto del libro. web_on: el
+        # cursor está en ella (la cinta y lo escrito van a ella); si no, enseña lo de la hoja de la izquierda
         self.web, self.web_on, self.web_state = None, False, {}
         # ¿cambios sin volcar en la hoja web?, qué hacer al cargarla, y el párrafo de su cursor (su sitio en la de Qt)
         self.web_dirty, self.web_then, self.web_home = False, None, None
-        self.web_resume = False  # se dejó la hoja web por «Contenido»: se vuelve a ella en el capítulo siguiente
         self.web_busy, self.web_queue = False, []  # on_sheet en curso y lo pulsado mientras tanto
+        # Lo que la web volcó al cargar (sin tocar), su capítulo y la versión de la hoja que enseña
+        self.web_base, self.web_section, self.web_rev = None, None, None
         import webview
         if webview.available():
             self.web = webview.WebSheet()
             self.web.hide()
-            desk_row.addWidget(self.web, 20)
             self.web_poll = QTimer(win)  # la cinta sigue al cursor de la hoja web (negrita, estilo, alineación)
             self.web_poll.timeout.connect(self.poll_web)
             self.web_issues = {}  # id -> Issue de los avisos pintados en la hoja web
@@ -7375,6 +7315,9 @@ class TextEditor:
         side_column.addWidget(self.scroll, 1)
         if self.side_web is not None:
             side_column.addWidget(self.side_web, 1, Qt.AlignmentFlag.AlignHCenter)
+        if self.web is not None:
+            self.side_tabs.addTab("Hoja web")
+            side_column.addWidget(self.web, 1)
         # Fuera, de capítulo en capítulo (hojear página a página era lento para cruzar el libro); dentro, de página
         # ◀◀ y no los de saltar pista: Windows los dibuja como emoji azules
         prev_btn = qtk.ArrowButton(-1, lambda: self.step_section(-1), "Capítulo anterior", double=True)
@@ -7386,7 +7329,7 @@ class TextEditor:
                                    _button("+", lambda: self.zoom(25))))
         # Sobre la hoja, como «Original | EPUB» del panel: una sola vista a la vez, la hoja o su código HTML
         self.view_tabs = QTabBar()
-        self.view_tabs.addTab("Hoja web" if self.web is not None else "Hoja")
+        self.view_tabs.addTab("Hoja")
         self.view_tabs.addTab("Código HTML")
         self.view_tabs.setDrawBase(False)
         self.view_tabs.currentChanged.connect(self.show_view)
@@ -7441,12 +7384,13 @@ class TextEditor:
         self.open_section(start, end, int(item))
         self.recover_draft()
         self.offer_resume()
-        # La hoja web es la vista de siempre (si Chromium está); quien la apaga, la encuentra apagada la próxima vez
-        if self.web is not None and app.settings.get("editor_web", True):
-            if self.current[0] >= 0:
-                self.load_web()
-            else:
-                self.web_resume = True
+        # La pestaña «Hoja web» se recuerda; se escribe en la hoja hasta que se pulsa en la web
+        if self.web is not None and app.settings.get("editor_web", False):
+            self.side_tabs.setCurrentIndex(WEB_TAB)
+        if self.web is not None:
+            QApplication.instance().focusChanged.connect(self.on_focus)
+            sheet.textChanged.connect(lambda: not self.web_on and self.web_tab()
+                                      and self.later("webview", 500, self.refresh_web))
         self.opened, self.saved_paragraphs = time.monotonic(), 0  # para «Tu trabajo» de «Cifras»
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         # Sin reiniciar la cuenta en cada aviso (la ortografía repinta y avisa sin parar): como mucho 5 s de trabajo perdido
@@ -7753,8 +7697,7 @@ class TextEditor:
         """Tema cambiado con el editor abierto: los iconos de la cinta, dibujados con el color del texto, se
         quedaban con el del tema anterior (apenas se veían)."""
         self.colors = theme.colors(dark)
-        self.code_look.colors = theme.code_colors(dark)
-        self.code_look.rehighlight()
+        self.code.set_colors(theme.code_colors(dark))
         for button, glyph, size in self.glyphs:
             if shiboken6.isValid(button):
                 button.setIcon(_glyph_icon(glyph, self.colors["ink"], size))
@@ -9101,28 +9044,62 @@ class TextEditor:
         self.web.call("undo", redo, done=done)
 
     def toggle_web(self):
-        """Vista «Hoja web»: el capítulo en Chromium, editable con el aspecto del libro; al volver, lo escrito pasa a la
-        hoja de Qt (un deshacer), igual que desde la vista de código."""
-        if self.web is None:
+        """La pestaña «Hoja web» del panel, o vuelta a «Original»."""
+        if self.web is not None:
+            self.side_tabs.setCurrentIndex(0 if self.web_tab() else WEB_TAB)
+
+    def web_tab(self):
+        return self.web is not None and self.side_tabs.currentIndex() == WEB_TAB
+
+    def doc_rev(self):
+        doc = self.sheet.document()
+        return id(doc), doc.revision()
+
+    def refresh_web(self):
+        """La hoja web, sin el cursor en ella, enseña lo de la hoja: al cambiar de capítulo o tras escribir."""
+        if self.closed or not self.web_tab() or self.web_on or self.code.isVisible():
             return
+        if self.current[0] < 0:
+            self.web.show_note("«Contenido» es la lista de capítulos: se edita en la hoja de la izquierda.")
+            return
+        if self.web.loaded and self.web_section == self.current and self.web_rev == self.doc_rev():
+            return
+        self.load_web(active=False)
+
+    def activate_web(self):
+        """El cursor entró en la hoja web: desde ahora la cinta y lo escrito van a ella. Si la hoja cambió desde que se
+        cargó, antes se vuelve a cargar."""
+        if self.web_on or not self.web_tab() or self.current[0] < 0 or self.code.isVisible():
+            return
+        if not self.web.loaded or self.web_section != self.current or self.web_rev != self.doc_rev():
+            self.load_web(active=True)
+            return
+        self.web_on, self.web_home, self.web_dirty = True, None, False
         if self.reading is not None:  # la voz iba por párrafos de la otra hoja
             self.stop_reading()
-        if not self.web_on and self.current[0] < 0:
-            self.tell("«Contenido» es la lista de capítulos: se edita en la hoja")
-            return
-        self.app.settings["editor_web"] = not self.web_on  # la próxima vez, el editor abre en la misma hoja
-        self.app.save_settings()
-        if not self.web_on:
-            if self.code.isVisible():
-                self.toggle_code()
-                if self.code.isVisible():  # el código no se pudo aplicar: se sigue en él
-                    return
-            self.load_web()
-            return
-        self.flush_web(self.web_done)
+        self.web_poll.start(400)
+        self.web_marks()
+        self.update_tools()
 
-    def load_web(self):
-        """Pone en la hoja web el capítulo de la hoja (con lo que lleve escrito)."""
+    def on_focus(self, old, new):
+        """El cursor pasa de una hoja a otra: a la web, se escribe en ella; a la hoja, lo escrito en la web pasa a la
+        hoja antes (y el cursor se queda donde se pulsó)."""
+        if self.closed or new is None or not shiboken6.isValid(self.web) or not shiboken6.isValid(self.sheet):
+            return
+        if new is self.web or self.web.isAncestorOf(new):
+            self.activate_web()
+        elif self.web_on and (new is self.sheet or self.sheet.isAncestorOf(new)):
+            pos = self.sheet.textCursor().position()
+
+            def back():
+                self.web_done()
+                cursor = self.sheet.textCursor()
+                cursor.setPosition(min(pos, self.sheet.document().characterCount() - 1))
+                self.sheet.setTextCursor(cursor)
+            self.flush_web(back)
+
+    def load_web(self, active=True):
+        """Pone en la hoja web el capítulo de la hoja (con lo que lleve escrito). active: se escribe en ella."""
         import websheet
         start, end = self.current
         lines = [line for line in editor.dump(self.sheet.document()).split("\n\n") if line.strip()]
@@ -9132,20 +9109,20 @@ class TextEditor:
             if m and editor.IMAGES and (Path(editor.IMAGES) / m[2]).is_file():
                 pictures[line.strip()] = (Path(editor.IMAGES) / m[2]).read_bytes()
         files, objects, path, head, body = websheet.sources(self.app.book, start, end, lines, pictures)
-        if not self.win.isVisible():  # al abrir el editor: la hoja web desde el principio, en blanco hasta que carga
-            self.sheet.hide()
-            self.web.show()
-        elif not self.web.isVisible():  # Vista → Hoja web: carga detrás de la hoja de Qt, que se ve hasta web_ready
-            self.web.setGeometry(self.sheet.geometry())
+        if "webview" in self.pending:  # una carga para ver, pendiente: esta la sustituye
+            qtk.cancel(self.pending.pop("webview"))
         self.web.load_sheet(files, path, websheet.page(lines, objects, head, body, path))
-        self.web_on, self.web_dirty, self.web_home = True, False, None
-        self.web_poll.start(400)
+        self.web_on, self.web_dirty, self.web_home = active, False, None
+        self.web_base, self.web_section, self.web_rev = None, self.current, self.doc_rev()
+        if active:
+            self.web_poll.start(400)
+        else:
+            self.web_poll.stop()
 
     def web_ready(self):
         """La hoja web cargó: sus marcas, el cursor en el párrafo del de la hoja y lo que esperaba (buscar)."""
-        if not self.web.isVisible():  # ya dibujada: ahora sí reemplaza a la hoja de Qt, sin verse en blanco
-            self.sheet.hide()
-            self.web.show()
+        self.web.call("dump", done=lambda d: setattr(self, "web_base", self.web_text(d)))  # sin tocar: la base
+        if self.web_on:
             self.web.setFocus()
         self.web_marks()
         self.web.setZoomFactor(self.text_zoom.value() / 100)  # load_sheet la deja al 100 %
@@ -9427,22 +9404,20 @@ class TextEditor:
         """Lo escrito en la hoja web pasa a la hoja de Qt (si cambió) y luego then()."""
         def back(dumped):
             text = self.web_text(dumped)
-            if text is not None and text != editor.dump(self.sheet.document()):
+            changed = self.web_base is None or text != self.web_base  # se escribió en la web desde que cargó
+            if text is not None and changed and text != editor.dump(self.sheet.document()):
                 self.sheet.set_text(text)
                 self.web.call("rehome")  # la hoja de Qt ya tiene los párrafos de ahora
                 self.web_home = None
+            if text is not None:
+                self.web_base, self.web_rev = text, self.doc_rev()  # las dos hojas, iguales
             then()
         self.web.call("dump", done=back)
 
-    def web_done(self, show_sheet=True):
-        """Deja la hoja web. show_sheet=False: se va a cargar otro capítulo en ella, que sigue a la vista con el de
-        antes hasta que esté listo (sin pasar por la hoja de Qt)."""
+    def web_done(self):
+        """La hoja web deja de ser donde se escribe; sigue a la vista si su pestaña lo está."""
         self.web_on, self.web_dirty, self.web_busy, self.web_queue = False, False, False, []
         self.web_poll.stop()
-        if show_sheet:
-            self.web.hide()
-            self.sheet.show()
-            self.sheet.setFocus()
         self.update_tools()
 
     def toggle_code(self):
@@ -9475,23 +9450,24 @@ class TextEditor:
         self.update_tools()
 
     def show_view(self, index):
-        """Pestañas sobre la hoja: la hoja (web, si está) o «Código HTML», una sola a la vista. El código sale de la
-        hoja de Qt: lo escrito en la web pasa antes a ella; al volver, la web se carga con lo cambiado."""
+        """Pestañas sobre la hoja: la hoja o «Código HTML», una sola a la vista. El código sale de la hoja: lo escrito
+        en la web pasa antes a ella; al volver, la web enseña lo cambiado."""
         if (index == 1) == self.code.isVisible():
             return
         if index == 1 and self.web_on:
             self.flush_web(lambda: (self.web_done(), self.toggle_code()))
             return
         self.toggle_code()
-        if (not self.code.isVisible() and self.web is not None and self.app.settings.get("editor_web", True)
-                and self.current[0] >= 0):
-            self.load_web()
 
     def sync_view(self):
         """La pestaña elegida sobre la hoja, la de lo que se ve (sin volver a pedir el cambio)."""
         self.view_tabs.blockSignals(True)
         self.view_tabs.setCurrentIndex(1 if self.code.isVisible() else 0)
         self.view_tabs.blockSignals(False)
+        if self.web is not None:  # con el código a la vista no se escribe en la web: lo pisaría al volver
+            self.web.setEnabled(not self.code.isVisible())
+            if not self.code.isVisible():
+                self.later("webview", 0, self.refresh_web)
 
     def add_ruby(self):
         """Furigana: la lectura encima del texto elegido (o de lo que se escriba), en la hoja a la vista."""
@@ -9559,10 +9535,10 @@ class TextEditor:
     def open_section(self, start, end, focus=None):
         """Muestra el capítulo start..end en la hoja (el ya editado si se visitó) y lo dice en la cinta."""
         if getattr(self, "web_on", False) and self.current and (start, end) != self.current:
-            # con la hoja web: lo escrito pasa a su capítulo, se abre el otro y se vuelve a la hoja web con él;
-            # «Contenido» (la lista de capítulos) va en la hoja, y al salir de él se vuelve a la web
-            self.flush_web(lambda: (self.web_done(start < 0), self.open_section(start, end, focus),
-                                    self.load_web() if start >= 0 else setattr(self, "web_resume", True)))
+            # con la hoja web: lo escrito pasa a su capítulo, se abre el otro y se sigue escribiendo en la web;
+            # «Contenido» (la lista de capítulos) solo en la hoja
+            self.flush_web(lambda: (self.web_done(), self.open_section(start, end, focus),
+                                    start >= 0 and self.web_tab() and self.load_web(active=True)))
             return
         if self.reading is not None:
             self.stop_reading()
@@ -9592,14 +9568,8 @@ class TextEditor:
             self.request_suggestions()
         self.sheet.ensureCursorVisible()
         self.sheet.setFocus()
-        if self.web_resume and start >= 0:  # tras el bucle que la abrió (reemplazar todo da vueltas por la hoja)
-            self.later("web_resume", 0, self.resume_web)
-
-    def resume_web(self):
-        """De «Contenido» a un capítulo: la hoja web otra vez, como estaba."""
-        if self.web_resume and not self.web_on and self.current and self.current[0] >= 0:
-            self.web_resume = False
-            self.load_web()
+        if self.web is not None and not self.web_on:  # la hoja web enseña el capítulo nuevo
+            self.later("webview", 0, self.refresh_web)
 
     def section_lines(self, start, end):
         """Líneas de la sección como se cargan en la hoja, [(bloque, línea)], y {bloque: tipo} de sus títulos. Un
@@ -9720,12 +9690,22 @@ class TextEditor:
         return self.side_web is not None and self.side_tabs.currentIndex() == 1
 
     def show_side(self, index):
-        """Pestaña del panel: «Original» (la página de origen) o «EPUB» (Chromium, el capítulo como saldrá)."""
-        web = index == 1 and self.side_web is not None
-        self.scroll.setVisible(not web)
+        """Pestaña del panel: «Original» (la página de origen), «EPUB» (el capítulo como saldrá) u «Hoja web» (el
+        capítulo con el aspecto del libro, editable)."""
+        web, sheet_web = index == 1 and self.side_web is not None, index == WEB_TAB and self.web is not None
+        if self.web is not None:
+            if self.web_on and not sheet_web:  # lo escrito en la web pasa a la hoja antes de dejar de verla
+                self.flush_web(self.web_done)
+            self.web.setVisible(sheet_web)
+            self.app.settings["editor_web"] = sheet_web  # la próxima vez, el editor abre con la misma pestaña
+            self.app.save_settings()
+        self.scroll.setVisible(not web and not sheet_web)
         if self.side_web is not None:
             self.side_web.setVisible(web)
-        if web:
+        if sheet_web:
+            self.page_label.setText("")
+            self.refresh_web()
+        elif web:
             self.draw_web()
         else:
             self.redraw()
@@ -9774,9 +9754,12 @@ class TextEditor:
         """◀ ▶ bajo el PDF: la hoja va al primer párrafo de la página anterior o siguiente (abriendo su capítulo si
         es otro) y el panel la dibuja. Las páginas sin nada del libro se saltan: no hay qué mostrar en la hoja.
         En la pestaña «EPUB», las páginas del capítulo como saldrá."""
-        if self.web_shown():
-            self.side_web.go(self.side_web.page_ + delta)
-            self.page_label.setText(f"Página {self.side_web.page_ + 1} de {self.side_web.pages}")
+        if self.web_shown():  # lo que se ve más abajo o más arriba (la barra pudo moverlo)
+            self.side_web.step(delta, lambda: self.page_label.setText(
+                f"Página {self.side_web.page_ + 1} de {self.side_web.pages}"))
+            return
+        if self.web_tab():
+            self.web.page().runJavaScript(f"window.scrollBy(0, {delta} * window.innerHeight * 0.9)")
             return
         if self.app.book.origin and self.app.pdf_doc is not None:
             # Un EPUB: sus bloques solo saben la primera página de su archivo, y con ella ◀ ▶ saltaban de capítulo
@@ -9854,8 +9837,7 @@ class TextEditor:
         self.sheet.set_zoom(percent)
         share = self.page_share if self.focused else 1.0  # más ancha solo en pantalla completa
         self.sheet.setMaximumWidth(int(self.page_width(percent) * share))
-        if self.web is not None:  # la hoja web, del mismo ancho de página y con la misma letra
-            self.web.setMaximumWidth(self.sheet.maximumWidth())
+        if self.web is not None:  # la hoja web, con la misma letra
             self.web.setZoomFactor(percent / 100)
         self.text_zoom_label.setText(f"{percent} %")
 
@@ -9867,7 +9849,7 @@ class TextEditor:
                                             QEvent.Type.MouseButtonRelease):
             return False
         x = event.position().x()
-        sheet = (self.web if self.web_on else self.sheet).geometry()  # la hoja a la vista: la de Qt va oculta
+        sheet = self.sheet.geometry()
         near = abs(x - sheet.left()) <= 10 or abs(x - sheet.right()) <= 10
         if kind == QEvent.Type.MouseButtonPress and near:
             self.dragging = True
@@ -9880,8 +9862,6 @@ class TextEditor:
             room = self.desk.width() - 2 * (self.focus_prev.width() + 40)  # la hoja no llega a las flechas
             self.page_share = max(1.0, min(width, room) / self.page_width())
             self.sheet.setMaximumWidth(int(self.page_width() * self.page_share))
-            if self.web is not None:
-                self.web.setMaximumWidth(self.sheet.maximumWidth())
             return True
         self.desk.setCursor(Qt.CursorShape.SizeHorCursor if near else Qt.CursorShape.ArrowCursor)
         return False
@@ -9906,6 +9886,11 @@ class TextEditor:
         if self.web is not None and shiboken6.isValid(self.web):  # lo que Chromium conteste ya no tiene a quién
             self.web.closing = True
             self.web_poll.stop()
+        if self.web is not None:
+            try:
+                QApplication.instance().focusChanged.disconnect(self.on_focus)
+            except (RuntimeError, TypeError):
+                pass
         self.drop_draft()  # se aceptó o se descartó: el borrador ya no hace falta
         # shortcut: tras aceptar, un párrafo añadido antes desplaza el bloque; se queda cerca, que basta para volver
         _log_work(self.app.work, datetime.now().date().isoformat(), paragraphs=self.saved_paragraphs,

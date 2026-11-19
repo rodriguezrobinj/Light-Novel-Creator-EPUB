@@ -47,14 +47,13 @@ def available():
     return AVAILABLE and _prepared and not os.environ.get("LNC_SIN_CHROMIUM")
 
 
-# Paginación de lector: el cuerpo en columnas del ancho de la vista, una por página, y sin barra de desplazamiento.
-# Las imágenes caben en una página (como en los lectores, que nunca las parten)
-PAGED = """
-html { height: 100vh !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; }
-body { box-sizing: border-box !important; height: 100vh !important; margin: 0 !important;
-       padding: %(pad_y)spx %(pad_x)spx !important;
-       column-width: calc(100vw - %(gap)spx) !important; column-gap: %(gap)spx !important; column-fill: auto !important; }
-img, svg, video { -webkit-user-drag: none !important; max-width: 100%% !important; max-height: calc(100vh - %(pad_y2)spx) !important; object-fit: contain; }
+# El capítulo seguido, con barra de desplazamiento; una «página» es lo que cabe en la vista. Las imágenes caben en
+# ella, como en los lectores, que nunca las parten
+SCROLLED = """
+html { margin: 0 !important; padding: 0 !important; }
+body { box-sizing: border-box !important; margin: 0 !important; padding: %(pad_y)spx %(pad_x)spx !important; }
+img, svg, video { -webkit-user-drag: none !important; max-width: 100%% !important;
+                  max-height: calc(100vh - %(pad_y2)spx) !important; object-fit: contain; }
 """
 # Modo oscuro de lector: fondo oscuro y letra clara; las ilustraciones, tal cual
 DARK = """
@@ -92,8 +91,9 @@ if AVAILABLE:
             job.reply(media.encode(), buffer)
 
     class EpubView(QWebEngineView):
-        """Un archivo del EPUB paginado como en un lector de size=(ancho, alto) en px de CSS, encogido o agrandado a
-        lo que mide la vista. paged(páginas) avisa al cargar; go(n) va a una página."""
+        """Un archivo del EPUB como en un lector de size=(ancho, alto) en px de CSS, encogido o agrandado a lo que
+        mide la vista, seguido y con barra de desplazamiento. paged(páginas) avisa al cargar (una página: lo que cabe
+        en la vista); go(n) va a una, step(±1) a la de al lado de donde se esté."""
         paged = Signal(int)
 
         def __init__(self, parent=None):
@@ -105,7 +105,7 @@ if AVAILABLE:
             self.setPage(QWebEnginePage(self.profile_, self))
             settings = self.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, False)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, True)
             self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # solo se mira: el teclado sigue en la lista
             self.page().setBackgroundColor(Qt.GlobalColor.white)
@@ -156,11 +156,11 @@ if AVAILABLE:
                 self.paged.emit(0)
                 return
             pad_x, pad_y = round(self.size_[0] * 0.06), round(self.size_[1] * 0.04)
-            css = PAGED % {"pad_x": pad_x, "pad_y": pad_y, "pad_y2": pad_y * 2, "gap": pad_x * 2}
+            css = SCROLLED % {"pad_x": pad_x, "pad_y": pad_y, "pad_y2": pad_y * 2}
             css += DARK if self.dark else ""
             script = ("(function(){var s=document.createElement('style');s.textContent=%s;"
                       "(document.head||document.documentElement).appendChild(s);"
-                      "return Math.max(1,Math.round(document.documentElement.scrollWidth/window.innerWidth));})()"
+                      "return Math.max(1,Math.ceil(document.documentElement.scrollHeight/window.innerHeight));})()"
                       % json.dumps(css))
             self.page().runJavaScript(script, 0, self._paged)
 
@@ -175,15 +175,23 @@ if AVAILABLE:
 
         def go(self, n):
             self.page_ = max(0, min(n, self.pages - 1))
-            self.page().runJavaScript(f"document.scrollingElement.scrollLeft = {self.page_} * window.innerWidth;", 0,
+            self.page().runJavaScript(f"document.scrollingElement.scrollTop = {self.page_} * window.innerHeight;", 0,
                                       lambda _: self.unveil())
+
+        def step(self, delta, done=None):
+            """A la página de al lado de la que se ve ahora (la barra pudo moverla); done() después."""
+            def at(n):
+                self.go(int(n or 0) + delta)
+                if done:
+                    done()
+            self.page().runJavaScript("Math.round(document.scrollingElement.scrollTop / window.innerHeight)", 0, at)
 
         def find_page(self, text, done):
             """done(página) de la primera vez que sale text (o 0)."""
             script = ("(function(t){var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);var n;"
                       "while((n=w.nextNode())){var i=n.data.indexOf(t);if(i>=0){var r=document.createRange();"
                       "r.setStart(n,i);r.setEnd(n,i+Math.min(t.length,n.data.length-i));var b=r.getBoundingClientRect();"
-                      "return Math.floor((b.left+document.scrollingElement.scrollLeft)/window.innerWidth);}}return 0;})"
+                      "return Math.floor((b.top+document.scrollingElement.scrollTop)/window.innerHeight);}}return 0;})"
                       "(%s)" % json.dumps(text))
             self.page().runJavaScript(script, 0, lambda n: done(int(n or 0)))
 
@@ -217,6 +225,12 @@ if AVAILABLE:
 
         def resizeEvent(self, event):
             QWebEngineView.resizeEvent(self, event)  # sin la escala del lector: se lee a su tamaño
+
+        def show_note(self, text):
+            """Un aviso en lugar del capítulo (lo que no se edita aquí)."""
+            import html
+            self.loaded = False
+            self.setHtml(f"<p style='font:14px sans-serif;color:#777;margin:24px'>{html.escape(text)}</p>")
 
         def _loaded(self, ok):
             import websheet
