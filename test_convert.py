@@ -11280,17 +11280,35 @@ def test_websheet_beside_the_sheet_follows_both():
             ed.code.setTextCursor(QTextCursor(ed.code.document().findBlockByNumber(target)))
             ed.code_moved()
             followed = ed.web_index(ed.sheet.textCursor().block())
+            # con el código a la vista: lo escrito en él sale al momento en la hoja y la web, que sigue editable
+            ed.code.setPlainText(ed.code.toPlainText().replace("Segundo", "Segundísimo", 1))
+            ed.apply_code_live()
+            live = wait_for(lambda: "Segundísimo" in (js(ed.web, text) or ""), 15) and "Segundísimo" in editor_dump(ed)
+            editable = ed.web.isEnabled()
+            # escribir en la web con el código a la vista: al volver al código, el código lo tiene
+            ed.on_focus(ed.code, ed.web)
+            wait_for(lambda: ed.web_on and ed.web.loaded, 15)
+            js(ed.web, "(function(){var w=document.createTreeWalker(document.getElementById('lnc-sheet'),4),n;"
+                       "while((n=w.nextNode())){var i=n.data.indexOf('Cuarto');if(i>=0){var r=document.createRange();"
+                       "r.setStart(n,i+6);r.collapse(true);var g=getSelection();g.removeAllRanges();g.addRange(r);"
+                       "document.execCommand('insertText',false,' Web y código');return true;}}return false;})()")
+            ed.on_focus(ed.web, ed.code)
+            coded_web = wait_for(lambda: not ed.web_on and "Web y código" in ed.code.toPlainText(), 15)
             ed.view_tabs.setCurrentIndex(0)
             # la pestaña EPUB recuadra ese párrafo
             ed.side_tabs.setCurrentIndex(1)
             marked = wait_for(lambda: bool(js(ed.side_web, "window.lncMarked ? 1 : 0")), 20)
+            # clic en un párrafo del EPUB: la hoja (y con ella las demás vistas) va a él
+            ed.side_web.page().clicked.emit("Cuarto Web y código.")  # el texto entero del párrafo, como lo manda
+            clicked = ed.sheet.textCursor().block().text().startswith("Cuarto")
             ed.win.done(0)
         finally:
             window.close()
     assert band and aligned, ("sin la banda del párrafo en la hoja web", band, aligned)
     assert sizes == (True, 15) and panel == 1.25, (sizes, panel)
     assert line == 2 and followed == target, (line, followed, target)
-    assert marked, "la pestaña EPUB no recuadra el párrafo del cursor"
+    assert marked and clicked, ("la pestaña EPUB no recuadra el párrafo del cursor", marked, clicked)
+    assert live and editable and coded_web, (live, editable, coded_web)
     assert left and kept, (left, kept)
     assert shown and back, (shown, back)
     assert "Desde la web." in both and "Desde la hoja." in both, both
@@ -11351,10 +11369,10 @@ def test_websheet_is_default_and_does_what_chromium_cannot():
             contents = wait_for(lambda: ed.current[0] < 0 and not ed.web_on and ed.sheet.isVisible(), 15)
             ed.open_section(*window.section_bounds(k))
             back = wait_for(lambda: ed.web.loaded and ed.web_section == ed.current, 10)  # la web enseña el capítulo
-            # pestañas sobre la hoja: «Código HTML» en lugar de la hoja (una a la vez); la web, quieta mientras tanto, y
-            # al volver enseña lo cambiado
+            # pestañas sobre la hoja: «Código HTML» en lugar de la hoja (una a la vez); la web sigue editable y enseña
+            # lo cambiado en el código
             ed.view_tabs.setCurrentIndex(1)
-            coded = wait_for(lambda: ed.code.isVisible() and not ed.sheet.isVisible() and not ed.web.isEnabled(), 15)
+            coded = wait_for(lambda: ed.code.isVisible() and not ed.sheet.isVisible() and ed.web.isEnabled(), 15)
             ed.code.setPlainText(ed.code.toPlainText().replace("Tercero", "Tercerísimo", 1))
             ed.view_tabs.setCurrentIndex(0)
             reweb = wait_for(lambda: ed.web.loaded and ed.web.isEnabled() and ed.sheet.isVisible()

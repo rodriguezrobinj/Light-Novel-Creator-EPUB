@@ -7235,6 +7235,9 @@ class TextEditor:
         # su línea es un párrafo: la hoja (oculta) va a él, y con ella el original, el EPUB y la hoja web
         self.code.cursorPositionChanged.connect(lambda: self.code.isVisible()
                                                 and self.later("code", 150, self.code_moved))
+        self.code.textChanged.connect(lambda: self.code.isVisible() and self.code.hasFocus()
+                                      and self.later("codelive", 600, self.apply_code_live))
+        self.applying_code = False  # la hoja cambia por el código: el código no se vuelve a escribir
         self.code.setFont(QFont("Consolas", 10))
         self.code.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.code.hide()
@@ -7331,6 +7334,7 @@ class TextEditor:
             self.epub_box.hide()
             side_column.addWidget(self.epub_box, 1)
             self.side_web.moved.connect(lambda: self.web_shown() and self.show_web_page(self.side_web))
+            self.side_web.page().clicked.connect(self.epub_clicked)
             self.side_web.paged.connect(lambda _: self.mark_epub())
         if self.web is not None:
             self.side_tabs.addTab("Hoja web")
@@ -7426,6 +7430,8 @@ class TextEditor:
         sheet.cursorPositionChanged.connect(lambda: self.later("diff", 150, self.update_diff))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
         sheet.cursorPositionChanged.connect(lambda: self.later("follow", 200, self.follow_cursor))
+        sheet.textChanged.connect(lambda: self.code.isVisible() and not self.applying_code
+                                  and self.later("coderefresh", 100, self.refresh_code))
         sheet.cursorPositionChanged.connect(self.update_tools)
         # Un clic o una tecla en la hoja mientras se lee: la voz se calla, como al pulsar Parar
         sheet.cursorPositionChanged.connect(lambda: self.reading is not None and not self.web_on
@@ -9092,7 +9098,7 @@ class TextEditor:
 
     def refresh_web(self):
         """La hoja web, sin el cursor en ella, enseña lo de la hoja: al cambiar de capítulo o tras escribir."""
-        if self.closed or not self.web_tab() or self.web_on or self.code.isVisible():
+        if self.closed or not self.web_tab() or self.web_on:
             return
         if self.current[0] < 0:
             self.web.show_note("«Contenido» es la lista de capítulos: se edita en la hoja de la izquierda.")
@@ -9104,7 +9110,7 @@ class TextEditor:
     def activate_web(self):
         """El cursor entró en la hoja web: desde ahora la cinta y lo escrito van a ella. Si la hoja cambió desde que se
         cargó, antes se vuelve a cargar."""
-        if self.web_on or not self.web_tab() or self.current[0] < 0 or self.code.isVisible():
+        if self.web_on or not self.web_tab() or self.current[0] < 0:
             return
         if not self.web.loaded or self.web_section != self.current or self.web_rev != self.doc_rev():
             self.load_web(active=True)
@@ -9114,6 +9120,7 @@ class TextEditor:
             self.stop_reading()
         self.web_poll.start(400)
         self.web_marks()
+        self.fit_ribbon_to_view()
         self.update_tools()
 
     def on_focus(self, old, new):
@@ -9123,7 +9130,7 @@ class TextEditor:
             return
         if new is self.web or self.web.isAncestorOf(new):
             self.activate_web()
-        elif self.web_on and (new is self.sheet or self.sheet.isAncestorOf(new)):
+        elif self.web_on and any(new is w or w.isAncestorOf(new) for w in (self.sheet, self.code)):
             pos = self.sheet.textCursor().position()
 
             def back():
@@ -9453,6 +9460,7 @@ class TextEditor:
         """La hoja web deja de ser donde se escribe; sigue a la vista si su pestaña lo está."""
         self.web_on, self.web_dirty, self.web_busy, self.web_queue = False, False, False, []
         self.web_poll.stop()
+        self.fit_ribbon_to_view()
         self.update_tools()
 
     def toggle_code(self):
@@ -9491,6 +9499,40 @@ class TextEditor:
         self.sync_view()
         self.update_tools()
 
+    def apply_code_live(self):
+        """Lo escrito en el código, a la hoja si ya vale (a medio escribir una etiqueta, aún no): así la hoja web, el
+        EPUB y el original lo enseñan sin salir del código. Cada vez es un deshacer de la hoja."""
+        if not self.code.isVisible() or self.code.toPlainText() == self.code_text:
+            return
+        try:
+            text = editor.from_code(self.code.toPlainText())
+        except ValueError:
+            return
+        self.code_text = self.code.toPlainText()
+        line = self.code.textCursor().blockNumber()
+        self.applying_code = True
+        try:
+            self.sheet.set_text(text)
+        finally:
+            self.applying_code = False
+        self.sheet.setTextCursor(QTextCursor(self.web_block(line)))
+
+    def refresh_code(self):
+        """La hoja cambió por otro lado (la hoja web) con el código a la vista: el código, al día, en su línea."""
+        if not self.code.isVisible() or self.applying_code:
+            return
+        code = editor.to_code(editor.dump(self.sheet.document()))
+        if code == self.code.toPlainText():
+            return
+        line = self.code.textCursor().blockNumber()
+        self.code.blockSignals(True)
+        self.code.setPlainText(code)
+        self.code.blockSignals(False)
+        self.code_text = code
+        block = self.code.document().findBlockByNumber(min(line, self.code.blockCount() - 1))
+        self.code.setTextCursor(QTextCursor(block))
+        self.code.mark_line()
+
     def code_moved(self):
         """El cursor del código cambió de línea: la hoja (oculta) va a ese párrafo."""
         if self.code.isVisible() and self.code.toPlainText() == self.code_text:  # sin editar: las líneas casan
@@ -9513,10 +9555,15 @@ class TextEditor:
         self.view_tabs.blockSignals(True)
         self.view_tabs.setCurrentIndex(1 if self.code.isVisible() else 0)
         self.view_tabs.blockSignals(False)
-        if self.web is not None:  # con el código a la vista no se escribe en la web: lo pisaría al volver
-            self.web.setEnabled(not self.code.isVisible())
-            if not self.code.isVisible():
-                self.later("webview", 0, self.refresh_web)
+        if self.web is not None:
+            self.later("webview", 0, self.refresh_web)
+        self.fit_ribbon_to_view()
+
+    def fit_ribbon_to_view(self):
+        """La cinta, solo con lo que vale: con el código a la vista, Vista; si se escribe en la hoja web, toda."""
+        on = not self.code.isVisible() or self.web_on
+        for n in range(self.ribbon_pages.count() - 1):
+            self.ribbon_pages.widget(n).setEnabled(on)
 
     def add_ruby(self):
         """Furigana: la lectura encima del texto elegido (o de lo que se escriba), en la hoja a la vista."""
@@ -9808,12 +9855,44 @@ class TextEditor:
             words = text[len(text) // 4:][:24].strip()
         self.side_web.mark(words, MARK_COLORS["current"])
 
+    def epub_clicked(self, text):
+        """Clic en un párrafo de la pestaña EPUB: la hoja va al párrafo con ese texto (el más cercano al cursor, si
+        se repite), y con ella el original, la hoja web y el código. La limpieza tipográfica cambia comillas y rayas:
+        se compara sin ellas."""
+        def bare(s):
+            return re.sub(r"[\W_]+", " ", s).strip().lower()
+        want = bare(text)[:60]
+        if not want or not self.current or self.current[0] < 0:
+            return
+        if self.web_on:  # lo escrito en la web, antes a la hoja
+            self.flush_web(lambda: (self.web_done(), self.epub_clicked(text)))
+            return
+        here = self.sheet.textCursor().blockNumber()
+        found = [b for b in self.blocks() if want and bare(b.text())[:60] == want]
+        if not found:
+            found = [b for b in self.blocks() if len(want) > 12 and want[:30] in bare(b.text())]
+        if found:
+            block = min(found, key=lambda b: abs(b.blockNumber() - here))
+            self.sheet.setTextCursor(QTextCursor(block))
+            self.sheet.ensureCursorVisible()
+
+    def blocks(self):
+        b = self.sheet.document().firstBlock()
+        while b.isValid():
+            yield b
+            b = b.next()
+
     def follow_cursor(self):
         """El párrafo del cursor de la hoja (o del código), en las otras vistas: recuadrado en el EPUB y con la banda
         de la hoja en la hoja web (cuando no se escribe en ella: entonces la pone su propio cursor)."""
         if self.closed:
             return
         self.mark_epub()
+        if self.code.isVisible() and self.code.toPlainText() == self.code_text:  # sin editar: las líneas casan
+            block = self.code.document().findBlockByNumber(self.web_index(self.sheet.textCursor().block()))
+            if block.isValid() and block != self.code.textCursor().block():
+                self.code.setTextCursor(QTextCursor(block))
+                self.code.centerCursor()
         if self.web_tab() and not self.web_on and self.web.loaded:
             self.web.call("here", self.web_index(self.sheet.textCursor().block()), True, self.here_color())
 
