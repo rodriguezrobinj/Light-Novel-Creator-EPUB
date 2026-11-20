@@ -44,7 +44,18 @@ SHEET_JS = r"""
     while (node && node.parentNode !== sheet) node = node.parentNode;
     return node && node.nodeType === 1 ? node : null;
   }
-  function here() { var s = window.getSelection(); return s.rangeCount ? block(s.getRangeAt(0).startContainer) : null; }
+  // Ilustración o separador pulsado: el cursor no entra en ellos (contenteditable=false), pero son el párrafo de ahora
+  var picked = null;
+  function here() {
+    if (picked) return picked;
+    var s = window.getSelection(); return s.rangeCount ? block(s.getRangeAt(0).startContainer) : null;
+  }
+  sheet.addEventListener('mousedown', function (e) {
+    var t = e.target.nodeType === 1 ? e.target : e.target.parentElement, o = t && t.closest('.lnc-obj');
+    picked = o && o.parentNode === sheet ? o : null;
+    if (picked) { lnc.hereAt = index(picked); lnc.placeHere(false); }
+  }, true);
+  sheet.addEventListener('keydown', function () { picked = null; }, true);
   function index(b) { return Array.prototype.indexOf.call(sheet.children, b); }
   function offset(b, node, at) {  // posición de (node, at) en el texto de b
     var r = document.createRange(); r.setStart(b, 0); r.setEnd(node, at); return r.toString().length;
@@ -58,6 +69,7 @@ SHEET_JS = r"""
     return last ? [last, last.data.length] : [b, 0];
   }
   function caret(b, a, z, c) {  // elige de a en b a z en c (o en b; o pone el cursor) y lo trae a la vista
+    picked = null;
     var p = spot(b, a, z !== undefined && (c || z !== a)), q = spot(c || b, z === undefined ? a : z), r = document.createRange();
     r.setStart(p[0], p[1]); r.setEnd(q[0], q[1]);
     sheet.focus(); var s = getSelection(); s.removeAllRanges(); s.addRange(r);
