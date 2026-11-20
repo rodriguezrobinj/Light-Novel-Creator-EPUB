@@ -4409,7 +4409,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
 
     tmp = partial_path(out_path)
     try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        # la vista previa sin comprimir: comprimir era más de un tercio de lo que tardaba al escribir
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED if preview else zipfile.ZIP_DEFLATED) as z:
             z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
             z.writestr("META-INF/container.xml", CONTAINER)
             z.writestr("OEBPS/content.opf", BAD_XML.sub("", opf))  # metadatos pegados con controles

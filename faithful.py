@@ -974,7 +974,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
         tmp = convert.partial_path(out_path)
         total, done = len(names) + len(added), 0
         try:
-            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+            # la vista previa sin comprimir: comprimir era más de un tercio de lo que tardaba al escribir
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED if preview else zipfile.ZIP_DEFLATED) as out:
                 out.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
                 for name in names:
                     done += 1
@@ -1001,7 +1002,11 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                             new = convert._shrink(new, limit)
                         out.writestr(name, _same_format(new, data) if new is not data else data)
                     else:
-                        out.writestr(z.getinfo(name), z.read(name))
+                        info = z.getinfo(name)
+                        if preview:  # sin volver a comprimir lo que no cambia: la mitad de lo que tardaba
+                            info = copy.copy(info)
+                            info.compress_type = zipfile.ZIP_STORED
+                        out.writestr(info, z.read(name))
                 for path, data in added.items():
                     done += 1
                     if progress:
