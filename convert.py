@@ -8,6 +8,7 @@ import functools
 import hashlib
 import html
 import io
+import math
 import os
 import posixpath
 import re
@@ -3414,6 +3415,7 @@ hr.brk { border: 0; border-top: 1px solid #999999; width: 33%; margin: 1.2em aut
 div.brk-gap { height: 1.5em; }
 div.brk-img { text-align: center; margin: 1em 0; }
 div.brk-img img { height: 1.4em; }
+svg.brk-icono { vertical-align: middle; max-width: 80%; }
 h1 + p, h2 + p, p.brk + p, hr.brk + p, div.brk-gap + p, div.brk-img + p, div.img + p { text-indent: 0; }
 div.img { text-align: center; margin: 0; page-break-before: always; page-break-after: always; }
 div.img img { max-width: 100%; max-height: 95vh; }
@@ -3507,8 +3509,9 @@ p.brk { font-size: 1.2em; }
 ORIGINAL = "Original"  # estilo de un EPUB de entrada (faithful): su CSS tal cual
 SEPARATORS = {"Novela ligera": "❖"}  # separador de escena; el resto usa "* * *"
 # En la ventana, desplegable "Separador"; editable: un texto que no es de la lista se usa tal cual (_separator)
-SEPARATOR_CHOICES = ["Según el estilo", "Original del PDF", "* * *", "❖", "✦", "⁂", "◆ ◆ ◆", "※ ・ ※ ・ ※", "~",
-                     "Línea", "Espacio en blanco"]
+# «Icono del original»: el adorno dibujado, como silueta SVG del color del texto; «Icono propio»: una imagen elegida
+SEPARATOR_CHOICES = ["Según el estilo", "Original del PDF", "Icono del original", "Icono propio", "* * *", "❖", "✦",
+                     "⁂", "◆ ◆ ◆", "※ ・ ※ ・ ※", "~", "Línea", "Espacio en blanco"]
 CHAPTER_NUMBER = re.compile(  # "Capítulo 3: Nombre" -> número y nombre, para el inicio de capítulo
     r"((?:cap[ií]tulo|chapter|pr[oó]logo|prologue|ep[ií]logo|epilogue|interludio|interlude|parte|part"
     r"|historia (?:paralela|adicional|corta))(?: [\w.]+)?)\s*[:.\-–—]\s*(.+)", re.I)
@@ -3582,9 +3585,135 @@ def _kepub(xhtml):
     return body.replace("\n</body>", "\n</div></div>\n</body>", 1)
 
 
-def _separator(block, index, style, choice, images):
+ICON_HEIGHT = 1.3  # em: alto de un separador hecho icono
+
+
+@functools.lru_cache(maxsize=64)  # el mismo adorno se repite en todo el libro
+def trace_svg(data, size=96):
+    """Silueta vectorial de un adorno (separador dibujado o imagen propia, PNG o JPG): sin el fondo (transparente o
+    el color de las esquinas), recortada y de un solo color, currentColor (el del texto, también en el modo oscuro
+    del lector). Cada borde entre la figura y el fondo se recorre como un polígono (los huecos van con evenodd),
+    sin escalones (por los puntos medios) y simplificado. "" si la imagen no se lee o no hay figura."""
+    try:
+        pix = pymupdf.Pixmap(data)
+        if pix.colorspace and pix.colorspace.n not in (1, 3):  # CMYK, paleta
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+        scale = min(1.0, size / max(pix.height, 1), size * 6 / max(pix.width, 1))
+        if scale < 1:
+            pix = pymupdf.Pixmap(pix, max(1, round(pix.width * scale)), max(1, round(pix.height * scale)), None)
+    except Exception:
+        return ""
+    w, h, n, samples = pix.width, pix.height, pix.n, pix.samples
+    color = n - (1 if pix.alpha else 0)
+
+    def lum(i):
+        return samples[i] if color == 1 else (samples[i] * 299 + samples[i + 1] * 587 + samples[i + 2] * 114) // 1000
+    alpha = [samples[i * n + n - 1] for i in range(w * h)] if pix.alpha else None
+    if alpha and min(alpha) < 128:  # PNG con transparencia: la figura es lo opaco
+        fg = [a >= 128 for a in alpha]
+    else:  # el fondo, el de las esquinas; la figura, lo que se aparta de él
+        corners = sorted(lum(i * n) for i in (0, w - 1, (h - 1) * w, h * w - 1))
+        back = (corners[1] + corners[2]) // 2
+        fg = [abs(lum(i * n) - back) > 64 for i in range(w * h)]
+    if not any(fg):
+        return ""
+    xs = [i % w for i, on in enumerate(fg) if on]
+    ys = [i // w for i, on in enumerate(fg) if on]
+    x0, y0, x1, y1 = min(xs), min(ys), max(xs) + 1, max(ys) + 1
+
+    def on(x, y):
+        return x0 <= x < x1 and y0 <= y < y1 and fg[y * w + x]
+    # bordes con la figura a la derecha (de arriba abajo en pantalla: en el sentido de las agujas del reloj)
+    out = collections.defaultdict(list)
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            if not on(x, y):
+                continue
+            if not on(x, y - 1):
+                out[(x, y)].append((x + 1, y))
+            if not on(x + 1, y):
+                out[(x + 1, y)].append((x + 1, y + 1))
+            if not on(x, y + 1):
+                out[(x + 1, y + 1)].append((x, y + 1))
+            if not on(x - 1, y):
+                out[(x, y + 1)].append((x, y))
+    paths = []
+    while out:
+        start = next(iter(out))
+        loop, here, came = [start], start, None
+        while True:
+            ends = out[here]
+            if came and len(ends) > 1:  # dos figuras que se tocan en una esquina: girar a la derecha, cada una aparte
+                dx, dy = here[0] - came[0], here[1] - came[1]
+                right = (here[0] - dy, here[1] + dx)
+                nxt = right if right in ends else ends[0]
+            else:
+                nxt = ends[0]
+            ends.remove(nxt)
+            if not ends:
+                del out[here]
+            came, here = here, nxt
+            if here == start:
+                break
+            loop.append(here)
+        corners = [p for i, p in enumerate(loop)  # sin los puntos de en medio de un lado recto
+                   if (loop[i - 1][0] - p[0]) * (loop[(i + 1) % len(loop)][1] - p[1])
+                   != (loop[i - 1][1] - p[1]) * (loop[(i + 1) % len(loop)][0] - p[0])]
+        if len(corners) < 3:
+            continue
+        mids = [((a[0] + b[0]) / 2 - x0, (a[1] + b[1]) / 2 - y0)  # por los puntos medios: sin escalones
+                for a, b in zip(corners, corners[1:] + corners[:1])]
+        points = _simplify(mids + mids[:1], 0.45)[:-1]
+        if len(points) >= 3:
+            paths.append("M" + "L".join(f"{_num(x)} {_num(y)}" for x, y in points) + "Z")
+    if not paths:
+        return ""
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {x1 - x0} {y1 - y0}">'
+            f'<path fill="currentColor" fill-rule="evenodd" d="{"".join(paths)}"/></svg>')
+
+
+def _num(v):
+    return f"{v:.1f}".rstrip("0").rstrip(".")
+
+
+def _simplify(points, tolerance):
+    """Ramer-Douglas-Peucker: los puntos que se apartan más de tolerance de la recta entre sus vecinos."""
+    if len(points) < 3:
+        return points
+    (ax, ay), (bx, by) = points[0], points[-1]
+    length = math.hypot(bx - ax, by - ay)
+    far, at = -1.0, 0
+    for i in range(1, len(points) - 1):
+        px, py = points[i]
+        d = (abs((bx - ax) * (ay - py) - (ax - px) * (by - ay)) / length if length
+             else math.hypot(px - ax, py - ay))
+        if d > far:
+            far, at = d, i
+    if far <= tolerance:
+        return [points[0], points[-1]]
+    return _simplify(points[:at + 1], tolerance)[:-1] + _simplify(points[at:], tolerance)
+
+
+def icon_html(svg, alt="* * *"):
+    """El SVG de trace_svg dentro del texto, ICON_HEIGHT de alto y su ancho en proporción."""
+    m = re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg)
+    width = ICON_HEIGHT * float(m[1]) / max(float(m[2]), 1) if m else ICON_HEIGHT
+    return svg.replace("<svg ", f'<svg class="brk-icono" width="{width:.2f}em" height="{ICON_HEIGHT}em" '
+                                f'role="img" aria-label="{html.escape(alt)}" ', 1)
+
+
+def _separator(block, index, style, choice, images, icon=""):
     """XHTML de un separador de escena según la opción elegida (SEPARATOR_CHOICES). Con "Original del
-    PDF" usa el adorno dibujado o el texto que traía; si no trae nada, el del estilo."""
+    PDF" usa el adorno dibujado o el texto que traía; si no trae nada, el del estilo. "Icono del original": el
+    adorno dibujado como icono (trace_svg); "Icono propio": icon (el SVG de la imagen elegida)."""
+    if choice == "Icono propio":
+        if icon:
+            return f'<p class="brk">{icon_html(icon)}</p>'
+        choice = "Según el estilo"
+    if choice == "Icono del original":
+        if block.image and (svg := trace_svg(block.image)):
+            return f'<p class="brk">{icon_html(svg)}</p>'
+        choice = "Original del PDF"
     if choice == "Original del PDF":
         if block.image:
             ext = "png" if block.image[:4] == b"\x89PNG" else "jpg"
@@ -3858,7 +3987,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
                breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
                progress=None, fit=None, whole_words=False, css_extra="", synopsis=False, title_image=None, logo="",
-               endnotes=False, note_style="1", heading_font="", box_style="Sencillo", horizontal=True, preview=False):
+               endnotes=False, note_style="1", heading_font="", box_style="Sencillo", horizontal=True, preview=False,
+               separator_icon=""):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     horizontal: un EPUB japonés en vertical sale de izquierda a derecha (faithful.HORIZONTAL_CSS).
     preview: para la vista previa de una sección: un EPUB de entrada se copia sin las imágenes que no usa.
@@ -3888,7 +4018,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     title_image, su image_key; título, volumen, créditos con furigana, enlaces y fechas). logo: ruta de una
     imagen PNG/JPG, en su propia página tras la de título. endnotes: todas las notas en «Notas», al final del libro.
     note_style: una de NOTE_STYLES. heading_font: una de HEADING_FONTS o la ruta de un .ttf/.otf, para los títulos.
-    box_style: uno de BOX_STYLES, el aspecto de los recuadros.
+    box_style: uno de BOX_STYLES, el aspecto de los recuadros. separator_icon: el SVG (trace_svg) del separador
+    «Icono propio».
     Un libro leído de un EPUB (book.origin) se escribe parcheando el original (faithful.write_faithful), salvo en
     EPUB 2, que no puede llevar su HTML de EPUB 3 y se rehace."""
     if book.origin and Path(book.origin).is_file():
@@ -4005,7 +4136,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     sized = _fit_style(data, fit) if fit else ""
                     parts.append(f'<div class="img"><img src="{src}" alt="{html.escape(alt)}"{sized}/></div>')
             elif b.kind == "break" or k in breaks:
-                parts.append(_separator(b if b.kind == "break" else Block("break", b.page), k, style, separator, images))
+                parts.append(_separator(b if b.kind == "break" else Block("break", b.page), k, style, separator, images,
+                                        separator_icon))
             elif b.kind == "heading":  # título que no es capítulo: subtítulo ("El lado de la bruja")
                 level = b.tag if b.tag in HEADING_TAGS - {"h1"} else "h2"  # «Título 3» del editor: <h3>
                 parts.append(f'{mark()}<{level} id="t{k}">{NOTE.sub(noteref, fix(b.html))}</{level}>')  # fuera: el título queda limpio
@@ -4083,7 +4215,9 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         f'<item id="cover-image" href="cover.jpg" media-type="image/jpeg"{cover_props}/>',
         '<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>',
     ]
-    manifest += [f'<item id="s{k}" href="{name}" media-type="application/xhtml+xml"/>' for k, name in enumerate(files)]
+    # un separador hecho icono es SVG dentro del XHTML: EPUB 3 pide la propiedad svg en su archivo
+    manifest += [f'<item id="s{k}" href="{name}" media-type="application/xhtml+xml"'
+                 f'{" properties=\"svg\"" if not epub2 and "<svg" in files[name] else ""}/>' for k, name in enumerate(files)]
     manifest += [f'<item id="i{k}" href="{src}" media-type="image/{"png" if src.endswith(".png") else "jpeg"}"/>'
                  for k, src in enumerate(images)]
     fonts = {}  # ruta en el EPUB -> archivo de la carpeta fonts

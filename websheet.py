@@ -34,10 +34,81 @@ SHEET_CSS = """
 html { background: #ffffff; } body { margin: 24px 36px !important; }
 """
 
+# «Mostrar cambios» en Chromium (hoja web y pestaña EPUB), como editor.mark_changes: lo puesto con el resaltado
+# lnc-change y lo quitado en un <span class="lnc-del"> vacío, que lo pinta tachado con ::after (el texto del
+# párrafo no cambia). key: cómo se comparan las palabras (en el EPUB, sin la tipografía: comillas y rayas)
+DIFF_JS = r"""
+window.lncDiff = function (a, b, key) {  // [['add', posición en b, largo] | ['del', posición en b, texto]]
+  key = key || function (t) { return t; };
+  var x = a.match(/\S+|\s+/g) || [], y = b.match(/\S+|\s+/g) || [], n = x.length, m = y.length, L = [], i, j;
+  for (i = 0; i <= n; i++) L.push(new Int32Array(m + 1));
+  for (i = n - 1; i >= 0; i--) for (j = m - 1; j >= 0; j--)
+    L[i][j] = key(x[i]) === key(y[j]) ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  var out = [], pos = 0, last = null;
+  for (i = 0, j = 0; i < n || j < m;) {
+    if (i < n && j < m && key(x[i]) === key(y[j])) { pos += y[j].length; i++; j++; last = null; }
+    else if (i < n && (j >= m || L[i + 1][j] >= L[i][j + 1])) {  // lo quitado antes que lo puesto en su sitio
+      if (x[i].trim()) {
+        if (last && last[0] === 'del' && last[1] === pos) last[2] += ' ' + x[i]; else out.push(last = ['del', pos, x[i]]);
+      }
+      i++;
+    } else {
+      if (last && last[0] === 'add') last[2] += y[j].length; else out.push(last = ['add', pos, y[j].length]);
+      pos += y[j].length; j++;
+    }
+  }
+  return out;
+};
+// Pinta en el elemento b sus cambios frente a before (null: todo es nuevo) y devuelve los Range de lo puesto
+window.lncPaintDiff = function (b, before, key) {
+  function point(pos) {  // (nodo de texto, posición) del carácter pos de b
+    var w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n, from = 0, last = null;
+    while ((n = w.nextNode())) { if (pos <= from + n.data.length) return [n, pos - from]; from += n.data.length; last = n; }
+    return last ? [last, last.data.length] : null;
+  }
+  var all = document.createRange(); all.selectNodeContents(b);
+  if (before === null || before === undefined) return [all];
+  var ops = lncDiff(before, b.textContent, key), added = [];
+  ops.forEach(function (op) {
+    if (op[0] !== 'add') return;
+    var a = point(op[1]), z = point(op[1] + op[2]);
+    if (a && z) { var r = document.createRange(); r.setStart(a[0], a[1]); r.setEnd(z[0], z[1]); added.push(r); }
+  });
+  ops.filter(function (op) { return op[0] === 'del'; }).reverse().forEach(function (op) {  // de atrás adelante
+    var p = point(op[1]), mark = document.createElement('span');
+    mark.className = 'lnc-del'; mark.setAttribute('contenteditable', 'false'); mark.setAttribute('data-del', op[2]);
+    if (!p) { b.appendChild(mark); return; }
+    // sin vaciar el nodo de texto que recuerda el deshacer de Chromium: en un borde no se parte, y al partir se
+    // queda con la primera mitad (normalize la vuelve a juntar en él)
+    var node = p[0], at = p[1];
+    if (at > 0 && at < node.data.length) node.splitText(at);
+    node.parentNode.insertBefore(mark, at === 0 ? node : node.nextSibling);
+  });
+  return added;
+};
+window.lncText = function (code) {  // texto del HTML de un párrafo, como lo enseña Chromium (null sigue null)
+  if (code === null || code === undefined) return null;
+  // en un documento aparte y como HTML: en la página (XHTML), un fallo de XML sacaba «parsererror» encima de todo
+  return new DOMParser().parseFromString('<body>' + code + '</body>', 'text/html').body.textContent;
+};
+window.lncClearDiff = function (root) {  // quita las marcas de lo quitado y junta el texto que partieron
+  var marks = root.querySelectorAll('.lnc-del'), parents = new Set();
+  marks.forEach(function (m) { parents.add(m.parentNode); m.remove(); });
+  parents.forEach(function (p) { p.normalize(); });
+};
+"""
+DEL_CSS = (".lnc-del::after { content: attr(data-del); color: %s; text-decoration: line-through; "
+           "margin: 0 0.2em; font-style: normal; text-indent: 0; }")
+
 # Funciones de la hoja: estado para la cinta, órdenes de formato, limpieza al pegar y atajos de Word en español
-SHEET_JS = r"""
+SHEET_JS = DIFF_JS + r"""
 (function () {
   var sheet = document.getElementById('lnc-sheet');
+  // Lo quitado («Mostrar cambios») son nodos en la hoja: fuera antes de cada edición, que el deshacer de Chromium
+  // no los vea; el repintado tras escribir los vuelve a poner
+  var exec = document.execCommand.bind(document);
+  document.execCommand = function () { lncClearDiff(sheet); return exec.apply(null, arguments); };
+  sheet.addEventListener('beforeinput', function () { lncClearDiff(sheet); }, true);
   document.execCommand('defaultParagraphSeparator', false, 'p');
   document.execCommand('styleWithCSS', false, false);
   function block(node) {  // el párrafo (hijo de la hoja) donde está node
@@ -234,21 +305,26 @@ SHEET_JS = r"""
       var m = lnc.marks, d = JSON.parse(data);
       m.spell = new Set(d.spell); m.issues = d.issues; m.show = d.show; m.colors = d.colors;
       m.changed = new Set(d.changed.map(function (i) { return sheet.children[i]; }));
+      // el texto de antes de cada párrafo, por su sitio al cargar (null: nuevo), para pintar lo puesto y lo quitado
+      m.before = new Map();
+      (d.before || []).forEach(function (t, i) { if (sheet.children[i]) m.before.set(sheet.children[i], lncText(t)); });
       var css = document.getElementById('lnc-marks') || document.head.appendChild(document.createElement('style'));
       css.id = 'lnc-marks';
-      css.textContent = '::highlight(lnc-spell){text-decoration: underline wavy ' + d.colors.spell + ';}' +
+      css.textContent = d.del_css + '::highlight(lnc-spell){text-decoration: underline wavy ' + d.colors.spell + ';}' +
         '::highlight(lnc-change){text-decoration: underline ' + d.colors.change + '; color: ' + d.colors.change + ';}' +
         d.levels.map(function (c, n) { return '::highlight(lnc-issue-' + n + '){text-decoration: underline wavy ' + c + ';}'; }).join('');
       if (!lnc.orig) {  // cómo era cada párrafo al cargar: el que cambia pierde sus avisos y es un cambio
         lnc.orig = new WeakMap();
-        Array.prototype.forEach.call(sheet.children, function (b) { lnc.orig.set(b, b.innerHTML); });
+        Array.prototype.forEach.call(sheet.children, function (b) { lnc.orig.set(b, lnc.inner(b)); });
         lnc.count = sheet.children.length;
       }
       lnc.paint();
     },
     setSpell: function (words) { lnc.marks.spell = new Set(JSON.parse(words)); lnc.paint(); },
     showChanges: function (on) { lnc.marks.show = on; lnc.paint(); },
-    edited: function (b) { return lnc.marks.changed.has(b) || !lnc.orig || !lnc.orig.has(b) || lnc.orig.get(b) !== b.innerHTML; },
+    edited: function (b) { return lnc.marks.changed.has(b) || !lnc.orig || !lnc.orig.has(b) || lnc.orig.get(b) !== lnc.inner(b); },
+    // el HTML del párrafo sin las marcas de lo quitado (en XHTML, con xmlns y quizá como <span …/>)
+    inner: function (b) { return b.innerHTML.replace(/<span\b[^>]*\bclass="lnc-del"[^>]*?(?:\/>|><\/span>)/g, ''); },
     ranges: function (b, text, near) {  // Range de text en el párrafo b, la aparición más cercana a near
       var nodes = [], all = '', w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n;
       while ((n = w.nextNode())) { nodes.push([n, all.length]); all += n.data; }
@@ -265,9 +341,13 @@ SHEET_JS = r"""
       if (!window.CSS || !CSS.highlights) return;
       var m = lnc.marks, spell = new Highlight(), change = new Highlight(), levels = {};
       lnc.found = [];  // [{id, range}] de los avisos pintados: para el clic derecho y F8
+      lncClearDiff(sheet);
       Array.prototype.forEach.call(sheet.children, function (b, i) {
         if (b.classList.contains('lnc-obj')) return;
-        if (m.show && lnc.edited(b)) { var r = document.createRange(); r.selectNodeContents(b); change.add(r); }
+        if (m.show && lnc.edited(b)) {
+          var before = m.before && m.before.has(b) ? m.before.get(b) : null;
+          if (before !== b.textContent) lncPaintDiff(b, before).forEach(function (r) { change.add(r); });
+        }
         if (m.spell.size) {
           var w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n, re = /[\p{L}\p{M}]+/gu, k;
           while ((n = w.nextNode())) {
@@ -364,7 +444,7 @@ SHEET_JS = r"""
       return JSON.stringify(Array.prototype.map.call(sheet.children, function (b) {
         var attrs = {};
         Array.prototype.forEach.call(b.attributes, function (a) { attrs[a.name] = a.value; });
-        return {tag: b.tagName.toLowerCase(), attrs: attrs, html: b.innerHTML, token: b.getAttribute('data-token') || ''};
+        return {tag: b.tagName.toLowerCase(), attrs: attrs, html: lnc.inner(b), token: b.getAttribute('data-token') || ''};
       }));
     }
   };

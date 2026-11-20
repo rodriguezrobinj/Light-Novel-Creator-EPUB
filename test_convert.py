@@ -981,6 +981,64 @@ def test_superscript_small_caps_and_right_reach_the_epub():
     assert not problems, problems
 
 
+def ornament_png(alpha=False):
+    """Adorno de separador: rombo con un hueco y dos puntos, negro sobre blanco (o sobre transparente)."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=80)
+    page.draw_polyline([(110, 40), (150, 10), (190, 40), (150, 70), (110, 40)], color=(0, 0, 0), fill=(0, 0, 0),
+                       closePath=True)
+    page.draw_circle((150, 40), 10, color=(1, 1, 1), fill=(1, 1, 1))
+    for x in (60, 240):
+        page.draw_circle((x, 40), 8, color=(0, 0, 0), fill=(0, 0, 0))
+    pix = page.get_pixmap(dpi=144)
+    if alpha:  # lo blanco, transparente
+        pix = pymupdf.Pixmap(pix, 1)
+        pix.set_alpha(bytes(255 - pix.samples[i * 4] for i in range(pix.width * pix.height)))
+    return pix.tobytes("png")
+
+
+def test_separator_icon_traces_the_ornament_as_inline_svg():
+    """«Icono del original» y «Icono propio»: el adorno (o la imagen elegida) sin su fondo, recortado y trazado como
+    silueta SVG de currentColor (el color del texto, también en modo oscuro), con su hueco (evenodd). Va dentro del
+    XHTML con la propiedad svg en el manifiesto, también en la copia fiel de un EPUB, y MuPDF lo dibuja."""
+    svg = convert.trace_svg(ornament_png())
+    see_through = convert.trace_svg(ornament_png(alpha=True))
+    blank = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 20), False)
+    blank.clear_with(255)
+    B = convert.Block
+    book = convert.Book("Prueba", "Autor", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Antes."),
+                                                 B("break", 1, "", image=ornament_png()), B("p", 1, "Después.")], [0])
+    out = TMP / "icono del original.epub"
+    convert.write_epub(book, [(0, "Capítulo 1")], out, separator="Icono del original")
+    with zipfile.ZipFile(out) as z:
+        opf = z.read("OEBPS/content.opf").decode()
+        chapter = next(z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml") and "Antes" in z.read(n).decode())
+    with pymupdf.open(out) as doc:
+        page = next(p for p in doc if "Antes" in p.get_text())
+        above, below = page.search_for("Antes.")[0], page.search_for("Después.")[0]
+        between = page.get_pixmap(clip=pymupdf.Rect(0, above.y1 + 1, page.rect.width, below.y0 - 1))
+        drawn = min(between.samples) < 100  # algo oscuro entre los dos párrafos: el icono
+    problems = convert.check_epub(out)
+    # «Icono propio» en un EPUB de entrada: su separador «※ ・ ※» pasa a ser el icono
+    src = sigil_epub(TMP / "Sigil icono.epub")
+    epub = convert.analyze(src)
+    own = TMP / "Sigil icono (LNC).epub"
+    convert.write_epub(epub, [(c, epub.blocks[c].title) for c in epub.candidates], own, style=convert.ORIGINAL,
+                       separator="Icono propio", separator_icon=svg)
+    with zipfile.ZipFile(own) as z:
+        own_opf = z.read("OEBPS/content.opf").decode()
+        own_chapter = z.read("OEBPS/Text/capitulo01.xhtml").decode()
+    assert svg.startswith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ') and 'fill="currentColor"' in svg
+    assert svg.count("M") == 4 and 'fill-rule="evenodd"' in svg, svg[:300]  # rombo, su hueco y los dos puntos
+    width, height = map(float, re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg).groups())
+    assert 220 < width < 250 and 68 < height < 80, (width, height)  # recortado a la figura (144 ppp: x2)
+    assert see_through.count("M") == 4 and convert.trace_svg(blank.tobytes("png")) == "" and convert.trace_svg(b"x") == ""
+    assert '<svg class="brk-icono"' in chapter and 'role="img"' in chapter, chapter
+    assert re.search(r'<item [^>]*properties="svg"', opf) and drawn and not problems, (opf, drawn, problems)
+    assert '<svg class="brk-icono"' in own_chapter and "※" not in own_chapter, own_chapter
+    assert re.search(r'<item [^>]*href="Text/capitulo01.xhtml"[^>]*properties="svg"', own_opf), own_opf
+
+
 def test_separator_options():
     blocks = [convert.Block("heading", 1, "Cap 1"), convert.Block("p", 1, "Uno."),
               convert.Block("break", 1, "☆"), convert.Block("p", 1, "Dos."),
@@ -1936,6 +1994,81 @@ def test_window_preview_shows_the_section_not_the_contents_page():
         names = z.namelist()
     window.close()
     assert "OEBPS/contents.xhtml" not in names, names
+
+
+def test_window_own_icon_separator_from_an_image():
+    """«Icono propio» en el desplegable «Separador»: pide una imagen y la hace icono, que sale en la vista previa y se
+    guarda con la revisión. Cancelar sin icono vuelve al separador de antes; una imagen sin figura lo avisa."""
+    import app
+    root, window = visible_window()
+    image, blank = TMP / "mi separador.png", TMP / "en blanco.png"
+    image.write_bytes(ornament_png())
+    white = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 20), False)
+    white.clear_with(255)
+    blank.write_bytes(white.tobytes("png"))
+    picks, warned = [str(blank), "", str(image)], []
+    originals = app.filedialog.askopenfilename, app.messagebox.showwarning
+    app.filedialog.askopenfilename = lambda **kwargs: picks.pop(0)
+    app.messagebox.showwarning = lambda title, message, **kwargs: warned.append(message)
+    box = window.separator_box
+    try:
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
+        window.tree.selection_set(first_title(window))
+        index = box.findText("Icono propio")
+        for _ in range(2):  # una imagen en blanco (aviso) y luego cancelar: vuelve el de antes
+            box.setCurrentIndex(index)
+            box.activated.emit(index)
+            root.update()
+        back = window.separator_var.get()
+        box.setCurrentIndex(index)
+        box.activated.emit(index)
+        root.update()
+        chosen, icon = window.separator_var.get(), window.separator_icon_var.get()
+        preview = epub_text(window.preview_path)
+        state = window.review_state()
+    finally:
+        app.filedialog.askopenfilename, app.messagebox.showwarning = originals
+        window.close()
+    assert len(warned) == 1 and "figura" in warned[0] and back == "Según el estilo", (warned, back)
+    assert chosen == "Icono propio" and icon.startswith("<svg") and 'class="brk-icono"' in preview, (chosen, icon[:60])
+    assert state["separator_icon"] == icon
+
+
+def test_editor_separator_menu_turns_separators_into_icons():
+    """Editor, Insertar › «Separador ▾»: «Separadores del libro como icono» pone la opción «Icono del original» del
+    libro, e «Icono propio desde una imagen…» la de la imagen elegida; el primero sigue insertando un separador."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos.")], [0])
+    image = TMP / "icono editor.png"
+    image.write_bytes(ornament_png())
+    original = app.filedialog.askopenfilename
+    app.filedialog.askopenfilename = lambda **kwargs: str(image)
+    try:
+        actions = {a.text(): a for a in editor.break_btn.menu().actions() if a.text()}
+        actions["Separadores del libro como icono"].trigger()
+        root.update()
+        book_icon = window.separator_var.get()
+        actions["Icono propio desde una imagen…"].trigger()
+        root.update()
+        own, icon = window.separator_var.get(), window.separator_icon_var.get()
+        editor.sheet.setTextCursor(QTextCursor(editor.sheet.document().findBlockByNumber(1)))
+        actions["Separador de escena"].trigger()
+        root.update()
+        text = editor_dump(editor)
+    finally:
+        app.filedialog.askopenfilename = original
+        editor.win.done(0)
+        window.close()
+    assert book_icon == "Icono del original" and own == "Icono propio" and icon.startswith("<svg"), (book_icon, own)
+    assert "* * *" in text, text
+
+
+def editor_dump(editor):
+    import editor as ed
+    return ed.dump(editor.sheet.document())
 
 
 def test_window_separator_reaches_preview_and_epub():
@@ -5788,9 +5921,72 @@ def test_editor_navigation_panel():
     assert remembered is True and shown_again and window.settings["editor_nav"] is False
 
 
+def test_code_completion_suggestions():
+    """Autocompletado de «Código HTML», como VS Code: etiquetas tras «<», la que cierra tras «</», atributos que la
+    etiqueta aún no tiene, clases del CSS en class="…", entidades y símbolos tras «&», abreviaturas tipo Emmet y la
+    etiqueta de cierre tras el «>» de una que abre."""
+    import editor as ed
+    assert ed.complete_at("<sp") == (2, [("<span>", "span", 0)])
+    assert ed.complete_at("<p>Hola <i>x</") == (0, [("</i>", "i>", 0)])
+    assert ed.complete_at('<p class="a" cl')[1] == [] and ed.complete_at("<p cl") == (2, [("class", 'class=""', 1)])
+    cut, found = ed.complete_at('<p class="x no', ["nota", "no-indent", "x", "otra"])
+    assert cut == 2 and [f[0] for f in found] == ["nota", "no-indent"], (cut, found)
+    cut, found = ed.complete_at("Hola &am")
+    assert cut == 3 and ("& ampersand", "&amp;", 0) in found, found
+    assert ("— raya", "—", 0) in ed.complete_at("Ella &")[1]
+    assert ed.complete_at("Texto sin nada") == (0, []) and ed.complete_at('<a href="x') == (0, [])
+    assert ed.expand_abbreviation("p.nota") == (6, '<p class="nota"></p>', 4)
+    assert ed.expand_abbreviation("Hola br") == (2, "<br/>", 0)
+    assert ed.expand_abbreviation('<p>Hola span.sc#n1') == (10, '<span id="n1" class="sc"></span>', 7)
+    assert ed.expand_abbreviation("<p cla") is None and ed.expand_abbreviation("Holax") is None
+    assert ed.closing_tag('<p class="x">') == "</p>" and ed.closing_tag("<br>") == ""
+    assert ed.closing_tag("<img src='a'/>") == "" and ed.closing_tag("texto>") == ""
+
+
+def test_editor_code_view_autocompletes():
+    """En «Código HTML»: «<i» y Intro eligen la etiqueta, «>» pone su cierre detrás del cursor y «b.sc» + Tab sale
+    como <b class="sc"></b>, con el cursor dentro. Lo escrito vuelve a la hoja como cursiva y negrita."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "El gato duerme.")], [0])
+    editor.toggle_code()
+    code = editor.code
+    block = code.document().findBlockByNumber(1)
+    cursor = QTextCursor(block)
+    cursor.setPosition(block.position() + block.text().index("</p>"))
+    code.setTextCursor(cursor)
+    code.setFocus()
+    QTest.keyClicks(code, " <i")
+    root.update()
+    popup = code.completer.popup().isVisible()
+    first = code.completer.model().item(0).text() if code.completer.model().rowCount() else ""
+    QTest.keyClick(code.completer.popup(), Qt.Key.Key_Return)
+    root.update()
+    QTest.keyClicks(code, ">")
+    QTest.keyClicks(code, "ya")
+    end = QTextCursor(code.textCursor())
+    end.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    end.setPosition(end.position() - len("</p>"))
+    code.setTextCursor(end)
+    QTest.keyClicks(code, " b.sc")
+    QTest.keyClick(code, Qt.Key.Key_Tab)
+    QTest.keyClicks(code, "fin")
+    line = code.document().findBlockByNumber(1).text()
+    editor.toggle_code()
+    shown = editor.sheet.document().findBlockByNumber(1).text()
+    editor.win.done(0)
+    window.close()
+    assert popup and first == "<i>", (popup, first)
+    assert line == '<p>El gato duerme. <i>ya</i> <b class="sc">fin</b></p>', line
+    assert shown.startswith("El gato duerme. ya fin"), shown
+
+
 def test_editor_shows_changes():
-    """«Mostrar cambios»: en el párrafo cambiado se subraya lo puesto («perro») y la barra muestra el original con
-    lo quitado tachado y lo puesto subrayado; en un párrafo sin cambios la barra se oculta. Apagarlo quita todo."""
+    """«Mostrar cambios», como Word con todas las marcas: en el párrafo cambiado se subraya lo puesto («perro») y lo
+    quitado («gato») sale tachado en su sitio, en un hueco abierto tras la letra anterior; igual en «Código HTML».
+    Sin barra aparte. Apagarlo quita todo."""
     from PySide6.QtGui import QTextCharFormat, QTextCursor
     import editor as ed
 
@@ -5812,20 +6008,33 @@ def test_editor_shows_changes():
                    and r.format.underlineStyle() == QTextCharFormat.UnderlineStyle.SingleUnderline
                    for r in layout.formats())
 
+    def gap(block, at):  # espaciado abierto tras la letra at
+        return any(r.start <= at < r.start + r.length and r.format.fontLetterSpacing() > 0
+                   for r in block.layout().formats())
+
+    root.update()
     marked = underlined(block, 4) and not underlined(block, 0) and not underlined(block, 12)
-    shown = not editor.diff_frame.isHidden()
-    bar = editor.diff_label.text()
-    sheet.setTextCursor(QTextCursor(sheet.document().findBlockByNumber(2)))
-    editor.update_diff()
-    hidden_clean = editor.diff_frame.isHidden()
+    removed = [(pos, old) for pos, old, *_ in block.userData().gone] if isinstance(block.userData(), ed.Changes) else []
+    hole = gap(block, 2) and not gap(block, 8)
+    clean = not isinstance(sheet.document().findBlockByNumber(2).userData(), ed.Changes) or \
+        not sheet.document().findBlockByNumber(2).userData().gone
+    bar = hasattr(editor, "diff_frame")
+    editor.toggle_code()  # «Código HTML»: lo mismo frente a la línea de antes
+    code = editor.code.document().findBlockByNumber(1)
+    code_removed = [old for _, old, *_ in code.userData().gone] if isinstance(code.userData(), ed.Changes) else []
+    code_marked = underlined(code, code.text().index("perro"))
+    editor.toggle_code()
     editor.show_changes_action.setChecked(False)
-    gone = not underlined(block, 4)
+    gone = not underlined(block, 4) and not gap(block, 2)
     editor.win.done(0)
     window.close()
     assert ed.added_spans("El gato duerme.", "El perro duerme.") == [(3, 5)]
-    assert marked and shown, (marked, shown, bar)
-    assert ">gato</s>" in bar and ">perro</u>" in bar and "negro" in bar and "<i>" not in bar, bar
-    assert hidden_clean and gone, (hidden_clean, gone)
+    assert ed.removed_spans("El gato duerme.", "El perro duerme.") == [(3, "gato")]
+    assert ed.removed_spans("Uno dos tres.", "Uno tres.") == [(4, "dos")]
+    assert marked and removed == [(3, "gato")] and hole, (marked, removed, hole)
+    assert clean and not bar, (clean, bar)
+    assert code_removed == ["gato"] and code_marked, (code_removed, code_marked)
+    assert gone
 
 
 def test_editor_sheet_changes_in_a_loaded_empty_paragraph():
@@ -11133,6 +11342,56 @@ def test_editor_epub_separator_plain_and_boxed_in_original():
     assert box is not None, box
 
 
+def test_editor_changes_inline_in_epub_tab_and_web_sheet():
+    """«Mostrar cambios» en Chromium: quitado «Segundo» y puesto «Primer», la pestaña EPUB y la hoja web enseñan lo
+    quitado tachado en su sitio y lo puesto subrayado. En la hoja web lo quitado no es texto: escribir y deshacer
+    (Ctrl+Z de Chromium) dejan el párrafo como estaba, y lo que vuelve a la hoja no lleva sus marcas."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    dels = "Array.from(document.querySelectorAll('.lnc-del')).map(e => e.getAttribute('data-del')).join('|')"
+    added = "Array.from(CSS.highlights.get('lnc-change') || []).map(r => r.toString()).join('|')"
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil cambios.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = next(c for c in window.book.candidates if window.book.blocks[c].title.startswith("Capítulo 1"))
+            window.settings["editor_web"] = False
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            block = next(b for b in ed.blocks() if b.text().startswith("Segundo"))
+            c = QTextCursor(block)
+            c.movePosition(QTextCursor.MoveOperation.EndOfWord, QTextCursor.MoveMode.KeepAnchor)
+            c.insertText("Primer")
+            ed.show_changes_action.setChecked(True)
+            ed.side_tabs.setCurrentIndex(1)
+            epub_del = wait_for(lambda: "Segundo" in (js(ed.side_web, dels) or ""), 15)
+            epub_add = "Primer" in (js(ed.side_web, added) or "")
+            ed.side_tabs.setCurrentIndex(2)
+            ed.activate_web()
+            wait_for(lambda: ed.web_on and ed.web.loaded)
+            web_del = wait_for(lambda: "Segundo" in (js(ed.web, dels) or ""), 15)
+            web_add = "Primer" in (js(ed.web, added) or "")
+            plain = js(ed.web, "Array.from(document.querySelectorAll('#lnc-sheet p')).find(p => p.textContent"
+                               ".startsWith('Primer')).textContent")
+            # escribir y deshacer en Chromium con las marcas puestas
+            js(ed.web, "(function(){var p=Array.from(document.querySelectorAll('#lnc-sheet p')).find(e=>e.textContent"
+                       ".startsWith('Primer'));var r=document.createRange();r.selectNodeContents(p);r.collapse(false);"
+                       "var s=getSelection();s.removeAllRanges();s.addRange(r);document.execCommand('insertText',false,"
+                       "' X');return true;})()")
+            wait_for(lambda: "Segundo" in (js(ed.web, dels) or ""), 5)  # repintado tras escribir
+            js(ed.web, "lnc.undo(false)")
+            undone = js(ed.web, "Array.from(document.querySelectorAll('#lnc-sheet p')).find(p => p.textContent"
+                                ".startsWith('Primer')).textContent")
+            dumped = js(ed.web, "lnc.dump()")
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert epub_del and epub_add, (epub_del, epub_add)
+    assert web_del and web_add and plain == "Primer párrafo & más.", (web_del, web_add, plain)
+    assert undone == "Primer párrafo & más." and "lnc-del" not in dumped, (undone, dumped[:300])
+
+
 def test_websheet_click_on_picture_or_separator_moves_the_cursor():
     """Hoja web: un clic en la ilustración o en el separador (no se escribe en ellos) los hace el párrafo de ahora: la
     banda va a ellos y la hoja de Qt (con ella el original y la pestaña EPUB) también."""
@@ -11542,7 +11801,9 @@ def test_websheet_navigation_changes_bar_and_close_follow_typing():
                 return [group.child(n) for n in range(group.childCount())] if group else []
             listed = wait_for(lambda: any("Escrito ahora" in c.toolTip(0) for c in changes()), 10)
             groups = [ed.nav.topLevelItem(n).text(0) for n in range(ed.nav.topLevelItemCount())]
-            bar = wait_for(lambda: ed.diff_frame.isVisible() and "Escrito" in ed.diff_label.text(), 10)
+            # lo puesto, subrayado en la propia hoja web (no en una barra aparte)
+            bar = wait_for(lambda: "Escrito" in (js(ed.web, "Array.from(CSS.highlights.get('lnc-change') || [])"
+                                                            ".map(r => r.toString()).join('|')") or ""), 10)
             js(ed.web, "(function(){var s=getSelection();var r=document.createRange();r.setStart(document.getElementById("
                        "'lnc-sheet'),0);r.collapse(true);s.removeAllRanges();s.addRange(r);return true;})()")
             ed.nav_go(next(c for c in changes() if "Escrito ahora" in c.toolTip(0)))
@@ -11845,6 +12106,33 @@ def test_faithful_preview_of_a_section_is_light():
     body = body[body.index("<body"):]
     assert "item/image/t2.jpg" not in files and "item/image/kugiri.jpg" in files, files
     assert "<br" not in body.split("kugiri", 1)[0], body[:300]
+
+
+def test_faithful_preview_leaves_out_the_book_index():
+    """Vista previa de una sección de un EPUB con su índice en el spine (linear="no", Date A Live 14): MuPDF lo
+    dibujaba como página tras cada sección, «Índice de contenido» en todas. El EPUB completo lo conserva."""
+    src = sigil_epub(TMP / "Sigil índice.epub")
+    with zipfile.ZipFile(src) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    files["OEBPS/content.opf"] = files["OEBPS/content.opf"].replace(
+        b"\n  </spine>", b'\n    <itemref idref="nav" linear="no"/>\n  </spine>')
+    with zipfile.ZipFile(src, "w") as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    book = convert.analyze(src)
+    k = next(c for c in book.candidates if book.blocks[c].title.startswith("Capítulo 2"))
+    part = convert.Book(book.title, "", book.cover, book.blocks[k:k + 2], [], origin=book.origin)
+    out, whole = TMP / "Sigil índice vista.epub", TMP / "Sigil índice (LNC).epub"
+    convert.write_epub(part, [(0, "Capítulo 2: Héroe")], out, style=convert.ORIGINAL, separator="Original del PDF",
+                       typography=False, contents=False, preview=True)
+    convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], whole, style=convert.ORIGINAL,
+                       separator="Original del PDF", typography=False)
+    with pymupdf.open(out) as doc:
+        text = "".join(page.get_text() for page in doc)
+    with zipfile.ZipFile(whole) as z:
+        opf = z.read("OEBPS/content.opf").decode()
+    assert "Quinto párrafo" in text and "Índice" not in text, text
+    assert 'idref="nav"' in opf, opf
 
 
 def test_page_pixmap_dark_keeps_illustrations():
