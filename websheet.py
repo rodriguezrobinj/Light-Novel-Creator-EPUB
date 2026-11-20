@@ -40,42 +40,66 @@ html { background: #ffffff; } body { margin: 24px 36px !important; }
 DIFF_JS = r"""
 window.lncDiff = function (a, b, key) {  // [['add', posición en b, largo] | ['del', posición en b, texto]]
   key = key || function (t) { return t; };
-  var x = a.match(/\S+|\s+/g) || [], y = b.match(/\S+|\s+/g) || [], n = x.length, m = y.length, L = [], i, j;
+  // las piezas de editor.WORDS: etiquetas, cada letra de chino o japonés, palabras y espacios
+  var re = /<[^<>]*>|[⺀-鿿豈-﫿＀-￯]|[^\s<⺀-鿿豈-﫿＀-￯]+|\s+|</g;
+  var x = a.match(re) || [], y = b.match(re) || [], i, j, pos = 0, out = [], last = null;
+  // lo igual del principio y del final, fuera: una edición toca poco y la tabla de abajo crece con el cuadrado
+  var head = 0;
+  while (head < x.length && head < y.length && key(x[head]) === key(y[head])) { pos += y[head].length; head++; }
+  var tail = 0;
+  while (tail < x.length - head && tail < y.length - head &&
+         key(x[x.length - 1 - tail]) === key(y[y.length - 1 - tail])) tail++;
+  x = x.slice(head, x.length - tail); y = y.slice(head, y.length - tail);
+  var n = x.length, m = y.length, L = [];
   for (i = 0; i <= n; i++) L.push(new Int32Array(m + 1));
   for (i = n - 1; i >= 0; i--) for (j = m - 1; j >= 0; j--)
     L[i][j] = key(x[i]) === key(y[j]) ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
-  var out = [], pos = 0, last = null;
   for (i = 0, j = 0; i < n || j < m;) {
     if (i < n && j < m && key(x[i]) === key(y[j])) { pos += y[j].length; i++; j++; last = null; }
     else if (i < n && (j >= m || L[i + 1][j] >= L[i][j + 1])) {  // lo quitado antes que lo puesto en su sitio
       if (x[i].trim()) {
-        if (last && last[0] === 'del' && last[1] === pos) last[2] += ' ' + x[i]; else out.push(last = ['del', pos, x[i]]);
-      }
+        if (last && last[0] === 'del' && last[1] === pos) last[2] += x[i]; else out.push(last = ['del', pos, x[i]]);
+      } else if (last && last[0] === 'del' && last[1] === pos) last[2] += x[i];
       i++;
     } else {
       if (last && last[0] === 'add') last[2] += y[j].length; else out.push(last = ['add', pos, y[j].length]);
       pos += y[j].length; j++;
     }
   }
+  out.forEach(function (op) { if (op[0] === 'del') op[2] = op[2].trim(); });
   return out;
 };
-// Pinta en el elemento b sus cambios frente a before (null: todo es nuevo) y devuelve los Range de lo puesto
-window.lncPaintDiff = function (b, before, key) {
-  function point(pos) {  // (nodo de texto, posición) del carácter pos de b
+// Pinta los cambios de un grupo de párrafos (els) que vienen de un mismo texto before (null: todos nuevos): uno
+// partido con Intro se compara entero, como editor.group_changes. Lo quitado, marcado en su sitio; devuelve los
+// Range de lo puesto
+window.lncPaintGroup = function (els, before, key) {
+  function point(b, pos) {  // (nodo de texto, posición) del carácter pos de b
     var w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n, from = 0, last = null;
     while ((n = w.nextNode())) { if (pos <= from + n.data.length) return [n, pos - from]; from += n.data.length; last = n; }
     return last ? [last, last.data.length] : null;
   }
-  var all = document.createRange(); all.selectNodeContents(b);
-  if (before === null || before === undefined) return [all];
-  var ops = lncDiff(before, b.textContent, key), added = [];
+  var added = [], texts = els.map(function (e) { return e.textContent; }), starts = [], at = 0;
+  if (before === null || before === undefined) {
+    els.forEach(function (e) { var r = document.createRange(); r.selectNodeContents(e); added.push(r); });
+    return added;
+  }
+  texts.forEach(function (t) { starts.push(at); at += t.length + 1; });
+  var joined = texts.join('\n');
+  if (joined === before) return added;
+  var ops = lncDiff(before, joined, key);
   ops.forEach(function (op) {
     if (op[0] !== 'add') return;
-    var a = point(op[1]), z = point(op[1] + op[2]);
-    if (a && z) { var r = document.createRange(); r.setStart(a[0], a[1]); r.setEnd(z[0], z[1]); added.push(r); }
+    els.forEach(function (e, k) {
+      var a = Math.max(op[1], starts[k]), z = Math.min(op[1] + op[2], starts[k] + texts[k].length);
+      if (z <= a || !joined.slice(a, z).trim()) return;
+      var p = point(e, a - starts[k]), q = point(e, z - starts[k]);
+      if (p && q) { var r = document.createRange(); r.setStart(p[0], p[1]); r.setEnd(q[0], q[1]); added.push(r); }
+    });
   });
-  ops.filter(function (op) { return op[0] === 'del'; }).reverse().forEach(function (op) {  // de atrás adelante
-    var p = point(op[1]), mark = document.createElement('span');
+  ops.filter(function (op) { return op[0] === 'del' && op[2]; }).reverse().forEach(function (op) {  // de atrás adelante
+    var k = els.length - 1;
+    while (k > 0 && op[1] < starts[k]) k--;
+    var b = els[k], p = point(b, Math.min(op[1] - starts[k], texts[k].length)), mark = document.createElement('span');
     mark.className = 'lnc-del'; mark.setAttribute('contenteditable', 'false'); mark.setAttribute('data-del', op[2]);
     if (!p) { b.appendChild(mark); return; }
     // sin vaciar el nodo de texto que recuerda el deshacer de Chromium: en un borde no se parte, y al partir se
@@ -97,6 +121,8 @@ window.lncClearDiff = function (root) {  // quita las marcas de lo quitado y jun
   parents.forEach(function (p) { p.normalize(); });
 };
 """
+
+
 DEL_CSS = (".lnc-del::after { content: attr(data-del); color: %s; text-decoration: line-through; "
            "margin: 0 0.2em; font-style: normal; text-indent: 0; }")
 
@@ -224,6 +250,27 @@ SHEET_JS = DIFF_JS + r"""
     },
     // Dónde estaba cada párrafo al cargar (o al volcar a la hoja de Qt): la hoja de Qt sigue con esas líneas, y así
     // el panel del original y el de navegación encuentran su párrafo aunque se haya escrito uno nuevo antes
+    // La hoja de Qt cambió y aquí solo se mira: cada [i, j, [html…]] cambia los párrafos de i a j (sin j) por esos,
+    // sin recargar la página (tardaba segundos y volvía arriba). Llegan de atrás adelante. false: no se pudo
+    splice: function (ops) {
+      lncClearDiff(sheet);
+      try {
+        ops.forEach(function (op) {
+          var kids = sheet.children, after = kids[op[1]] || null;
+          for (var k = op[1] - 1; k >= op[0]; k--) kids[k].remove();
+          if (!op[2].length) return;
+          var r = document.createRange();
+          r.selectNodeContents(sheet);
+          var frag = r.createContextualFragment(op[2].join(''));
+          Array.prototype.forEach.call(frag.children, function (e) { if (lnc.orig) lnc.orig.set(e, lnc.inner(e)); });
+          sheet.insertBefore(frag, after);
+        });
+      } catch (e) { return false; }
+      lnc.count = sheet.children.length;
+      lnc.rehome();
+      lnc.placeHere(false);
+      return true;
+    },
     rehome: function () { lnc.home = new WeakMap(); Array.prototype.forEach.call(sheet.children, function (b, i) { lnc.home.set(b, i); }); },
     homeOf: function (b) { while (b && !lnc.home.has(b)) b = b.previousElementSibling; return b ? lnc.home.get(b) : 0; },
     goHome: function (n) {  // el cursor al principio del párrafo que estaba en el sitio n
@@ -320,6 +367,13 @@ SHEET_JS = DIFF_JS + r"""
       }
       lnc.paint();
     },
+    setChanges: function (changed, before) {  // solo «Mostrar cambios» (sincronía en vivo): como setMarks
+      var m = lnc.marks;
+      m.changed = new Set(changed.map(function (i) { return sheet.children[i]; }));
+      m.before = new Map();
+      before.forEach(function (t, i) { if (sheet.children[i]) m.before.set(sheet.children[i], lncText(t)); });
+      lnc.paint();
+    },
     setSpell: function (words) { lnc.marks.spell = new Set(JSON.parse(words)); lnc.paint(); },
     showChanges: function (on) { lnc.marks.show = on; lnc.paint(); },
     edited: function (b) { return lnc.marks.changed.has(b) || !lnc.orig || !lnc.orig.has(b) || lnc.orig.get(b) !== lnc.inner(b); },
@@ -342,12 +396,20 @@ SHEET_JS = DIFF_JS + r"""
       var m = lnc.marks, spell = new Highlight(), change = new Highlight(), levels = {};
       lnc.found = [];  // [{id, range}] de los avisos pintados: para el clic derecho y F8
       lncClearDiff(sheet);
+      if (m.show) {  // grupos: un párrafo con su texto de antes y los nuevos que lo siguen (Intro), comparados juntos
+        var groups = [], group = null;
+        Array.prototype.forEach.call(sheet.children, function (b) {
+          if (b.classList.contains('lnc-obj')) { group = null; return; }
+          var before = m.before ? m.before.get(b) : undefined;
+          if (typeof before === 'string' || !group) groups.push(group = {before: typeof before === 'string' ? before : null, els: []});
+          group.els.push(b);
+        });
+        groups.forEach(function (g) {
+          if (g.els.some(lnc.edited)) lncPaintGroup(g.els, g.before).forEach(function (r) { change.add(r); });
+        });
+      }
       Array.prototype.forEach.call(sheet.children, function (b, i) {
         if (b.classList.contains('lnc-obj')) return;
-        if (m.show && lnc.edited(b)) {
-          var before = m.before && m.before.has(b) ? m.before.get(b) : null;
-          if (before !== b.textContent) lncPaintDiff(b, before).forEach(function (r) { change.add(r); });
-        }
         if (m.spell.size) {
           var w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n, re = /[\p{L}\p{M}]+/gu, k;
           while ((n = w.nextNode())) {

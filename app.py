@@ -66,6 +66,7 @@ EXPLORER = str(WINDOWS / "explorer.exe")
 POWERSHELL = str(WINDOWS / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
 
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
+WEB_POLL_MS = 200  # cada cuánto se mira la hoja web mientras se escribe en ella: lo escrito va a las otras vistas
 SEP = "Separador"                                   # título que se escribe como separador de escena
 # Estilo de párrafo de la cinta -> etiqueta en la hoja web
 WEB_TAGS = {"Normal": "p", "Capítulo": "h1", "Subtítulo": "h2", "Título 3": "h3", "Título 4": "h4", "Cita": "blockquote"}
@@ -1219,8 +1220,9 @@ def _data_changes(old, new):
         a, b = old.get(key), new.get(key)
         if a == b or (not a and not b):  # sin valor y vacío son lo mismo para quien lo lee
             continue
-        if key == "description":
-            lines.append([(f"{label}: cambiada", None)])
+        if key in ("description", "separator_icon"):  # un texto largo o un SVG: no se lee entero
+            lines.append([(f"{label}: {'quitado' if not b else 'puesto' if not a else 'cambiado'}"
+                           if key == "separator_icon" else f"{label}: cambiada", None)])
         else:
             lines.append([(f"{label}: ", None), (_shown(key, a), "old"), (" → ", None), (_shown(key, b), "new")])
     images = [sum(1 for e in s.get("edits", []) if e[:1] == ["image"]) for s in (old, new)]
@@ -3086,6 +3088,9 @@ class App:
 
     def add_thumbs(self, job, start, titles, images):
         if job != self.thumb_job or not self.pdf_doc or self.closed:
+            return
+        if self.text_editor:  # con el editor abierto, la tira espera: dibujar páginas trababa cada tecla
+            qtk.after(1000, self.add_thumbs, job, start, titles, images)
             return
         end = min(start + THUMBS_PER_TICK, self.pdf_doc.page_count)
         for n in range(start, end):
@@ -7329,6 +7334,9 @@ class TextEditor:
         self.web_busy, self.web_queue = False, []  # on_sheet en curso y lo pulsado mientras tanto
         # Lo que la web volcó al cargar (sin tocar), su capítulo y la versión de la hoja que enseña
         self.web_base, self.web_section, self.web_rev = None, None, None
+        self.web_lines, self.web_objects, self.web_page = None, {}, ""  # lo que enseña la hoja web (sync_web_live)
+        self.epub_lines, self.epub_drawn = None, None  # la pestaña EPUB: lo que tiene puesto; lo que se dibujó
+        self.epub_stale = False  # algo que patch_epub no pudo poner: draw_web lo rehará
         import webview
         if webview.available():
             self.web = webview.WebSheet()
@@ -7416,7 +7424,7 @@ class TextEditor:
             self.side_web.moved.connect(lambda: self.web_shown() and self.show_web_page(self.side_web))
             self.side_web.page().clicked.connect(self.epub_clicked)
             self.side_web.page().picked.connect(self.epub_picked)
-            self.side_web.paged.connect(lambda _: (self.mark_epub(), self.epub_changes()))
+            self.side_web.paged.connect(lambda _: (self.mark_epub(), self.tag_epub()))
         if self.web is not None:
             self.side_tabs.addTab("Hoja web")
             self.web_box = QWidget()
@@ -7502,7 +7510,7 @@ class TextEditor:
         if self.web is not None:
             QApplication.instance().focusChanged.connect(self.on_focus)
             sheet.textChanged.connect(lambda: not self.web_on and self.web_tab()
-                                      and self.later("webview", 500, self.refresh_web))
+                                      and self.later("webview", 40, self.sync_web_live))
         self.opened, self.saved_paragraphs = time.monotonic(), 0  # para «Tu trabajo» de «Cifras»
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         # Sin reiniciar la cuenta en cada aviso (la ortografía repinta y avisa sin parar): como mucho 5 s de trabajo perdido
@@ -7521,7 +7529,9 @@ class TextEditor:
         sheet.redoAvailable.connect(self.redo_btn.setEnabled)
         sheet.textChanged.connect(lambda: self.later("extra", 250, self.refresh_marks))
         sheet.textChanged.connect(lambda: self.later("spell", 1000, self.check_new_words))
-        sheet.textChanged.connect(lambda: self.web_shown() and self.later("web", 600, self.draw_web))
+        # La pestaña EPUB: lo escrito, al momento en su párrafo (patch_epub); rehecha entera, al parar de escribir
+        sheet.textChanged.connect(lambda: self.web_shown() and not self.web_on and self.later("epublive", 30, self.patch_epub))
+        sheet.textChanged.connect(lambda: self.web_shown() and self.later("web", 1200, self.draw_web))
         sheet.command.connect(self.on_command)
         sheet.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         sheet.customContextMenuRequested.connect(self.context_menu)
@@ -8133,7 +8143,7 @@ class TextEditor:
         self.focus_page()
 
     # Mostrar cambios, como el control de cambios de Word con todas las marcas: lo puesto subrayado y lo quitado
-    # tachado en su sitio, en la hoja, el código, la pestaña EPUB y la hoja web
+    # tachado en su sitio, en la hoja, el código y la hoja web (la pestaña EPUB es como saldrá el libro: sin marcas)
     def change_colors(self):
         """(color de lo puesto, color de lo quitado) del tema."""
         colors = theme.mark_colors(self.app.dark)
@@ -8146,7 +8156,6 @@ class TextEditor:
         self.code.show_changes(color if on else None, removed)
         if self.web is not None and self.web.loaded:
             self.web_marks()
-        self.epub_changes()
 
     def book_classes(self):
         """Clases del CSS del libro (sus hojas de estilo, si es un EPUB, y las de la app), ordenadas."""
@@ -8167,26 +8176,11 @@ class TextEditor:
         for block in self.blocks():
             lines = [line for line in editor.block_lines(block) if line.strip()]
             original = editor.original_of(block)
+            if editor.original_group(block)[1]:  # partido con Intro: el código lo compara con el primero (code_group)
+                original = None
             for line in lines:
                 out.append(None if original is None else editor.to_code(original if len(lines) == 1 else line))
         return out
-
-    def epub_changes(self):
-        """Pestaña EPUB: los párrafos cambiados con lo puesto subrayado y lo quitado tachado (o nada, apagado)."""
-        if not self.web_shown():
-            return
-        import websheet
-        items, blocks = [], list(self.blocks())
-        if self.show_changes_action.isChecked():
-            for n, block in enumerate(blocks):
-                original = editor.original_of(block)
-                if not block.text().strip() or editor.objects_of(block) or editor.block_lines(block) == [original]:
-                    continue
-                words, nth = self.epub_key(block, blocks[:n])
-                items.append({"t": words, "nth": nth, "before": None if original is None else editor.to_code(original)})
-        color, removed = self.change_colors()
-        self.side_web.changes(items, color, websheet.DEL_CSS % removed)
-
 
     def resume_bar(self):
         """«Lo dejaste en «Capítulo 5» · Ir allí»: el editor no salta solo, quien lo abre desde un aviso o una fila
@@ -9347,6 +9341,45 @@ class TextEditor:
             return
         self.load_web(active=False)
 
+    def sync_web_live(self):
+        """La hoja web, sin el cursor en ella, sigue a la hoja al momento: solo cambian los párrafos que cambiaron,
+        sin recargar la página (recargar tardaba segundos y volvía arriba). Si algo no se puede (otro capítulo, una
+        imagen nueva), se recarga."""
+        if self.closed or self.web is None or self.web_on or not self.web_tab() or self.current[0] < 0:
+            return
+        if self.web_lines is None or self.web_section != self.current:
+            self.refresh_web()
+            return
+        if not self.web.loaded:  # cargando: web_ready la pone al día (recargar en cada tecla no acababa nunca)
+            return
+        import websheet
+        new = [line for lines in self.sheet.all_lines() for line in lines]
+        old = self.web_lines
+        if new == old:
+            return
+        ops = []
+        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+            if op == "equal":
+                continue
+            fresh = new[j1:j2]
+            if any((convert.TOKEN.fullmatch(line.strip()) or convert.PICTURE.fullmatch(line.strip()))
+                   and line.strip() not in self.web_objects for line in fresh):
+                self.load_web(active=False)  # una ilustración que la página no tiene
+                return
+            ops.append([i1, i2, [websheet._element(line, self.web_objects, self.web_page) for line in fresh]])
+        self.web_lines, self.web_rev = new, self.doc_rev()
+
+        def done(ok):
+            if not ok:
+                self.load_web(active=False)
+                return
+            if any(i2 - i1 != len(htmls) for i1, i2, htmls in ops):  # párrafos de más o de menos: avisos en su sitio
+                self.web_marks()
+            elif self.show_changes_action.isChecked():
+                self.web.call("setChanges", *self.web_changes())
+            self.web.call("here", self.web_index(self.sheet.textCursor().block()), False, self.here_color())
+        self.web.call("splice", ops[::-1], done=done)
+
     def activate_web(self):
         """El cursor entró en la hoja web: desde ahora la cinta y lo escrito van a ella. Si la hoja cambió desde que se
         cargó, antes se vuelve a cargar."""
@@ -9358,7 +9391,7 @@ class TextEditor:
         self.web_on, self.web_home, self.web_dirty = True, None, False
         if self.reading is not None:  # la voz iba por párrafos de la otra hoja
             self.stop_reading()
-        self.web_poll.start(400)
+        self.web_poll.start(WEB_POLL_MS)
         self.web_marks()
         self.fit_ribbon_to_view()
         self.update_tools()
@@ -9398,10 +9431,11 @@ class TextEditor:
         if self.app.book.vertical and self.app.horizontal_var.get():  # como saldrá: de izquierda a derecha
             text = text.replace("</head>", f"<style>{faithful.HORIZONTAL_CSS}</style></head>", 1)
         self.web.load_sheet(files, path, text)
+        self.web_lines, self.web_objects, self.web_page = lines, objects, path
         self.web_on, self.web_dirty, self.web_home = active, False, None
         self.web_base, self.web_section, self.web_rev = None, self.current, self.doc_rev()
         if active:
-            self.web_poll.start(400)
+            self.web_poll.start(WEB_POLL_MS)
         else:
             self.web_poll.stop()
 
@@ -9413,6 +9447,8 @@ class TextEditor:
             self.web.setFocus()
         self.web_marks()
         self.web.call("goHome", self.web_index(self.sheet.textCursor().block()))
+        if not self.web_on:  # lo escrito en la hoja mientras cargaba
+            self.later("webview", 0, self.sync_web_live)
         then, self.web_then = self.web_then, None
         if then:  # el de sheet_to_web acaba con web_settled, ya con la selección puesta
             then()
@@ -9427,21 +9463,18 @@ class TextEditor:
 
     def web_index(self, block):
         """Número del párrafo de la hoja web (hijo de la hoja, como los carga load_web) del bloque de la hoja."""
-        n, b = 0, self.sheet.document().firstBlock()
-        while b.isValid() and b != block:
-            n += sum(1 for line in editor.block_lines(b) if line.strip())
-            b = b.next()
-        return n
+        if block.document() is not self.sheet.document():
+            return 0
+        return sum(len(lines) for lines in self.sheet.all_lines()[:block.blockNumber()])
 
     def web_block(self, n):
         """El bloque de la hoja del párrafo n de la hoja web (al revés que web_index)."""
-        b = self.sheet.document().firstBlock()
-        while b.isValid():
-            n -= sum(1 for line in editor.block_lines(b) if line.strip())
-            if n < 0 or not b.next().isValid():
-                return b
-            b = b.next()
-        return b
+        doc = self.sheet.document()
+        for k, lines in enumerate(self.sheet.all_lines()):
+            n -= len(lines)
+            if n < 0:
+                return doc.findBlockByNumber(k)
+        return doc.lastBlock()
 
     def poll_web(self):
         """Cada poco, con la hoja web a la vista: el estado de la cinta, las palabras nuevas que revisar, el borrador
@@ -9477,7 +9510,7 @@ class TextEditor:
         if "draft" not in self.pending:
             self.later("draft", DRAFT_MS, self.write_draft)
         if self.web_shown():
-            self.later("web", 600, self.draw_web)
+            self.later("web", 1200, self.draw_web)
         self.later("nav", 600, self.refill_nav)
 
     def web_text(self, dumped):
@@ -9491,6 +9524,24 @@ class TextEditor:
             _log(f"Hoja web: {e}")
             return None
 
+    def web_changes(self):
+        """(n.º de los párrafos cambiados, HTML de antes de cada párrafo) de la hoja web, en su orden. Lo de antes, solo
+        en el primero de los que vienen del mismo (Intro): la hoja web compara con él los que lo siguen; Chromium saca
+        su texto como el de la hoja (notas, saltos)."""
+        changed = {b.blockNumber() for b in self.sheet.changed_blocks()}
+        marked, before, n, block = [], [], 0, self.sheet.document().firstBlock()
+        for lines in self.sheet.all_lines():
+            original = editor.original_of(block)
+            head = original is not None and len(lines) == 1 and editor.original_group(block)[1] == 0
+            for line in lines:
+                before.append(editor.to_code(original) if head else None)
+                if block.blockNumber() in changed and not (convert.TOKEN.fullmatch(line.strip())
+                                                           or convert.PICTURE.fullmatch(line.strip())):
+                    marked.append(n)
+                n += 1
+            block = block.next()
+        return marked, before
+
     def web_marks(self):
         """Marcas de la hoja web, las mismas que las de la hoja: palabras que no están, avisos del informe (del color
         de su gravedad, en su trozo) y párrafos cambiados. Se pintan con resaltados de CSS: el HTML no cambia."""
@@ -9499,18 +9550,12 @@ class TextEditor:
         import websheet
         colors = theme.mark_colors(self.app.dark)
         levels = list(convert.LEVELS)
-        changed = {b.blockNumber() for b in self.sheet.changed_blocks()}
-        issues, marked, before, self.web_issues, n = [], [], [], {}, 0
+        marked, before = self.web_changes()
+        issues, self.web_issues, n = [], {}, 0
         block = self.sheet.document().firstBlock()
-        while block.isValid():
-            lines = [line for line in editor.block_lines(block) if line.strip()]
-            original = editor.original_of(block)
+        for lines in self.sheet.all_lines():
             for line in lines:
-                # el párrafo de antes como HTML: Chromium saca su texto como el de la hoja (notas, saltos)
-                before.append(None if original is None or len(lines) > 1 else editor.to_code(original))
                 if not (convert.TOKEN.fullmatch(line.strip()) or convert.PICTURE.fullmatch(line.strip())):
-                    if block.blockNumber() in changed:
-                        marked.append(n)
                     text = block.text()
                     for issue in self.block_issues(block):
                         start, end = issue.span or (0, len(text))
@@ -9700,6 +9745,7 @@ class TextEditor:
                 self.web_home = None
             if text is not None:
                 self.web_base, self.web_rev = text, self.doc_rev()  # las dos hojas, iguales
+                self.web_lines = [line for lines in self.sheet.all_lines() for line in lines]
             then()
         self.web.call("dump", done=back)
 
@@ -9956,6 +10002,7 @@ class TextEditor:
         else:
             self.sheet.use(page["doc"], page["look"])
         self.current = (start, end)
+        self.epub_lines = None  # la pestaña EPUB es de otro capítulo hasta que se dibuje este
         if focus is not None:
             self.sheet.goto_source(focus)
         row = next((n for n, s in enumerate(self.sections) if s[1:3] == (start, end)), None)
@@ -10151,7 +10198,8 @@ class TextEditor:
             return
         import webview
         book, (start, end) = self.app.book, self.current
-        text = editor.dump(self.sheet.document()) if text is None else text
+        self.epub_drawn, self.epub_stale = self.sheet.all_lines(), False  # lo escrito después lo pone patch_epub
+        text = "\n\n".join(line for lines in self.epub_drawn for line in lines) if text is None else text
         draft = copy.copy(book)  # el libro con este capítulo como está en la hoja; el de la ventana no se toca
         draft.blocks, draft.candidates = list(book.blocks), list(book.candidates)
         try:
@@ -10207,17 +10255,69 @@ class TextEditor:
         words, nth = self.epub_key(block, before)
         self.side_web.mark(words, MARK_COLORS["current"], nth)
 
+    @staticmethod
+    def epub_letters(block):
+        """Solo las letras del párrafo: comillas, rayas, notas «01» y <br/> cambian en el EPUB."""
+        return "".join(c for c in editor.NOTE.sub("", block.text()).lower() if c.isalpha())
+
     def epub_key(self, block, before):
         """(letras, n.º) con que la pestaña EPUB encuentra el párrafo block (webview.FIND_JS): un trozo de sus letras
         y cuántos de los de antes (before) también lo tienen."""
-        def letters(b):  # solo las letras: comillas, rayas, notas «01» y <br/> cambian en el EPUB
-            return "".join(c for c in editor.NOTE.sub("", b.text()).lower() if c.isalpha())
+        letters = self.epub_letters
         # un separador escrito («※ ・ ※») no tiene letras: se cuenta entre los párrafos sin ellas
         text = "" if editor.objects_of(block) else letters(block)
         words = text if len(text) <= 40 else text[len(text) // 4:][:30]  # un trozo del medio
         nth = sum(1 for b in before if b.text().strip() and not self.drawn_object(b)
                   and (words in letters(b) if words else not letters(b)))
         return words, nth
+
+    def tag_epub(self):
+        """Tras dibujar la pestaña EPUB: cada párrafo suyo con su n.º en la hoja (webview.TAG_JS), y cómo era cada
+        párrafo entonces: lo que se escriba luego va al suyo al momento (patch_epub)."""
+        blocks = list(self.blocks())
+        # como epub_key, con las letras de cada párrafo una sola vez: párrafo a párrafo tardaba segundos
+        shown = [bool(b.text().strip()) and not self.drawn_object(b) for b in blocks]
+        letters = [self.epub_letters(b) if on else "" for b, on in zip(blocks, shown)]
+        items = []
+        for n, block in enumerate(blocks):
+            if not shown[n]:
+                continue
+            text = "" if editor.objects_of(block) else letters[n]
+            words = text if len(text) <= 40 else text[len(text) // 4:][:30]
+            nth = sum(1 for k in range(n) if shown[k] and (words in letters[k] if words else not letters[k]))
+            items.append([n, words, nth])
+        self.side_web.tag(items)
+        self.epub_lines = self.epub_drawn or self.sheet.all_lines()
+        self.patch_epub()  # lo escrito mientras se dibujaba
+
+    def patch_epub(self):
+        """Lo escrito, en su párrafo de la pestaña EPUB al momento (sin rehacer el capítulo, que tarda): cada párrafo
+        de la hoja que cambió desde que se dibujó, como irá (reemplazos y tipografía). Con párrafos de más o de menos
+        espera a draw_web."""
+        if not self.web_shown() or self.epub_lines is None:
+            return
+        lines = self.sheet.all_lines()
+        if len(lines) != len(self.epub_lines):
+            self.epub_stale = True
+            return
+        typography, rules = self.app.typography_var.get(), convert._rules(self.app.replacements)
+        whole, patched = True, False  # todo puesto tal cual irá: no hace falta rehacer el capítulo al parar
+        for k, (old, new) in enumerate(zip(self.epub_lines, lines)):
+            if old is new or old == new:
+                continue
+            patched = True
+            if len(new) != 1 or convert.TOKEN.fullmatch(new[0].strip()) or convert.PICTURE.fullmatch(new[0].strip()):
+                whole = False
+                continue
+            whole = (whole and "[Nota:" not in new[0]
+                     and convert.split_prefix(new[0])[0] == convert.split_prefix((old or [""])[0])[0])
+            html = convert._replace(convert._inline(convert.split_prefix(new[0])[1]), rules) if rules else                 convert._inline(convert.split_prefix(new[0])[1])
+            self.side_web.patch(k, convert._typography(html) if typography else html,
+                                lambda: self.later("web", 300, self.draw_web))  # sin su párrafo: se rehace
+        self.epub_lines = lines
+        self.epub_stale = self.epub_stale or not whole  # hasta que draw_web lo rehaga
+        if patched and not self.epub_stale and "web" in self.pending:  # el capítulo rehecho saldría igual: se ahorra (bloqueaba la ventana)
+            qtk.cancel(self.pending.pop("web"))
 
     def drawn_object(self, block):
         """¿El párrafo de la hoja es una ilustración o un separador dibujado (una imagen en el EPUB)?"""

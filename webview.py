@@ -176,23 +176,31 @@ MARK_JS = FIND_JS + """
   return true;
 })(%s, %s, %s, %s)
 """
-# «Mostrar cambios» en la vista del EPUB: cada párrafo cambiado (buscado como en MARK_JS) con lo puesto subrayado y
-# lo quitado tachado; las palabras se comparan sin la tipografía. items vacío lo quita todo
-CHANGES_JS = """
-(function (items, color, css) {
-  lncClearDiff(document.body);
-  var style = document.getElementById('lnc-changes') || document.documentElement.appendChild(document.createElement('style'));
-  style.id = 'lnc-changes';
-  style.textContent = css + '::highlight(lnc-change){text-decoration: underline ' + color + '; color: ' + color + ';}';
-  if (!window.CSS || !CSS.highlights) return false;
-  var change = new Highlight(), key = function (w) { return w.toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ''); };
+# Cada párrafo de la vista del EPUB con el n.º de su párrafo en la hoja (data-lnc-b), buscado como en FIND_JS pero de
+# una vez: items [[n.º, letras, n.º de los que también las tienen]]. Así lo escrito se pone al momento (PATCH_JS)
+TAG_JS = """
+(function (items) {
+  var sel = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, div, td';
+  var leaves = Array.prototype.filter.call(document.body.querySelectorAll(sel), function (e) { return !e.querySelector(sel); });
+  var letters = leaves.map(function (e) { return e.textContent.toLowerCase().replace(/[^\\p{L}]+/gu, ''); });
+  var bare = leaves.map(function (e) { return !!e.textContent.trim() && !e.querySelector('img, svg'); });
+  document.querySelectorAll('[data-lnc-b]').forEach(function (e) { e.removeAttribute('data-lnc-b'); });
   items.forEach(function (it) {
-    var b = lncFind(it.t, it.nth);
-    if (b) lncPaintDiff(b, lncText(it.before), key).forEach(function (r) { change.add(r); });
+    var t = it[1], seen = -1, last = null;
+    for (var i = 0; i < leaves.length && seen < it[2]; i++)
+      if (t ? letters[i].indexOf(t) >= 0 : !letters[i] && bare[i]) { seen++; last = leaves[i]; }
+    if (last && !last.hasAttribute('data-lnc-b')) last.setAttribute('data-lnc-b', it[0]);
   });
-  CSS.highlights.set('lnc-change', change);
   return true;
-})(%s, %s, %s)
+})(%s)
+"""
+PATCH_JS = """
+(function (n, html) {
+  var e = document.querySelector('[data-lnc-b="' + n + '"]');
+  if (!e) return false;
+  try { e.innerHTML = html; } catch (err) { e.textContent = html.replace(/<[^>]*>/g, ''); }
+  return true;
+})(%s, %s)
 """
 # Modo oscuro de lector: fondo oscuro y letra clara; las ilustraciones, tal cual
 DARK = """
@@ -342,17 +350,19 @@ if AVAILABLE:
             if inner:
                 self.page().runJavaScript(f"window.lncShowNote({json.dumps(inner)}, {json.dumps(self.dark)})", 0)
 
+        def tag(self, items):
+            """Cada párrafo de la vista con su n.º en la hoja (TAG_JS): items [[n.º, letras, n.º]] como mark."""
+            self.page().runJavaScript(TAG_JS % json.dumps(items), 0)
+
+        def patch(self, n, html, missing=None):
+            """El párrafo n.º n de la hoja (TAG_JS) con html, al momento, sin rehacer la página. missing(): no está."""
+            self.page().runJavaScript(PATCH_JS % (int(n), json.dumps(html)), 0,
+                                      lambda ok: ok is False and missing and missing())
+
         def mark(self, text, color, nth=0, image=-1):
             """Recuadra el párrafo n.º nth cuyas letras (minúsculas, sin lo demás) contienen text ("": el n.º nth sin
             letras) y lo trae a la vista; con image, la ilustración n.º image. text None quita el recuadro."""
             self.page().runJavaScript(MARK_JS % (json.dumps(text), json.dumps(color), int(nth), int(image)), 0)
-
-        def changes(self, items, color, css):
-            """«Mostrar cambios»: items [{t, nth, before}] (el párrafo como en mark y su HTML de antes, None si es
-            nuevo) con lo puesto subrayado de color y lo quitado tachado con css (websheet.DEL_CSS)."""
-            import websheet
-            self.page().runJavaScript(websheet.DIFF_JS + FIND_JS + CHANGES_JS % (
-                json.dumps(items), json.dumps(color), json.dumps(css)), 0)
 
         def _loaded(self, ok):
             if not ok:

@@ -3589,32 +3589,45 @@ ICON_HEIGHT = 1.3  # em: alto de un separador hecho icono
 
 
 @functools.lru_cache(maxsize=64)  # el mismo adorno se repite en todo el libro
-def trace_svg(data, size=96):
-    """Silueta vectorial de un adorno (separador dibujado o imagen propia, PNG o JPG): sin el fondo (transparente o
-    el color de las esquinas), recortada y de un solo color, currentColor (el del texto, también en el modo oscuro
-    del lector). Cada borde entre la figura y el fondo se recorre como un polígono (los huecos van con evenodd),
-    sin escalones (por los puntos medios) y simplificado. "" si la imagen no se lee o no hay figura."""
+def trace_svg(data, size=128):
+    """Silueta vectorial de un adorno (separador dibujado o imagen propia, PNG o JPG): sin el fondo (transparente, o
+    el de las esquinas, también en degradado), sin motas sueltas, recortada y de un solo color, currentColor (el del
+    texto, también en el modo oscuro del lector). Cada borde entre la figura y el fondo se recorre como un polígono
+    (los huecos van con evenodd), sin escalones (por los puntos medios) y simplificado. "" si la imagen no se lee
+    o no hay figura."""
     try:
         pix = pymupdf.Pixmap(data)
         if pix.colorspace and pix.colorspace.n not in (1, 3):  # CMYK, paleta
             pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-        scale = min(1.0, size / max(pix.height, 1), size * 6 / max(pix.width, 1))
-        if scale < 1:
+        # una pequeña se agranda (una línea fina de 1 px salía a trozos) y una grande se reduce (va en 1,3 em)
+        scale = min(size / max(pix.height, 1), size * 6 / max(pix.width, 1), 4.0)
+        if abs(scale - 1) > 0.05:
             pix = pymupdf.Pixmap(pix, max(1, round(pix.width * scale)), max(1, round(pix.height * scale)), None)
     except Exception:
         return ""
     w, h, n, samples = pix.width, pix.height, pix.n, pix.samples
     color = n - (1 if pix.alpha else 0)
-
-    def lum(i):
-        return samples[i] if color == 1 else (samples[i] * 299 + samples[i + 1] * 587 + samples[i + 2] * 114) // 1000
     alpha = [samples[i * n + n - 1] for i in range(w * h)] if pix.alpha else None
     if alpha and min(alpha) < 128:  # PNG con transparencia: la figura es lo opaco
         fg = [a >= 128 for a in alpha]
-    else:  # el fondo, el de las esquinas; la figura, lo que se aparta de él
-        corners = sorted(lum(i * n) for i in (0, w - 1, (h - 1) * w, h * w - 1))
-        back = (corners[1] + corners[2]) // 2
-        fg = [abs(lum(i * n) - back) > 64 for i in range(w * h)]
+    else:
+        # el fondo de cada punto, mezcla de los de las cuatro esquinas (un degradado también); la figura, lo que se
+        # aparta de él más que el umbral que mejor separa las dos partes (Otsu). En gris, que MuPDF saca de golpe
+        gray = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.Pixmap(pix, 0) if pix.alpha else pix).samples
+        c00, c10, c01, c11 = gray[0], gray[w - 1], gray[(h - 1) * w], gray[h * w - 1]
+        steps = [x / max(w - 1, 1) for x in range(w)]
+        far = []
+        for y in range(h):
+            v = y / max(h - 1, 1)
+            left, right = c00 + (c01 - c00) * v, c10 + (c11 - c10) * v
+            far += [abs(g - left - (right - left) * u) for g, u in zip(gray[y * w:(y + 1) * w], steps)]
+        counts = [0] * 256
+        for d in far:
+            counts[min(255, int(d))] += 1
+        # la mitad del de Otsu: una línea fina se aclara al reducirla y quedaba fuera junto al fondo
+        cut = max(_otsu(counts) // 2, 32)
+        fg = [d > cut for d in far]
+    fg = _without_specks(fg, w, h)
     if not any(fg):
         return ""
     xs = [i % w for i, on in enumerate(fg) if on]
@@ -3670,6 +3683,47 @@ def trace_svg(data, size=96):
         return ""
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {x1 - x0} {y1 - y0}">'
             f'<path fill="currentColor" fill-rule="evenodd" d="{"".join(paths)}"/></svg>')
+
+
+def _otsu(counts):
+    """Umbral de Otsu de un histograma: el que más separa las dos clases."""
+    total = sum(counts)
+    sum_all, sum_low, weight_low, best, cut = sum(i * c for i, c in enumerate(counts)), 0, 0, -1.0, 0
+    for i, c in enumerate(counts):
+        weight_low += c
+        if not weight_low or weight_low == total:
+            continue
+        sum_low += i * c
+        mean_low, mean_high = sum_low / weight_low, (sum_all - sum_low) / (total - weight_low)
+        between = weight_low * (total - weight_low) * (mean_low - mean_high) ** 2
+        if between > best:
+            best, cut = between, i
+    return cut
+
+
+def _without_specks(fg, w, h):
+    """fg sin las manchas sueltas (ruido del JPEG, polvo del escaneo): las de menos del 0,5 % de la figura."""
+    seen, parts = [False] * len(fg), []
+    for start, on in enumerate(fg):
+        if not on or seen[start]:
+            continue
+        seen[start], stack, part = True, [start], []
+        while stack:
+            i = stack.pop()
+            part.append(i)
+            x, y = i % w, i // w
+            for j in ((i - 1) if x else -1, (i + 1) if x + 1 < w else -1, i - w, i + w):
+                if 0 <= j < len(fg) and fg[j] and not seen[j]:
+                    seen[j] = True
+                    stack.append(j)
+        parts.append(part)
+    keep = sum(len(p) for p in parts) * 0.005
+    out = [False] * len(fg)
+    for part in parts:
+        if len(part) >= keep:
+            for i in part:
+                out[i] = True
+    return out
 
 
 def _num(v):
@@ -4355,7 +4409,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
 
     tmp = partial_path(out_path)
     try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        # la vista previa sin comprimir: comprimir era más de un tercio de lo que tardaba al escribir
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED if preview else zipfile.ZIP_DEFLATED) as z:
             z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
             z.writestr("META-INF/container.xml", CONTAINER)
             z.writestr("OEBPS/content.opf", BAD_XML.sub("", opf))  # metadatos pegados con controles
