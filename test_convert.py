@@ -11497,6 +11497,53 @@ def test_editor_changes_inline_in_epub_tab_and_web_sheet():
     assert undone == "Primer párrafo & más." and "lnc-del" not in dumped, (undone, dumped[:300])
 
 
+def test_editor_views_follow_typing_without_reloading():
+    """Lo escrito en la hoja sale al momento en la hoja web y en la pestaña EPUB, sin recargar la página (tardaba
+    segundos y volvía arriba): solo cambia su párrafo. Un párrafo nuevo (Intro) también llega a la hoja web sin
+    recargar; la pestaña EPUB lo rehace al parar."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil en vivo.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = next(c for c in window.book.candidates if window.book.blocks[c].title.startswith("Capítulo 1"))
+            window.settings["editor_web"] = False
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            ed.side_tabs.setCurrentIndex(2)  # hoja web, solo mirando
+            assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            js(ed.web, "window.lncSame = 1")
+            block = next(b for b in ed.blocks() if b.text().startswith("Segundo"))
+            c = QTextCursor(block)
+            c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+            ed.sheet.setTextCursor(c)
+            c.insertText(" Vivo")
+            web_text = wait_for(lambda: "Segundo párrafo & más. Vivo" in (js(ed.web, "document.getElementById("
+                                                                             "'lnc-sheet').textContent") or ""), 3)
+            c.insertBlock()
+            c.insertText("Párrafo nuevo")
+            web_new = wait_for(lambda: js(ed.web, "Array.from(document.querySelectorAll('#lnc-sheet p')).some(p => "
+                                                  "p.textContent === 'Párrafo nuevo')"), 3)
+            web_same = js(ed.web, "window.lncSame") == 1
+            ed.side_tabs.setCurrentIndex(1)  # pestaña EPUB
+            assert wait_for(lambda: ed.side_web.pages > 0 and ed.epub_lines is not None, 15), "la pestaña EPUB no cargó"
+            wait_for(lambda: "web" not in ed.pending, 5)
+            js(ed.side_web, "window.lncSame = 1")
+            c = QTextCursor(next(b for b in ed.blocks() if b.text().startswith("Tercero")))
+            c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+            c.insertText(" ahora")
+            epub_text = wait_for(lambda: "Tercero. ahora" in (js(ed.side_web, "document.body.textContent") or ""), 3)
+            epub_same = js(ed.side_web, "window.lncSame") == 1
+            no_rebuild = "web" not in ed.pending  # todo puesto: no hace falta rehacer el capítulo
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert web_text and web_new and web_same, (web_text, web_new, web_same)
+    assert epub_text and epub_same and no_rebuild, (epub_text, epub_same, no_rebuild)
+
+
 def test_websheet_click_on_picture_or_separator_moves_the_cursor():
     """Hoja web: un clic en la ilustración o en el separador (no se escribe en ellos) los hace el párrafo de ahora: la
     banda va a ellos y la hoja de Qt (con ella el original y la pestaña EPUB) también."""

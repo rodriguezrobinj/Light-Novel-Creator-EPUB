@@ -1604,6 +1604,7 @@ class Sheet(QTextEdit):
         self.cursorPositionChanged.connect(lambda: self.mark_current and self.viewport().update())
         self.origins = {}  # documento -> [(bloque, línea)] tal como se cargó
         self.known = {}  # documento -> {párrafo: (revisión, ¿cambiado?)} de changed_blocks, hasta que cambie
+        self.lines_known = {}  # documento -> {párrafo: (revisión, [líneas])} de all_lines, hasta que cambie
         self.paints = collections.deque(maxlen=60)  # últimos repintados (zona, desplazamiento), para diagnose
         self.set_zoom(100)
 
@@ -1621,7 +1622,7 @@ class Sheet(QTextEdit):
             if k is not None and not convert.TOKEN.fullmatch(line.strip()):
                 loaded.setdefault(_canonical(line), []).append((k, line))
         document.contentsChange.connect(lambda pos, removed, added: self.relink(document, loaded, pos, added))
-        self.known[document] = {}
+        self.known[document], self.lines_known[document] = {}, {}
         document.contentsChange.connect(lambda pos, removed, added: self.forget(document, pos, added))
         # Letra y hoja antes del aspecto: con él puesto, cambiarlas volvía a colorear todo (3 veces al abrir)
         self.setDocument(document)
@@ -1693,11 +1694,27 @@ class Sheet(QTextEdit):
     def forget(self, document, pos, added):
         """Los párrafos tocados (texto, formato o deshacer) se vuelven a comparar en changed_blocks."""
         known, block, last = self.known[document], document.findBlock(pos), document.findBlock(pos + added)
+        lines = self.lines_known.setdefault(document, {})
         while block.isValid():
             known.pop(block.fragmentIndex(), None)
+            lines.pop(block.fragmentIndex(), None)
             if block == last:
                 break
             block = block.next()
+
+    def all_lines(self):
+        """[[líneas de dump] de cada párrafo], en orden. Cada párrafo se recuerda hasta que se toca (forget): volcar
+        la hoja entera en cada tecla tardaba 50 ms en un capítulo largo."""
+        doc = self.document()
+        known, out, block = self.lines_known.setdefault(doc, {}), [], doc.firstBlock()
+        while block.isValid():
+            seen = known.get(block.fragmentIndex())
+            if seen is None or seen[0] != block.revision():
+                seen = known[block.fragmentIndex()] = (block.revision(),
+                                                       [line for line in block_lines(block) if line.strip()])
+            out.append(seen[1])
+            block = block.next()
+        return out
 
     def relink(self, document, loaded, pos, added):
         """Al partir un párrafo, el nuevo copia el formato del de arriba y con él su origen. Si el trozo nuevo

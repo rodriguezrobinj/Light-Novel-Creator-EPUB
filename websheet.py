@@ -250,6 +250,27 @@ SHEET_JS = DIFF_JS + r"""
     },
     // Dónde estaba cada párrafo al cargar (o al volcar a la hoja de Qt): la hoja de Qt sigue con esas líneas, y así
     // el panel del original y el de navegación encuentran su párrafo aunque se haya escrito uno nuevo antes
+    // La hoja de Qt cambió y aquí solo se mira: cada [i, j, [html…]] cambia los párrafos de i a j (sin j) por esos,
+    // sin recargar la página (tardaba segundos y volvía arriba). Llegan de atrás adelante. false: no se pudo
+    splice: function (ops) {
+      lncClearDiff(sheet);
+      try {
+        ops.forEach(function (op) {
+          var kids = sheet.children, after = kids[op[1]] || null;
+          for (var k = op[1] - 1; k >= op[0]; k--) kids[k].remove();
+          if (!op[2].length) return;
+          var r = document.createRange();
+          r.selectNodeContents(sheet);
+          var frag = r.createContextualFragment(op[2].join(''));
+          Array.prototype.forEach.call(frag.children, function (e) { if (lnc.orig) lnc.orig.set(e, lnc.inner(e)); });
+          sheet.insertBefore(frag, after);
+        });
+      } catch (e) { return false; }
+      lnc.count = sheet.children.length;
+      lnc.rehome();
+      lnc.placeHere(false);
+      return true;
+    },
     rehome: function () { lnc.home = new WeakMap(); Array.prototype.forEach.call(sheet.children, function (b, i) { lnc.home.set(b, i); }); },
     homeOf: function (b) { while (b && !lnc.home.has(b)) b = b.previousElementSibling; return b ? lnc.home.get(b) : 0; },
     goHome: function (n) {  // el cursor al principio del párrafo que estaba en el sitio n
@@ -344,6 +365,13 @@ SHEET_JS = DIFF_JS + r"""
         Array.prototype.forEach.call(sheet.children, function (b) { lnc.orig.set(b, lnc.inner(b)); });
         lnc.count = sheet.children.length;
       }
+      lnc.paint();
+    },
+    setChanges: function (changed, before) {  // solo «Mostrar cambios» (sincronía en vivo): como setMarks
+      var m = lnc.marks;
+      m.changed = new Set(changed.map(function (i) { return sheet.children[i]; }));
+      m.before = new Map();
+      before.forEach(function (t, i) { if (sheet.children[i]) m.before.set(sheet.children[i], lncText(t)); });
       lnc.paint();
     },
     setSpell: function (words) { lnc.marks.spell = new Set(JSON.parse(words)); lnc.paint(); },

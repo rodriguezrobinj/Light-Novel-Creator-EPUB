@@ -176,6 +176,32 @@ MARK_JS = FIND_JS + """
   return true;
 })(%s, %s, %s, %s)
 """
+# Cada párrafo de la vista del EPUB con el n.º de su párrafo en la hoja (data-lnc-b), buscado como en FIND_JS pero de
+# una vez: items [[n.º, letras, n.º de los que también las tienen]]. Así lo escrito se pone al momento (PATCH_JS)
+TAG_JS = """
+(function (items) {
+  var sel = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, div, td';
+  var leaves = Array.prototype.filter.call(document.body.querySelectorAll(sel), function (e) { return !e.querySelector(sel); });
+  var letters = leaves.map(function (e) { return e.textContent.toLowerCase().replace(/[^\\p{L}]+/gu, ''); });
+  var bare = leaves.map(function (e) { return !!e.textContent.trim() && !e.querySelector('img, svg'); });
+  document.querySelectorAll('[data-lnc-b]').forEach(function (e) { e.removeAttribute('data-lnc-b'); });
+  items.forEach(function (it) {
+    var t = it[1], seen = -1, last = null;
+    for (var i = 0; i < leaves.length && seen < it[2]; i++)
+      if (t ? letters[i].indexOf(t) >= 0 : !letters[i] && bare[i]) { seen++; last = leaves[i]; }
+    if (last && !last.hasAttribute('data-lnc-b')) last.setAttribute('data-lnc-b', it[0]);
+  });
+  return true;
+})(%s)
+"""
+PATCH_JS = """
+(function (n, html) {
+  var e = document.querySelector('[data-lnc-b="' + n + '"]');
+  if (!e) return false;
+  try { e.innerHTML = html; } catch (err) { e.textContent = html.replace(/<[^>]*>/g, ''); }
+  return true;
+})(%s, %s)
+"""
 # Modo oscuro de lector: fondo oscuro y letra clara; las ilustraciones, tal cual
 DARK = """
 html, body { background: #1a1a1a !important; color: #ececec !important; }
@@ -323,6 +349,15 @@ if AVAILABLE:
             inner = note_html(data, unquote(target.fragment))
             if inner:
                 self.page().runJavaScript(f"window.lncShowNote({json.dumps(inner)}, {json.dumps(self.dark)})", 0)
+
+        def tag(self, items):
+            """Cada párrafo de la vista con su n.º en la hoja (TAG_JS): items [[n.º, letras, n.º]] como mark."""
+            self.page().runJavaScript(TAG_JS % json.dumps(items), 0)
+
+        def patch(self, n, html, missing=None):
+            """El párrafo n.º n de la hoja (TAG_JS) con html, al momento, sin rehacer la página. missing(): no está."""
+            self.page().runJavaScript(PATCH_JS % (int(n), json.dumps(html)), 0,
+                                      lambda ok: ok is False and missing and missing())
 
         def mark(self, text, color, nth=0, image=-1):
             """Recuadra el párrafo n.º nth cuyas letras (minúsculas, sin lo demás) contienen text ("": el n.º nth sin
