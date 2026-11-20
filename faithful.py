@@ -608,7 +608,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                    separator=ORIGINAL, shrink=False, replacements=(), credits=False, gray=False, breaks=(), trim=False,
                    font="", reading=False, kepub=False, hyphenate=False, alts=None, progress=None, fit=None,
                    whole_words=False, css_extra="", synopsis=False, title_image=None, logo="", endnotes=False,
-                   note_style="1", heading_font="", box_style="Sencillo", horizontal=True, preview=False):
+                   note_style="1", heading_font="", box_style="Sencillo", horizontal=True, preview=False,
+                   separator_icon=""):
     """Escribe el libro leído por read_epub copiando su EPUB original (book.origin) y parcheando solo lo que cambió:
     un XHTML sin cambios sale con los mismos bytes. Mismas opciones que convert.write_epub; style, font y separator
     con ORIGINAL (o vacíos) dejan el aspecto del original."""
@@ -684,12 +685,17 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
             return convert.NOTE.sub(ref, new)
 
         def rebreak(b, k):
+            icon = separator_icon if separator == "Icono propio" else (
+                convert.trace_svg(b.image) if separator == "Icono del original" and b.image else "")
+            if icon:  # SVG en el texto, del color de la letra
+                return f'<p style="text-align: center; text-indent: 0; margin: 1em 0">{convert.icon_html(icon)}</p>'
             if separator == "Línea":
                 return "<hr/>"
             if separator == "Espacio en blanco":
                 return '<p style="margin: 1.5em 0; text-indent: 0">&#160;</p>'
             symbol = (html.escape(separator, quote=False)
-                      if separator not in (ORIGINAL, "Original del PDF", "Según el estilo", "") else b.html or "* * *")
+                      if separator not in (ORIGINAL, "Original del PDF", "Según el estilo", "", "Icono propio",
+                                           "Icono del original") else b.html or "* * *")
             return f'<p style="text-align: center; text-indent: 0; margin: 1em 0">{symbol}</p>'
 
         def render(k, b, base, notes, own):
@@ -712,7 +718,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                                f'{picture(part, base, alt or "")}</div>'
                                for part in (convert._spread(b.image, b.layout) if b.layout else [b.image]) if part)
             if b.kind == "break" or k in breaks:
-                if own and b.kind == "break" and separator in (ORIGINAL, "Original del PDF", "Según el estilo", ""):
+                if own and b.kind == "break" and (separator in (ORIGINAL, "Original del PDF", "Según el estilo", "")
+                                                  or separator == "Icono del original" and not b.image):
                     return source(base)[b.src[3]:b.src[4]]
                 return rebreak(b, k)
             new = fix(b.html)
@@ -927,6 +934,12 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
         opf_text = z.read(opf_path).decode("utf-8")
         new_opf = _patch_opf(opf_text, opf, opf_path, items, order, gone, file_order, new_items,
                              cover_page and cover_page[0], [p for p, _ in pages], notes_page and notes_page[0], book, lang)
+        for ident, (path, kind, props) in items.items():  # un separador hecho icono: SVG en el XHTML (EPUB 3)
+            if path in texts and "<svg" in texts[path] and "svg" not in props.split():
+                new_opf = re.sub(rf'(<item\b(?=[^>]*\bid="{re.escape(ident)}")[^>]*?)(\s*/?>)',
+                                 lambda m: (re.sub(r'properties="([^"]*)"', r'properties="\1 svg"', m[1])
+                                            if "properties=" in m[1] else m[1] + ' properties="svg"') + m[2],
+                                 new_opf, count=1)
         nav_id = next((i for i, (p, *_) in items.items() if p == nav_path), None) if nav_path else None
         if preview and nav_id:  # el índice del libro en el spine (linear="no"): MuPDF lo dibujaba tras la sección
             new_opf = re.sub(rf'\s*<itemref\b[^>]*\bidref="{re.escape(nav_id)}"[^>]*/>', "", new_opf)
