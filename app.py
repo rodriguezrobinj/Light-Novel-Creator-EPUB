@@ -1219,8 +1219,9 @@ def _data_changes(old, new):
         a, b = old.get(key), new.get(key)
         if a == b or (not a and not b):  # sin valor y vacío son lo mismo para quien lo lee
             continue
-        if key == "description":
-            lines.append([(f"{label}: cambiada", None)])
+        if key in ("description", "separator_icon"):  # un texto largo o un SVG: no se lee entero
+            lines.append([(f"{label}: {'quitado' if not b else 'puesto' if not a else 'cambiado'}"
+                           if key == "separator_icon" else f"{label}: cambiada", None)])
         else:
             lines.append([(f"{label}: ", None), (_shown(key, a), "old"), (" → ", None), (_shown(key, b), "new")])
     images = [sum(1 for e in s.get("edits", []) if e[:1] == ["image"]) for s in (old, new)]
@@ -7416,7 +7417,7 @@ class TextEditor:
             self.side_web.moved.connect(lambda: self.web_shown() and self.show_web_page(self.side_web))
             self.side_web.page().clicked.connect(self.epub_clicked)
             self.side_web.page().picked.connect(self.epub_picked)
-            self.side_web.paged.connect(lambda _: (self.mark_epub(), self.epub_changes()))
+            self.side_web.paged.connect(lambda _: self.mark_epub())
         if self.web is not None:
             self.side_tabs.addTab("Hoja web")
             self.web_box = QWidget()
@@ -8133,7 +8134,7 @@ class TextEditor:
         self.focus_page()
 
     # Mostrar cambios, como el control de cambios de Word con todas las marcas: lo puesto subrayado y lo quitado
-    # tachado en su sitio, en la hoja, el código, la pestaña EPUB y la hoja web
+    # tachado en su sitio, en la hoja, el código y la hoja web (la pestaña EPUB es como saldrá el libro: sin marcas)
     def change_colors(self):
         """(color de lo puesto, color de lo quitado) del tema."""
         colors = theme.mark_colors(self.app.dark)
@@ -8146,7 +8147,6 @@ class TextEditor:
         self.code.show_changes(color if on else None, removed)
         if self.web is not None and self.web.loaded:
             self.web_marks()
-        self.epub_changes()
 
     def book_classes(self):
         """Clases del CSS del libro (sus hojas de estilo, si es un EPUB, y las de la app), ordenadas."""
@@ -8167,26 +8167,11 @@ class TextEditor:
         for block in self.blocks():
             lines = [line for line in editor.block_lines(block) if line.strip()]
             original = editor.original_of(block)
+            if editor.original_group(block)[1]:  # partido con Intro: el código lo compara con el primero (code_group)
+                original = None
             for line in lines:
                 out.append(None if original is None else editor.to_code(original if len(lines) == 1 else line))
         return out
-
-    def epub_changes(self):
-        """Pestaña EPUB: los párrafos cambiados con lo puesto subrayado y lo quitado tachado (o nada, apagado)."""
-        if not self.web_shown():
-            return
-        import websheet
-        items, blocks = [], list(self.blocks())
-        if self.show_changes_action.isChecked():
-            for n, block in enumerate(blocks):
-                original = editor.original_of(block)
-                if not block.text().strip() or editor.objects_of(block) or editor.block_lines(block) == [original]:
-                    continue
-                words, nth = self.epub_key(block, blocks[:n])
-                items.append({"t": words, "nth": nth, "before": None if original is None else editor.to_code(original)})
-        color, removed = self.change_colors()
-        self.side_web.changes(items, color, websheet.DEL_CSS % removed)
-
 
     def resume_bar(self):
         """«Lo dejaste en «Capítulo 5» · Ir allí»: el editor no salta solo, quien lo abre desde un aviso o una fila
@@ -9506,8 +9491,10 @@ class TextEditor:
             lines = [line for line in editor.block_lines(block) if line.strip()]
             original = editor.original_of(block)
             for line in lines:
-                # el párrafo de antes como HTML: Chromium saca su texto como el de la hoja (notas, saltos)
-                before.append(None if original is None or len(lines) > 1 else editor.to_code(original))
+                # el párrafo de antes como HTML: Chromium saca su texto como el de la hoja (notas, saltos). Solo en el
+                # primero de los que vienen del mismo (Intro): la hoja web compara con él los que lo siguen sin texto de antes
+                head = editor.original_group(block)[1] == 0
+                before.append(None if original is None or len(lines) > 1 or not head else editor.to_code(original))
                 if not (convert.TOKEN.fullmatch(line.strip()) or convert.PICTURE.fullmatch(line.strip())):
                     if block.blockNumber() in changed:
                         marked.append(n)

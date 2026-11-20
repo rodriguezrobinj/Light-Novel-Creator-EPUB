@@ -9,7 +9,7 @@ import html
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QEvent, QMimeData, QObject, QPoint, QRect, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QBuffer, QEvent, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QStandardItem, QStandardItemModel,
                            QSyntaxHighlighter, QTextBlockFormat,
                            QTextBlockUserData, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat,
@@ -413,17 +413,21 @@ class CodeLook(QSyntaxHighlighter):
         super().__init__(document)
         self.colors = colors  # theme.CODE: colores del tema
         self.changes, self.removed = None, None  # «Mostrar cambios», como en Look
+        watch_groups(self, code_group)
 
     def highlightBlock(self, text):
         self.paint_code(text)
-        data = self.currentBlock().userData()
-        known = isinstance(data, Changes)  # sin Changes: línea nueva (Intro), o no se compara (cambios apagados)
-        if self.changes and text.strip() and (not known or data.original != text):
+        block = self.currentBlock()
+        group, n = code_group(block)
+        head = group[0].userData()
+        before = head.original if isinstance(head, Changes) else None
+        texts = [b.text() if b != block else text for b in group]
+        if self.changes and text.strip() and texts != [before]:
             wide = any(ord(c) > 0xFFFF for c in text)
-            mark_changes(self, text, data.original if known else None, lambda i: u16(text, i) if wide else i,
+            mark_changes(self, text, group_changes(before, texts, n), lambda i: u16(text, i) if wide else i,
                          QColor(self.changes))
-        elif known:
-            data.gone = []
+        elif isinstance(block.userData(), Changes):
+            block.userData().gone = []
 
     def paint_code(self, text):
         def paint(start, size, key):
@@ -649,6 +653,11 @@ class CodeEdit(QTextEdit):
                 block = block.next()
         self.look.changes, self.look.removed = color, removed
         self.look.rehighlight()
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip and removed_tip(self, event):  # lo quitado, entero
+            return True
+        return super().event(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1235,34 +1244,54 @@ def plain_line(line):
     return "".join(shown[kind] or value for kind, value, _ in parse_inline(_strip(line)))
 
 
-# Piezas que se comparan en «Mostrar cambios»: palabras, espacios y, en el código, cada etiqueta entera
-WORDS = re.compile(r"<[^<>]*>|[^\s<]+|\s+|<")
+# Piezas que se comparan en «Mostrar cambios»: cada etiqueta entera (el código), cada letra de chino o japonés (no
+# llevan espacios: una «palabra» era el párrafo entero), las demás palabras y los espacios
+CJK = "⺀-鿿豈-﫿＀-￯"
+WORDS = re.compile(rf"<[^<>]*>|[{CJK}]|[^\s<{CJK}]+|\s+|<")
+
+
+def diff_ops(before, after):
+    """(lo puesto [(inicio, largo)], lo quitado [(posición en after, texto)]) de after frente a before, pieza a pieza
+    (WORDS). Lo que solo es espacio no cuenta."""
+    x, y = WORDS.findall(before), WORDS.findall(after)
+    starts = [0]
+    for token in y:
+        starts.append(starts[-1] + len(token))
+    adds, gone = [], []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes():
+        if op in ("replace", "insert") and "".join(y[j1:j2]).strip():
+            adds.append((starts[j1], starts[j2] - starts[j1]))
+        if op in ("replace", "delete") and (old := "".join(x[i1:i2]).strip()):
+            gone.append((starts[j1], old))
+    return adds, gone
 
 
 def added_spans(before, after):
-    """[(inicio, largo)] de lo puesto en after que no estaba en before, palabra a palabra."""
-    x, y = WORDS.findall(before), WORDS.findall(after)
-    starts = [0]
-    for token in y:
-        starts.append(starts[-1] + len(token))
-    return [(starts[j1], starts[j2] - starts[j1]) for op, _, _, j1, j2 in
-            difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes() if op in ("replace", "insert")]
+    """[(inicio, largo)] de lo puesto en after que no estaba en before."""
+    return diff_ops(before, after)[0]
 
 
 def removed_spans(before, after):
-    """[(posición en after, texto)] de lo que estaba en before y ya no, palabra a palabra: va donde estaba."""
-    x, y = WORDS.findall(before), WORDS.findall(after)
-    starts = [0]
-    for token in y:
-        starts.append(starts[-1] + len(token))
-    return [(starts[j1], "".join(x[i1:i2]).strip()) for op, i1, i2, j1, j2 in
-            difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes()
-            if op in ("replace", "delete") and "".join(x[i1:i2]).strip()]
+    """[(posición en after, texto)] de lo que estaba en before y ya no: va donde estaba."""
+    return diff_ops(before, after)[1]
+
+
+def group_changes(before, texts, index):
+    """diff_ops del párrafo texts[index] de un grupo que viene de un mismo original before (Intro copia el origen del
+    párrafo al nuevo de abajo): se compara el grupo entero, unido por saltos de línea. Así un párrafo nuevo tras otro
+    sale como puesto, no como el de arriba cambiado. before None: el párrafo es nuevo, todo puesto."""
+    if before is None:
+        return [(0, len(texts[index]))], []
+    start = sum(len(t) + 1 for t in texts[:index])
+    end = start + len(texts[index])
+    adds, gone = diff_ops(before, "\n".join(texts))
+    return ([(max(a, start) - start, min(a + n, end) - max(a, start)) for a, n in adds if a < end and a + n > start],
+            [(p - start, old) for p, old in gone if start <= p <= end])
 
 
 class Changes(QTextBlockUserData):
-    """«Mostrar cambios» de un párrafo: con qué texto se compara (en el código, su línea al abrirlo) y lo quitado que
-    se pinta tachado en su hueco, [(posición, texto, ancho)]."""
+    """«Mostrar cambios» de un párrafo: con qué texto se compara (en el código, su línea al abrirlo; None: nueva) y
+    lo quitado que se pinta tachado en su hueco (mark_changes)."""
 
     def __init__(self, original=None):
         super().__init__()
@@ -1272,75 +1301,152 @@ class Changes(QTextBlockUserData):
 GAP = 3  # píxeles a cada lado de lo quitado
 
 
-def mark_changes(look, text, before, at, color):
-    """Desde highlightBlock de look: lo puesto frente a before (None: párrafo nuevo, todo puesto) subrayado del color
-    dado, y un hueco para cada trozo quitado: espaciado tras la letra anterior (o tras la primera, que se pinta
-    después de lo quitado: no hay letra antes). paint_removed lo pinta tachado en el hueco."""
+def mark_changes(look, text, changes, at, color):
+    """Desde highlightBlock de look: changes (group_changes) con lo puesto subrayado del color dado y, para cada trozo
+    quitado, un hueco: espaciado tras la letra anterior (o tras la primera, que se pinta después de lo quitado: no
+    hay letra antes). Uno largo se acorta con «…» (lo entero sale en un globo). paint_removed lo pinta."""
     block = look.currentBlock()
     data = block.userData() if isinstance(block.userData(), Changes) else Changes()
     data.gone = []
-    spans = [(0, len(text))] if before is None else added_spans(before, text)
-    for start, size in spans:
+    adds, gone = changes
+    for start, size in adds:
         for c in range(at(start), at(start + size)):
             f = QTextCharFormat(look.format(c))
             f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
             f.setUnderlineColor(color)
             f.setForeground(color)
             look.setFormat(c, 1, f)
-    for pos, old in [] if before is None or not text else removed_spans(before, text):
+    room = max(40.0, (look.document().textWidth() or 600) * 0.45)  # lo más ancho de un hueco: media hoja
+    for pos, old in gone if text else []:
         c = at(max(pos - 1, 0))
         cursor = QTextCursor(block)
         cursor.setPosition(block.position() + c + 1)  # su formato es el de la letra c
         f, shown = QTextCharFormat(look.format(c)), QTextCharFormat(cursor.charFormat())
         shown.merge(f)
         font = shown.font().resolve(look.document().defaultFont())
-        width = QFontMetrics(font).horizontalAdvance(old) + 2 * GAP
+        metrics = QFontMetrics(font)
+        short = metrics.elidedText(old, Qt.TextElideMode.ElideMiddle, int(room))
+        width = metrics.horizontalAdvance(short) + 2 * GAP
         f.setFontLetterSpacingType(QFont.SpacingType.AbsoluteSpacing)
         f.setFontLetterSpacing(width)
+        ink = f.foreground().color() if f.hasProperty(QTextFormat.Property.ForegroundBrush) else None
         if not pos:  # la primera letra va tras lo quitado: la de su sitio, invisible
             f.setForeground(QColor(0, 0, 0, 0))
         look.setFormat(c, 1, f)
-        data.gone.append((pos, old, width, font))
+        data.gone.append((c, text[max(pos - 1, 0)], short, old, width, font, not pos, ink))
     look.setCurrentBlockUserData(data)
+
+
+def _x(line, pos):
+    x = line.cursorToX(pos)
+    return x[0] if isinstance(x, tuple) else x
 
 
 def paint_removed(edit, painter, color):
     """Lo quitado de cada párrafo a la vista (Changes.gone), tachado del color dado en el hueco que le abrió
-    mark_changes."""
-    block = edit.cursorForPosition(QPoint(0, 0)).block()
+    mark_changes. Se mide con el layout de su línea: al final de una línea el hueco sigue a su letra. Deja en
+    edit.removed_boxes [(QRectF, texto entero)] para el globo."""
+    doc_layout = edit.document().documentLayout()
+    dx, dy = edit.horizontalScrollBar().value(), edit.verticalScrollBar().value()
+    boxes = edit.removed_boxes = []
     bottom = edit.viewport().height()
     ink = edit.palette().color(QPalette.ColorRole.Text)
-    while block.isValid():
+    block = edit.cursorForPosition(QPoint(0, 0)).block()
+    while block.isValid() and doc_layout.blockBoundingRect(block).top() - dy <= bottom:
         data = block.userData()
-        if isinstance(data, Changes):
-            for pos, old, width, font in data.gone:
-                if pos > block.length() - 1:
+        if isinstance(data, Changes) and data.gone:
+            layout = block.layout()
+            origin = layout.position()
+            for c, glyph, short, old, width, font, first, color_of in data.gone:
+                line = layout.lineForTextPosition(c)
+                if not line.isValid():
                     continue
-                here = QTextCursor(block)
-                here.setPosition(block.position() + pos)
-                rect = edit.cursorRect(here)
-                if pos:
-                    here.setPosition(block.position() + pos - 1)
-                    prev = edit.cursorRect(here)
-                    if prev.top() != rect.top():  # partido al final de la línea: el hueco quedó al final de la de antes
-                        rect = prev.translated(QFontMetrics(font).horizontalAdvance(block.text()[pos - 1]) + width, 0)
-                    x = rect.left() - width
-                else:
-                    x = rect.left()
+                after = layout.lineForTextPosition(c + 1)
+                end = (_x(line, c + 1) if after.isValid() and after.lineNumber() == line.lineNumber()
+                       else _x(line, c) + QFontMetrics(font).horizontalAdvance(glyph) + width)
+                x = origin.x() + (_x(line, c) if first else end - width) - dx
+                y = origin.y() + line.y() - dy
+                box = QRectF(x + GAP, y, width - 2 * GAP, line.height())
                 strike = QFont(font)
                 strike.setStrikeOut(True)
                 painter.setFont(strike)
                 painter.setPen(QColor(color))
-                box = QRectF(x + GAP, rect.top(), width - 2 * GAP, rect.height())
-                painter.drawText(box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, old)
-                if not pos and block.text():  # la primera letra, tras lo quitado
+                painter.drawText(box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, short)
+                boxes.append((box, old))
+                if first:  # la primera letra, tras lo quitado, con su color (el de lo puesto si lo es)
                     painter.setFont(font)
-                    painter.setPen(ink)
-                    painter.drawText(QRectF(x + width, rect.top(), width + 50, rect.height()),
-                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, block.text()[0])
-        if edit.cursorRect(QTextCursor(block)).top() > bottom:
-            break
+                    painter.setPen(color_of or ink)
+                    painter.drawText(QRectF(x + width, y, width + 80, line.height()),
+                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, glyph)
         block = block.next()
+
+
+def removed_tip(edit, event):
+    """Globo con lo quitado entero al pasar el ratón por su tachado; True si lo enseñó."""
+    point = QPointF(edit.viewport().mapFromGlobal(event.globalPos()))
+    hit = next((old for box, old in getattr(edit, "removed_boxes", []) if box.contains(point)), None)
+    if hit:
+        QToolTip.showText(event.globalPos(), f"Quitado: {hit}", edit)
+    return bool(hit)
+
+
+def code_group(block):
+    """Como original_group en «Código HTML»: la línea con su línea de antes (Changes.original) y las nuevas que la
+    siguen (Intro no les pasa el dato): una línea partida o añadida se compara con todas."""
+    def known(b):
+        return isinstance(b.userData(), Changes) and b.userData().original is not None
+    first = block
+    while not known(first) and first.previous().isValid():
+        first = first.previous()
+    if not known(first):
+        return [block], 0
+    group, b = [first], first.next()
+    while b.isValid() and not known(b):
+        group.append(b)
+        b = b.next()
+    return group, block.blockNumber() - first.blockNumber()
+
+
+def watch_groups(look, group_of):
+    """Al tocar un párrafo de un grupo (original_group, code_group), los demás del grupo se repintan también: lo
+    quitado y lo puesto se reparten entre todos."""
+    def changed(pos, removed, added):
+        if not look.changes:
+            return
+        doc = look.document()
+        first, last = doc.findBlock(pos), doc.findBlock(pos + added)
+        touched = set()
+        block = first
+        while block.isValid():
+            touched.add(block.blockNumber())
+            if block == last:
+                break
+            block = block.next()
+        others = {b.blockNumber() for n in touched for b in group_of(doc.findBlockByNumber(n))[0]} - touched
+        if others:
+            QTimer.singleShot(0, look, lambda: [look.rehighlightBlock(doc.findBlockByNumber(n)) for n in sorted(others)
+                                                if doc.findBlockByNumber(n).isValid()])
+    look.document().contentsChange.connect(changed)
+
+
+def original_group(block):
+    """([párrafos], n.º de block en ellos) de los seguidos que vienen del mismo original que block (Intro copia su
+    origen al párrafo nuevo de abajo)."""
+    f = block.blockFormat()
+    key = (f.property(ORIGINAL), f.property(SOURCE))
+    if key[0] is None:
+        return [block], 0
+
+    def same(b):
+        return b.isValid() and (b.blockFormat().property(ORIGINAL), b.blockFormat().property(SOURCE)) == key
+    first = block
+    while same(first.previous()):
+        first = first.previous()
+    group, b = [], first
+    while same(b):
+        group.append(b)
+        b = b.next()
+    return group, block.blockNumber() - first.blockNumber()
 
 
 def settle(document):
@@ -1368,6 +1474,7 @@ class Look(QSyntaxHighlighter):
         self.tags = {}
         self.changes = None  # color con que se subraya lo puesto en cada párrafo cambiado; None: no se marca
         self.removed = None  # color de lo quitado, tachado en su sitio (theme.mark_colors)
+        watch_groups(self, original_group)
 
     def show_changes(self, color, removed=None):
         """«Mostrar cambios»: subraya, del color dado (None lo quita), lo que se puso frente al original, y pinta
@@ -1456,7 +1563,10 @@ class Look(QSyntaxHighlighter):
                 c = stop
         original = original_of(block)
         if self.changes and text.strip() and not objects_of(block) and block_lines(block) != [original]:
-            mark_changes(self, text, None if original is None else plain_line(original), at, QColor(self.changes))
+            group, n = original_group(block)
+            mark_changes(self, text, group_changes(None if original is None else plain_line(original),
+                                                   [b.text() if b != block else text for b in group], n),
+                         at, QColor(self.changes))
         elif isinstance(block.userData(), Changes):
             block.userData().gone = []
 
@@ -2416,7 +2526,9 @@ class Sheet(QTextEdit):
         self.setTextCursor(cursor)
 
     def event(self, event):
-        """Al pasar el ratón por una nota, su texto entero (en la hoja puede ser largo)."""
+        """Al pasar el ratón por una nota, su texto entero (en la hoja puede ser largo); por lo quitado, lo quitado."""
+        if event.type() == QEvent.Type.ToolTip and removed_tip(self, event):
+            return True
         if event.type() == QEvent.Type.ToolTip:
             note = self.note_at(self.cursorForPosition(self.viewport().mapFromGlobal(event.globalPos())).position())
             if note:
