@@ -94,6 +94,7 @@ LANGUAGES = ["es", "en", "pt", "fr", "it", "ja"]     # idioma del EPUB: lo usan 
 LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")  # el idioma va tal cual en el XML del EPUB
 # Lo que comparten los tomos de una serie: al abrir un tomo sin revisión se toma de otro ya revisado
 INHERITED = ("author", "publisher", "translator", "illustrator", "subjects", "lang", "style", "separator",
+             "separator_icon",
              "typography", "shrink", "shrink_size", "gray", "trim", "font", "font_file", "epub2", "reading",
              "contents", "credits", "profile", "replacements", "horizontal", "kepub", "words", "hyphenate", "glossary", "tr_glossary", "tr_notes",
              "book_type", "franchise", "author_native", "illustrator_native", "relay", "epub_by", "distributor", "links",
@@ -606,6 +607,7 @@ def _write_options(state, breaks=()):
             "typography": bool(state.get("typography", True)),
             "style": style if style in convert.STYLES or style == convert.ORIGINAL else "Clásico",
             "separator": str(state.get("separator", "Según el estilo")),
+            "separator_icon": icon if (icon := str(state.get("separator_icon") or "")).startswith("<svg") else "",
             "shrink": int(state.get("shrink_size") or convert.SHRINK) if state.get("shrink", True) else False,
             "replacements": [tuple(rule) for rule in state.get("replacements", [])],
             "credits": bool(state.get("credits")), "gray": bool(state.get("gray")), "trim": bool(state.get("trim")),
@@ -1119,7 +1121,7 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "translator": "Traductor", "illustrator": "Ilustraciones", "proofreader": "Corrección",
                 "editor": "Edición", "original_title": "Título original", "subjects": "Géneros", "date": "Fecha",
                 "lang": "Idioma", "description": "Sinopsis", "cover": "Portada", "style": "Estilo",
-                "separator": "Separadores", "font": "Fuente", "font_file": "Archivo de fuente", "profile": "Perfil",
+                "separator": "Separadores", "separator_icon": "Icono del separador", "font": "Fuente", "font_file": "Archivo de fuente", "profile": "Perfil",
                 "typography": "Limpieza tipográfica", "gray": "Imágenes en gris", "shrink": "Reducir imágenes",
                 "shrink_size": "Tamaño de las imágenes", "trim": "Recortar márgenes blancos",
                 "credits": "Página de título y créditos", "reading": "Minutos de lectura", "contents": "Índice", "epub2": "EPUB 2",
@@ -2174,6 +2176,8 @@ class App:
         self.autocase_var = qtk.Var(False)
         self.profile_var = qtk.Var("Personalizado")  # fija gris, tamaño de imagen, EPUB 2 y KEPUB
         self.separator_var = qtk.Var("Según el estilo")  # cómo se ven los separadores de escena
+        self.separator_icon_var = qtk.Var("")  # SVG del «Icono propio» (convert.trace_svg de la imagen elegida)
+        self.separator_before = "Según el estilo"  # al cancelar «Icono propio» sin icono, se vuelve a este
         self.style_var = qtk.Var("Clásico")  # aspecto del EPUB: letra, párrafos e inicio de capítulo
         self.font_var = qtk.Var("Del lector")  # tipografía incrustada (convert.FONTS) o nombre de la propia
         self.font_file_var = qtk.Var("")  # ruta de la fuente propia
@@ -2382,10 +2386,11 @@ class App:
         self.style_box = _combo(self.style_var, list(convert.STYLES), 10, changed=self.update_preview)
         self.style_box.setToolTip("«Original»: el aspecto del EPUB abierto, con su CSS y sus fuentes")
         # «Otro…»: el texto que se escriba es el separador, tal cual
-        self.separator_box = _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12, changed=self.update_preview,
+        self.separator_box = _combo(self.separator_var, convert.SEPARATOR_CHOICES, 12, changed=self.separator_changed,
                                     other=lambda now: _ask_line(root, "Separador", "Separador de escena (se pone tal "
                                                                 "cual entre las escenas):", now))
-        self.separator_box.setToolTip("Elige uno, u «Otro…» para escribir el tuyo")
+        self.separator_box.setToolTip("Elige uno, u «Otro…» para escribir el tuyo. «Icono propio»: una imagen tuya "
+                                      "(PNG o JPG) hecha icono del color del texto")
         index = qtk.Var.check(self.contents_var, QCheckBox("Índice"))
         index.setToolTip("Página «Contenido» tras la portada, con los capítulos y sus subtítulos")
         self.options_row.setLayout(_row(_label("Perfil:"), _combo(self.profile_var, list(PROFILES), 15,
@@ -3582,6 +3587,23 @@ class App:
             self.book.cover = convert.text_cover(self.book)
         self.save_review()
         return _plan(self.book, self.rows())
+
+    def separator_changed(self, parent=None):
+        """«Icono propio»: la imagen que se elija (PNG o JPG), sin su fondo y hecha icono (convert.trace_svg). Sin
+        imagen ni icono de antes, vuelve el separador de antes."""
+        if self.separator_var.get() == "Icono propio":
+            path = filedialog.askopenfilename(filetypes=[("Imagen", "*.png *.jpg *.jpeg")], title="Imagen del separador",
+                                              parent=parent or self.root)
+            svg = convert.trace_svg(Path(path).read_bytes()) if path and Path(path).is_file() else ""
+            if path and not svg:
+                messagebox.showwarning("Icono propio", "No se encontró ninguna figura en la imagen. Usa una con el "
+                                       "fondo liso o transparente.", parent=parent or self.root)
+            if svg:
+                self.separator_icon_var.set(svg)
+            elif not self.separator_icon_var.get():
+                self.separator_var.set(self.separator_before)
+        self.separator_before = self.separator_var.get()
+        self.update_preview()
 
     def write_options(self, breaks=()):
         """Opciones de write_epub según la ventana (ver _write_options)."""
@@ -5478,6 +5500,7 @@ class App:
                 "illustrator": self.illustrator_var, "proofreader": self.proofreader_var, "editor": self.editor_var,
                 "original_title": self.original_title_var, "subjects": self.subjects_var, "date": self.date_var,
                 "lang": self.lang_var, "style": self.style_var, "separator": self.separator_var,
+                "separator_icon": self.separator_icon_var,
                 "typography": self.typography_var, "shrink": self.shrink_var, "shrink_size": self.shrink_size_var,
                 "credits": self.credits_var, "gray": self.gray_var, "trim": self.trim_var, "font": self.font_var,
                 "font_file": self.font_file_var, "epub2": self.epub2_var, "reading": self.reading_var, "profile": self.profile_var,
@@ -7269,7 +7292,6 @@ class TextEditor:
         column.addWidget(self.split_bar())
         column.addWidget(self.issue_bar())
         column.addWidget(self.resume_bar())
-        column.addWidget(self.diff_bar())
         # Hoja centrada sobre el escritorio gris, como la vista de impresión de Word
         desk = QFrame(objectName="desk")
         desk_row = QHBoxLayout(desk)
@@ -7394,7 +7416,7 @@ class TextEditor:
             self.side_web.moved.connect(lambda: self.web_shown() and self.show_web_page(self.side_web))
             self.side_web.page().clicked.connect(self.epub_clicked)
             self.side_web.page().picked.connect(self.epub_picked)
-            self.side_web.paged.connect(lambda _: self.mark_epub())
+            self.side_web.paged.connect(lambda _: (self.mark_epub(), self.epub_changes()))
         if self.web is not None:
             self.side_tabs.addTab("Hoja web")
             self.web_box = QWidget()
@@ -7485,8 +7507,6 @@ class TextEditor:
         sheet.textChanged.connect(lambda: self.later("status", 300, self.update_status))
         # Sin reiniciar la cuenta en cada aviso (la ortografía repinta y avisa sin parar): como mucho 5 s de trabajo perdido
         sheet.textChanged.connect(lambda: "draft" in self.pending or self.later("draft", DRAFT_MS, self.write_draft))
-        sheet.textChanged.connect(lambda: self.later("diff", 150, self.update_diff))
-        sheet.cursorPositionChanged.connect(lambda: self.later("diff", 150, self.update_diff))
         sheet.cursorPositionChanged.connect(lambda: self.later("source", 150, self.draw_source))
         sheet.cursorPositionChanged.connect(lambda: self.later("follow", 200, self.follow_cursor))
         sheet.textChanged.connect(lambda: self.code.isVisible() and not self.applying_code
@@ -7735,7 +7755,12 @@ class TextEditor:
             ("¿ ? Pregunta", lambda: self.do("wrap", "¿", "?")), ("¡ ! Exclamación", lambda: self.do("wrap", "¡", "!")), None,
             ("Corregir tipografía del capítulo", lambda: self.on_sheet(self.fix_typography))], icon="symbols")
         group("Símbolos", [self.symbols_btn])
-        group("Texto", [tool("Separador", "Separador de escena tras el párrafo", lambda: self.do("insert_break"), icon="scene"),
+        self.break_btn, _ = menu_tool("Separador ▾", "Separador de escena tras el párrafo, o los del libro hechos "
+                                      "icono (una silueta del color del texto)", [
+            ("Separador de escena", lambda: self.do("insert_break")), None,
+            ("Separadores del libro como icono", self.icon_separators),
+            ("Icono propio desde una imagen…", self.own_icon_separator)], icon="scene")
+        group("Texto", [self.break_btn,
                         tool("Nota…", "Nota al pie: se escribe en un cuadro; en el EPUB sale al tocar su llamada. Con "
                              "el cursor en una nota, la edita", self.note_dialog,
                              icon="note")])
@@ -7820,6 +7845,8 @@ class TextEditor:
         quedaban con el del tema anterior (apenas se veían)."""
         self.colors = theme.colors(dark)
         self.code.set_colors(theme.code_colors(dark))
+        if self.show_changes_action.isChecked():  # lo puesto y lo quitado, con los colores del tema
+            self.set_show_changes(True)
         for button, glyph, size in self.glyphs:
             if shiboken6.isValid(button):
                 button.setIcon(_glyph_icon(glyph, self.colors["ink"], size))
@@ -8015,6 +8042,22 @@ class TextEditor:
         """El foco a la hoja a la vista: con la hoja web, a ella (en la de Qt, oculta, se escribía a ciegas)."""
         (self.web if self.web_on else self.sheet).setFocus()
 
+    def icon_separators(self):
+        """Los separadores dibujados del libro, como icono (convert.trace_svg): la opción «Icono del original» de la
+        ventana. La pestaña EPUB lo enseña ya."""
+        self.app.separator_var.set("Icono del original")
+        self.app.separator_changed()
+        self.draw_web()
+        self.tell("Separadores dibujados como icono del color del texto (Separador: «Icono del original»)")
+
+    def own_icon_separator(self):
+        """Una imagen propia (PNG o JPG) hecha icono, para todos los separadores: la opción «Icono propio»."""
+        self.app.separator_var.set("Icono propio")
+        self.app.separator_changed(self.win)
+        self.draw_web()
+        if self.app.separator_var.get() == "Icono propio":
+            self.tell("Separadores con tu icono (Separador: «Icono propio»)")
+
     def tell(self, text):
         """Nota de la última herramienta en la barra de estado; se borra sola: tras deshacer ya no sería cierta."""
         self.note.setText(text)
@@ -8074,8 +8117,7 @@ class TextEditor:
             self.tabs_row.insertWidget(3, self.review_btn)
         if self.focused:
             self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.view_tabs, self.find_frame,
-                                             self.link_frame, self.split_frame, self.issue_frame, self.resume_frame,
-                                             self.diff_frame)
+                                             self.link_frame, self.split_frame, self.issue_frame, self.resume_frame)
                                  if not w.isHidden()]
             for widget in self.before_focus:
                 widget.hide()
@@ -8090,54 +8132,61 @@ class TextEditor:
             self.note.setText("")
         self.focus_page()
 
-    # Mostrar cambios, como el control de cambios de Word: lo puesto subrayado en la hoja y el original en una barra
-    def diff_bar(self):
-        bar = self.diff_frame = QFrame(objectName="ribbon")
-        self.diff_label = QLabel()
-        self.diff_label.setTextFormat(Qt.TextFormat.RichText)
-        self.diff_label.setWordWrap(True)
-        self.diff_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        bar.setLayout(_row(_label("Cambios:", "muted"), self.diff_label, margins=(10, 6, 10, 6)))
-        bar.hide()
-        return bar
+    # Mostrar cambios, como el control de cambios de Word con todas las marcas: lo puesto subrayado y lo quitado
+    # tachado en su sitio, en la hoja, el código, la pestaña EPUB y la hoja web
+    def change_colors(self):
+        """(color de lo puesto, color de lo quitado) del tema."""
+        colors = theme.mark_colors(self.app.dark)
+        return colors["changed"], colors["Grave"]
 
     def set_show_changes(self, on):
-        color = theme.mark_colors(self.app.dark)["changed"] if on else None
+        color, removed = self.change_colors()
         for page in self.pages.values():
-            page["look"].show_changes(color)
-        self.update_diff()
-        if getattr(self, "web_on", False):
-            self.web.call("showChanges", bool(on))
+            page["look"].show_changes(color if on else None, removed)
+        self.code.show_changes(color if on else None, removed)
+        if self.web is not None and self.web.loaded:
+            self.web_marks()
+        self.epub_changes()
 
-    def update_diff(self):
-        """El original del párrafo del cursor con lo quitado tachado y lo puesto subrayado; sin cambios, se oculta."""
-        if not shiboken6.isValid(self.diff_frame):
+    def book_classes(self):
+        """Clases del CSS del libro (sus hojas de estilo, si es un EPUB, y las de la app), ordenadas."""
+        css = convert.BASE_CSS + "".join(convert.STYLES.values())
+        if self.app.book.origin:
+            try:
+                with zipfile.ZipFile(self.app.book.origin) as z:
+                    css += "".join(z.read(n).decode("utf-8", "replace") for n in z.namelist()
+                                   if n.lower().endswith(".css"))
+            except (OSError, zipfile.BadZipFile):
+                pass  # sin el EPUB de entrada: solo las de la app
+        selectors = re.sub(r"\{[^}]*\}", " ", re.sub(r"/\*.*?\*/", "", css, flags=re.S))  # sin valores: «.ttf»
+        return sorted(set(re.findall(r"\.([A-Za-z_][\w-]*)", selectors)))
+
+    def code_originals(self):
+        """Línea de código de antes de cada línea de la vista «Código HTML» (None: párrafo nuevo), en su orden."""
+        out = []
+        for block in self.blocks():
+            lines = [line for line in editor.block_lines(block) if line.strip()]
+            original = editor.original_of(block)
+            for line in lines:
+                out.append(None if original is None else editor.to_code(original if len(lines) == 1 else line))
+        return out
+
+    def epub_changes(self):
+        """Pestaña EPUB: los párrafos cambiados con lo puesto subrayado y lo quitado tachado (o nada, apagado)."""
+        if not self.web_shown():
             return
-        block = self.sheet.textCursor().block()
-        original = editor.original_of(block)
-        if self.web_on:  # el párrafo del cursor de la web (sondeo): la hoja de Qt aún no tiene lo escrito en ella
-            st = self.web_state
-            text, objects = st.get("text", "").replace(" ", " "), st.get("obj")
-            new = st.get("fresh") or original is None
-            unchanged = not st.get("edited") and not new
-        else:
-            text, objects, new = block.text(), editor.objects_of(block), original is None
-            unchanged = original is not None and editor.block_lines(block) == [original]
-        if not self.show_changes_action.isChecked() or objects or not text.strip() or unchanged:
-            self.diff_frame.hide()
-            return
-        if new:
-            self.diff_label.setText("<i>Párrafo nuevo</i>")
-        else:
-            colors = theme.mark_colors(self.app.dark)
-            parts, diff = [], _word_diff(editor.plain_line(original), text)
-            for n, (text, tag) in enumerate(diff):
-                text = html.escape(text)
-                gap = " " if tag == "old" and n + 1 < len(diff) and diff[n + 1][1] == "new" else ""  # «cargada grávida»
-                parts.append(f'<s style="color:{colors["Grave"]}">{text}</s>{gap}' if tag == "old" else
-                             f'<u style="color:{colors["changed"]}">{text}</u>' if tag == "new" else text)
-            self.diff_label.setText("".join(parts))
-        self.diff_frame.show()
+        import websheet
+        items, blocks = [], list(self.blocks())
+        if self.show_changes_action.isChecked():
+            for n, block in enumerate(blocks):
+                original = editor.original_of(block)
+                if not block.text().strip() or editor.objects_of(block) or editor.block_lines(block) == [original]:
+                    continue
+                words, nth = self.epub_key(block, blocks[:n])
+                items.append({"t": words, "nth": nth, "before": None if original is None else editor.to_code(original)})
+        color, removed = self.change_colors()
+        self.side_web.changes(items, color, websheet.DEL_CSS % removed)
+
 
     def resume_bar(self):
         """«Lo dejaste en «Capítulo 5» · Ir allí»: el editor no salta solo, quien lo abre desde un aviso o una fila
@@ -9409,8 +9458,6 @@ class TextEditor:
         self.web_dirty = bool(self.web_state.get("dirty"))
         self.update_tools()
         self.undo_btn.setEnabled(bool(self.web_state.get("canUndo")) or self.sheet.document().isUndoAvailable())
-        if self.show_changes_action.isChecked():
-            self.update_diff()
         if self.web_state.get("wants") in ("undo", "redo"):  # Ctrl+Z o Ctrl+Y sin nada que hacer en Chromium
             self.web_undo(self.web_state["wants"] == "redo")
         if isinstance(self.reading, int) and self.web_state.get("i", -1) != self.reading:
@@ -9447,16 +9494,20 @@ class TextEditor:
     def web_marks(self):
         """Marcas de la hoja web, las mismas que las de la hoja: palabras que no están, avisos del informe (del color
         de su gravedad, en su trozo) y párrafos cambiados. Se pintan con resaltados de CSS: el HTML no cambia."""
-        if not self.web_on:
+        if self.web is None or not self.web.loaded:  # también cuando solo enseña la hoja: sus cambios a la vista
             return
+        import websheet
         colors = theme.mark_colors(self.app.dark)
         levels = list(convert.LEVELS)
         changed = {b.blockNumber() for b in self.sheet.changed_blocks()}
-        issues, marked, self.web_issues, n = [], [], {}, 0
+        issues, marked, before, self.web_issues, n = [], [], [], {}, 0
         block = self.sheet.document().firstBlock()
         while block.isValid():
             lines = [line for line in editor.block_lines(block) if line.strip()]
+            original = editor.original_of(block)
             for line in lines:
+                # el párrafo de antes como HTML: Chromium saca su texto como el de la hoja (notas, saltos)
+                before.append(None if original is None or len(lines) > 1 else editor.to_code(original))
                 if not (convert.TOKEN.fullmatch(line.strip()) or convert.PICTURE.fullmatch(line.strip())):
                     if block.blockNumber() in changed:
                         marked.append(n)
@@ -9472,7 +9523,8 @@ class TextEditor:
                 n += 1
             block = block.next()
         data = {"spell": sorted(w.lower() for w in self.unknown - self.ignored_words), "issues": issues,
-                "changed": marked, "show": self.show_changes_action.isChecked(),
+                "changed": marked, "show": self.show_changes_action.isChecked(), "before": before,
+                "del_css": websheet.DEL_CSS % colors["Grave"],
                 "colors": {"spell": self.sheet.tags.get("broken", {}).get("foreground", colors["Grave"]),
                            "change": colors["changed"]},
                 "levels": [colors.get(level, colors["Grave"]) for level in levels]}
@@ -9665,6 +9717,11 @@ class TextEditor:
             line = self.web_index(self.sheet.textCursor().block())
             self.code.setPlainText(editor.to_code(editor.dump(self.sheet.document())))
             self.code_text = self.code.toPlainText()
+            if not self.code.classes:  # para el autocompletado de class="…"
+                self.code.classes = self.book_classes()
+            color, removed = self.change_colors()  # «Mostrar cambios» frente a cada línea de antes
+            self.code.show_changes(color if self.show_changes_action.isChecked() else None, removed,
+                                   self.code_originals())
             self.sheet.hide()
             self.code.show()
             block = self.code.document().findBlockByNumber(line)
@@ -9895,7 +9952,7 @@ class TextEditor:
             if start >= 0:
                 self.replay_history(doc, lines)
             if self.show_changes_action.isChecked():
-                look.show_changes(theme.mark_colors(self.app.dark)["changed"])
+                look.show_changes(*self.change_colors())
         else:
             self.sheet.use(page["doc"], page["look"])
         self.current = (start, end)
@@ -10139,8 +10196,6 @@ class TextEditor:
         letras (un párrafo repetido, por su orden); una ilustración, por su número en el capítulo."""
         if not self.web_shown():
             return
-        def letters(b):  # solo las letras: comillas, rayas, notas «01» y <br/> cambian en el EPUB
-            return "".join(c for c in editor.NOTE.sub("", b.text()).lower() if c.isalpha())
         block = self.sheet.textCursor().block()
         before = [b for b in self.blocks() if b.blockNumber() < block.blockNumber()]
         if self.drawn_object(block):  # ilustración o separador dibujado: el n.º tal de las imágenes
@@ -10149,12 +10204,20 @@ class TextEditor:
         if not block.text().strip():  # una línea vacía: nada que recuadrar
             self.side_web.mark(None, MARK_COLORS["current"])
             return
+        words, nth = self.epub_key(block, before)
+        self.side_web.mark(words, MARK_COLORS["current"], nth)
+
+    def epub_key(self, block, before):
+        """(letras, n.º) con que la pestaña EPUB encuentra el párrafo block (webview.FIND_JS): un trozo de sus letras
+        y cuántos de los de antes (before) también lo tienen."""
+        def letters(b):  # solo las letras: comillas, rayas, notas «01» y <br/> cambian en el EPUB
+            return "".join(c for c in editor.NOTE.sub("", b.text()).lower() if c.isalpha())
         # un separador escrito («※ ・ ※») no tiene letras: se cuenta entre los párrafos sin ellas
         text = "" if editor.objects_of(block) else letters(block)
         words = text if len(text) <= 40 else text[len(text) // 4:][:30]  # un trozo del medio
         nth = sum(1 for b in before if b.text().strip() and not self.drawn_object(b)
                   and (words in letters(b) if words else not letters(b)))
-        self.side_web.mark(words, MARK_COLORS["current"], nth)
+        return words, nth
 
     def drawn_object(self, block):
         """¿El párrafo de la hoja es una ilustración o un separador dibujado (una imagen en el EPUB)?"""

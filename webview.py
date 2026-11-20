@@ -144,7 +144,22 @@ NOTE_JS = """
 })()
 """
 # El párrafo del cursor en la vista del EPUB: recuadrado como en el panel del original, y a la vista
-MARK_JS = """
+# El párrafo n.º nth cuyas letras contienen t (solo las letras: la tipografía cambia comillas y rayas, y una nota o un
+# <br/> parten el texto). Sin letras («—…», «※ ・ ※»), los párrafos sin letras
+FIND_JS = """
+window.lncFind = function (t, nth) {
+  var all = document.body.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, div, td');
+  var found = [];
+  for (var i = 0; i < all.length; i++) {
+    var e = all[i], letters = e.textContent.toLowerCase().replace(/[^\\p{L}]+/gu, '');
+    if (t ? letters.indexOf(t) >= 0 : !letters && e.textContent.trim() && !e.querySelector('img, svg')) found.push(e);
+  }
+  // el de más dentro: un <div> que envuelve el capítulo también contiene el texto
+  found = found.filter(function (e) { return !found.some(function (o) { return o !== e && e.contains(o); }); });
+  return found[Math.min(nth, found.length - 1)] || null;
+};
+"""
+MARK_JS = FIND_JS + """
 (function (t, color, nth, img) {
   if (window.lncMarked) { window.lncMarked.style.outline = ''; window.lncMarked = null; }
   var b = null;
@@ -152,17 +167,7 @@ MARK_JS = """
     var pics = document.body.querySelectorAll('img, svg');
     b = pics[Math.min(img, pics.length - 1)] || null;
   } else if (t !== null) {
-    // solo las letras: la tipografía cambia comillas y rayas, y una nota o un <br/> parten el texto. Sin letras
-    // («—…»), los párrafos sin letras
-    var all = document.body.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, div, td');
-    var found = [];
-    for (var i = 0; i < all.length; i++) {
-      var e = all[i], letters = e.textContent.toLowerCase().replace(/[^\\p{L}]+/gu, '');
-      if (t ? letters.indexOf(t) >= 0 : !letters && e.textContent.trim() && !e.querySelector('img, svg')) found.push(e);
-    }
-    // el de más dentro: un <div> que envuelve el capítulo también contiene el texto
-    found = found.filter(function (e) { return !found.some(function (o) { return o !== e && e.contains(o); }); });
-    b = found[Math.min(nth, found.length - 1)] || null;
+    b = lncFind(t, nth);
   }
   if (!b) return false;
   b.style.outline = '2px solid ' + color; b.style.outlineOffset = '3px';
@@ -170,6 +175,24 @@ MARK_JS = """
   b.scrollIntoView({block: 'center'});
   return true;
 })(%s, %s, %s, %s)
+"""
+# «Mostrar cambios» en la vista del EPUB: cada párrafo cambiado (buscado como en MARK_JS) con lo puesto subrayado y
+# lo quitado tachado; las palabras se comparan sin la tipografía. items vacío lo quita todo
+CHANGES_JS = """
+(function (items, color, css) {
+  lncClearDiff(document.body);
+  var style = document.getElementById('lnc-changes') || document.documentElement.appendChild(document.createElement('style'));
+  style.id = 'lnc-changes';
+  style.textContent = css + '::highlight(lnc-change){text-decoration: underline ' + color + '; color: ' + color + ';}';
+  if (!window.CSS || !CSS.highlights) return false;
+  var change = new Highlight(), key = function (w) { return w.toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ''); };
+  items.forEach(function (it) {
+    var b = lncFind(it.t, it.nth);
+    if (b) lncPaintDiff(b, lncText(it.before), key).forEach(function (r) { change.add(r); });
+  });
+  CSS.highlights.set('lnc-change', change);
+  return true;
+})(%s, %s, %s)
 """
 # Modo oscuro de lector: fondo oscuro y letra clara; las ilustraciones, tal cual
 DARK = """
@@ -323,6 +346,13 @@ if AVAILABLE:
             """Recuadra el párrafo n.º nth cuyas letras (minúsculas, sin lo demás) contienen text ("": el n.º nth sin
             letras) y lo trae a la vista; con image, la ilustración n.º image. text None quita el recuadro."""
             self.page().runJavaScript(MARK_JS % (json.dumps(text), json.dumps(color), int(nth), int(image)), 0)
+
+        def changes(self, items, color, css):
+            """«Mostrar cambios»: items [{t, nth, before}] (el párrafo como en mark y su HTML de antes, None si es
+            nuevo) con lo puesto subrayado de color y lo quitado tachado con css (websheet.DEL_CSS)."""
+            import websheet
+            self.page().runJavaScript(websheet.DIFF_JS + FIND_JS + CHANGES_JS % (
+                json.dumps(items), json.dumps(color), json.dumps(css)), 0)
 
         def _loaded(self, ok):
             if not ok:

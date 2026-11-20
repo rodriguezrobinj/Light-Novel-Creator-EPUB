@@ -10,9 +10,11 @@ import re
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QEvent, QMimeData, QObject, QPoint, QRect, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QSyntaxHighlighter, QTextBlockFormat,
-                           QTextCharFormat, QTextCursor, QTextDocument, QTextFormat, QTextImageFormat, QTextListFormat)
-from PySide6.QtWidgets import QApplication, QTextEdit, QToolTip, QWidget
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QStandardItem, QStandardItemModel,
+                           QSyntaxHighlighter, QTextBlockFormat,
+                           QTextBlockUserData, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat,
+                           QTextImageFormat, QTextListFormat)
+from PySide6.QtWidgets import QApplication, QCompleter, QTextEdit, QToolTip, QWidget
 
 import convert
 from qtk import u16
@@ -410,8 +412,20 @@ class CodeLook(QSyntaxHighlighter):
     def __init__(self, document, colors):
         super().__init__(document)
         self.colors = colors  # theme.CODE: colores del tema
+        self.changes, self.removed = None, None  # «Mostrar cambios», como en Look
 
     def highlightBlock(self, text):
+        self.paint_code(text)
+        data = self.currentBlock().userData()
+        known = isinstance(data, Changes)  # sin Changes: línea nueva (Intro), o no se compara (cambios apagados)
+        if self.changes and text.strip() and (not known or data.original != text):
+            wide = any(ord(c) > 0xFFFF for c in text)
+            mark_changes(self, text, data.original if known else None, lambda i: u16(text, i) if wide else i,
+                         QColor(self.changes))
+        elif known:
+            data.gone = []
+
+    def paint_code(self, text):
         def paint(start, size, key):
             f = QTextCharFormat()
             f.setForeground(QColor(self.colors[key]))
@@ -428,6 +442,95 @@ class CodeLook(QSyntaxHighlighter):
                 paint(m.start(3) + a.start(3), len(a[3]), "value")
         for m in re.finditer(r"<!--.*?-->", text):
             paint(m.start(), m.end() - m.start(), "comment")
+
+
+# Autocompletado de «Código HTML», como las extensiones de HTML de VS Code: etiquetas tras «<», la que cierra tras
+# «</», atributos dentro de una etiqueta, las clases del CSS del libro en class="…", entidades y símbolos tras «&»,
+# abreviaturas tipo Emmet con Tab («p.nota») y la etiqueta de cierre al escribir el «>» de una que abre
+HTML_TAGS = ("p", "i", "b", "em", "strong", "span", "br", "a", "ruby", "rt", "rp", "sup", "sub", "small", "s", "u",
+        "h1", "h2", "h3", "h4", "h5", "h6", "div", "img", "hr", "blockquote", "ul", "ol", "li", "table", "tr", "td",
+        "th", "figure", "figcaption", "section", "aside", "q", "cite", "code", "pre", "del", "ins", "mark", "abbr")
+HTML_VOID = {"br", "img", "hr", "wbr"}
+HTML_ATTRS = {"": ("class", "id", "style", "lang", "title", "dir", "epub:type", "xml:lang"),
+         "a": ("href",), "img": ("src", "alt", "width", "height"), "td": ("colspan", "rowspan"),
+         "th": ("colspan", "rowspan"), "ol": ("start",), "abbr": ("title",)}
+ENTITIES = (("&amp;", "& ampersand"), ("&lt;", "< menor que"), ("&gt;", "> mayor que"), ("&nbsp;", "espacio duro"),
+            ("&quot;", "\" comillas"), ("&#160;", "espacio duro (número)"),
+            ("—", "— raya"), ("–", "– semirraya"), ("…", "… puntos suspensivos"), ("«", "« comilla latina"),
+            ("»", "» comilla latina"), ("“", "“ comilla inglesa"), ("”", "” comilla inglesa"),
+            ("‘", "‘ comilla simple"), ("’", "’ apóstrofo"), ("¡", "¡ apertura de exclamación"),
+            ("¿", "¿ apertura de interrogación"), ("·", "· punto medio"), ("※", "※ separador japonés"),
+            ("♡", "♡ corazón"), ("☆", "☆ estrella"), ("♪", "♪ nota musical"))
+
+
+def open_tags(text):
+    """Etiquetas abiertas sin cerrar en text, de fuera adentro."""
+    stack = []
+    for close, name, end in re.findall(r"<(/?)([A-Za-z][\w:-]*)[^<>]*?(/?)>", text):
+        if end or name.lower() in HTML_VOID:
+            continue
+        if not close:
+            stack.append(name)
+        elif name in stack:
+            del stack[len(stack) - 1 - stack[::-1].index(name):]
+    return stack
+
+
+def complete_at(before, classes=()):
+    """Sugerencias para lo escrito antes del cursor en su línea: (cuántas letras de atrás sustituyen, [(lo que se
+    ve, lo que se escribe, cuántos caracteres atrás queda el cursor)]). Sin contexto, (0, [])."""
+    if m := re.search(r"&([\w#]*)$", before):  # entidades y símbolos
+        typed = m[1].lower()
+        found = [(label, text, 0) for text, label in ENTITIES
+                 if not typed or text.lstrip("&").lower().startswith(typed) or typed in label.lower()]
+        return len(m[0]), found
+    if m := re.search(r"</([\w:-]*)$", before):  # la etiqueta que cierra: la abierta más de dentro
+        stack = open_tags(before[:m.start()])
+        return len(m[1]), [(f"</{n}>", f"{n}>", 0) for n in reversed(stack) if n.startswith(m[1])][:1]
+    if m := re.search(r"<([\w:-]*)$", before):  # etiquetas
+        return len(m[1]), [(f"<{t}>", t, 0) for t in HTML_TAGS if t.startswith(m[1].lower())]
+    tag = re.search(r"<([A-Za-z][\w:-]*)\b([^<>]*)$", before)
+    if not tag:
+        return 0, []
+    inside = tag[2]
+    if m := re.search(r'\bclass="([^"]*)$', inside):  # clases del CSS del libro
+        word = re.search(r"[\w-]*$", m[1])[0]
+        used = set(m[1].split())
+        return len(word), [(c, c, 0) for c in classes if c.startswith(word) and c not in used]
+    if inside.count('"') % 2:  # dentro del valor de otro atributo
+        return 0, []
+    if m := re.search(r"\s([\w:-]*)$", inside):  # atributos que la etiqueta aún no tiene
+        have = set(re.findall(r'([\w:-]+)=', inside))
+        names = HTML_ATTRS[""] + HTML_ATTRS.get(tag[1].lower(), ())
+        return len(m[1]), [(a, f'{a}=""', 1) for a in names if a.startswith(m[1]) and a not in have]
+    return 0, []
+
+
+def expand_abbreviation(before):
+    """Abreviatura tipo Emmet al final de before («p.nota», «span.sc#x», «i»): (cuántos caracteres sustituye, lo
+    que se escribe, cuántos atrás queda el cursor), o None si lo de antes no es una."""
+    m = re.search(r"(?:^|(?<=[\s>]))([a-z][a-z0-9]*)((?:[.#][\w-]+)*)$", before)
+    if not m or m[1] not in HTML_TAGS or "<" in before[m.start():] or open_tag_here(before):
+        return None
+    classes = re.findall(r"\.([\w-]+)", m[2])
+    ids = re.findall(r"#([\w-]+)", m[2])
+    attrs = (f' id="{ids[-1]}"' if ids else "") + (f' class="{" ".join(classes)}"' if classes else "")
+    if m[1] in HTML_VOID:
+        return len(m[0]), f"<{m[1]}{attrs}/>", 0
+    return len(m[0]), f"<{m[1]}{attrs}></{m[1]}>", len(m[1]) + 3
+
+
+def open_tag_here(before):
+    """¿El cursor está dentro de una etiqueta («<p clas|»)?"""
+    return bool(re.search(r"<[^<>]*$", before))
+
+
+def closing_tag(before):
+    """La etiqueta que cierra la que acaba de abrirse con el «>» final de before («<i>» → «</i>»), o ""."""
+    m = re.search(r"<([A-Za-z][\w:-]*)\b[^<>]*>$", before)
+    if not m or before.endswith("/>") or m[1].lower() in HTML_VOID:
+        return ""
+    return f"</{m[1]}>"
 
 
 class _Gutter(QWidget):
@@ -458,9 +561,101 @@ class CodeEdit(QTextEdit):
         self.cursorPositionChanged.connect(self.mark_line)
         self.fit_gutter()
         self.mark_line()
+        # autocompletado (complete_at): la lista sale bajo el cursor, ya filtrada aquí
+        self.classes, self.items, self.cut = [], [], 0  # clases del CSS del libro; sugerencias de ahora
+        self.completer = QCompleter(self)
+        self.completer.setWidget(self)
+        self.completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
+        self.completer.setModel(QStandardItemModel(self.completer))
+        self.completer.setMaxVisibleItems(12)
+        self.completer.activated.connect(self.accept_completion)
+
+    def before_cursor(self):
+        cursor = self.textCursor()
+        return cursor.block().text()[:cursor.positionInBlock()]
+
+    def suggest(self, force=False):
+        """Sugerencias de lo de antes del cursor; sin forzar (Ctrl+Espacio), solo con algo escrito o tras < & / \"."""
+        popup = self.completer.popup()
+        before = self.before_cursor()
+        self.cut, self.items = complete_at(before, self.classes)
+        if not self.items or not (force or self.cut or before[-1:] in ('<', '&', '/', '"')):
+            popup.hide()
+            return
+        model = self.completer.model()
+        model.clear()
+        for label, *_ in self.items[:60]:
+            model.appendRow(QStandardItem(label))
+        rect = self.cursorRect()
+        rect.setWidth(popup.sizeHintForColumn(0) + popup.verticalScrollBar().sizeHint().width() + 24)
+        self.completer.complete(rect)
+        popup.setCurrentIndex(model.index(0, 0))
+
+    def accept_completion(self, label):
+        """La sugerencia elegida: sustituye lo escrito y deja el cursor donde toca (dentro de class="")."""
+        item = next((i for i in self.items if i[0] == label), None)
+        if item is None:
+            return
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, self.cut)
+        cursor.insertText(item[1])
+        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.MoveAnchor, item[2])
+        self.setTextCursor(cursor)
+        if item[1].endswith('=""'):  # tras un atributo, sus valores (las clases)
+            QTimer.singleShot(0, self.suggest)
+
+    def replace_before(self, cut, text, back):
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, cut)
+        cursor.insertText(text)
+        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.MoveAnchor, back)
+        self.setTextCursor(cursor)
+
+    def keyPressEvent(self, event):
+        key, popup = event.key(), self.completer.popup()
+        if popup.isVisible() and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab, Qt.Key.Key_Escape,
+                                         Qt.Key.Key_Backtab):
+            event.ignore()  # los recoge el QCompleter: elige (activated) o cierra
+            return
+        mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        if key == Qt.Key.Key_Space and mods == Qt.KeyboardModifier.ControlModifier:
+            self.suggest(force=True)
+            return
+        if key == Qt.Key.Key_Tab and not mods and (found := expand_abbreviation(self.before_cursor())):
+            self.replace_before(*found)  # «p.nota» + Tab
+            return
+        super().keyPressEvent(event)
+        if event.text() == ">" and (closing := closing_tag(self.before_cursor())):
+            after = self.textCursor().block().text()[self.textCursor().positionInBlock():]
+            if not after.startswith(closing):  # la que cierra, tras el cursor
+                self.replace_before(0, closing, len(closing))
+        if (event.text() and event.text().isprintable() and event.text() != ">") or key == Qt.Key.Key_Backspace:
+            self.suggest()
+        elif popup.isVisible() and key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home, Qt.Key.Key_End):
+            popup.hide()
 
     def blockCount(self):
         return self.document().blockCount()
+
+    def show_changes(self, color, removed, originals=None):
+        """«Mostrar cambios» en el código: lo puesto subrayado (color) y lo quitado tachado (removed) frente a
+        originals, la línea de antes de cada una (None: nueva); sin originals, las que ya tenía."""
+        if originals is not None:
+            block = self.document().firstBlock()
+            for line in originals:
+                if not block.isValid():
+                    break
+                block.setUserData(Changes(line) if line is not None else None)
+                block = block.next()
+        self.look.changes, self.look.removed = color, removed
+        self.look.rehighlight()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.look.changes and self.look.removed:
+            painter = QPainter(self.viewport())
+            paint_removed(self, painter, self.look.removed)
+            painter.end()
 
     def setPlainText(self, text):
         super().setPlainText(text)
@@ -1040,14 +1235,112 @@ def plain_line(line):
     return "".join(shown[kind] or value for kind, value, _ in parse_inline(_strip(line)))
 
 
+# Piezas que se comparan en «Mostrar cambios»: palabras, espacios y, en el código, cada etiqueta entera
+WORDS = re.compile(r"<[^<>]*>|[^\s<]+|\s+|<")
+
+
 def added_spans(before, after):
     """[(inicio, largo)] de lo puesto en after que no estaba en before, palabra a palabra."""
-    x, y = re.findall(r"\S+|\s+", before), re.findall(r"\S+|\s+", after)
+    x, y = WORDS.findall(before), WORDS.findall(after)
     starts = [0]
     for token in y:
         starts.append(starts[-1] + len(token))
     return [(starts[j1], starts[j2] - starts[j1]) for op, _, _, j1, j2 in
             difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes() if op in ("replace", "insert")]
+
+
+def removed_spans(before, after):
+    """[(posición en after, texto)] de lo que estaba en before y ya no, palabra a palabra: va donde estaba."""
+    x, y = WORDS.findall(before), WORDS.findall(after)
+    starts = [0]
+    for token in y:
+        starts.append(starts[-1] + len(token))
+    return [(starts[j1], "".join(x[i1:i2]).strip()) for op, i1, i2, j1, j2 in
+            difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes()
+            if op in ("replace", "delete") and "".join(x[i1:i2]).strip()]
+
+
+class Changes(QTextBlockUserData):
+    """«Mostrar cambios» de un párrafo: con qué texto se compara (en el código, su línea al abrirlo) y lo quitado que
+    se pinta tachado en su hueco, [(posición, texto, ancho)]."""
+
+    def __init__(self, original=None):
+        super().__init__()
+        self.original, self.gone = original, []
+
+
+GAP = 3  # píxeles a cada lado de lo quitado
+
+
+def mark_changes(look, text, before, at, color):
+    """Desde highlightBlock de look: lo puesto frente a before (None: párrafo nuevo, todo puesto) subrayado del color
+    dado, y un hueco para cada trozo quitado: espaciado tras la letra anterior (o tras la primera, que se pinta
+    después de lo quitado: no hay letra antes). paint_removed lo pinta tachado en el hueco."""
+    block = look.currentBlock()
+    data = block.userData() if isinstance(block.userData(), Changes) else Changes()
+    data.gone = []
+    spans = [(0, len(text))] if before is None else added_spans(before, text)
+    for start, size in spans:
+        for c in range(at(start), at(start + size)):
+            f = QTextCharFormat(look.format(c))
+            f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
+            f.setUnderlineColor(color)
+            f.setForeground(color)
+            look.setFormat(c, 1, f)
+    for pos, old in [] if before is None or not text else removed_spans(before, text):
+        c = at(max(pos - 1, 0))
+        cursor = QTextCursor(block)
+        cursor.setPosition(block.position() + c + 1)  # su formato es el de la letra c
+        f, shown = QTextCharFormat(look.format(c)), QTextCharFormat(cursor.charFormat())
+        shown.merge(f)
+        font = shown.font().resolve(look.document().defaultFont())
+        width = QFontMetrics(font).horizontalAdvance(old) + 2 * GAP
+        f.setFontLetterSpacingType(QFont.SpacingType.AbsoluteSpacing)
+        f.setFontLetterSpacing(width)
+        if not pos:  # la primera letra va tras lo quitado: la de su sitio, invisible
+            f.setForeground(QColor(0, 0, 0, 0))
+        look.setFormat(c, 1, f)
+        data.gone.append((pos, old, width, font))
+    look.setCurrentBlockUserData(data)
+
+
+def paint_removed(edit, painter, color):
+    """Lo quitado de cada párrafo a la vista (Changes.gone), tachado del color dado en el hueco que le abrió
+    mark_changes."""
+    block = edit.cursorForPosition(QPoint(0, 0)).block()
+    bottom = edit.viewport().height()
+    ink = edit.palette().color(QPalette.ColorRole.Text)
+    while block.isValid():
+        data = block.userData()
+        if isinstance(data, Changes):
+            for pos, old, width, font in data.gone:
+                if pos > block.length() - 1:
+                    continue
+                here = QTextCursor(block)
+                here.setPosition(block.position() + pos)
+                rect = edit.cursorRect(here)
+                if pos:
+                    here.setPosition(block.position() + pos - 1)
+                    prev = edit.cursorRect(here)
+                    if prev.top() != rect.top():  # partido al final de la línea: el hueco quedó al final de la de antes
+                        rect = prev.translated(QFontMetrics(font).horizontalAdvance(block.text()[pos - 1]) + width, 0)
+                    x = rect.left() - width
+                else:
+                    x = rect.left()
+                strike = QFont(font)
+                strike.setStrikeOut(True)
+                painter.setFont(strike)
+                painter.setPen(QColor(color))
+                box = QRectF(x + GAP, rect.top(), width - 2 * GAP, rect.height())
+                painter.drawText(box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, old)
+                if not pos and block.text():  # la primera letra, tras lo quitado
+                    painter.setFont(font)
+                    painter.setPen(ink)
+                    painter.drawText(QRectF(x + width, rect.top(), width + 50, rect.height()),
+                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, block.text()[0])
+        if edit.cursorRect(QTextCursor(block)).top() > bottom:
+            break
+        block = block.next()
 
 
 def settle(document):
@@ -1074,10 +1367,13 @@ class Look(QSyntaxHighlighter):
         self.job = 0  # tanda de repintado en curso (_repaint)
         self.tags = {}
         self.changes = None  # color con que se subraya lo puesto en cada párrafo cambiado; None: no se marca
+        self.removed = None  # color de lo quitado, tachado en su sitio (theme.mark_colors)
 
-    def show_changes(self, color):
-        """«Mostrar cambios»: subraya, del color dado (None lo quita), lo que se puso frente al original."""
+    def show_changes(self, color, removed=None):
+        """«Mostrar cambios»: subraya, del color dado (None lo quita), lo que se puso frente al original, y pinta
+        tachado (de removed) lo que se quitó, donde estaba."""
         self.changes = color
+        self.removed = removed or self.removed
         self.rehighlight()
 
     def set_tags(self, tags):
@@ -1158,22 +1454,11 @@ class Look(QSyntaxHighlighter):
                 f.setUnderlineColor(broken)
                 self.setFormat(c, stop - c, f)
                 c = stop
-        if self.changes and text.strip() and not objects_of(block):
-            original = original_of(block)
-            if original is None:
-                spans = [(0, len(text))]  # párrafo nuevo: todo es lo puesto
-            elif block_lines(block) == [original]:
-                spans = []
-            else:
-                spans = added_spans(plain_line(original), text)
-            changes = QColor(self.changes)
-            for start, size in spans:
-                for c in range(at(start), at(start + size)):
-                    f = QTextCharFormat(self.format(c))
-                    f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
-                    f.setUnderlineColor(changes)
-                    f.setForeground(changes)
-                    self.setFormat(c, 1, f)
+        original = original_of(block)
+        if self.changes and text.strip() and not objects_of(block) and block_lines(block) != [original]:
+            mark_changes(self, text, None if original is None else plain_line(original), at, QColor(self.changes))
+        elif isinstance(block.userData(), Changes):
+            block.userData().gone = []
 
 
 class _Filter(QObject):
@@ -1426,6 +1711,8 @@ class Sheet(QTextEdit):
         layout, doc = self.document().documentLayout(), self.document()
         dx, dy = self.horizontalScrollBar().value(), self.verticalScrollBar().value()
         self.paint_frames(painter, layout, doc, dx, dy, event.rect())
+        if self.look.changes and self.look.removed:
+            paint_removed(self, painter, self.look.removed)
         if not self.bars:
             painter.end()
             return
