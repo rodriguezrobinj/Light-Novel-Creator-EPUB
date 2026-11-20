@@ -11056,8 +11056,9 @@ def test_editor_epub_tab_follows_what_is_written():
 
 def test_editor_epub_tab_marks_every_paragraph_and_pages_into_next_chapter():
     """Pestaña «EPUB» del editor: el recuadro del párrafo del cursor sale en todos, también en el título de dos líneas
-    (<br/>), en uno con nota, en «— ¡...!» (sin letras, y la tipografía lo cambia) y en la ilustración. Pasar página al
-    final del capítulo abre el siguiente, y hacia atrás al principio, el anterior por su final."""
+    (<br/>), en uno con nota, en «— ¡...!» (sin letras, y la tipografía lo cambia), en el separador «※ ・ ※» y en la
+    ilustración. Un clic en la ilustración o en el separador lleva la hoja a él. Pasar página al final del capítulo
+    abre el siguiente, y hacia atrás al principio, el anterior por su final."""
     import app
     from PySide6.QtGui import QTextCursor
     marked = "window.lncMarked ? window.lncMarked.textContent.replace(/\\s+/g, ' ').trim() || window.lncMarked.tagName : ''"
@@ -11075,13 +11076,19 @@ def test_editor_epub_tab_marks_every_paragraph_and_pages_into_next_chapter():
             assert wait_for(lambda: ed.side_web.pages > 0), "la pestaña EPUB no cargó"
             missing = []
             for b in list(ed.blocks()):
-                if not b.text().strip() or (editor_objects(b) and "Ilustración" not in " ".join(editor_objects(b))):
+                if not b.text().strip():
                     continue
                 js(ed.side_web, "window.lncMarked && (window.lncMarked.style.outline = ''); window.lncMarked = null")
                 ed.sheet.setTextCursor(QTextCursor(b))
                 ed.mark_epub()
                 if not wait_for(lambda: js(ed.side_web, marked), 5):
-                    missing.append(b.text())
+                    missing.append(b.text() + " ".join(editor_objects(b)))
+            # clic en la ilustración y en el separador de la pestaña: la hoja va a ellos
+            ed.sheet.setTextCursor(QTextCursor(ed.sheet.document().firstBlock()))
+            js(ed.side_web, "document.querySelector('img').click()")
+            picked = wait_for(lambda: "Ilustración" in " ".join(editor_objects(ed.sheet.textCursor().block())), 5)
+            js(ed.side_web, "Array.from(document.querySelectorAll('p')).find(p => p.textContent.includes('※')).click()")
+            symbol = wait_for(lambda: "Separador" in " ".join(editor_objects(ed.sheet.textCursor().block())), 5)
             # al final del capítulo, «Página siguiente» abre el siguiente; al principio, «anterior» vuelve por el final
             bar = ed.side_web.bar
             bar.setValue(bar.maximum())
@@ -11095,7 +11102,59 @@ def test_editor_epub_tab_marks_every_paragraph_and_pages_into_next_chapter():
         finally:
             window.close()
     assert not missing, missing
+    assert picked and symbol, (picked, symbol)
     assert ahead != first and back == first and at_end, (first, ahead, back, at_end)
+
+
+def test_editor_epub_separator_plain_and_boxed_in_original():
+    """Separador «<b>※ ・ ※ ・ ※</b>» de un EPUB: en la hoja, sin etiquetas; en el panel del original, recuadrado y con
+    «・» dibujado (MuPDF lo dejaba en un cuadro con la letra latina: la vista lleva «·»)."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+    root, window = visible_window()
+    try:
+        window.pdf = src
+        window.show_book(convert.analyze(src))
+        k = next(c for c in window.book.candidates if window.book.blocks[c].title.startswith("Capítulo 1"))
+        window.settings["editor_web"] = False
+        ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+        texts = [v for v in ed.pictures(*ed.current).values() if isinstance(v, str)]
+        block = next(b for b in ed.blocks() if "Separador" in " ".join(editor_objects(b)))
+        ed.sheet.setTextCursor(QTextCursor(block))
+        root.update()
+        ed.draw_source()
+        box, page = ed.box, window.pdf_doc[ed.page].get_text()
+        ed.win.done(0)
+    finally:
+        window.close()
+    assert texts == ["※ ・ ※ ・ ※"], texts
+    assert "※ · ※ · ※" in page and "�" not in page, page
+    assert box is not None, box
+
+
+def test_websheet_click_on_picture_or_separator_moves_the_cursor():
+    """Hoja web: un clic en la ilustración o en el separador (no se escribe en ellos) los hace el párrafo de ahora: la
+    banda va a ellos y la hoja de Qt (con ella el original y la pestaña EPUB) también."""
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = next(c for c in window.book.candidates if window.book.blocks[c].title.startswith("Capítulo 1"))
+            ed = web_editor(window, k)
+            found = {}
+            for kind, css in (("Ilustración", "figure.lnc-obj"), ("Separador", "p.lnc-break")):
+                js(ed.web, f"document.querySelector('{css}').dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}}))")
+                found[kind] = wait_for(lambda: kind in " ".join(editor_objects(ed.sheet.textCursor().block())), 8)
+                found[kind + " banda"] = js(ed.web, f"lnc.hereAt === Array.prototype.indexOf.call("
+                                                    f"document.getElementById('lnc-sheet').children, "
+                                                    f"document.querySelector('{css}'))")
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert all(found.values()), found
 
 
 def editor_objects(block):

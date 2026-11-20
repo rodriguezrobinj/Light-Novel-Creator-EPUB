@@ -84,6 +84,11 @@ CLICK_JS = """
   if (window.lncClick) return true;
   window.lncClick = true;
   document.addEventListener('click', function (e) {
+    var pic = e.target.closest && e.target.closest('img, svg');  // una ilustración: su número, como en MARK_JS
+    if (pic) {
+      console.log('lnc-pick ' + Array.prototype.indexOf.call(document.body.querySelectorAll('img, svg'), pic));
+      return;
+    }
     var b = e.target.closest && e.target.closest('p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption');
     if (b) console.log('lnc-click ' + b.textContent.replace(/\\s+/g, ' ').trim().slice(0, 200));
   });
@@ -206,9 +211,12 @@ if AVAILABLE:
         scrolled = Signal(int, int, int)  # arriba, alto del documento y de la vista, en px de CSS
         clicked = Signal(str)  # texto del párrafo pulsado (CLICK_JS)
         note = Signal(str)  # href de la llamada a nota pulsada (NOTE_JS)
+        picked = Signal(int)  # número de la ilustración pulsada (CLICK_JS)
 
         def javaScriptConsoleMessage(self, level, message, line, source):
-            if message.startswith("lnc-note "):
+            if message.startswith("lnc-pick "):
+                self.picked.emit(int(message.split()[1]))
+            elif message.startswith("lnc-note "):
                 self.note.emit(message[len("lnc-note "):])
             elif message.startswith("lnc-click "):
                 self.clicked.emit(message[len("lnc-click "):])

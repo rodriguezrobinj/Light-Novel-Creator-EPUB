@@ -1052,7 +1052,7 @@ def _epub_block_page(book, doc, k):
                   and len(convert._plain(b)) >= 4), None)
     if probe is None:
         return start
-    words = " ".join(convert._plain(probe).split())[:24]
+    words = " ".join(convert._plain(probe).translate(convert.PREVIEW_TABLE).split())[:24]
     end = next((b.page - 1 for b in book.blocks[k:] if b.src and b.src[0] != block.src[0]), doc.page_count)
     return next((i for i in range(start, min(end + 1, doc.page_count)) if doc[i].search_for(words)), start)
 
@@ -7393,6 +7393,7 @@ class TextEditor:
             side_column.addWidget(self.epub_box, 1)
             self.side_web.moved.connect(lambda: self.web_shown() and self.show_web_page(self.side_web))
             self.side_web.page().clicked.connect(self.epub_clicked)
+            self.side_web.page().picked.connect(self.epub_picked)
             self.side_web.paged.connect(lambda _: self.mark_epub())
         if self.web is not None:
             self.side_tabs.addTab("Hoja web")
@@ -10142,19 +10143,38 @@ class TextEditor:
             return "".join(c for c in editor.NOTE.sub("", b.text()).lower() if c.isalpha())
         block = self.sheet.textCursor().block()
         before = [b for b in self.blocks() if b.blockNumber() < block.blockNumber()]
-        objects = " ".join(editor.objects_of(block))
-        if "Ilustración" in objects:
-            image = sum(1 for b in before if "Ilustración" in " ".join(editor.objects_of(b)))
-            self.side_web.mark("", MARK_COLORS["current"], image=image)
+        if self.drawn_object(block):  # ilustración o separador dibujado: el n.º tal de las imágenes
+            self.side_web.mark("", MARK_COLORS["current"], image=sum(1 for b in before if self.drawn_object(b)))
             return
-        if objects or not block.text().strip():  # un separador o una línea vacía: nada que recuadrar
+        if not block.text().strip():  # una línea vacía: nada que recuadrar
             self.side_web.mark(None, MARK_COLORS["current"])
             return
-        text = letters(block)
+        # un separador escrito («※ ・ ※») no tiene letras: se cuenta entre los párrafos sin ellas
+        text = "" if editor.objects_of(block) else letters(block)
         words = text if len(text) <= 40 else text[len(text) // 4:][:30]  # un trozo del medio
-        nth = sum(1 for b in before if not editor.objects_of(b) and b.text().strip()
+        nth = sum(1 for b in before if b.text().strip() and not self.drawn_object(b)
                   and (words in letters(b) if words else not letters(b)))
         self.side_web.mark(words, MARK_COLORS["current"], nth)
+
+    def drawn_object(self, block):
+        """¿El párrafo de la hoja es una ilustración o un separador dibujado (una imagen en el EPUB)?"""
+        for name in editor.objects_of(block):
+            kind, _, n = name.partition(" ")
+            if kind in ("Ilustración", "Imagen") or (kind == "Separador" and n.isdigit()
+                                                     and int(n) < len(self.app.book.blocks)
+                                                     and self.app.book.blocks[int(n)].image):
+                return True
+        return False
+
+    def epub_picked(self, n):
+        """Clic en la imagen n.º n de la pestaña EPUB: la hoja va a la ilustración (o separador dibujado) n.º n."""
+        if self.web_on:
+            self.flush_web(lambda: (self.web_done(), self.epub_picked(n)))
+            return
+        found = [b for b in self.blocks() if self.drawn_object(b)]
+        if self.current and self.current[0] >= 0 and found:
+            self.sheet.setTextCursor(QTextCursor(found[min(n, len(found) - 1)]))
+            self.sheet.ensureCursorVisible()
 
     def epub_clicked(self, text):
         """Clic en un párrafo de la pestaña EPUB: la hoja va al párrafo con ese texto (el más cercano al cursor, si
@@ -10162,14 +10182,21 @@ class TextEditor:
         se compara sin ellas."""
         def bare(s):
             return re.sub(r"[\W_]+", " ", s).strip().lower()
-        want = bare(text)[:60]
-        if not want or not self.current or self.current[0] < 0:
+        def symbols(b):  # un separador escrito, por sus símbolos: «※ ・ ※» no tiene letras
+            names = editor.objects_of(b)
+            k = int(names[0].split()[-1]) if names and names[0].startswith("Separador ") else -1
+            return "".join(convert._plain(self.app.book.blocks[k]).split()) if 0 <= k < len(self.app.book.blocks) \
+                else ""
+        want, signs = bare(text)[:60], "".join(text.split())
+        if not (want or signs) or not self.current or self.current[0] < 0:
             return
         if self.web_on:  # lo escrito en la web, antes a la hoja
             self.flush_web(lambda: (self.web_done(), self.epub_clicked(text)))
             return
         here = self.sheet.textCursor().blockNumber()
         found = [b for b in self.blocks() if want and bare(b.text())[:60] == want]
+        if not found and not want:
+            found = [b for b in self.blocks() if symbols(b) == signs or "".join(b.text().split()) == signs]
         if not found:
             found = [b for b in self.blocks() if len(want) > 12 and want[:30] in bare(b.text())]
         if found:
@@ -10277,7 +10304,7 @@ class TextEditor:
                 except Exception:
                     pass  # imagen que MuPDF no lee: queda su marca
             elif block.kind == "break":
-                found[k] = html.unescape(block.html).strip() or "❖"
+                found[k] = convert._plain(block).strip() or "❖"  # «<b>※ ・ ※</b>» de un EPUB: sin etiquetas
             elif block.kind == "heading" and block.image:  # título dibujado: con el texto de ahora (traducido)
                 found[f"título {k}"] = QImage.fromData(convert.title_picture(block.image, convert._plain(block)))
         return found
@@ -10746,8 +10773,15 @@ class TextEditor:
     def find_box(page, block):
         """Recuadro del párrafo en su página, de sus 6 primeras palabras a sus 6 últimas. None si el texto no
         aparece tal cual (palabra partida con guion en el PDF, párrafo ya editado)."""
-        words = convert._plain(block).split()
-        hits = page.search_for(" ".join(words[:6])) if words else []
+        text = convert._plain(block)
+        words = (text if page.parent.is_pdf else text.translate(convert.PREVIEW_TABLE)).split()  # EPUB: «・» es «·»
+        hits = []
+        for r in page.search_for(" ".join(words[:6])) if words else []:
+            # letra a letra cuando cambia la fuente («※ · ※»: de reserva cada uno): los trozos seguidos, uno
+            if hits and abs(r.x0 - hits[-1].x1) < 1 and r.y0 < hits[-1].y1 and r.y1 > hits[-1].y0:
+                hits[-1] |= r
+            else:
+                hits.append(r)
         if not hits or (len(hits) > 1 and len(words) <= 6):  # línea corta repetida ("—Sí."): no se sabe cuál
             return None
         box = hits[0]

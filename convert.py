@@ -2886,12 +2886,38 @@ FONTS = {"Literata": "literata", "Bitter": "bitter", "Liberation Serif": "libera
 FONT_DIR = Path(__file__).parent / "fonts"  # en el .exe, junto a los módulos (--add-data fonts;fonts)
 
 
+# «・» entre letras latinas: MuPDF lo busca en su letra latina de reserva, que no lo tiene, y sale un cuadro (Date A
+# Live 14, el separador «※ ・ ※ ・ ※»). En la vista del EPUB va «·»; quien busque en ella su texto, igual
+PREVIEW_CHARS = {"・": "·"}
+PREVIEW_TABLE = str.maketrans(PREVIEW_CHARS)
+
+
+def _preview_epub(path):
+    """Bytes del EPUB con PREVIEW_CHARS cambiados en su XHTML, para que MuPDF los dibuje; None si no lleva ninguno."""
+    with zipfile.ZipFile(path) as z:
+        pages = {n: z.read(n) for n in z.namelist() if n.lower().endswith((".xhtml", ".html", ".htm"))}
+        if not any(c.encode() in data for data in pages.values() for c in PREVIEW_CHARS):
+            return None
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as copy:
+            for info in z.infolist():
+                data = pages.get(info.filename)
+                if data is None:
+                    data = z.read(info)
+                else:
+                    for old, new in PREVIEW_CHARS.items():
+                        data = data.replace(old.encode(), new.encode())
+                copy.writestr(info, data)  # con su compresión: «mimetype» sigue el primero y sin comprimir
+        return out.getvalue()
+
+
 def open_pdf(path):
     """Abre el PDF (o EPUB) para leerlo o dibujarlo. Una imagen JPEG 2000 que trae su propia paleta y el PDF
     marca /Indexed salía como ruido al dibujarla más pequeña que su tamaño (Eminence 7, las ilustraciones):
     MuPDF la reduce promediando los índices de la paleta como si fueran colores. Sin el /ColorSpace del PDF
     usa los colores del propio JPEG 2000. Solo en memoria: el archivo no cambia."""
-    doc = pymupdf.open(path)
+    preview = _preview_epub(path) if str(path).lower().endswith(".epub") else None
+    doc = pymupdf.open(stream=preview, filetype="epub") if preview else pymupdf.open(path)
     if doc.is_pdf and not doc.needs_pass:
         for xref in range(1, doc.xref_length()):
             try:
