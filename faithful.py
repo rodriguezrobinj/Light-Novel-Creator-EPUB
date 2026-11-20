@@ -927,6 +927,9 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
         opf_text = z.read(opf_path).decode("utf-8")
         new_opf = _patch_opf(opf_text, opf, opf_path, items, order, gone, file_order, new_items,
                              cover_page and cover_page[0], [p for p, _ in pages], notes_page and notes_page[0], book, lang)
+        nav_id = next((i for i, (p, *_) in items.items() if p == nav_path), None) if nav_path else None
+        if preview and nav_id:  # el índice del libro en el spine (linear="no"): MuPDF lo dibujaba tras la sección
+            new_opf = re.sub(rf'\s*<itemref\b[^>]*\bidref="{re.escape(nav_id)}"[^>]*/>', "", new_opf)
         if horizontal and book.vertical:  # las páginas se pasan de izquierda a derecha
             new_opf = new_opf.replace('page-progression-direction="rtl"', 'page-progression-direction="ltr"')
             new_opf = re.sub(r'(<meta\b[^>]*name="primary-writing-mode"[^>]*content=")[^"]*', r"\1horizontal-lr", new_opf)

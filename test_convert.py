@@ -11847,6 +11847,33 @@ def test_faithful_preview_of_a_section_is_light():
     assert "<br" not in body.split("kugiri", 1)[0], body[:300]
 
 
+def test_faithful_preview_leaves_out_the_book_index():
+    """Vista previa de una sección de un EPUB con su índice en el spine (linear="no", Date A Live 14): MuPDF lo
+    dibujaba como página tras cada sección, «Índice de contenido» en todas. El EPUB completo lo conserva."""
+    src = sigil_epub(TMP / "Sigil índice.epub")
+    with zipfile.ZipFile(src) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    files["OEBPS/content.opf"] = files["OEBPS/content.opf"].replace(
+        b"\n  </spine>", b'\n    <itemref idref="nav" linear="no"/>\n  </spine>')
+    with zipfile.ZipFile(src, "w") as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    book = convert.analyze(src)
+    k = next(c for c in book.candidates if book.blocks[c].title.startswith("Capítulo 2"))
+    part = convert.Book(book.title, "", book.cover, book.blocks[k:k + 2], [], origin=book.origin)
+    out, whole = TMP / "Sigil índice vista.epub", TMP / "Sigil índice (LNC).epub"
+    convert.write_epub(part, [(0, "Capítulo 2: Héroe")], out, style=convert.ORIGINAL, separator="Original del PDF",
+                       typography=False, contents=False, preview=True)
+    convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], whole, style=convert.ORIGINAL,
+                       separator="Original del PDF", typography=False)
+    with pymupdf.open(out) as doc:
+        text = "".join(page.get_text() for page in doc)
+    with zipfile.ZipFile(whole) as z:
+        opf = z.read("OEBPS/content.opf").decode()
+    assert "Quinto párrafo" in text and "Índice" not in text, text
+    assert 'idref="nav"' in opf, opf
+
+
 def test_page_pixmap_dark_keeps_illustrations():
     """Modo oscuro de las vistas (ventana y panel del original del editor): papel y letra invertidos, la ilustración
     tal cual."""
