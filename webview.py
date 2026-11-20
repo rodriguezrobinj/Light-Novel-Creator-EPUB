@@ -176,24 +176,6 @@ MARK_JS = FIND_JS + """
   return true;
 })(%s, %s, %s, %s)
 """
-# «Mostrar cambios» en la vista del EPUB: cada párrafo cambiado (buscado como en MARK_JS) con lo puesto subrayado y
-# lo quitado tachado; las palabras se comparan sin la tipografía. items vacío lo quita todo
-CHANGES_JS = """
-(function (items, color, css) {
-  lncClearDiff(document.body);
-  var style = document.getElementById('lnc-changes') || document.documentElement.appendChild(document.createElement('style'));
-  style.id = 'lnc-changes';
-  style.textContent = css + '::highlight(lnc-change){text-decoration: underline ' + color + '; color: ' + color + ';}';
-  if (!window.CSS || !CSS.highlights) return false;
-  var change = new Highlight(), key = function (w) { return w.toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ''); };
-  items.forEach(function (it) {
-    var b = lncFind(it.t, it.nth);
-    if (b) lncPaintDiff(b, lncText(it.before), key).forEach(function (r) { change.add(r); });
-  });
-  CSS.highlights.set('lnc-change', change);
-  return true;
-})(%s, %s, %s)
-"""
 # Modo oscuro de lector: fondo oscuro y letra clara; las ilustraciones, tal cual
 DARK = """
 html, body { background: #1a1a1a !important; color: #ececec !important; }
@@ -346,13 +328,6 @@ if AVAILABLE:
             """Recuadra el párrafo n.º nth cuyas letras (minúsculas, sin lo demás) contienen text ("": el n.º nth sin
             letras) y lo trae a la vista; con image, la ilustración n.º image. text None quita el recuadro."""
             self.page().runJavaScript(MARK_JS % (json.dumps(text), json.dumps(color), int(nth), int(image)), 0)
-
-        def changes(self, items, color, css):
-            """«Mostrar cambios»: items [{t, nth, before}] (el párrafo como en mark y su HTML de antes, None si es
-            nuevo) con lo puesto subrayado de color y lo quitado tachado con css (websheet.DEL_CSS)."""
-            import websheet
-            self.page().runJavaScript(websheet.DIFF_JS + FIND_JS + CHANGES_JS % (
-                json.dumps(items), json.dumps(color), json.dumps(css)), 0)
 
         def _loaded(self, ok):
             if not ok:

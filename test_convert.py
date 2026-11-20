@@ -1031,11 +1031,25 @@ def test_separator_icon_traces_the_ornament_as_inline_svg():
     assert svg.startswith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ') and 'fill="currentColor"' in svg
     assert svg.count("M") == 4 and 'fill-rule="evenodd"' in svg, svg[:300]  # rombo, su hueco y los dos puntos
     width, height = map(float, re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg).groups())
-    assert 220 < width < 250 and 68 < height < 80, (width, height)  # recortado a la figura (144 ppp: x2)
+    assert 3.0 < width / height < 3.4 and height < 110, (width, height)  # recortado a la figura (240 × 75)
     assert see_through.count("M") == 4 and convert.trace_svg(blank.tobytes("png")) == "" and convert.trace_svg(b"x") == ""
     assert '<svg class="brk-icono"' in chapter and 'role="img"' in chapter, chapter
     assert re.search(r'<item [^>]*properties="svg"', opf) and drawn and not problems, (opf, drawn, problems)
     assert '<svg class="brk-icono"' in own_chapter and "※" not in own_chapter, own_chapter
+    # fondo en degradado, una línea fina y una mota suelta (JPEG pequeño): la línea se queda, la mota no
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=80)
+    for x in range(300):
+        page.draw_line((x, 0), (x, 80), color=(1 - x / 600, 0.8 - x / 900, 0.6), width=1.2)
+    page.draw_polyline([(110, 40), (150, 10), (190, 40), (150, 70), (110, 40)], color=(0.1, 0.1, 0.2),
+                       fill=(0.1, 0.1, 0.2), closePath=True)
+    page.draw_line((20, 40), (90, 40), color=(0, 0, 0), width=0.8)
+    page.draw_circle((260, 20), 0.4, color=(0, 0, 0), fill=(0, 0, 0))
+    graded = convert.trace_svg(page.get_pixmap(dpi=72).tobytes("jpg"))
+    width, height = map(float, re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', graded).groups())
+    assert graded.count("M") == 2 and width / height < 3.2, graded[:200]  # rombo y línea, sin la mota de la derecha
+    import app
+    assert app._data_changes({}, {"separator_icon": svg}) == [[("Icono del separador: puesto", None)]]
     assert re.search(r'<item [^>]*href="Text/capitulo01.xhtml"[^>]*properties="svg"', own_opf), own_opf
 
 
@@ -5983,6 +5997,89 @@ def test_editor_code_view_autocompletes():
     assert shown.startswith("El gato duerme. ya fin"), shown
 
 
+def test_editor_changes_of_a_new_paragraph_and_of_japanese():
+    """«Mostrar cambios»: un párrafo nuevo tras otro (Intro al final y escribir) sale entero como puesto y el de
+    arriba sin marcas, aunque Intro le copie su origen; partir una frase no marca nada; en japonés (sin espacios) se
+    compara letra a letra, no el párrafo entero; en el código, una línea nueva tras otra, igual."""
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+    import editor as ed
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "序章"), B("p", 1, "「悪いね」"), B("p", 1, "Uno dos tres."),
+                                      B("p", 1, "青年は軽くそう言った。")], [0])
+    sheet = editor.sheet
+    doc = sheet.document()
+    c = QTextCursor(doc.findBlockByNumber(1))
+    c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    c.insertBlock()
+    c.insertText("kmkvmkf")
+    c = QTextCursor(doc.findBlockByNumber(3))
+    c.setPosition(doc.findBlockByNumber(3).position() + len("Uno dos "))
+    c.insertBlock()
+    c = QTextCursor(doc.findBlockByNumber(5))
+    c.setPosition(doc.findBlockByNumber(5).position() + 3)
+    c.setPosition(doc.findBlockByNumber(5).position() + 5, QTextCursor.MoveMode.KeepAnchor)
+    c.insertText("優しく")
+    editor.show_changes_action.setChecked(True)
+    root.update()
+
+    def marks(n):
+        block = doc.findBlockByNumber(n)
+        under = sorted({c for r in block.layout().formats() if r.format.underlineStyle()
+                        == QTextCharFormat.UnderlineStyle.SingleUnderline for c in range(r.start, r.start + r.length)})
+        gone = [g[3] for g in block.userData().gone] if isinstance(block.userData(), ed.Changes) else []
+        return under, gone
+    above, new = marks(1), marks(2)
+    split = marks(3), marks(4)
+    japanese = marks(5)
+    editor.toggle_code()  # en el código: Intro al final de la línea 2 y una línea nueva
+    code = editor.code
+    line = code.document().findBlockByNumber(2)
+    c = QTextCursor(line)
+    c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    code.setTextCursor(c)
+    c.insertBlock()
+    c.insertText("<p>Nueva</p>")
+    root.update()
+    code_above = code.document().findBlockByNumber(2)
+    code_gone = code_above.userData().gone if isinstance(code_above.userData(), ed.Changes) else []
+    editor.win.done(0)
+    window.close()
+    assert ed.diff_ops("「悪いね」", "「悪いよ」") == ([(3, 1)], [(3, "ね")])
+    assert above == ([], []) and new == (list(range(7)), []), (above, new)
+    assert split == (([], []), ([], [])), split
+    assert japanese == ([3, 4], ["軽"]), japanese  # «く» sigue
+    assert not code_gone, code_gone
+
+
+def test_editor_long_removal_is_shortened_inside_the_page():
+    """Lo quitado largo se acorta con «…» (el hueco no pasa de media hoja) y se pinta dentro de la hoja, también al
+    final de una línea; al pasar el ratón sale entero."""
+    from PySide6.QtGui import QTextCursor
+    import editor as ed
+    B = convert.Block
+    words = " ".join(f"palabra{n}" for n in range(60))
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, f"Inicio {words} final.")], [0])
+    sheet = editor.sheet
+    editor.win.resize(1200, 800)
+    root.update()
+    block = sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.setPosition(block.position() + len("Inicio "))
+    c.setPosition(block.position() + len("Inicio ") + len(words) + 1, QTextCursor.MoveMode.KeepAnchor)
+    c.removeSelectedText()
+    editor.show_changes_action.setChecked(True)
+    root.update()
+    sheet.viewport().grab()  # pinta: ahí se miden los huecos
+    gone = block.userData().gone
+    boxes = list(getattr(sheet, "removed_boxes", []))
+    width = sheet.viewport().width()
+    editor.win.done(0)
+    window.close()
+    assert len(gone) == 1 and "…" in gone[0][2] and gone[0][3] == words, gone
+    assert len(boxes) == 1 and 0 <= boxes[0][0].left() and boxes[0][0].right() <= width, (boxes, width)
+    assert boxes[0][1] == words
+
+
 def test_editor_shows_changes():
     """«Mostrar cambios», como Word con todas las marcas: en el párrafo cambiado se subraya lo puesto («perro») y lo
     quitado («gato») sale tachado en su sitio, en un hueco abierto tras la letra anterior; igual en «Código HTML».
@@ -6014,14 +6111,14 @@ def test_editor_shows_changes():
 
     root.update()
     marked = underlined(block, 4) and not underlined(block, 0) and not underlined(block, 12)
-    removed = [(pos, old) for pos, old, *_ in block.userData().gone] if isinstance(block.userData(), ed.Changes) else []
+    removed = [g[3] for g in block.userData().gone] if isinstance(block.userData(), ed.Changes) else []
     hole = gap(block, 2) and not gap(block, 8)
     clean = not isinstance(sheet.document().findBlockByNumber(2).userData(), ed.Changes) or \
         not sheet.document().findBlockByNumber(2).userData().gone
     bar = hasattr(editor, "diff_frame")
     editor.toggle_code()  # «Código HTML»: lo mismo frente a la línea de antes
     code = editor.code.document().findBlockByNumber(1)
-    code_removed = [old for _, old, *_ in code.userData().gone] if isinstance(code.userData(), ed.Changes) else []
+    code_removed = [g[3] for g in code.userData().gone] if isinstance(code.userData(), ed.Changes) else []
     code_marked = underlined(code, code.text().index("perro"))
     editor.toggle_code()
     editor.show_changes_action.setChecked(False)
@@ -6031,7 +6128,7 @@ def test_editor_shows_changes():
     assert ed.added_spans("El gato duerme.", "El perro duerme.") == [(3, 5)]
     assert ed.removed_spans("El gato duerme.", "El perro duerme.") == [(3, "gato")]
     assert ed.removed_spans("Uno dos tres.", "Uno tres.") == [(4, "dos")]
-    assert marked and removed == [(3, "gato")] and hole, (marked, removed, hole)
+    assert marked and removed == ["gato"] and hole, (marked, removed, hole)
     assert clean and not bar, (clean, bar)
     assert code_removed == ["gato"] and code_marked, (code_removed, code_marked)
     assert gone
@@ -11343,9 +11440,10 @@ def test_editor_epub_separator_plain_and_boxed_in_original():
 
 
 def test_editor_changes_inline_in_epub_tab_and_web_sheet():
-    """«Mostrar cambios» en Chromium: quitado «Segundo» y puesto «Primer», la pestaña EPUB y la hoja web enseñan lo
-    quitado tachado en su sitio y lo puesto subrayado. En la hoja web lo quitado no es texto: escribir y deshacer
-    (Ctrl+Z de Chromium) dejan el párrafo como estaba, y lo que vuelve a la hoja no lleva sus marcas."""
+    """«Mostrar cambios» en Chromium: quitado «Segundo» y puesto «Primer», la hoja web enseña lo quitado tachado en
+    su sitio y lo puesto subrayado; la pestaña EPUB no (es como saldrá el libro). En la hoja web lo quitado no es
+    texto: escribir y deshacer (Ctrl+Z de Chromium) dejan el párrafo como estaba, y lo que vuelve a la hoja no lleva
+    sus marcas. Un párrafo nuevo con Intro sale entero como puesto, sin tachar el de arriba."""
     import app
     from PySide6.QtGui import QTextCursor
     dels = "Array.from(document.querySelectorAll('.lnc-del')).map(e => e.getAttribute('data-del')).join('|')"
@@ -11365,8 +11463,8 @@ def test_editor_changes_inline_in_epub_tab_and_web_sheet():
             c.insertText("Primer")
             ed.show_changes_action.setChecked(True)
             ed.side_tabs.setCurrentIndex(1)
-            epub_del = wait_for(lambda: "Segundo" in (js(ed.side_web, dels) or ""), 15)
-            epub_add = "Primer" in (js(ed.side_web, added) or "")
+            wait_for(lambda: ed.side_web.pages > 0, 15)
+            epub_clean = not js(ed.side_web, dels) and not js(ed.side_web, added)
             ed.side_tabs.setCurrentIndex(2)
             ed.activate_web()
             wait_for(lambda: ed.web_on and ed.web.loaded)
@@ -11384,10 +11482,17 @@ def test_editor_changes_inline_in_epub_tab_and_web_sheet():
             undone = js(ed.web, "Array.from(document.querySelectorAll('#lnc-sheet p')).find(p => p.textContent"
                                 ".startsWith('Primer')).textContent")
             dumped = js(ed.web, "lnc.dump()")
+            js(ed.web, "(function(){var p=Array.from(document.querySelectorAll('#lnc-sheet p')).find(e=>e.textContent"
+                       ".startsWith('Primer'));var r=document.createRange();r.selectNodeContents(p);r.collapse(false);"
+                       "var s=getSelection();s.removeAllRanges();s.addRange(r);document.execCommand('insertParagraph');"
+                       "document.execCommand('insertText',false,'Nuevo.');return true;})()")
+            fresh = wait_for(lambda: "Nuevo." in (js(ed.web, added) or ""), 5)
+            only_segundo = js(ed.web, dels)
             ed.win.done(0)
         finally:
             window.close()
-    assert epub_del and epub_add, (epub_del, epub_add)
+    assert epub_clean
+    assert fresh and only_segundo == "Segundo", (fresh, only_segundo)
     assert web_del and web_add and plain == "Primer párrafo & más.", (web_del, web_add, plain)
     assert undone == "Primer párrafo & más." and "lnc-del" not in dumped, (undone, dumped[:300])
 
