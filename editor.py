@@ -629,13 +629,19 @@ class CodeEdit(QTextEdit):
             self.replace_before(*found)  # «p.nota» + Tab
             return
         super().keyPressEvent(event)
+        after = self.textCursor().block().text()[self.textCursor().positionInBlock():]
         if event.text() == ">" and (closing := closing_tag(self.before_cursor())):
-            after = self.textCursor().block().text()[self.textCursor().positionInBlock():]
             if not after.startswith(closing):  # la que cierra, tras el cursor
                 self.replace_before(0, closing, len(closing))
+        elif event.text() == ">" and (typed := re.search(r"</[\w:-]+>$", self.before_cursor())) \
+                and after.startswith(typed[0]):  # escrita a mano la que ya se puso sola: una, no dos
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, len(typed[0]))
+            cursor.removeSelectedText()
         if (event.text() and event.text().isprintable() and event.text() != ">") or key == Qt.Key.Key_Backspace:
             self.suggest()
-        elif popup.isVisible() and key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home, Qt.Key.Key_End):
+        elif popup.isVisible() and (event.text() == ">" or key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home,
+                                                                    Qt.Key.Key_End)):  # tras «>», Intro es línea nueva
             popup.hide()
 
     def blockCount(self):
@@ -653,13 +659,35 @@ class CodeEdit(QTextEdit):
                 block = block.next()
         self.look.changes, self.look.removed = color, removed
         self.look.rehighlight()
+        self.gutter.update()  # los números de las líneas cambiadas, de verde
 
     def event(self, event):
         if event.type() == QEvent.Type.ToolTip and removed_tip(self, event):  # lo quitado, entero
             return True
         return super().event(event)
 
+    def changed_lines(self):
+        """[(bloque, rectángulo en la vista)] de las líneas a la vista distintas de su línea de antes, o nuevas."""
+        out, dy = [], self.verticalScrollBar().value()
+        block = self.cursorForPosition(QPoint(0, 0)).block()
+        while block.isValid():
+            box = self.document().documentLayout().blockBoundingRect(block).translated(0, -dy)
+            if box.top() > self.viewport().height():
+                break
+            data = block.userData()
+            if block.text().strip() and not (isinstance(data, Changes) and data.original == block.text()):
+                out.append((block, box))
+            block = block.next()
+        return out
+
     def paintEvent(self, event):
+        if self.look.changes:  # la línea cambiada, de fondo verde claro, como GitHub
+            under = QPainter(self.viewport())
+            tint = QColor(self.look.changes)
+            tint.setAlpha(tint.alpha() // 3)
+            for _, box in self.changed_lines():
+                under.fillRect(QRectF(0, box.top(), self.viewport().width(), box.height()), tint)
+            under.end()
         super().paintEvent(event)
         if self.look.changes and self.look.removed:
             painter = QPainter(self.viewport())
@@ -728,6 +756,9 @@ class CodeEdit(QTextEdit):
     def paint_gutter(self, event):
         painter = QPainter(self.gutter)
         painter.fillRect(event.rect(), QColor(self.look.colors["gutter"]))
+        if self.look.changes:  # el número de la línea cambiada, sobre verde, como GitHub
+            for _, box in self.changed_lines():
+                painter.fillRect(QRectF(0, box.top(), self.gutter.width(), box.height()), QColor(self.look.changes))
         painter.setFont(self.font())
         block, here = self.cursorForPosition(QPoint(0, 0)).block(), self.textCursor().blockNumber()
         scroll, height = self.verticalScrollBar().value(), self.fontMetrics().height()
@@ -1309,13 +1340,16 @@ def mark_changes(look, text, changes, at, color):
     data = block.userData() if isinstance(block.userData(), Changes) else Changes()
     data.gone = []
     adds, gone = changes
-    for start, size in adds:
-        for c in range(at(start), at(start + size)):
-            f = QTextCharFormat(look.format(c))
-            f.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
-            f.setUnderlineColor(color)
-            f.setForeground(color)
-            look.setFormat(c, 1, f)
+    for start, size in adds:  # fondo verde, como GitHub; por tramos del mismo formato: letra a letra tardaba segundos
+        c, end = at(start), at(start + size)
+        while c < end:
+            base, stop = look.format(c), c + 1
+            while stop < end and look.format(stop) == base:
+                stop += 1
+            f = QTextCharFormat(base)
+            f.setBackground(color)
+            look.setFormat(c, stop - c, f)
+            c = stop
     room = max(40.0, (look.document().textWidth() or 600) * 0.45)  # lo más ancho de un hueco: media hoja
     for pos, old in gone if text else []:
         c = at(max(pos - 1, 0))
@@ -1370,7 +1404,8 @@ def paint_removed(edit, painter, color):
                 strike = QFont(font)
                 strike.setStrikeOut(True)
                 painter.setFont(strike)
-                painter.setPen(QColor(color))
+                painter.fillRect(box.adjusted(-2, 1, 2, -1), QColor(color))  # fondo rojo, como GitHub
+                painter.setPen(ink)
                 painter.drawText(box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, short)
                 boxes.append((box, old))
                 if first:  # la primera letra, tras lo quitado, con su color (el de lo puesto si lo es)
@@ -1470,18 +1505,23 @@ class Look(QSyntaxHighlighter):
     def __init__(self, document):
         super().__init__(document)
         self.unknown = set()
-        self.job = 0  # tanda de repintado en curso (_repaint)
+        self.jobs = {"spell": 0, "changes": 0}  # tanda de repintado en curso de cada cosa (_repaint)
         self.tags = {}
         self.changes = None  # color con que se subraya lo puesto en cada párrafo cambiado; None: no se marca
         self.removed = None  # color de lo quitado, tachado en su sitio (theme.mark_colors)
         watch_groups(self, original_group)
 
-    def show_changes(self, color, removed=None):
-        """«Mostrar cambios»: subraya, del color dado (None lo quita), lo que se puso frente al original, y pinta
-        tachado (de removed) lo que se quitó, donde estaba."""
+    def show_changes(self, color, removed=None, blocks=None):
+        """«Mostrar cambios», como GitHub: fondo del color dado (None lo quita) en lo que se puso frente al original,
+        y lo que se quitó tachado sobre fondo removed, donde estaba. blocks: solo esos párrafos (los cambiados, los
+        de la vista primero), por tandas; repintar la hoja entera congelaba la ventana segundos."""
         self.changes = color
         self.removed = removed or self.removed
-        self.rehighlight()
+        if blocks is None:
+            self.rehighlight()
+            return
+        self.jobs["changes"] += 1
+        self._repaint("changes", self.jobs["changes"], list(blocks))
 
     def set_tags(self, tags):
         """Colores de theme.editor_tags del tema actual."""
@@ -1502,20 +1542,20 @@ class Look(QSyntaxHighlighter):
             if any(True for _ in _matches(block.text(), changed)):
                 blocks.append(block)
             block = block.next()
-        self.job += 1
-        self._repaint(self.job, blocks)
+        self.jobs["spell"] += 1
+        self._repaint("spell", self.jobs["spell"], blocks)
 
-    def _repaint(self, job, blocks):
+    def _repaint(self, kind, job, blocks):
         """Repinta de REPAINT_BATCH en REPAINT_BATCH párrafos y deja respirar a la ventana entre tandas: los ~600
-        de un capítulo sin traducir, de golpe, la congelaban 1 s. Una llamada nueva a set_unknown cancela esta."""
-        if job != self.job:
+        de un capítulo sin traducir, de golpe, la congelaban 1 s. Una llamada nueva de lo mismo (kind) cancela esta."""
+        if job != self.jobs[kind]:
             return
         settle(self.document())  # maquetada entera antes de tocar unos párrafos (ver Sheet.changeEvent)
         for block in blocks[:REPAINT_BATCH]:
             if block.isValid():  # borrado mientras tanto: ya no hay nada que pintar
                 self.rehighlightBlock(block)
         if blocks[REPAINT_BATCH:]:
-            QTimer.singleShot(0, self, lambda: self._repaint(job, blocks[REPAINT_BATCH:]))  # sin hoja, no corre
+            QTimer.singleShot(0, self, lambda: self._repaint(kind, job, blocks[REPAINT_BATCH:]))  # sin hoja, no corre
 
     def matches(self, text):
         """Las palabras subrayadas de text, como re.Match."""
@@ -1818,6 +1858,20 @@ class Sheet(QTextEdit):
 
     def paintEvent(self, event):
         self.paints.append((event.rect().getRect(), self.verticalScrollBar().value()))
+        if self.look.changes and self.bars:  # «Mostrar cambios»: el párrafo cambiado, de fondo verde claro (GitHub)
+            under = QPainter(self.viewport())
+            tint = QColor(self.look.changes)
+            tint.setAlpha(tint.alpha() // 3)
+            doc, dy = self.document(), self.verticalScrollBar().value()
+            width = doc.textWidth() if doc.textWidth() > 0 else self.viewport().width()
+            for block in self.bars:
+                if block.isValid() and block.document() is doc:
+                    text = block.layout().boundingRect().translated(block.layout().position())
+                    band = QRectF(doc.documentMargin() - 10 - self.horizontalScrollBar().value(), text.top() - 2 - dy,
+                                  width - 2 * doc.documentMargin() + 20, text.height() + 4)
+                    if band.intersects(QRectF(event.rect())):
+                        under.fillRect(band, tint)
+            under.end()
         if self.mark_current:  # debajo del texto: antes de que QTextEdit lo pinte
             block, doc = self.textCursor().block(), self.document()
             text = block.layout().boundingRect().translated(block.layout().position())  # el texto, sin márgenes

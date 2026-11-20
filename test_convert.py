@@ -1807,6 +1807,34 @@ def test_window_preview_page_navigation():
     assert "1/" in first and "2/" in second and "1/" in back, (first, second, back)
 
 
+def test_window_original_and_epub_previews_follow_each_other():
+    """Original y EPUB sincronizados: pasar página en el EPUB lleva el original a la página de ese texto, y pasarla
+    en el original lleva el EPUB a la suya; una página de otra sección elige su fila."""
+    root, window = visible_window()
+    window.pdf = make_novel()  # 5 páginas
+    blocks = [convert.Block("heading", 1, "Cap 1")]
+    blocks += [convert.Block("p", 1 + n // 12, f"Parrafo {n} " + "texto de relleno " * 12) for n in range(36)]
+    blocks += [convert.Block("heading", 5, "Cap 2"), convert.Block("p", 5, "Final del libro.")]
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 37]))
+    window.tree.selection_set("0")
+    root.update()
+    pages = []
+    while window.epub_page < window.epub_pages - 1:
+        window.epub_step(1)
+        pages.append(window.pdf_page)
+    last = window.pdf_page, window.epub_page
+    window.pdf_step(-1)  # a la página 2 del original: el EPUB vuelve a donde empieza su texto
+    firsts = window.epub_firsts()
+    back = window.pdf_page, window.epub_page, firsts[window.epub_page] <= 13 < (firsts + [99])[window.epub_page + 1]
+    for _ in range(3):  # la página 5 es del capítulo 2
+        window.pdf_step(1)
+    other = window.tree.selection()[0], window.epub_page, window.pdf_page
+    window.close()
+    assert pages == sorted(pages) and pages[0] == 0 and last[0] == 2, pages
+    assert back[0] == 1 and back[1] < last[1] and back[2], (back, last, firsts)
+    assert other == ("37", 0, 4), other
+
+
 def test_window_list_styles_follow_type():
     from types import SimpleNamespace
 
@@ -4718,6 +4746,7 @@ def test_editor_sheet_marks_the_right_word_after_emoji():
 
     import app
     import qtk
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QTextCharFormat, QTextCursor
 
     import editor
@@ -4739,7 +4768,8 @@ def test_editor_sheet_marks_the_right_word_after_emoji():
                       if r.format.underlineStyle() == style)
 
     spell = spans(0, QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
-    added = spans(1, QTextCharFormat.UnderlineStyle.SingleUnderline)
+    added = sorted((r.start, r.start + r.length) for r in sheet.document().findBlockByNumber(1).layout().formats()
+                   if r.format.background().style() != Qt.BrushStyle.NoBrush)  # lo puesto, de fondo (GitHub)
     start, end = app.TextEditor.issue_range(sheet.document().findBlockByNumber(0), types.SimpleNamespace(span=(3, 7)))
     c.setPosition(sheet.document().findBlockByNumber(0).position() + start)
     c.setPosition(sheet.document().findBlockByNumber(0).position() + end, QTextCursor.MoveMode.KeepAnchor)
@@ -5544,7 +5574,7 @@ def test_window_editor_undo_survives_accept():
     editor.changes_window.close()
     editor.win.done(0)
     window.close()
-    assert "2 cambios" in listed and "Primero:" in listed and "Y" in listed and "Ir" in listed, listed
+    assert "2 cambios" in listed and "Primero:" in listed and "Y" in listed and "−" in listed, listed
     assert went == "Y Dos.", went
     assert edited[1] == "Primero: Uno.", edited
     assert clean and undone == "Uno." and redone == "Primero: Uno.", (clean, undone, redone)
@@ -5997,10 +6027,47 @@ def test_editor_code_view_autocompletes():
     assert shown.startswith("El gato duerme. ya fin"), shown
 
 
+def test_editor_code_view_new_line_keeps_the_cursor():
+    """«Código HTML» en vivo: Intro al final de una línea deja el cursor en la línea nueva aunque el código pase a la
+    hoja (antes saltaba a la de arriba, lo escrito iba allí y el retroceso pegaba esa línea a la anterior); escribir
+    a mano el cierre que ya se puso solo deja uno."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos.")], [0])
+    editor.toggle_code()
+    code = editor.code
+    cursor = QTextCursor(code.document().findBlockByNumber(2))  # la última
+    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    code.setTextCursor(cursor)
+    code.setFocus()
+    QTest.keyClick(code, Qt.Key.Key_Return)
+    editor.apply_code_live()  # lo que hace la espera de 600 ms
+    editor.follow_cursor()
+    at = code.textCursor().blockNumber(), code.textCursor().positionInBlock()
+    QTest.keyClicks(code, "<p>Nueva")
+    QTest.keyClicks(code, "</p>")
+    editor.apply_code_live()
+    editor.follow_cursor()
+    QTest.keyClick(code, Qt.Key.Key_Return)
+    editor.apply_code_live()
+    QTest.keyClick(code, Qt.Key.Key_Backspace)
+    lines = code.toPlainText().split("\n")
+    editor.toggle_code()
+    sheet = [editor.sheet.document().findBlockByNumber(n).text() for n in range(4)]
+    editor.win.done(0)
+    window.close()
+    assert at == (3, 0), at
+    assert lines == ["<h1>Capítulo 1</h1>", "<p>Uno.</p>", "<p>Dos.</p>", "<p>Nueva</p>"], lines
+    assert sheet == ["Capítulo 1", "Uno.", "Dos.", "Nueva"], sheet
+
+
 def test_editor_changes_of_a_new_paragraph_and_of_japanese():
     """«Mostrar cambios»: un párrafo nuevo tras otro (Intro al final y escribir) sale entero como puesto y el de
     arriba sin marcas, aunque Intro le copie su origen; partir una frase no marca nada; en japonés (sin espacios) se
     compara letra a letra, no el párrafo entero; en el código, una línea nueva tras otra, igual."""
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QTextCharFormat, QTextCursor
     import editor as ed
     B = convert.Block
@@ -6024,8 +6091,8 @@ def test_editor_changes_of_a_new_paragraph_and_of_japanese():
 
     def marks(n):
         block = doc.findBlockByNumber(n)
-        under = sorted({c for r in block.layout().formats() if r.format.underlineStyle()
-                        == QTextCharFormat.UnderlineStyle.SingleUnderline for c in range(r.start, r.start + r.length)})
+        under = sorted({c for r in block.layout().formats() if r.format.background().style()
+                        != Qt.BrushStyle.NoBrush for c in range(r.start, r.start + r.length)})
         gone = [g[3] for g in block.userData().gone] if isinstance(block.userData(), ed.Changes) else []
         return under, gone
     above, new = marks(1), marks(2)
@@ -6084,6 +6151,7 @@ def test_editor_shows_changes():
     """«Mostrar cambios», como Word con todas las marcas: en el párrafo cambiado se subraya lo puesto («perro») y lo
     quitado («gato») sale tachado en su sitio, en un hueco abierto tras la letra anterior; igual en «Código HTML».
     Sin barra aparte. Apagarlo quita todo."""
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QTextCharFormat, QTextCursor
     import editor as ed
 
@@ -6102,7 +6170,7 @@ def test_editor_shows_changes():
     def underlined(block, at):
         layout = block.layout()
         return any(r.start <= at < r.start + r.length
-                   and r.format.underlineStyle() == QTextCharFormat.UnderlineStyle.SingleUnderline
+                   and r.format.background().style() != Qt.BrushStyle.NoBrush
                    for r in layout.formats())
 
     def gap(block, at):  # espaciado abierto tras la letra at
@@ -6138,6 +6206,7 @@ def test_editor_sheet_changes_in_a_loaded_empty_paragraph():
     """Un párrafo que se cargó vacío: con «Mostrar cambios», lo escrito en él se subraya como puesto (antes el
     coloreado fallaba: PySide devuelve [] por la línea original vacía), cuenta como cambio y vuelve a vacío."""
     import qtk
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QTextCharFormat, QTextCursor
 
     import editor
@@ -6150,8 +6219,7 @@ def test_editor_sheet_changes_in_a_loaded_empty_paragraph():
     QTextCursor(block).insertText("Nuevo")
     qtk.pump()
     block = sheet.document().findBlockByNumber(1)
-    marked = any(r.format.underlineStyle() == QTextCharFormat.UnderlineStyle.SingleUnderline
-                 for r in block.layout().formats())
+    marked = any(r.format.background().style() != Qt.BrushStyle.NoBrush for r in block.layout().formats())
     changed = [b.text() for b in sheet.changed_blocks()]
     original = editor.original_of(block)
     sheet.restore(block)
@@ -12241,6 +12309,27 @@ def test_faithful_epub_pages_without_index_entry_continue_their_chapter():
     assert 'page-progression-direction="rtl"' in vertical_opf, vertical_opf
 
 
+def test_fixed_layout_illustration_fills_its_original_page():
+    """Página de maquetación fija (Kadokawa): la ilustración es un <svg width="100%" height="100%"> con su viewBox.
+    En la vista «Original» MuPDF la dibujaba pequeña en la esquina de arriba de una página grande; ahora la llena."""
+    src = kadokawa_epub(TMP / "Kadokawa fija.epub")
+    fixed = TMP / "Kadokawa fija con svg.epub"
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" '
+           'width="100%" height="100%" viewBox="0 0 1441 2048"><image width="1441" height="2048" '
+           'xlink:href="../image/t1.jpg"/></svg>')
+    with zipfile.ZipFile(src) as z, zipfile.ZipFile(fixed, "w") as out:
+        for info in z.infolist():
+            data = z.read(info)
+            if info.filename.endswith("p-001.xhtml"):
+                data = re.sub(rb"<p><img[^>]*/></p>", svg.encode(), data).replace(
+                    b"</head>", b'<meta name="viewport" content="width=1441, height=2048"/></head>')
+            out.writestr(info, data)
+    with convert.open_pdf(fixed) as doc:
+        page = doc[0].rect
+        box = pymupdf.Rect(doc[0].get_image_info()[0]["bbox"])
+    assert box.width > 0.9 * page.width and box.height > 0.9 * page.height, (box, page)
+
+
 def test_faithful_preview_of_a_section_is_light():
     """Vista previa de una sección de un EPUB: sin las imágenes del resto del libro (copiaba 14 MB en cada fila) y,
     si empieza a mitad de archivo, sin las líneas en blanco de lo quitado delante (salía una página en blanco)."""
@@ -12258,6 +12347,28 @@ def test_faithful_preview_of_a_section_is_light():
     body = body[body.index("<body"):]
     assert "item/image/t2.jpg" not in files and "item/image/kugiri.jpg" in files, files
     assert "<br" not in body.split("kugiri", 1)[0], body[:300]
+
+
+def test_faithful_preview_puts_each_illustration_on_its_own_page():
+    """Vista previa de un capítulo de un EPUB: la ilustración del final iba en la misma página que el texto (Date A
+    Live 14). En la vista es o texto o ilustración; el EPUB que sale sigue como el original."""
+    src = sigil_epub(TMP / "Sigil láminas.epub")
+    book = convert.analyze(src)
+    start = next(k for k, b in enumerate(book.blocks) if b.kind == "heading" and "Templo" in b.title)
+    end = next(k for k, b in enumerate(book.blocks) if k > start and b.kind == "heading" and "Héroe" in b.title)
+    part = convert.Book(book.title, "", book.cover, book.blocks[start:end], [], origin=book.origin)
+    out = TMP / "Sigil láminas (LNC).epub"
+    convert.write_epub(part, [(0, "Capítulo 1")], out, style=convert.ORIGINAL, separator="Original del PDF",
+                       typography=False, contents=False, preview=True)
+    with pymupdf.open(out) as epub:
+        epub.layout(width=360, height=640, fontsize=11)
+        pages = [(bool(p.get_text().strip()), bool(p.get_image_info())) for p in epub if p.get_image_info()
+                 or p.get_text().strip()]
+    whole = TMP / "Sigil láminas completo (LNC).epub"
+    convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], whole, style=convert.ORIGINAL,
+                       separator="Original del PDF", typography=False, contents=False)
+    assert (False, True) in pages and (True, True) not in pages, pages
+    assert "page-break" not in epub_file(whole, "OEBPS/Text/capitulo01.xhtml")
 
 
 def test_faithful_preview_leaves_out_the_book_index():

@@ -1051,13 +1051,27 @@ def _epub_block_page(book, doc, k):
     start = block.page - 1
     if doc is None or not block.src:
         return start
+    end = next((b.page - 1 for b in book.blocks[k:] if b.src and b.src[0] != block.src[0]), doc.page_count)
+    if block.kind == "image":  # la n.ª imagen de su archivo: la página donde se llega a ella
+        nth = sum(1 for b in book.blocks[:k] if b.image and b.src and b.src[0] == block.src[0])
+        seen = 0
+        for i in range(start, min(end + 1, doc.page_count)):
+            seen += len(doc[i].get_image_info())
+            if seen > nth:
+                return i
+        return start
     probe = next((b for b in book.blocks[k:k + 8] if b.kind == "p" and b.src and b.src[0] == block.src[0]
                   and len(convert._plain(b)) >= 4), None)
     if probe is None:
         return start
     words = " ".join(convert._plain(probe).translate(convert.PREVIEW_TABLE).split())[:24]
-    end = next((b.page - 1 for b in book.blocks[k:] if b.src and b.src[0] != block.src[0]), doc.page_count)
     return next((i for i in range(start, min(end + 1, doc.page_count)) if doc[i].search_for(words)), start)
+
+
+def _match_key(text):
+    """Texto para buscar un párrafo en una página dibujada: solo letras y cifras, en minúsculas (sin espacios,
+    rayas ni comillas, que la tipografía cambia)."""
+    return re.sub(r"\W+", "", text.translate(convert.PREVIEW_TABLE)).lower()
 
 
 def websheet_text_file(blocks):
@@ -1263,8 +1277,9 @@ def _plain_lines(blocks):
 
 
 def _word_diff(before, after):
-    """Un párrafo con lo quitado ("old") y lo puesto ("new") palabra a palabra, como el control de cambios de Word."""
-    x, y = re.findall(r"\S+|\s+", before), re.findall(r"\S+|\s+", after)
+    """Un párrafo con lo quitado ("old") y lo puesto ("new") palabra a palabra (en japonés, letra a letra: no lleva
+    espacios), como el control de cambios de Word."""
+    x, y = editor.WORDS.findall(before), editor.WORDS.findall(after)
     out = []
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes():
         if op == "equal":
@@ -2975,6 +2990,8 @@ class App:
             except Exception:
                 self.epub_pages = -1  # no se pudo generar
         self.draw_epub()
+        if self.epub_page:  # se entró por el final (◀ desde la sección de después): el original, a esa página
+            self.follow_epub()
         if self.find_target:
             self.show_found(*self.find_target)
 
@@ -3019,6 +3036,8 @@ class App:
             # Todas las páginas tras la portada (capítulo 0): un capítulo de un EPUB puede ocupar varios archivos
             # (portadilla y texto), y antes solo se veía el primero
             pages = [(c, p) for c in range(1, epub.chapter_count) for p in range(epub.chapter_page_count(c))]
+            if self.book and self.book.origin:  # sin las páginas en blanco del salto antes de cada ilustración
+                pages = [n for n in pages if epub.load_page(n).get_bboxlog()] or pages
             self.preview_doc = size, epub, pages
         return self.preview_doc[1], len(self.preview_doc[2])
 
@@ -3046,6 +3065,119 @@ class App:
         if self.pdf_doc:
             self.pdf_page = max(0, min(self.pdf_page + delta, self.pdf_doc.page_count - 1))
             self.draw_pdf()
+            self.follow_original()
+
+    # Original y EPUB sincronizados: al pasar página en uno, el otro va a la misma parte del libro
+    def epub_firsts(self):
+        """Bloque del libro con que empieza cada página de la vista previa del EPUB (el que sigue de la anterior si
+        no empieza ninguno), buscando el texto de cada párrafo en las páginas, en orden. Una vez por vista previa."""
+        doc, selected = self.preview_doc, self.tree.selection()
+        if not doc or not selected or not self.book or self.epub_cut or self.tree.current() in (COVER, CONTENTS):
+            return []
+        if len(doc) > 3:
+            return doc[3]
+        start, end = self.section_of(selected[0])
+        blocks, firsts, k = self.book.blocks, [], start
+
+        def on_page(j, text, alone):
+            if blocks[j].kind == "image":
+                return alone
+            probe = _match_key(convert._plain(blocks[j]))[:16]
+            return len(probe) < 6 or probe in text  # sin letras (un separador) o corto («Sí.»): con lo de antes
+        for n in doc[2]:
+            page = doc[1].load_page(n)
+            text = _match_key(page.get_text())
+            alone = not text and bool(page.get_image_info())  # una ilustración, sola en su página
+            first = None
+            while k < end:
+                if not on_page(k, text, alone):  # uno que no se encuentra (quitado, renombrado): los de detrás
+                    k = next((j for j in range(k + 1, min(k + 9, end)) if (blocks[j].kind == "image" or len(
+                        _match_key(convert._plain(blocks[j]))) >= 6) and on_page(j, text, alone)), k)
+                    if not on_page(k, text, alone):
+                        break
+                first = k if first is None else first
+                k += 1
+                if alone and blocks[k - 1].kind == "image":  # una ilustración por página
+                    break
+            firsts.append(first if first is not None else max(start, k - 1))
+        self.preview_doc = (*doc, firsts)
+        return firsts
+
+    def original_page(self, k):
+        """Página del original (desde 0) donde está el bloque k."""
+        return _epub_block_page(self.book, self.pdf_doc, k) if self.book.origin else self.book.blocks[k].page - 1
+
+    def block_at_original(self, page):
+        """Primer bloque de la sección de la fila que está en la página page del original (o el que viene de la
+        anterior); None si la página no es de la sección."""
+        selected = self.tree.selection()
+        if not selected or not self.book:
+            return None
+        start, end = self.section_of(selected[0])
+        blocks = self.book.blocks
+        if self.book.origin and self.pdf_doc:  # un EPUB: el bloque solo sabe la primera página de su archivo
+            text = _match_key(self.pdf_doc[page].get_text())
+            # el que empieza más arriba; uno corto («Sí.») está en cualquier página: no cuenta
+            hits = [(text.find(probe), k) for k in range(start, end) if blocks[k].kind != "image"
+                    and len(probe := _match_key(convert._plain(blocks[k]))[:16]) >= 8 and probe in text]
+            if hits:
+                return min(hits)[1]
+            if not text:  # una ilustración
+                found = next((k for k in range(start, end) if blocks[k].kind == "image"
+                              and self.original_page(k) == page), None)
+                if found is not None:
+                    return found
+        on = [k for k in range(start, end) if blocks[k].page - 1 == page]
+        if on:
+            return on[0]
+        pages = [blocks[k].page - 1 for k in range(start, end)]
+        if pages and min(pages) < page <= max(pages):
+            return max(k for k in range(start, end) if blocks[k].page - 1 < page)
+        return None
+
+    def reading_rows(self):
+        """Filas que se leen una tras otra con ◀ ▶: sin separadores ni los subtítulos de dentro de un capítulo (ya
+        se leen con él), salvo el elegido."""
+        selected, items, inside = self.tree.selection(), [], False
+        for i in self.tree.get_children():
+            chapter = self.is_title(i) and self.tree.set(i, "inc") == ON
+            inside = inside or chapter
+            if not self.is_break(i) and (chapter or not inside or not self.is_title(i) or i in selected):
+                items.append(i)
+        return items
+
+    def follow_original(self):
+        """El original cambió de página: el EPUB, a la página con ese texto; si es de otra sección, a la fila de la
+        lista que la tiene."""
+        if not self.book or not self.pdf_doc or self.tree.current() in (COVER, CONTENTS) or not self.tree.selection():
+            return
+        page = self.pdf_page
+        k = self.block_at_original(page)
+        if k is None:
+            item = next((i for i in reversed(self.reading_rows()) if self.book.blocks[int(i)].page - 1 <= page), None)
+            if item is None or item == self.tree.selection()[0]:
+                return
+            self.tree.selection_set(item)  # update_preview: la sección, desde su principio
+            self.tree.see(item)
+            self.pdf_page = page
+            self.draw_pdf()
+            k = self.block_at_original(page)
+            if k is None:
+                return
+        firsts = self.epub_firsts()
+        n = max((n for n, first in enumerate(firsts) if first <= k), default=0)
+        if firsts and n != self.epub_page:
+            self.epub_page = n
+            self.draw_epub()
+
+    def follow_epub(self):
+        """El EPUB cambió de página dentro de la sección: el original, a la página de su primer párrafo."""
+        firsts = self.epub_firsts()
+        if 0 <= self.epub_page < len(firsts) and self.pdf_doc:
+            page = self.original_page(firsts[self.epub_page])
+            if page != self.pdf_page and 0 <= page < self.pdf_doc.page_count:
+                self.pdf_page = page
+                self.draw_pdf()
 
     def epub_step(self, delta):
         """◀ ▶ del EPUB: páginas de la sección y, al llegar a un extremo, la sección vecina de la lista,
@@ -3055,16 +3187,11 @@ class App:
         if self.epub_pages > 0 and self.epub_page != edge:
             self.epub_page = max(0, min(self.epub_page + delta, self.epub_pages - 1))
             self.draw_epub()
+            self.follow_epub()
             return
         selected = self.tree.selection()
         # Los separadores no son secciones: desde uno se sigue con la sección de antes o la de después.
-        # Los títulos de dentro de un capítulo (subtítulos) ya se leen con él: se saltan, salvo el elegido.
-        items, inside = [], False
-        for i in self.tree.get_children():
-            chapter = self.is_title(i) and self.tree.set(i, "inc") == ON
-            inside = inside or chapter
-            if not self.is_break(i) and (chapter or not inside or not self.is_title(i) or i in selected):
-                items.append(i)
+        items = self.reading_rows()
         here = int(selected[0]) if selected else None
         if here is None:
             n = 0 if delta > 0 and self.tree.current() in (COVER, CONTENTS) else -1  # de la portada al libro
@@ -3116,6 +3243,8 @@ class App:
         if item:
             self.tree.selection_set(item)
             self.tree.see(item)
+        else:  # una página de en medio de una sección: el EPUB, a ella
+            self.follow_original()
 
     def remember(self, change):
         """Apunta un cambio para Ctrl+Z y guarda la revisión poco después (autosave)."""
@@ -8145,17 +8274,30 @@ class TextEditor:
     # Mostrar cambios, como el control de cambios de Word con todas las marcas: lo puesto subrayado y lo quitado
     # tachado en su sitio, en la hoja, el código y la hoja web (la pestaña EPUB es como saldrá el libro: sin marcas)
     def change_colors(self):
-        """(color de lo puesto, color de lo quitado) del tema."""
+        """(fondo de lo puesto, fondo de lo quitado) del tema, como GitHub."""
         colors = theme.mark_colors(self.app.dark)
-        return colors["changed"], colors["Grave"]
+        return colors["added"], colors["removed"]
 
     def set_show_changes(self, on):
+        """Solo se repintan los párrafos cambiados de la hoja a la vista (los de la pantalla primero, por tandas); los
+        otros capítulos, al volver a ellos, y el código, al abrirlo. Repintarlo todo congelaba la ventana segundos."""
         color, removed = self.change_colors()
-        for page in self.pages.values():
-            page["look"].show_changes(color if on else None, removed)
-        self.code.show_changes(color if on else None, removed)
+        for key, page in self.pages.items():
+            if key == self.current:
+                page["look"].show_changes(color if on else None, removed, self.changes_in_view())
+            else:
+                page["look"].changes, page["look"].removed, page["stale"] = color if on else None, removed, True
+        if self.code.isVisible():
+            self.code.show_changes(color if on else None, removed)
+        else:
+            self.code.look.changes, self.code.look.removed = color if on else None, removed
         if self.web is not None and self.web.loaded:
             self.web_marks()
+
+    def changes_in_view(self):
+        """Párrafos cambiados de la hoja, primero los de la pantalla y los que siguen."""
+        top = self.sheet.cursorForPosition(QPoint(0, 0)).blockNumber()
+        return sorted(self.sheet.changed_blocks(), key=lambda b: (b.blockNumber() < top, b.blockNumber()))
 
     def book_classes(self):
         """Clases del CSS del libro (sus hojas de estilo, si es un EPUB, y las de la app), ordenadas."""
@@ -8867,8 +9009,8 @@ class TextEditor:
         return found
 
     def show_all_changes(self, flushed=False):
-        """Revisar → Cambios → «Ver todos los cambios»: cada párrafo cambiado del libro, con lo quitado tachado y lo
-        puesto subrayado, por capítulos; «Ir» lleva la hoja a él. La ventana se queda abierta mientras se revisa."""
+        """Revisar → Cambios → «Ver todos los cambios»: cada párrafo cambiado del libro, antes y ahora lado a lado
+        como GitHub, por capítulos; su número lleva la hoja a él. La ventana se queda abierta mientras se revisa."""
         if self.web_on and not flushed:
             self.flush_web(lambda: self.show_all_changes(True))
             return
@@ -8877,22 +9019,35 @@ class TextEditor:
             self.tell("Sin cambios en el libro desde que se abrió")
             return
         colors = theme.mark_colors(self.app.dark)
+        base = QApplication.palette().color(QPalette.ColorRole.Base)
+
+        def solid(key):  # el rich text de Qt no mezcla la transparencia: el color ya mezclado con el fondo
+            c = QColor(colors[key])
+            k = c.alphaF()
+            return QColor(*(round(getattr(c, n)() * k + getattr(base, n)() * (1 - k))
+                            for n in ("red", "green", "blue"))).name()
+        tint = {"old": solid("removed"), "new": solid("added")}
+
+        def side(text, tag, line):
+            return (f'<td width="4%" align="right" bgcolor="{line}">{tag}</td>'
+                    f'<td width="46%" bgcolor="{line}">{text}</td>')
         parts, count = [], 0
         for title, start, end, diffs in found:
             parts.append(f"<h3>{html.escape(title)} <span style='font-weight:normal'>· "
-                         f"{convert.counted(len(diffs), 'cambio')}</span></h3>")
+                         f"{convert.counted(len(diffs), 'cambio')}</span></h3>"
+                         '<table width="100%" cellspacing="0" cellpadding="4">')
             for before, after, line in diffs:
                 count += 1
-                if not before:
-                    body = f'<u style="color:{colors["changed"]}">{html.escape(editor.plain_line(after))}</u>'
-                elif not after:
-                    body = f'<s style="color:{colors["Grave"]}">{html.escape(editor.plain_line(before))}</s>'
-                else:
-                    body = "".join(f'<s style="color:{colors["Grave"]}">{html.escape(text)}</s>' if tag == "old" else
-                                   f'<u style="color:{colors["changed"]}">{html.escape(text)}</u>' if tag == "new"
-                                   else html.escape(text)
-                                   for text, tag in _word_diff(editor.plain_line(before), editor.plain_line(after)))
-                parts.append(f'<p>{body} &nbsp;<a href="{start}-{end}-{line}">Ir</a></p>')
+                pieces = _word_diff(editor.plain_line(before), editor.plain_line(after))
+                old = "".join(f'<span style="background-color:{tint[tag]}">{html.escape(t)}</span>' if tag
+                              else html.escape(t) for t, tag in pieces if tag != "new")
+                new = "".join(f'<span style="background-color:{tint[tag]}">{html.escape(t)}</span>' if tag
+                              else html.escape(t) for t, tag in pieces if tag != "old")
+                go = f'<a href="{start}-{end}-{line}">{line + 1}</a>'  # el n.º del párrafo, como GitHub: lleva a él
+                parts.append("<tr>" + (side(old, "−", solid("removed_line")) if before else side("", "", base.name()))
+                             + (side(new, go, solid("added_line")) if after else side("", go, base.name())) + "</tr>"
+                             '<tr><td colspan="4" style="font-size:2px">&nbsp;</td></tr>')
+            parts.append("</table>")
         if getattr(self, "changes_window", None) is not None and shiboken6.isValid(self.changes_window):
             self.changes_window.close()
         win = Dialog(self.win)
@@ -8900,14 +9055,15 @@ class TextEditor:
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         column = QVBoxLayout(win)
         column.addWidget(_label(f"{convert.counted(count, 'cambio')} en {convert.counted(len(found), 'capítulo')}: "
-                                "lo quitado tachado y lo puesto subrayado, también lo aceptado antes", "muted"))
+                                "antes a la izquierda y ahora a la derecha, como GitHub (lo quitado en rojo y lo "
+                                "puesto en verde), también lo aceptado antes; el número lleva al párrafo", "muted"))
         view = QTextBrowser()
         view.setOpenLinks(False)
         view.setHtml("".join(parts))
         view.anchorClicked.connect(lambda url: self.goto_change(*map(int, url.toString().split("-"))))
         column.addWidget(view, 1)
         column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
-        win.resize(640, 480)
+        win.resize(900, 560)
         win.show()
         self.changes_window = win
 
@@ -9569,9 +9725,9 @@ class TextEditor:
             block = block.next()
         data = {"spell": sorted(w.lower() for w in self.unknown - self.ignored_words), "issues": issues,
                 "changed": marked, "show": self.show_changes_action.isChecked(), "before": before,
-                "del_css": websheet.DEL_CSS % colors["Grave"],
+                "del_css": websheet.DEL_CSS % theme.css_color(colors["removed"]),
                 "colors": {"spell": self.sheet.tags.get("broken", {}).get("foreground", colors["Grave"]),
-                           "change": colors["changed"]},
+                           "change": theme.css_color(colors["added"])},
                 "levels": [colors.get(level, colors["Grave"]) for level in levels]}
         self.web.call("setMarks", json.dumps(data))
         self.refill_nav()  # tras las marcas: el panel lista los avisos pintados
@@ -9786,8 +9942,10 @@ class TextEditor:
                 self.sync_view()
                 messagebox.showwarning("Código HTML", f"{e}\n\nArréglalo para volver a la hoja.", parent=self.win)
                 return
-            self.sheet.set_text(text)
-        self.sheet.setTextCursor(QTextCursor(self.web_block(self.code.textCursor().blockNumber())))
+            if editor.to_code(text) != self.code_text:  # solo líneas vacías de más: la hoja ya es esa
+                self.sheet.set_text(text)
+        code = self.code.toPlainText().split("\n")[:self.code.textCursor().blockNumber()]
+        self.sheet.setTextCursor(QTextCursor(self.web_block(sum(1 for raw in code if raw.strip()))))
         self.code.hide()
         self.sheet.show()
         self.sheet.ensureCursorVisible()
@@ -9800,19 +9958,24 @@ class TextEditor:
     def apply_code_live(self):
         """Lo escrito en el código, a la hoja si ya vale (a medio escribir una etiqueta, aún no): así la hoja web, el
         EPUB y el original lo enseñan sin salir del código. Cada vez es un deshacer de la hoja."""
-        if not self.code.isVisible() or self.code.toPlainText() == self.code_text:
+        code = self.code.toPlainText()
+        if not self.code.isVisible() or code == self.code_text:
             return
         try:
-            text = editor.from_code(self.code.toPlainText())
+            text = editor.from_code(code)
         except ValueError:
             return
-        self.code_text = self.code.toPlainText()
-        line = self.code.textCursor().blockNumber()
-        self.applying_code = True
-        try:
-            self.sheet.set_text(text)
-        finally:
-            self.applying_code = False
+        # code_text es el código de la hoja, sin líneas vacías: con una (Intro sin escribir aún) las líneas ya no
+        # casan con los párrafos y el cursor del código no sigue al de la hoja (saltaba a la línea de arriba)
+        canonical = editor.to_code(text)
+        line = sum(1 for raw in code.split("\n")[:self.code.textCursor().blockNumber()] if raw.strip())
+        if canonical != self.code_text:
+            self.code_text = canonical
+            self.applying_code = True
+            try:
+                self.sheet.set_text(text)
+            finally:
+                self.applying_code = False
         self.sheet.setTextCursor(QTextCursor(self.web_block(line)))
 
     def refresh_code(self):
@@ -9998,9 +10161,11 @@ class TextEditor:
             if start >= 0:
                 self.replay_history(doc, lines)
             if self.show_changes_action.isChecked():
-                look.show_changes(*self.change_colors())
+                look.show_changes(*self.change_colors(), self.changes_in_view())
         else:
             self.sheet.use(page["doc"], page["look"])
+            if page.pop("stale", False):  # «Mostrar cambios» cambió con otro capítulo a la vista
+                page["look"].show_changes(page["look"].changes, None, self.changes_in_view())
         self.current = (start, end)
         self.epub_lines = None  # la pestaña EPUB es de otro capítulo hasta que se dibuje este
         if focus is not None:
