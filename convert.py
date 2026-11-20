@@ -1763,7 +1763,7 @@ def text_stats(texts):
     """Cifras de unos párrafos: palabras, párrafos, minutos de lectura (230 por minuto, como
     reading_minutes) y el porcentaje de palabras en párrafos de diálogo."""
     texts = [t.strip() for t in texts if t.strip()]
-    counts = [len(t.split()) for t in texts]
+    counts = [word_count(t) for t in texts]
     words = sum(counts)
     dialog = sum(n for t, n in zip(texts, counts) if t.startswith(DIALOG_START))
     return {"words": words, "paragraphs": len(texts), "minutes": max(1, round(words / 230)) if words else 0,
@@ -1983,9 +1983,22 @@ def numbered(title):
     return fixed + title[len(word):]
 
 
+CJK_CHARS = "⺀-鿿豈-﫿＀-￯"  # chino y japonés (kana, kanji, signos de ancho completo)
+CJK = re.compile(f"[{CJK_CHARS}]")
+
+
+def word_count(text):
+    """Palabras de text. El japonés no lleva espacios (un párrafo era una palabra y un capítulo, «1 min»): se lee
+    a unas 500 letras por minuto, así que cada 2,2 letras cuentan como una de las 230 palabras por minuto."""
+    letters = len(CJK.findall(text))
+    if not letters:
+        return len(text.split())
+    return len(CJK.sub(" ", text).split()) + round(letters / 2.2)
+
+
 def reading_minutes(blocks):
     """Minutos de lectura de unos bloques, a 230 palabras por minuto."""
-    words = sum(len(_plain(b).split()) for b in blocks if b.kind in ("p", "heading"))
+    words = sum(word_count(_plain(b)) for b in blocks if b.kind in ("p", "heading"))
     return max(1, round(words / 230)) if words else 0
 
 
@@ -2643,7 +2656,10 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
         text = _plain(b).strip()
         number, link, broken, english, capital, letter_end = _facts(text)
         english = english and not in_english
-        if text[:1].islower():
+        japanese = bool(CJK.search(text))  # aún sin traducir: las reglas del español no le valen
+        # un EPUB no tiene números de página ni encabezados: «１» es el número de sección (Re Zero 1, Kadokawa)
+        number = number and not book.origin
+        if text[:1].islower() and not re.match(r"(https?:|www\.)", text):  # una dirección web no es una frase
             # El párrafo anterior, saltando ilustraciones y separadores (la página se cortó con una imagen)
             j = next((j for j in range(k - 1, -1, -1) if blocks[j].kind in ("p", "heading")), None)
             head = _plain(blocks[j]).strip() if j is not None and blocks[j].kind == "p" else ""
@@ -2674,7 +2690,8 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
             report.append(Issue("number", k, b.page, "Revisar", "Número suelto",
                                 "Un párrafo que solo es un número suele ser el número de página del PDF.",
                                 "Quitarlo.", text, "", drop(k), text))
-        elif len(text) < 60 and lines[text] >= 3 and text[:1].isalnum() and not text.endswith(END_PUNCT):
+        elif (len(text) < 60 and lines[text] >= 3 and text[:1].isalnum() and not text.endswith(END_PUNCT)
+              and not book.origin):
             # "Einherjar Project" sí; un diálogo repetido ("¿Eh?", "Ya veo.") empieza con signo o acaba en punto
             report.append(Issue("repeated", k, b.page, "Revisar", f"Línea repetida {lines[text]} veces",
                                 "Una línea corta que se repite por todo el libro suele ser el encabezado o el "
@@ -2736,7 +2753,7 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                                 "Si es un símbolo de texto (♡, ★, ♪…), bórralo y escribe el carácter con «Editar "
                                 "texto…» (tecla E), en «Insertar › Símbolos». Si se ve bien, ignora el aviso.",
                                 _cut(_unhtml(ICON.sub("[icono]", b.html)).strip()), text=text))
-        for t, fixed in _typos(line) if spanish and not link else ():
+        for t, fixed in _typos(line) if spanish and not link and not japanese else ():
             kind, title, _, why, solution = TYPOS[t]
             before, after = TAGS.sub("", line), TAGS.sub("", fixed)
             n = len(os.path.commonprefix([before, after]))

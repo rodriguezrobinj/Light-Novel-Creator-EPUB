@@ -9030,6 +9030,25 @@ def test_quality_report_capital_ignores_footnotes():
     assert found == [2], found
 
 
+def test_quality_report_japanese_epub_has_no_pdf_or_spanish_warnings():
+    """Re Zero 1 en japonés (EPUB de Kadokawa): «１» es el número de sección, no el de página; una línea repetida
+    no es un encabezado (un EPUB no tiene); el japonés no lleva «¿ ¡»; y una dirección web en el colofón no es
+    un párrafo partido. Un capítulo japonés tampoco se lee en «1 min»: contaba un párrafo como una palabra."""
+    texts = ["１", "「あれ!? 俺の一撃必殺でその程度ってどゆこと!?」", "Ｒｅ：ゼロから始める異世界生活１",
+             "Ｒｅ：ゼロから始める異世界生活１", "Ｒｅ：ゼロから始める異世界生活１", "©Tappei Nagatsuki 2014",
+             "http://www.kadokawa.co.jp/"]
+    blocks = [convert.Block("heading", 1, "第一章")] + [convert.Block("p", 1, t) for t in texts]
+    epub = convert.Book("Libro", "", b"", blocks, [0], origin="libro.epub")
+    kinds = {i.kind for i in convert.quality_report(epub)}
+    assert not kinds & {"number", "repeated", "opening", "lower"}, kinds
+    # en un PDF el número y la línea repetida sí avisan, y el español sin «¡» también
+    pdf = convert.Book("Libro", "", b"", blocks + [convert.Block("p", 1, "Qué bien!")], [0])
+    assert {"number", "repeated", "opening"} <= {i.kind for i in convert.quality_report(pdf)}
+    page = [convert.Block("p", 1, "体の中の血が全て溢れてしまったような錯覚に陥る。" * 10)] * 100  # 24 000 letras
+    assert 44 <= convert.reading_minutes(page) <= 52, convert.reading_minutes(page)  # a unas 500 por minuto
+    assert convert.word_count("Hola, ¿qué tal?") == 3
+
+
 def test_quality_report_fixes_fansub_typos():
     """Signo de apertura que falta, palabra repetida, «haber si» y «¿porque»: avisos con arreglo; lo que
     ya está bien escrito o es «haber» de verdad no salta."""
@@ -12309,21 +12328,80 @@ def test_faithful_epub_pages_without_index_entry_continue_their_chapter():
     assert 'page-progression-direction="rtl"' in vertical_opf, vertical_opf
 
 
-def test_fixed_layout_illustration_fills_its_original_page():
-    """Página de maquetación fija (Kadokawa): la ilustración es un <svg width="100%" height="100%"> con su viewBox.
-    En la vista «Original» MuPDF la dibujaba pequeña en la esquina de arriba de una página grande; ahora la llena."""
-    src = kadokawa_epub(TMP / "Kadokawa fija.epub")
-    fixed = TMP / "Kadokawa fija con svg.epub"
+def kadokawa_fixed_epub(path):
+    """kadokawa_epub con su primera página de maquetación fija: la ilustración en un <svg width="100%"> con viewBox
+    y un viewport de 1441×2048."""
+    src = kadokawa_epub(path.with_name(path.stem + " base.epub"))
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" '
            'width="100%" height="100%" viewBox="0 0 1441 2048"><image width="1441" height="2048" '
            'xlink:href="../image/t1.jpg"/></svg>')
-    with zipfile.ZipFile(src) as z, zipfile.ZipFile(fixed, "w") as out:
+    with zipfile.ZipFile(src) as z, zipfile.ZipFile(path, "w") as out:
         for info in z.infolist():
             data = z.read(info)
             if info.filename.endswith("p-001.xhtml"):
                 data = re.sub(rb"<p><img[^>]*/></p>", svg.encode(), data).replace(
                     b"</head>", b'<meta name="viewport" content="width=1441, height=2048"/></head>')
             out.writestr(info, data)
+    return path
+
+
+def test_window_fixed_layout_epub_preview_matches_original_and_device():
+    """Re Zero 1 (Kadokawa): la sección que empieza en la primera página del EPUB perdía esa página en la vista
+    previa (se saltaba como si fuera la portada de la app) y el original iba una página por detrás; y la página de
+    maquetación fija salía a su tamaño (716×1024, la ilustración pequeña en una esquina), no en la pantalla del
+    celular. Ahora la primera página es la ilustración, el original la acompaña y se ve encajada en el celular."""
+    import app
+    from PySide6.QtGui import QColor
+    root, window = visible_window()
+    window.pdf = kadokawa_fixed_epub(TMP / "Kadokawa celular.epub")
+    window.device_var.set("Celular")
+    window.show_book(convert.analyze(window.pdf))
+    window.tree.selection_set("0")
+    root.update()
+    first = window.epub_load(0)
+    pictured = bool(first.get_image_info()) and not first.get_text().strip()
+    shot = window.device_image(first, False)
+    width, height = app.DEVICES["Celular"]
+    middle = QColor(shot.pixel(shot.width() // 2, shot.height() // 2)).lightness()
+    pages = [(window.epub_page, window.pdf_page)]
+    while window.epub_page < window.epub_pages - 1:
+        window.epub_step(1)
+        pages.append((window.epub_page, window.pdf_page))
+    window.close()
+    assert pictured, first.get_text()
+    assert abs(shot.width() / shot.height() - width / height) < 0.02, (shot.width(), shot.height())
+    assert middle < 100, middle  # la ilustración (gris oscuro) llena el centro, no una esquina
+    assert pages[0] == (0, 0) and pages[1][1] == 1, pages
+
+
+def test_editor_original_marks_japanese_paragraphs():
+    """«Editar texto…» de un EPUB japonés (陰の実力者 07): el panel Original no recuadraba uno de cada cuatro
+    párrafos. Sin espacios, el párrafo entero era una «palabra» y search_for no la halla si cruza de línea; con
+    el furigana en línea («溢あふれ») igual. Ahora se recuadra entero, en todas sus líneas; «「ん？」», que sale
+    en cualquier página, ya no lleva el párrafo a otra."""
+    import app
+    long = "体の中の血が<ruby>全<rt>すべ</rt></ruby>て<ruby>溢<rt>あふ</rt></ruby>れてしまったような錯覚に陥る。" * 6
+    src = kadokawa_epub(TMP / "Kadokawa largo base.epub")
+    out = TMP / "Kadokawa largo.epub"
+    with zipfile.ZipFile(src) as z, zipfile.ZipFile(out, "w") as copy:
+        for info in z.infolist():
+            data = z.read(info)
+            if info.filename.endswith("p-004.xhtml"):
+                data = re.sub(rb"<p>.*</p>", f"<p>「ん？」</p><p>{long}</p><p>次の段落はここから。</p>".encode(), data)
+            copy.writestr(info, data)
+    book = convert.analyze(out)
+    with convert.open_pdf(out) as doc:
+        k = next(k for k, b in enumerate(book.blocks) if "錯覚" in b.html)
+        page = app._epub_block_page(book, doc, k - 1)  # «「ん？」»: la página del párrafo largo que le sigue
+        box = app.TextEditor.find_box(doc[page], book.blocks[k])
+        line = doc[page].search_for("次の段落")[0].height
+    assert box is not None and box.height > 3 * line, (box, line)
+
+
+def test_fixed_layout_illustration_fills_its_original_page():
+    """Página de maquetación fija (Kadokawa): la ilustración es un <svg width="100%" height="100%"> con su viewBox.
+    En la vista «Original» MuPDF la dibujaba pequeña en la esquina de arriba de una página grande; ahora la llena."""
+    fixed = kadokawa_fixed_epub(TMP / "Kadokawa fija con svg.epub")
     with convert.open_pdf(fixed) as doc:
         page = doc[0].rect
         box = pymupdf.Rect(doc[0].get_image_info()[0]["bbox"])

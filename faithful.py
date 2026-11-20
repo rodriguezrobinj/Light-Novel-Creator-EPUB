@@ -88,6 +88,13 @@ def parse(text, container="body"):
     return root
 
 
+@functools.lru_cache(maxsize=512)  # la vista previa de cada fila volvía a analizar todos los archivos del libro
+def _tree(text):
+    """(árbol, nodos de sus bloques) de un XHTML; el árbol no cambia después de parse."""
+    root = parse(text)
+    return root, [n for _, n in leaves(root)] if root else []
+
+
 def leaves(node):
     """(kind, nodo) de los bloques del árbol en orden: "text" (párrafo o título), "image" o "break" (hr)."""
     out = []
@@ -643,8 +650,7 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
         spans = {}
         for name in spine:
             if "html" in kinds.get(name, "") and name in names and name != nav_path:
-                root = parse(source(name))
-                found = [n for _, n in leaves(root)] if root else []
+                root, found = _tree(source(name))
                 if found:
                     spans[name] = (root, found)
         first = next(iter(spans), None)
@@ -1033,8 +1039,8 @@ def _patch_opf(text, opf, opf_path, items, order, gone, file_order, new_items, c
     by_path = {path: ident for ident, (path, _, _) in items.items()}
     gone_ids = {by_path[p] for p in gone if p in by_path}
     # manifiesto
-    for ident in gone_ids:
-        text = re.sub(rf"\s*<item\b[^>]*\bid=\"{re.escape(ident)}\"[^>]*/>", "", text, count=1)
+    # una pasada para todos: en la vista previa de una sección se quitan casi todos (era una por archivo)
+    text = re.sub(r"\s*<item\b[^>]*\bid=\"([^\"]+)\"[^>]*/>", lambda m: "" if m[1] in gone_ids else m[0], text)
     root_dir = posixpath.dirname(opf_path)
     lines = "".join(f'\n    <item id="{ident}" href="{_rel(opf_path, path)}" media-type="{media}"/>'
                     for ident, path, media in new_items)
@@ -1057,8 +1063,9 @@ def _patch_opf(text, opf, opf_path, items, order, gone, file_order, new_items, c
         text = re.sub(r"(<spine\b[^>]*>).*?(</spine>)", lambda m: m[1] + "\n    " + "\n    ".join(body) + "\n  " + m[2],
                       text, count=1, flags=re.S)
     # guía: sin referencias a archivos quitados
-    for path in gone:
-        text = re.sub(rf"\s*<reference\b[^>]*href=\"{re.escape(_rel(opf_path, path))}(?:#[^\"]*)?\"[^>]*/>", "", text)
+    gone_refs = {_rel(opf_path, path) for path in gone}
+    text = re.sub(r"\s*<reference\b[^>]*href=\"([^\"#]*)(?:#[^\"]*)?\"[^>]*/>",
+                  lambda m: "" if m[1] in gone_refs else m[0], text)
     # datos: si alguno cambió, los suyos se escriben de nuevo; lo demás (accesibilidad, Sigil…) se queda
     fresh = _book_meta(opf, book.origin)
     language = opf.find(f"{OPF_NS}metadata/{DC}language")
