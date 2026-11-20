@@ -2003,7 +2003,7 @@ class Sheet(QTextEdit):
         while block.isValid():
             if _is_text(block):
                 count += 1
-                words += len(block.text().split())
+                words += convert.word_count(block.text())
                 if block == here:
                     current = count
             block = block.next()

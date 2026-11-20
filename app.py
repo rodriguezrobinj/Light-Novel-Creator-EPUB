@@ -6,6 +6,7 @@ import contextlib
 import copy
 import ctypes
 import dataclasses
+import functools
 import difflib
 import hashlib
 import html
@@ -1064,8 +1065,37 @@ def _epub_block_page(book, doc, k):
                   and len(convert._plain(b)) >= 4), None)
     if probe is None:
         return start
+    if convert.CJK.search(convert._plain(probe)):  # japonés: 24 letras seguidas cruzan de línea y search_for no las halla
+        # «「ん？」» es una letra y sale en cualquier página: se busca el primer párrafo con algo más
+        longer = next((b for b in book.blocks[k:k + 8] if b.kind == "p" and b.src and b.src[0] == block.src[0]
+                       and len(_match_key(convert._plain(b))) >= 6), probe)
+        key = _match_key(convert._plain(longer))[:16]
+        return next((i for i in range(start, min(end + 1, doc.page_count)) if key in _match_key(doc[i].get_text())),
+                    start)
     words = " ".join(convert._plain(probe).translate(convert.PREVIEW_TABLE).split())[:24]
     return next((i for i in range(start, min(end + 1, doc.page_count)) if doc[i].search_for(words)), start)
+
+
+@functools.lru_cache(maxsize=8)  # se busca párrafo a párrafo en las mismas páginas
+def _page_chars(doc, number):
+    """Letras de la página (sin espacios) en orden de lectura y el recuadro de cada una."""
+    chars = [(c["c"], pymupdf.Rect(c["bbox"])) for b in doc[number].get_text("rawdict")["blocks"] if b["type"] == 0
+             for line in b["lines"] for span in line["spans"] for c in span["chars"] if not c["c"].isspace()]
+    return "".join(c for c, _ in chars), [r for _, r in chars]
+
+
+def _cjk_box(doc, number, text):
+    """Recuadro de un párrafo japonés en la página, letra a letra desde su principio (el furigana va en línea,
+    como en _plain); hasta el final de la página si sigue en la siguiente. None si no empieza en ella o si es
+    corto y se repite («「──っ！」»)."""
+    flat, boxes = _page_chars(doc, number)
+    at = flat.find(text[:12])
+    if at < 0 or (len(text) <= 6 and flat.count(text) > 1):
+        return None
+    box = pymupdf.Rect(boxes[at])
+    for r in boxes[at + 1:at + len(text)]:
+        box |= r
+    return box
 
 
 def _match_key(text):
@@ -3030,12 +3060,18 @@ class App:
             if self.preview_doc:
                 self.preview_doc[1].close()
             self.preview_doc = None
-            # Desde los bytes: abierto por ruta, Windows no dejaría reescribir el archivo
-            epub = pymupdf.open(stream=Path(self.preview_path).read_bytes(), filetype="epub")
+            # Desde los bytes: abierto por ruta, Windows no dejaría reescribir el archivo. Arreglado como el original
+            # (_preview_epub): sin eso la ilustración de una página Kadokawa salía pequeña en una esquina
+            data = convert._preview_epub(self.preview_path) or Path(self.preview_path).read_bytes()
+            epub = pymupdf.open(stream=data, filetype="epub")
             epub.layout(width=size[0], height=size[1], fontsize=11)
-            # Todas las páginas tras la portada (capítulo 0): un capítulo de un EPUB puede ocupar varios archivos
-            # (portadilla y texto), y antes solo se veía el primero
-            pages = [(c, p) for c in range(1, epub.chapter_count) for p in range(epub.chapter_page_count(c))]
+            # La portada (capítulo 0) no es de la sección, salvo en un EPUB cuya sección empieza en la portada del
+            # original: entonces no se añade la de la app (faithful) y saltarla desfasaba el original una página
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                skip = 0 if self.book and self.book.origin and not any(
+                    n.endswith("lnc/portada.xhtml") for n in z.namelist()) else 1
+            # Todas las páginas de la sección: un capítulo de un EPUB puede ocupar varios archivos (portadilla y texto)
+            pages = [(c, p) for c in range(skip, epub.chapter_count) for p in range(epub.chapter_page_count(c))]
             if self.book and self.book.origin:  # sin las páginas en blanco del salto antes de cada ilustración
                 pages = [n for n in pages if epub.load_page(n).get_bboxlog()] or pages
             self.preview_doc = size, epub, pages
@@ -3054,12 +3090,30 @@ class App:
         try:
             epub, self.epub_pages = self.preview_epub()
             self.epub_page = max(0, min(self.epub_page, self.epub_pages - 1))
-            image, _ = self.render(self.epub_load(self.epub_page), dark=self.dark_var.get())
+            image = self.device_image(self.epub_load(self.epub_page), self.dark_var.get())
         except Exception:
             self.blank(view, "Sin vista previa")
             return
         view.show_image(self.box_size(), image)
         self.epub_caption.setText(f"EPUB · {self.device_var.get()} · {self.epub_page + 1}/{self.epub_pages}")
+
+    def device_image(self, page, dark):
+        """Página del EPUB en la pantalla del dispositivo. Una de maquetación fija (Kadokawa: 716×1024, o el doble
+        si es una ilustración a dos páginas) no se adapta al tamaño elegido: el lector la encaja entera en la
+        pantalla, con bandas de papel, y así se ve."""
+        width, height = DEVICES[self.device_var.get()]
+        if abs(page.rect.width - width) < 1 and abs(page.rect.height - height) < 1:
+            return self.render(page, dark)[0]
+        box_w, box_h = self.box_size()
+        zoom = min(box_w / width, box_h / height)
+        screen = QImage(round(width * zoom), round(height * zoom), QImage.Format.Format_RGB32)
+        screen.fill(QColor(theme.DARK["sheet"] if dark else "white"))
+        scale = min(screen.width() / page.rect.width, screen.height() / page.rect.height)
+        image = qtk.qimage(_page_pixmap(page, pymupdf.Matrix(scale, scale), dark))
+        painter = QPainter(screen)
+        painter.drawImage((screen.width() - image.width()) // 2, (screen.height() - image.height()) // 2, image)
+        painter.end()
+        return screen
 
     def pdf_step(self, delta):
         if self.pdf_doc:
@@ -8980,7 +9034,7 @@ class TextEditor:
         chapters = sum(1 for s in self.sections if s[0] != FRONT)
         extra = f"{convert.counted(chapters, 'capítulo')} en el libro"
         if selected.strip():
-            extra += f" · selección: {convert.counted(len(selected.split()), 'palabra')}"
+            extra += f" · selección: {convert.counted(convert.word_count(selected), 'palabra')}"
         column.addWidget(_label(extra, "muted"))
         column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
         win.show()
@@ -11103,6 +11157,8 @@ class TextEditor:
         aparece tal cual (palabra partida con guion en el PDF, párrafo ya editado)."""
         text = convert._plain(block)
         words = (text if page.parent.is_pdf else text.translate(convert.PREVIEW_TABLE)).split()  # EPUB: «・» es «·»
+        if convert.CJK.search(text):  # japonés: sin espacios, el párrafo entero era una «palabra» que cruza líneas
+            return _cjk_box(page.parent, page.number, "".join(words))
         hits = []
         for r in page.search_for(" ".join(words[:6])) if words else []:
             # letra a letra cuando cambia la fuente («※ · ※»: de reserva cada uno): los trozos seguidos, uno
