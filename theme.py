@@ -183,10 +183,20 @@ MARKS = {False: {"Grave": "#d32f2f", "Revisar": "#e07b00", "Menor": "#1f6fd1", "
                  "reading": "#cfe3fb", "comment": "#fff3b0"},
          True: {"Grave": "#ff6b6b", "Revisar": "#ffa94d", "Menor": "#6ea8ff", "changed": "#5cc777",
                 "reading": "#1f3a5c", "comment": "#4a4318"}}
+# «Mostrar cambios» como GitHub: fondo verde en lo puesto y rojo en lo quitado, y uno más claro en el párrafo
+# cambiado. Con transparencia (#AARRGGBB): valen sobre la hoja clara y la oscura
+for _marks in MARKS.values():
+    _marks.update({"added": "#662ea043", "removed": "#66f85149", "added_line": "#1f2ea043", "removed_line": "#1ff85149"})
 
 
 def mark_colors(dark):
     return MARKS[bool(dark)]
+
+
+def css_color(color):
+    """Un color de Qt (#AARRGGBB) en CSS, que lee #RRGGBBAA al revés."""
+    c = QColor(color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {c.alphaF():.2f})"
 
 
 def state_colors(dark):

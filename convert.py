@@ -2893,22 +2893,34 @@ PREVIEW_CHARS = {"・": "·"}
 PREVIEW_TABLE = str.maketrans(PREVIEW_CHARS)
 
 
+def _svg_size(m):
+    """<svg width="100%" height="100%" viewBox="0 0 W H"> con el tamaño W×H de su viewBox."""
+    box = re.search(rb'viewBox="\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)', m[0])
+    if not box:
+        return m[0]
+    tag = re.sub(rb'\swidth="100%"', b' width="' + box[1] + b'"', m[0])
+    return re.sub(rb'\sheight="100%"', b' height="' + box[2] + b'"', tag)
+
+
 def _preview_epub(path):
-    """Bytes del EPUB con PREVIEW_CHARS cambiados en su XHTML, para que MuPDF los dibuje; None si no lleva ninguno."""
+    """Bytes del EPUB arreglado para que MuPDF lo dibuje, o None si no hace falta: PREVIEW_CHARS cambiados y, en las
+    páginas de maquetación fija (Kadokawa), el <svg> de la ilustración al 100 % con el tamaño de su viewBox: si no,
+    MuPDF la dejaba pequeña en una esquina de la página."""
     with zipfile.ZipFile(path) as z:
-        pages = {n: z.read(n) for n in z.namelist() if n.lower().endswith((".xhtml", ".html", ".htm"))}
-        if not any(c.encode() in data for data in pages.values() for c in PREVIEW_CHARS):
+        pages = {}
+        for n in z.namelist():
+            if n.lower().endswith((".xhtml", ".html", ".htm")):
+                data = z.read(n)
+                for old, new in PREVIEW_CHARS.items():
+                    data = data.replace(old.encode(), new.encode())
+                pages[n] = re.sub(rb"<svg\b[^>]*>", _svg_size, data)
+        if all(data == z.read(n) for n, data in pages.items()):
             return None
         out = io.BytesIO()
         with zipfile.ZipFile(out, "w") as copy:
             for info in z.infolist():
                 data = pages.get(info.filename)
-                if data is None:
-                    data = z.read(info)
-                else:
-                    for old, new in PREVIEW_CHARS.items():
-                        data = data.replace(old.encode(), new.encode())
-                copy.writestr(info, data)  # con su compresión: «mimetype» sigue el primero y sin comprimir
+                copy.writestr(info, z.read(info) if data is None else data)  # con su compresión: «mimetype» primero
         return out.getvalue()
 
 

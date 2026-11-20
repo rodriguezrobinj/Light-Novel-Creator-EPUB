@@ -713,6 +713,11 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                         raw = re.sub(r"((?:src|href)\s*=\s*\")[^\"]*(\")", lambda m: m[1] + _rel(base, path) + m[2], raw)
                     if alt:
                         raw = re.sub(r"<img\b[^>]*>", lambda m: _set_attr(m[0], "alt", alt), raw, count=1)
+                    if preview:  # en la vista previa, sola en su página: ni texto ni otra ilustración al lado. Dentro
+                        # de <section> o <figure> MuPDF no hace caso de page-break-before: un bloque vacío que salta
+                        # después; la página en blanco que deja al empezar un archivo no se enseña (App.preview_epub)
+                        return (f'<div style="page-break-after: always"></div>'
+                                f'<div style="page-break-after: always">{raw}</div>')
                     return raw
                 return "".join(f'<div style="text-align: center; page-break-before: always; page-break-after: always">'
                                f'{picture(part, base, alt or "")}</div>'

@@ -123,8 +123,8 @@ window.lncClearDiff = function (root) {  // quita las marcas de lo quitado y jun
 """
 
 
-DEL_CSS = (".lnc-del::after { content: attr(data-del); color: %s; text-decoration: line-through; "
-           "margin: 0 0.2em; font-style: normal; text-indent: 0; }")
+DEL_CSS = (".lnc-del::after { content: attr(data-del); background: %s; text-decoration: line-through; "
+           "margin: 0 0.2em; padding: 0 0.1em; font-style: normal; text-indent: 0; }")  # fondo rojo, como GitHub
 
 # Funciones de la hoja: estado para la cinta, órdenes de formato, limpieza al pegar y atajos de Word en español
 SHEET_JS = DIFF_JS + r"""
@@ -358,7 +358,7 @@ SHEET_JS = DIFF_JS + r"""
       var css = document.getElementById('lnc-marks') || document.head.appendChild(document.createElement('style'));
       css.id = 'lnc-marks';
       css.textContent = d.del_css + '::highlight(lnc-spell){text-decoration: underline wavy ' + d.colors.spell + ';}' +
-        '::highlight(lnc-change){text-decoration: underline ' + d.colors.change + '; color: ' + d.colors.change + ';}' +
+        '::highlight(lnc-change){background-color: ' + d.colors.change + ';}' +
         d.levels.map(function (c, n) { return '::highlight(lnc-issue-' + n + '){text-decoration: underline wavy ' + c + ';}'; }).join('');
       if (!lnc.orig) {  // cómo era cada párrafo al cargar: el que cambia pierde sus avisos y es un cambio
         lnc.orig = new WeakMap();
