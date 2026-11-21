@@ -319,11 +319,12 @@ class _Shown(QObject):
     lista desplegable que no cabe debajo de su campo se abre encima: el campo se une a ella por arriba (up)."""
 
     def eventFilter(self, obj, event):
+        kind = event.type()  # una vez: mira cada evento de la app, y cada type() crea un enum de Python
         # Una lista sin campo de texto no toma el foco con el ratón: al cerrarla le quedaba el borde azul del foco
-        if (event.type() == QEvent.Type.Polish and isinstance(obj, QComboBox) and not obj.isEditable()
+        if (kind == QEvent.Type.Polish and isinstance(obj, QComboBox) and not obj.isEditable()
                 and obj.focusPolicy() in (Qt.FocusPolicy.StrongFocus, Qt.FocusPolicy.WheelFocus)):
             obj.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-        if event.type() != QEvent.Type.Show or not isinstance(obj, QWidget):
+        if kind != QEvent.Type.Show or not isinstance(obj, QWidget):
             return False
         if obj.windowType() in (Qt.WindowType.Window, Qt.WindowType.Dialog):
             title_bar(obj, bool(QApplication.instance().property("theme_dark")))

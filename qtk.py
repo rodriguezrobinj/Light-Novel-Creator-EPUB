@@ -484,8 +484,10 @@ class RowList(QTreeWidget):
                 self._look(item, item.data(0, TAGS))
 
     def _look(self, item, tags):
-        tags = tuple(tags)
+        tags, old = tuple(tags), item.data(0, TAGS) or ()
         item.setData(0, TAGS, tags)
+        if not any(t in self.looks for t in tags + tuple(old)):
+            return  # sin aspecto antes ni ahora: poner letra y color a cada celda era la mitad de llenar «Traducir…»
         font, color = next((self.looks[t] for t in tags if t in self.looks), (None, None))
         for n in range(len(self.columns)):
             item.setFont(n, font or self.font())
