@@ -4451,6 +4451,8 @@ def test_edit_section_moves_images_and_adds_titles():
                      ("p", "Tres."), ("break", "* * *"), ("p", "[Ilustración 6]"), ("heading", "Cap 2"),
                      ("p", "Cuatro.")], kinds  # <b> sin cerrar: se quitan las etiquetas; la marca 6 no es de aquí
     assert mapping[2] == 3 and 3 not in mapping and mapping[5] == 7, mapping  # el separador 3 se borró
+    # Se calcula al pedirlo, pero es el diccionario entero de siempre (los párrafos 1 y 4 se sustituyen)
+    assert mapping == {0: 0, 2: 3, 5: 7, 6: 8} and len(mapping) == 4 and 4 not in mapping, mapping
     assert book.candidates == [0, 7], book.candidates
 
 
@@ -7998,6 +8000,64 @@ def test_spell_server_answers_checks_before_suggestions():
     assert [s[1] for s in suggestions] == ["tambien", "caballeroz"] and suggestions[0][2][0] == "también", suggestions
     assert replies.empty()
     assert not worker.is_alive()
+
+
+def test_spell_server_forgets_closed_editor_after_reset():
+    """El proceso de ortografía sigue vivo entre aperturas del editor: tras ("reset",) olvida lo pedido por el editor
+    cerrado y vuelve a dar las sugerencias de una palabra ya contestada (si no, el siguiente editor no las tendría)."""
+    import queue
+    import threading
+
+    import app
+    requests, replies = queue.Queue(), queue.Queue()
+    requests.put(("suggest", "tambien"))
+    worker = threading.Thread(target=app._spell_server, args=(requests, replies), daemon=True)
+    worker.start()
+    first = replies.get(timeout=60)
+    requests.put(("reset",))
+    requests.put(("suggest", "tambien"))
+    again = replies.get(timeout=60)
+    requests.put(None)
+    worker.join(10)
+    assert first[:2] == again[:2] == ("suggestions", "tambien") and again[2], (first, again)
+    assert not worker.is_alive()
+
+
+def test_text_editor_reuses_spell_process_between_openings():
+    """Abrir el editor dos veces arranca un solo proceso de ortografía (cargar Hunspell tarda ~4 s): al cerrar se le
+    manda ("reset",) y la siguiente apertura tira lo que el anterior dejó por leer. Si muere, se arranca otro."""
+    import queue
+
+    import app
+    requests, replies, proc = queue.Queue(), queue.Queue(), FakeSpellProcess()
+    B = convert.Block
+    original, started = app._start_spell_process, []
+    root, window = visible_window()
+    app._start_spell_process = lambda: started.append(1) or (requests, replies, proc)
+    try:
+        doc = pymupdf.open()
+        add_page(doc, 1, [(72, 100, "Pagina", 11, "helv")])
+        window.pdf = TMP / f"ortografia-dos-{time_ns()}.pdf"
+        doc.save(window.pdf)
+        window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"),
+                                                          B("p", 1, "La palabrq rara.")], [0]))
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        editor.win.done(0)
+        sent = []
+        while not requests.empty():
+            sent.append(requests.get_nowait())
+        replies.put(("suggestions", "vieja", ["del editor de antes"]))
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        stale = editor.spell is not None and replies.empty()
+        editor.win.done(0)
+        proc.alive = False
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        editor.win.done(0)
+    finally:
+        app._start_spell_process = original
+    window.close()
+    assert sent[0][0] == "check" and sent[-1] == ("reset",), sent
+    assert stale and len(started) == 2, (stale, started)
 
 
 def test_app_ends_after_stopping_spell_server_with_words_pending():

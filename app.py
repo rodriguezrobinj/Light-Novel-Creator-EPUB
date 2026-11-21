@@ -277,7 +277,8 @@ def _worker(events, work, args, report):
 def _spell_server(requests, replies):
     """Proceso de ortografía del editor: carga Hunspell una vez (~4 s) y responde mientras el editor está
     abierto. ("check", [palabras]) -> ("unknown", [las que no están]); ("suggest", palabra) -> ("suggestions",
-    palabra, [sugerencias]); ("first", palabra): la misma, antes que las demás (clic derecho); None termina.
+    palabra, [sugerencias]); ("first", palabra): la misma, antes que las demás (clic derecho); ("reset",): el
+    editor se cerró, se olvida lo pedido (el proceso sigue para el siguiente, App.spell_process); None termina.
     Las revisiones pasan antes que las sugerencias pendientes (~1 s cada una): lo que se escribe se subraya
     enseguida."""
     spell, pending, done, good = convert._hunspell(), [], set(), set()  # good: las correctas, para sugerir
@@ -297,6 +298,10 @@ def _spell_server(requests, replies):
                 break
         if None in pending:
             return
+        if ("reset",) in pending:  # lo de antes era del editor cerrado: sus sugerencias ya no hacen falta
+            pending = pending[len(pending) - pending[::-1].index(("reset",)):]
+            done.clear()
+            good.clear()
         for _, words in [r for r in pending if r[0] == "check"]:
             unknown = [w for w in words if not spell.lookup(w)]
             good.update(set(words) - set(unknown))
@@ -410,8 +415,15 @@ def _image_ext(data):
 
 
 def _image_info(data):
-    """«1200×1700 px · 340 KB · JPEG» de una imagen."""
-    image = QImage.fromData(data)
+    """«1200×1700 px · 340 KB · JPEG» de una imagen. El tamaño, de su cabecera: descodificarla entera para eso
+    era la mitad de lo que tardaba en abrirse «Ilustraciones…» (Eminence 7, 21 láminas: 0,29 s)."""
+    from PySide6.QtCore import QBuffer, QByteArray
+    from PySide6.QtGui import QImageReader
+    buffer = QBuffer()
+    buffer.setData(QByteArray(data))
+    image = QImageReader(buffer).size()
+    if not image.isValid():
+        image = QImage.fromData(data).size()
     return f"{image.width()}×{image.height()} px · {max(1, round(len(data) / 1024))} KB · {_image_ext(data).upper()}"
 
 
@@ -420,7 +432,8 @@ THUMB_BOX = (72, 72)  # miniatura de la lista de ilustraciones: marco cuadrado, 
 
 def _framed_thumb(data):
     """La imagen reducida y centrada en un marco transparente de THUMB_BOX: todas las filas, iguales."""
-    image = QImage.fromData(data).scaled(*THUMB_BOX, Qt.AspectRatioMode.KeepAspectRatio,
+    # Ya reducida al descodificar (_scaled_jpeg): entera, la otra mitad de lo que tardaba «Ilustraciones…»
+    image = (_scaled_jpeg(data, *THUMB_BOX) or QImage.fromData(data)).scaled(*THUMB_BOX, Qt.AspectRatioMode.KeepAspectRatio,
                                          Qt.TransformationMode.SmoothTransformation)
     framed = QPixmap(*THUMB_BOX)
     framed.fill(Qt.GlobalColor.transparent)
@@ -2302,6 +2315,7 @@ class App:
         self.recent_thumbs, self.thumbs_tried = None, set()
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
         self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
+        self.spell_server = None               # proceso de ortografía del editor (spell_process)
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
         self.cover_choice = None
         self.device_var, self.dark_var = qtk.Var('E-reader 6"'), qtk.Var(False)
@@ -5430,6 +5444,18 @@ class App:
             self.fields()[name].set(value)
         self.update_preview()
 
+    def spell_process(self):
+        """El proceso de ortografía del editor, el mismo de una apertura a otra: arrancarlo y cargar Hunspell
+        tardaba 4,4 s cada vez que se abría el editor. Lo que quede por leer era del editor anterior."""
+        server = self.spell_server
+        if server and server[2].is_alive():
+            with contextlib.suppress(queue.Empty, OSError, ValueError, EOFError):
+                while True:
+                    server[1].get_nowait()
+            return server
+        self.spell_server = _start_spell_process()
+        return self.spell_server
+
     def spanish(self):
         """El libro está en español: las erratas, los calcos, los ecos y la ortografía solo saben de español."""
         return (self.lang_var.get().strip() or "es").lower().startswith("es")
@@ -7979,7 +8005,7 @@ class TextEditor:
         sheet.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         sheet.customContextMenuRequested.connect(self.context_menu)
         # el diccionario es de español; en Opciones → Editor se puede no subrayar
-        self.spell = _start_spell_process() if app.spanish() and self.option("editor_spell") else None
+        self.spell = app.spell_process() if app.spanish() and self.option("editor_spell") else None
         if self.spell:  # todo el libro de una vez; luego, lo que se escriba
             self.send_words(words=app.spell_candidates())
             qtk.after(300, self.poll_spelling)
@@ -8021,7 +8047,9 @@ class TextEditor:
         self.ribbon_float.hide()
         tabs.tabBarDoubleClicked.connect(lambda _: self.pin_ribbon(not self.ribbon_pinned))
         tabs.tabBarClicked.connect(lambda _: self.ribbon_pinned or qtk.after(0, self.float_ribbon))
-        QApplication.instance().installEventFilter(editor._Filter(self.win, self.outside_ribbon))
+        # Solo mientras flota (float_ribbon): puesto siempre, miraba cada evento de la app, también los miles de
+        # crear el editor
+        self.ribbon_watch = editor._Filter(self.win, self.outside_ribbon)
         # Botones que se quedan en su icono si la cinta no cabe (compact_to): (botón, texto, texto corto o None
         # si se queda en su glifo, nivel)
         self.compact, self.ribbon_level, self.ribbon_rows = [], 0, []
@@ -8325,12 +8353,14 @@ class TextEditor:
         frame.setGeometry(top.x(), top.y(), self.ribbon_bar.width(), frame.sizeHint().height())
         frame.show()
         frame.raise_()
+        QApplication.instance().installEventFilter(self.ribbon_watch)
 
     def drop_ribbon(self):
         """La cinta vuelve a su sitio: visible si está fijada, oculta si no."""
         if not shiboken6.isValid(self.ribbon_float):
             return
         self.ribbon_float.hide()
+        QApplication.instance().removeEventFilter(self.ribbon_watch)
         self.ribbon_bar.layout().addWidget(self.ribbon_pages)
         self.ribbon_pages.setVisible(self.ribbon_pinned and not self.focused)  # pantalla completa: sin cinta
 
@@ -11127,8 +11157,9 @@ class TextEditor:
         if shiboken6.isValid(self.sheet) and self.sheet.current_source() is not None:
             self.app.editor_at = self.sheet.current_source()
         self.app.save_review()
-        if self.spell:
-            self.spell[2].terminate()  # nada que guardar: lo aprendido ya está en App.words
+        if self.spell:  # sigue vivo para la próxima vez (App.spell_process); lo aprendido ya está en App.words
+            with contextlib.suppress(OSError, ValueError):
+                self.spell[0].put(("reset",))
             self.spell = None
         if self.speaker:
             self.speaker.stop()

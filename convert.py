@@ -1,6 +1,7 @@
 """Convierte PDFs de novelas ligeras en EPUB con texto fluido."""
 import base64
 import collections
+import collections.abc
 import colorsys
 import csv
 import difflib
@@ -1610,11 +1611,36 @@ def edit_section(book, start, end, text, folder=None):
                 bullet = _plain(was)[:1]
                 if bullet in BULLETS and _plain(now)[:1] not in BULLETS:
                     now.html = f"{bullet} {now.html}"
-    delta = len(new) - (end - start)
     book.blocks = old[:start] + new + old[end:]
-    mapping = {k: k for k in range(start)} | kept | {k: k + delta for k in range(end, len(old))}
+    mapping = _Shift(start, end, len(new) - (end - start), kept, len(old))
     book.candidates = [mapping[k] for k in book.candidates if k in mapping]
     return mapping
+
+
+class _Shift(collections.abc.Mapping):
+    """{índice viejo: nuevo} de edit_section, calculado al pedirlo: hecho entero, «Todos» de la búsqueda (920
+    párrafos de Eminence 7) llenaba 920 diccionarios de 8000 bloques y tardaba 0,6 s."""
+
+    def __init__(self, start, end, delta, kept, size):
+        self.start, self.end, self.delta, self.kept, self.size = start, end, delta, kept, size
+
+    def __getitem__(self, k):
+        if 0 <= k < self.start:
+            return k
+        if self.end <= k < self.size:
+            return k + self.delta
+        return self.kept[k]
+
+    def __iter__(self):
+        yield from range(self.start)
+        yield from self.kept
+        yield from range(self.end, self.size)
+
+    def __len__(self):
+        return self.start + len(self.kept) + self.size - self.end
+
+    def __repr__(self):
+        return repr(dict(self))
 
 
 HONORIFICS = {"san", "sama", "kun", "chan", "dono", "sensei", "senpai", "sempai", "nee", "nii", "onee", "onii",
