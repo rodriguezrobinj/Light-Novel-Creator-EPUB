@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 
 import convert
+import registro
 
 # Nombre visible -> tipo de API, URL base y modelo por defecto (los modelos se pueden cambiar en la ventana)
 ENGINES = {
@@ -566,6 +567,7 @@ CHAPTER_INTRO = ("The whole chapter in the original language, only as context (w
                  "the tone, what comes next). Translate only the paragraphs you are asked for:\n")
 
 
+@registro.timed
 def translate(name, texts, src, dst, api_key="", model="", base="", glossary=(), context=(), style=None):
     """Traduce texts (un lote de batches) con el motor name; devuelve una traducción por texto, en orden.
     context: [(original, traducción)] de los párrafos anteriores. style: lo de instructions más "chapter", el

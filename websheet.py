@@ -237,6 +237,7 @@ SHEET_JS = DIFF_JS + r"""
               text: b ? b.textContent : '', edited: !!(b && lnc.orig && lnc.edited(b)),
               fresh: !!(b && lnc.orig && !lnc.orig.has(b)), obj: !!(b && b.classList.contains('lnc-obj')),
               dirty: lnc.changedAny(), canUndo: document.queryCommandEnabled('undo'),
+              canRedo: document.queryCommandEnabled('redo'),
               wants: lnc.take()});  // un objeto no llega a Python: JSON
     },
     // Ctrl+Z (o Ctrl+Y) sin nada que deshacer en Chromium: lo hecho por la hoja de Qt (versalitas, recuadro…) se

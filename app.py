@@ -13,6 +13,7 @@ import html
 import http.server
 import io
 import json
+import logging
 import multiprocessing
 import os
 import pickle
@@ -55,6 +56,7 @@ import editor
 import faithful
 import options
 import qtk
+import registro
 import theme
 import translate
 from qtk import filedialog, messagebox
@@ -114,6 +116,15 @@ def _data_dir():
 
 # Preferencias de la ventana entre sesiones (opciones, última carpeta y PDF recientes)
 SETTINGS = _data_dir() / "ajustes.json"
+LOG = logging.getLogger("app")  # registro.log: lo que hace la ventana (registro.py)
+STANDBY = True  # un proceso de trabajo preparado de antemano (warm_worker); las pruebas lo apagan
+# Opciones → Editor: cómo es el editor de cada uno. Los que ya existían (editor_nav, editor_dark) se recuerdan también
+# al cambiarlos desde el propio editor
+UNDO_SCOPES = ("Por capítulo", "Todo el libro")
+EDITOR_SIDES = ("La última usada", "Original", "EPUB", "Hoja web")
+EDITOR_DEFAULTS = {"editor_undo": UNDO_SCOPES[0], "editor_side": EDITOR_SIDES[0], "editor_zoom": 100,
+                   "editor_changes": False, "editor_nav": False, "editor_dark": False, "editor_spell": True,
+                   "editor_resume": True}
 RECENT = 8  # PDF recientes que recuerda el menú
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
@@ -138,7 +149,7 @@ PROFILES = {"Personalizado": {},
 FONT_CHOICES = ["Del lector"] + list(convert.FONTS) + ["Otra…"]  # «Otra…» pide un archivo
 HEADING_OWN = "Archivo propio"  # fuente de títulos de un archivo (heading_font_file)
 # Un EPUB abierto sale como es: su CSS, sus separadores y sus páginas; la limpieza tipográfica ya la tiene
-EPUB_DEFAULTS = {"style": convert.ORIGINAL, "separator": "Original del PDF", "typography": False, "contents": False,
+EPUB_DEFAULTS = {"style": convert.ORIGINAL, "separator": "Icono del original", "typography": False, "contents": False,
                  "credits": False, "synopsis": False}
 APP_NAME = "Light Novel Creator"  # nombre visible; el .exe y la carpeta de ajustes siguen siendo «PDF a EPUB»
 KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro, theme.kind_colors(True)
@@ -147,7 +158,8 @@ PREVIEW_CHROME = 40       # alto de la fila ◀ leyenda ▶ de cada vista previa
 PAGE_GAP = 8              # píxeles entre la página y la siguiente en el panel del editor
 DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
 THUMB_HEIGHT = 64         # alto de las miniaturas del PDF, en píxeles
-THUMBS_PER_TICK = 6       # miniaturas por tanda: dibujarlas todas de golpe congelaría la ventana
+THUMBS_PER_TICK = 6       # miniaturas por tanda como mucho: dibujarlas todas de golpe congelaría la ventana
+THUMBS_TICK_S = 0.05      # y no más de 50 ms por tanda: 6 láminas a color de un EPUB, juntas, la paraban 0,9 s
 SUGGEST_AHEAD = 40        # sugerencias de ortografía pedidas por adelantado en cada capítulo
 MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
@@ -180,6 +192,26 @@ def _swap_image(book, k, data):
     book.blocks = book.blocks[:k] + [dataclasses.replace(book.blocks[k], image=data)] + book.blocks[k + 1:]
 
 
+def _scaled_jpeg(data, width, height):
+    """Una lámina JPEG ya reducida a caber en width×height, o None si no es JPEG o Qt no la lee. Qt la descodifica
+    a 1/2, 1/4 u 1/8 de su tamaño: 2,4 veces más rápido que entera con MuPDF (las 15 de Strange Grief 1, 0,3 s)."""
+    if data[:2] != b"\xff\xd8":
+        return None
+    from PySide6.QtCore import QBuffer, QByteArray
+    from PySide6.QtGui import QImageReader
+    buffer = QBuffer()
+    buffer.setData(QByteArray(data))
+    reader = QImageReader(buffer, b"jpeg")
+    size = reader.size()
+    if not size.isValid():
+        return None
+    if size.width() > width or size.height() > height:
+        size.scale(QSize(width, height), Qt.AspectRatioMode.KeepAspectRatio)
+        reader.setScaledSize(size)
+    image = reader.read()
+    return None if image.isNull() else image
+
+
 def _diff_spans(before, after):
     """Tramos que cambian entre la vista previa de antes y la de después: ([(i, j) en before], [(i, j) en after])."""
     ops = difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes()
@@ -187,8 +219,15 @@ def _diff_spans(before, after):
             [(j1, j2) for op, _, _, j1, j2 in ops if op in ("replace", "insert")])
 
 
-def _log(text):
-    """Apunta un fallo en errores.log, junto a las preferencias: el .exe no tiene consola donde verlo."""
+def _log(text, tb=None):
+    """Apunta un fallo en errores.log, junto a las preferencias: el .exe no tiene consola donde verlo. Con la pila
+    (tb, o la del except en curso), también las variables de donde saltó y tras qué acción."""
+    tb = tb or sys.exc_info()[2]
+    details = registro.crash_details(tb) if tb else ""
+    if details:
+        text = f"{text.rstrip()}\n{details}"
+    if registro.LAST_ACTION:
+        text = f"{text.rstrip()}\nTras: {registro.LAST_ACTION}"
     path = SETTINGS.parent / "errores.log"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,12 +235,18 @@ def _log(text):
             f.write(f"--- {datetime.now():%Y-%m-%d %H:%M:%S}\n{text.rstrip()}\n")
     except OSError:
         pass  # sin registro; el aviso en pantalla sale igual
+    LOG.error("%s", text.rstrip())  # y en registro.log, con lo que pasó antes
     return path
 
 
 def _worker(events, work, args, report):
     """Corre en otro proceso: PyMuPDF retiene el GIL y, en un hilo, trabaría la ventana. args es la tupla o,
     desde App.run, la ruta del archivo donde la guardó."""
+    if multiprocessing.parent_process() is not None:  # su registro, a la ventana (en las pruebas corre aquí mismo)
+        logging.getLogger().handlers[:] = [registro.ToQueue(events)]
+        logging.getLogger().setLevel(logging.DEBUG)
+    log = logging.getLogger("trabajo")
+    started = time.perf_counter()
     try:
         if isinstance(args, str):
             path = args
@@ -215,10 +260,18 @@ def _worker(events, work, args, report):
             result = work(*args, progress=lambda done, total: events.put(("progress", done, total)))
         else:
             result = work(*args)
+        log.info("%s terminó en %.1f s · memoria máx. %s MB", getattr(work, "__name__", work),
+                 time.perf_counter() - started, registro.peak_memory_mb())
         events.put(("done", result))
+    except convert.BookError as e:  # el libro no se puede convertir: se avisa, no es un fallo de la app
+        log.warning("%s no pudo: %s", getattr(work, "__name__", work), e)
+        events.put(("error", str(e)))
     except Exception as e:
+        details = registro.crash_details(e.__traceback__)  # qué valía qué donde saltó
+        log.exception("%s falló tras %.1f s · memoria máx. %s MB\n%s", getattr(work, "__name__", work),
+                      time.perf_counter() - started, registro.peak_memory_mb(), details)
         events.put(("error", str(e) or type(e).__name__))  # MemoryError() no trae mensaje
-        events.put(("log", traceback.format_exc()))  # la ventana lo apunta en errores.log
+        events.put(("log", f"{traceback.format_exc()}{details}"))  # la ventana lo apunta en errores.log
 
 
 def _spell_server(requests, replies):
@@ -540,6 +593,32 @@ def _start_thumbs(jobs):
         return None
 
 
+def _standby(events, jobs):
+    """Proceso de trabajo preparado de antemano: con todo ya importado, espera su encargo (work, args, report) y lo
+    hace como _worker. Arrancar uno nuevo para cada trabajo costaba 1,7 s en el .exe antes de empezar."""
+    parent = multiprocessing.parent_process()
+    while True:
+        try:
+            job = jobs.get(timeout=2)
+            break
+        except queue.Empty:
+            if parent is not None and not parent.is_alive():
+                return  # la ventana murió sin avisar: nadie le daría encargo
+    _worker(events, *job)
+
+
+def _start_standby():
+    """(proceso, eventos, encargos) de _standby, o None si no arranca: los trabajos arrancan su proceso al momento."""
+    try:
+        events, jobs = multiprocessing.Queue(), multiprocessing.Queue()
+        proc = multiprocessing.Process(target=_standby, args=(events, jobs), daemon=True)
+        proc.start()
+        return proc, events, jobs
+    except Exception:
+        LOG.warning("No se pudo preparar el proceso de trabajo", exc_info=True)
+        return None
+
+
 def _start_spell_process():
     """(peticiones, respuestas, proceso) de _spell_server, o None si no arranca: el editor sigue sin él."""
     try:
@@ -553,12 +632,23 @@ def _start_spell_process():
         return None
 
 
+def _toc_page(doc):
+    """Página del índice impreso (desde 0) entre las 30 primeras de doc; None si no lo tiene."""
+    for n in range(min(30, doc.page_count if doc else 0)):
+        if any(line.strip().lower() in TOC_TITLES for line in doc[n].get_text().splitlines()):
+            return n
+    return None
+
+
 def _analyze(pdf, progress=None):
-    """convert.analyze, las ilustraciones repetidas y el informe de calidad, en el proceso de trabajo: en la
-    ventana congelaban al abrir (Kage 5: 2,4 s las repetidas; Nageki 1: 0,9 s el informe)."""
+    """convert.analyze, las ilustraciones repetidas, el informe de calidad y la página del índice impreso, en el
+    proceso de trabajo: en la ventana congelaban al abrir (Kage 5: 2,4 s las repetidas; Nageki 1: 0,9 s el informe;
+    Strange Grief 1: 0,8 s leer sus 30 primeras páginas buscando el índice)."""
     book = convert.analyze(pdf, progress)
     _fit_review(pdf, book)
-    return book, convert.duplicate_images(book), convert.quality_report(book), convert.report_memos()
+    with contextlib.closing(convert.open_pdf(pdf)) as doc:  # la ventana lo abre sin volver a recorrerlo
+        shown = {"toc": _toc_page(doc), "jpx": doc.jpx}
+    return book, convert.duplicate_images(book), convert.quality_report(book), convert.report_memos(), shown
 
 
 def _sweep_temp(age=86400):
@@ -569,6 +659,10 @@ def _sweep_temp(age=86400):
             with contextlib.suppress(OSError):  # otra ventana lo tiene abierto
                 if time.time() - path.stat().st_mtime > age:
                     path.unlink()
+        elif path.name.startswith("lnepub-pdf-") and path.is_dir():  # la de write_pdf que el antivirus no dejó borrar
+            with contextlib.suppress(OSError):
+                if time.time() - path.stat().st_mtime > age:
+                    shutil.rmtree(path, ignore_errors=True)
 
 
 def _write_json(path, data):
@@ -608,7 +702,7 @@ def _write_options(state, breaks=()):
     return {"lang": lang if LANG.fullmatch(lang) else "es",
             "typography": bool(state.get("typography", True)),
             "style": style if style in convert.STYLES or style == convert.ORIGINAL else "Clásico",
-            "separator": str(state.get("separator", "Según el estilo")),
+            "separator": convert.separator_choice(str(state.get("separator", "Según el estilo"))),
             "separator_icon": icon if (icon := str(state.get("separator_icon") or "")).startswith("<svg") else "",
             "shrink": int(state.get("shrink_size") or convert.SHRINK) if state.get("shrink", True) else False,
             "replacements": [tuple(rule) for rule in state.get("replacements", [])],
@@ -1062,17 +1156,17 @@ def _epub_block_page(book, doc, k):
                 return i
         return start
     probe = next((b for b in book.blocks[k:k + 8] if b.kind == "p" and b.src and b.src[0] == block.src[0]
-                  and len(convert._plain(b)) >= 4), None)
+                  and len(_source_plain(b)) >= 4), None)
     if probe is None:
         return start
-    if convert.CJK.search(convert._plain(probe)):  # japonés: 24 letras seguidas cruzan de línea y search_for no las halla
+    if convert.CJK.search(_source_plain(probe)):  # japonés: 24 letras seguidas cruzan de línea y search_for no las halla
         # «「ん？」» es una letra y sale en cualquier página: se busca el primer párrafo con algo más
         longer = next((b for b in book.blocks[k:k + 8] if b.kind == "p" and b.src and b.src[0] == block.src[0]
-                       and len(_match_key(convert._plain(b))) >= 6), probe)
-        key = _match_key(convert._plain(longer))[:16]
+                       and len(_match_key(_source_plain(b))) >= 6), probe)
+        key = _match_key(_source_plain(longer))[:16]
         return next((i for i in range(start, min(end + 1, doc.page_count)) if key in _match_key(doc[i].get_text())),
                     start)
-    words = " ".join(convert._plain(probe).translate(convert.PREVIEW_TABLE).split())[:24]
+    words = " ".join(_source_plain(probe).translate(convert.PREVIEW_TABLE).split())[:24]
     return next((i for i in range(start, min(end + 1, doc.page_count)) if doc[i].search_for(words)), start)
 
 
@@ -1096,6 +1190,12 @@ def _cjk_box(doc, number, text):
     for r in boxes[at + 1:at + len(text)]:
         box |= r
     return box
+
+
+def _source_plain(block):
+    """Texto del bloque como está en el original: el que se leyó de un EPUB (traducido o corregido, el original
+    sigue con el de antes); en un PDF, el de ahora."""
+    return convert._unhtml(block.orig) if block.orig else convert._plain(block)
 
 
 def _match_key(text):
@@ -1160,7 +1260,7 @@ def _set_aside(pdf):
 # Versiones del trabajo de un libro, como los commits de git: copias completas de la revisión en un zip junto al
 # PDF. Restaurar una no borra las posteriores: así conviven alternativas del mismo tomo.
 # No cuentan para saber si una versión automática repite la última
-VERSION_NOISE = ("problems", "pdf", "editor_at", "work", "faithful")
+VERSION_NOISE = ("problems", "pdf", "editor_at", "work", "faithful", "editor_history")
 COMPARE_LIMIT = 300  # párrafos cambiados que se muestran al comparar: más no se leen y la ventana tardaría
 FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volume": "Vol.", "publisher": "Grupo",
                 "translator": "Traductor", "illustrator": "Ilustraciones", "proofreader": "Corrección",
@@ -1496,7 +1596,7 @@ def _cover_image(doc, choice, book=None):
     if kind == "image":
         return book.blocks[int(value)].image
     if _network_path(value):
-        raise ValueError("La imagen está en una carpeta de red: cópiala al equipo y elígela desde ahí.")
+        raise convert.BookError("La imagen está en una carpeta de red: cópiala al equipo y elígela desde ahí.")
     return convert.load_cover(value)
 
 
@@ -1599,7 +1699,7 @@ def _lookup(series):
         with urllib.request.urlopen(request, timeout=15) as response:
             data = json.load(response)
     except (OSError, ValueError) as e:
-        raise ValueError(f"No se pudo consultar AniList: {e}") from e
+        raise convert.BookError(f"No se pudo consultar AniList: {e}") from e
     return _anilist_results(data)
 
 
@@ -2182,6 +2282,7 @@ class App:
         self.matches = []                      # resultados de la búsqueda: (bloque, página, texto)
         self.dark = False                      # tema oscuro activo
         self.proc = None
+        self.standby = None                    # proceso de trabajo ya arrancado para el siguiente (warm_worker)
         self.book_lock = self.lock_key = None  # candado del libro abierto (ver lock_book)
         self.closed = False                    # ventana cerrada: lo diferido (miniaturas, repintar) ya no se hace
         self._description = ""                 # sinopsis (propiedad description)
@@ -2192,8 +2293,8 @@ class App:
         self.tr_notes = ""                     # personajes y estilo para la IA que traduce, de la serie
         self.comments = []                     # comentarios del revisor: {"text", "page", "note"}; no van al EPUB
         self.editor_at = None                  # bloque del cursor al cerrar el editor: «Lo dejaste en…»
-        # texto de un capítulo aceptado en el editor -> (el de antes, para su deshacer; el del principio, para
-        # «Ver todos los cambios»)
+        # _history_key de un capítulo aceptado en el editor -> [el de antes, para su deshacer; el del principio, para
+        # «Ver todos los cambios»], como _history_delta. Va en la revisión: sigue al cerrar la aplicación
         self.editor_history = {}
         self.work = {}                         # trabajo en el editor por día: {"AAAA-MM-DD": {"minutes", …}}
         self.alts = {}                         # descripciones de ilustraciones: {convert.image_key: texto}
@@ -2281,6 +2382,7 @@ class App:
         tools.addSeparator()
         tools.addAction("Opciones…  (Ctrl+,)", lambda: self.open_options())
         tools.addAction("Atajos de teclado…", lambda: messagebox.showinfo("Atajos de teclado", SHORTCUTS))
+        tools.addAction("Registro de la aplicación", self.open_log)
         tools.addSeparator()
         tools.addAction("Instalar en este equipo", self.install)
         tools.addAction("Desinstalar", self.uninstall)
@@ -2494,6 +2596,7 @@ class App:
         self.poller = QTimer()
         self.poller.timeout.connect(self.poll)
         self.poller.start(100)
+        qtk.after(2000, self.warm_worker)  # tras abrirse la ventana: arrancarlo no le quita el sitio
         # Carpeta vigilada de la sesión anterior: lo llegado con la ventana cerrada también se convierte
         self.watch, self.watch_sizes, self.watch_skip = "", {}, set()
         watch = self.settings.get("watch")
@@ -2667,15 +2770,29 @@ class App:
             fd, self.args_file = tempfile.mkstemp(prefix="lnepub-trabajo-", suffix=".pickle")
             with os.fdopen(fd, "wb") as f:
                 pickle.dump(args, f, protocol=pickle.HIGHEST_PROTOCOL)
-            self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, self.args_file, report),
-                                                daemon=True)
-            self.proc.start()
+            standby, self.standby = self.standby, None
+            if standby and standby[0].is_alive():  # el preparado: ya importado, empieza enseguida
+                self.proc, self.events, jobs = standby
+                jobs.put((work, self.args_file, report))
+            else:
+                self.proc = multiprocessing.Process(target=_worker, args=(self.events, work, self.args_file, report),
+                                                    daemon=True)
+                self.proc.start()
+            self.work_log = (getattr(work, "__name__", str(work)), time.perf_counter())
+            LOG.info("Trabajo %s: empieza (proceso %s) · %s", self.work_log[0], self.proc.pid, busy)
         except Exception as e:  # disco lleno, sin permisos en %TEMP%: sin esto la ventana se quedaba ocupada
             _log(traceback.format_exc())
             self.proc = None
             self.finish(("error", f"No se pudo empezar el trabajo: {e or type(e).__name__}"))
             return False
         return True
+
+    def warm_worker(self):
+        """Deja un proceso de trabajo arrancado y esperando (_standby), para que el siguiente trabajo no espere a que
+        arranque. Uno solo, y no mientras trabaja otro (le quitaría CPU)."""
+        if not STANDBY or self.closed or self.done or (self.standby and self.standby[0].is_alive()):
+            return
+        self.standby = _start_standby()
 
     def stop_work(self):
         """Detiene el proceso de trabajo y borra lo que dejó a medias: el EPUB o PDF y el archivo de sus datos."""
@@ -2730,6 +2847,8 @@ class App:
                 self.report(event[1], event[2])
             elif event[0] == "log":  # detalle del fallo del proceso de trabajo, tras su "error"
                 _log(event[1])
+            elif event[0] == "rec":  # una línea de su registro
+                registro.replay(event)
             else:
                 self.finish(event)
         # Un proceso que muere sin avisar (fallo de MuPDF, falta de memoria) no envía "error".
@@ -2746,6 +2865,12 @@ class App:
     def finish(self, event):
         """Cierra el trabajo en curso: desbloquea la ventana y entrega el resultado o el error."""
         done, self.done, self.latest, self.partial = self.done, None, None, None
+        qtk.after(1000, self.warm_worker)  # el de este trabajo ya terminó: otro preparado para el siguiente
+        name, started = getattr(self, "work_log", ("?", time.perf_counter()))
+        ok = event[0] in ("done", "cancel")
+        LOG.log(logging.INFO if ok else logging.ERROR, "Trabajo %s: %s en %.1f s%s", name,
+                {"done": "hecho", "cancel": "cancelado"}.get(event[0], "error"), time.perf_counter() - started,
+                "" if ok else f" · {event[1]}")
         self.update_chrome()
         with contextlib.suppress(OSError):  # el proceso lo borra al leerlo; si murió antes, queda aquí
             os.remove(self.args_file)
@@ -2772,7 +2897,7 @@ class App:
     def on_error(self, kind, value, tb):
         """Fallo dentro de la ventana (un botón, un atajo): se apunta en errores.log y se avisa, en vez
         de perderse en una consola que el .exe no tiene."""
-        path = _log("".join(traceback.format_exception(kind, value, tb)))
+        path = _log("".join(traceback.format_exception(kind, value, tb)), tb)
         messagebox.showerror("Algo falló", f"{value or kind.__name__}\n\nEl detalle queda en:\n{path}")
 
     def close(self):
@@ -2806,6 +2931,8 @@ class App:
         self.save_settings()
         if self.done:
             self.stop_work()
+        if self.standby and self.standby[0].is_alive():
+            self.standby[0].terminate()
         self.thumb_job += 1  # cancela las miniaturas pendientes
         if self.pdf_doc:
             self.pdf_doc.close()
@@ -2815,6 +2942,9 @@ class App:
         Path(self.preview_path).unlink(missing_ok=True)
         self.lock_book(None)
         self.root.on_close, self.closed = None, True
+        freezes = getattr(_log_start, "freezes", None)
+        LOG.info("Se cierra la ventana · memoria máx. %s MB · %s congelaciones (la peor, %.1f s)",
+                 registro.peak_memory_mb(), freezes.count if freezes else 0, freezes.worst if freezes else 0)
         self.root.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # libera la ventana y sus diálogos
         self.root.close()
         return True
@@ -2911,12 +3041,26 @@ class App:
                                                                      Qt.TransformationMode.SmoothTransformation))
         self.epub_caption.setText("EPUB · portada")
 
+    def spell_candidates(self):
+        """Las palabras del libro que revisa la ortografía del editor. Una vez por libro: sacarlas en cada apertura
+        del editor tardaba 0,16 s (Strange Grief 1, 8033 palabras). Se rehacen si cambia el texto o el diccionario
+        propio."""
+        blocks = [b for b in self.book.blocks if b.kind in ("p", "heading")]
+        key = (id(self.book), len(blocks), sum(len(b.html) for b in blocks), tuple(sorted(self.words)))
+        if getattr(self, "spell_memo", (None,))[0] != key:
+            skip = convert.spell_skip(self.words)
+            text = " ".join(convert._plain(b) for b in blocks)
+            self.spell_memo = (key, {w for w in convert.spell_words(text) if convert.spell_candidate(w, skip)})
+        return self.spell_memo[1]
+
     def toc_page(self):
-        """Página del índice impreso del PDF (desde 0), entre las primeras; None si no lo tiene."""
-        for n in range(min(30, self.pdf_doc.page_count if self.pdf_doc else 0)):
-            if any(line.strip().lower() in TOC_TITLES for line in self.pdf_doc[n].get_text().splitlines()):
-                return n
-        return None
+        """Página del índice impreso del PDF (desde 0), entre las primeras; None si no lo tiene. Una vez por
+        documento: cada cambio de «Contenido» la buscaba de nuevo y, en un EPUB, contar sus páginas lo compone entero
+        (registro.log: la ventana congelada 2,3 s al abrir un EPUB japonés)."""
+        doc = self.pdf_doc
+        if getattr(self, "toc_memo", (None,))[0] is not doc:
+            self.toc_memo = (doc, _toc_page(doc))
+        return self.toc_memo[1]
 
     def contents_row(self):
         """La fila «Contenido» como va: «Índice» si el EPUB la lleva, «Quitar» si no; con la página del índice
@@ -3133,22 +3277,31 @@ class App:
         start, end = self.section_of(selected[0])
         blocks, firsts, k = self.book.blocks, [], start
 
-        def on_page(j, text, alone):
+        def where(j, text, alone, at):
+            """(posición, avance) del bloque j en la página, detrás de at: un párrafo repetido («Ｒｅ：ゼロ…１» en
+            奥付) no se toma por el de antes. Sin letras (un separador), corto («Sí.») o una ilustración sola: con lo
+            de antes, sin avanzar. None si no está."""
             if blocks[j].kind == "image":
-                return alone
+                return (at, 0) if alone else None
             probe = _match_key(convert._plain(blocks[j]))[:16]
-            return len(probe) < 6 or probe in text  # sin letras (un separador) o corto («Sí.»): con lo de antes
+            if len(probe) < 6:
+                return at, 0
+            spot = text.find(probe, at)
+            return (spot, 1) if spot >= 0 else None
         for n in doc[2]:
             page = doc[1].load_page(n)
             text = _match_key(page.get_text())
             alone = not text and bool(page.get_image_info())  # una ilustración, sola en su página
-            first = None
+            first, at = None, 0
             while k < end:
-                if not on_page(k, text, alone):  # uno que no se encuentra (quitado, renombrado): los de detrás
+                spot = where(k, text, alone, at)
+                if spot is None:  # uno que no se encuentra (quitado, renombrado): los de detrás
                     k = next((j for j in range(k + 1, min(k + 9, end)) if (blocks[j].kind == "image" or len(
-                        _match_key(convert._plain(blocks[j]))) >= 6) and on_page(j, text, alone)), k)
-                    if not on_page(k, text, alone):
+                        _match_key(convert._plain(blocks[j]))) >= 6) and where(j, text, alone, at)), k)
+                    spot = where(k, text, alone, at)
+                    if spot is None:
                         break
+                at = spot[0] + spot[1]
                 first = k if first is None else first
                 k += 1
                 if alone and blocks[k - 1].kind == "image":  # una ilustración por página
@@ -3171,11 +3324,24 @@ class App:
         blocks = self.book.blocks
         if self.book.origin and self.pdf_doc:  # un EPUB: el bloque solo sabe la primera página de su archivo
             text = _match_key(self.pdf_doc[page].get_text())
+            # Solo los del archivo de esa página (su page es la primera del archivo): una frase del capítulo 1 que
+            # también está en el prólogo dejaba la fila en el capítulo y el EPUB en su final
+            here = max((b.page - 1 for b in blocks if b.page - 1 <= page), default=-1)
             # el que empieza más arriba; uno corto («Sí.») está en cualquier página: no cuenta
             hits = [(text.find(probe), k) for k in range(start, end) if blocks[k].kind != "image"
-                    and len(probe := _match_key(convert._plain(blocks[k]))[:16]) >= 8 and probe in text]
+                    and blocks[k].page - 1 == here
+                    and len(probe := _match_key(_source_plain(blocks[k]))[:16]) >= 8 and probe in text]
             if hits:
-                return min(hits)[1]
+                k = min(hits)[1]
+                # Un párrafo repetido en el archivo («Ｒｅ：ゼロ…１» al principio y al final de 奥付): el de su orden,
+                # contando las veces que ya salió en las páginas de antes; si no, la 2.ª página volvía a la 1.ª
+                probe = _match_key(_source_plain(blocks[k]))[:16]
+                twins = [j for j in range(start, end) if blocks[j].kind != "image" and blocks[j].page - 1 == here
+                         and _match_key(_source_plain(blocks[j]))[:16] == probe]
+                if len(twins) > 1:
+                    seen = sum(_match_key(self.pdf_doc[n].get_text()).count(probe) for n in range(here, page))
+                    k = twins[min(seen, len(twins) - 1)]
+                return k
             if not text:  # una ilustración
                 found = next((k for k in range(start, end) if blocks[k].kind == "image"
                               and self.original_page(k) == page), None)
@@ -3190,14 +3356,15 @@ class App:
         return None
 
     def reading_rows(self):
-        """Filas que se leen una tras otra con ◀ ▶: sin separadores ni los subtítulos de dentro de un capítulo (ya
-        se leen con él), salvo el elegido."""
-        selected, items, inside = self.tree.selection(), [], False
+        """Filas que se leen una tras otra con ◀ ▶: sin separadores ni lo de dentro de un capítulo (subtítulos e
+        ilustraciones: ya se leen con él, y salían dos veces), salvo el elegido."""
+        selected, items, until = self.tree.selection(), [], -1
         for i in self.tree.get_children():
-            chapter = self.is_title(i) and self.tree.set(i, "inc") == ON
-            inside = inside or chapter
-            if not self.is_break(i) and (chapter or not inside or not self.is_title(i) or i in selected):
-                items.append(i)
+            if self.is_break(i) or (int(i) < until and i not in selected):
+                continue
+            items.append(i)
+            if self.is_title(i) and self.tree.set(i, "inc") == ON:
+                until = self.section_of(i)[1]
         return items
 
     def follow_original(self):
@@ -3273,8 +3440,11 @@ class App:
         if self.text_editor:  # con el editor abierto, la tira espera: dibujar páginas trababa cada tecla
             qtk.after(1000, self.add_thumbs, job, start, titles, images)
             return
-        end = min(start + THUMBS_PER_TICK, self.pdf_doc.page_count)
+        end, until = min(start + THUMBS_PER_TICK, self.pdf_doc.page_count), time.perf_counter() + THUMBS_TICK_S
         for n in range(start, end):
+            if n > start and time.perf_counter() > until:  # el resto, en la tanda siguiente
+                end = n
+                break
             page = self.pdf_doc[n]
             zoom = THUMB_HEIGHT / page.rect.height
             image = qtk.qimage(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)))
@@ -3460,6 +3630,7 @@ class App:
             return
         self.close_tools(BLOCK_TOOLS + BOOK_TOOLS)  # sin cerrar, cambiarían el libro nuevo con datos del anterior
         path = str(Path(path).resolve())
+        LOG.info("Abrir %s (%s KB)", path, Path(path).stat().st_size // 1024)
         self.settings["folder"] = str(Path(path).parent)
         self.settings["recent"] = [path] + [p for p in self.settings.get("recent", []) if p != path][:RECENT - 1]
         self.fill_recent()
@@ -3482,10 +3653,14 @@ class App:
         self.stack.setCurrentIndex(1)
         self.run(_analyze, (path,), lambda result: self.show_book(*result), report=True)
 
-    def show_book(self, book, twins=None, report=None, memos=None):
-        """Pone en la ventana un libro analizado. twins, report y memos: sus ilustraciones repetidas, su informe
-        de calidad y lo que el informe recuerda de cada párrafo, si ya se calcularon en el proceso de trabajo."""
+    def show_book(self, book, twins=None, report=None, memos=None, shown=None):
+        """Pone en la ventana un libro analizado. twins, report, memos y shown: sus ilustraciones repetidas, su
+        informe de calidad, lo que el informe recuerda de cada párrafo y, para abrir el PDF (_analyze), la página de
+        su índice impreso y los JPEG 2000 que arreglar, si ya se calcularon en el proceso de trabajo."""
         self.book = book
+        LOG.info("Libro: «%s» · %d bloques · %d títulos · %d ilustraciones · %s", book.title, len(book.blocks),
+                 len(book.candidates), sum(b.kind == "image" for b in book.blocks),
+                 "EPUB de entrada" if book.origin else "PDF")
         # El análisis tal cual, para restaurar versiones sin volver a analizar: las ediciones hacen listas nuevas
         self.pristine = (list(book.blocks), list(book.candidates), book.cover)
         # Son del libro: llegan con la revisión (el glosario, también heredado de otro tomo)
@@ -3498,7 +3673,10 @@ class App:
             convert.seed_report_memos(memos)
         if self.pdf_doc:
             self.pdf_doc.close()
-        self.pdf_doc = convert.open_pdf(self.pdf)  # vista previa, miniaturas y panel del editor
+        # vista previa, miniaturas y panel del editor
+        self.pdf_doc = convert.open_pdf(self.pdf, shown["jpx"] if shown else None)
+        if shown:
+            self.toc_memo = (self.pdf_doc, shown["toc"])
         self.stack.setCurrentIndex(1)
         self.update_chrome()
         self.save_thumb()
@@ -3630,7 +3808,7 @@ class App:
             elif block.kind == "image":
                 double = " doble" if str(i) in self.wide else ""
                 mark, title = (IMG if block.keep else DROPPED), f"Ilustración{double} · página {block.page}"
-            elif block.kind == "break":  # separador de escena del texto: su símbolo, para encontrarlo
+            elif block.kind == "break" and not convert.is_rule(block):  # separador de escena: su símbolo
                 symbol = convert._plain(block).strip() or ("Adorno" if block.image else "Separador")
                 mark, title = SEP, f"{symbol} · página {block.page}"
             else:
@@ -4024,7 +4202,8 @@ class App:
 
     def option_choices(self):
         """Valores de las listas de «Opciones»."""
-        return {"profile": list(PROFILES), "lang": LANGUAGES, "pdf_size": list(convert.PDF_SIZES),
+        return {"editor_undo": list(UNDO_SCOPES), "editor_side": list(EDITOR_SIDES),
+                "profile": list(PROFILES), "lang": LANGUAGES, "pdf_size": list(convert.PDF_SIZES),
                 "theme": theme.CHOICES, "device": list(DEVICES), "note_style": list(convert.NOTE_STYLES),
                 "heading_font": convert.HEADING_FONT_CHOICES + [HEADING_OWN], "box_style": list(convert.BOX_STYLES)}
 
@@ -4038,12 +4217,14 @@ class App:
         """Lo de «La aplicación» en Opciones, copiado: se edita sin tocar nada hasta Aceptar."""
         return {"theme": self.theme_var.get(), "device": self.settings.get("device", self.device_var.get()),
                 "dark": self.settings.get("dark") is True, "echoes": self.echoes_var.get(), "watch": self.watch,
-                "translate": copy.deepcopy(self.settings.get("translate") or {})}
+                "translate": copy.deepcopy(self.settings.get("translate") or {}),
+                **{key: self.settings.get(key, value) for key, value in EDITOR_DEFAULTS.items()}}
 
     def accept_options(self, defaults, values):
         """Aceptar en Opciones: «Libros nuevos» y la aplicación a ajustes.json, el libro a su revisión."""
         self.settings["defaults"] = dict(defaults)
         self.settings.update(device=values["device"], dark=values["dark"], echoes=values["echoes"])
+        self.settings.update({key: values[key] for key in EDITOR_DEFAULTS})  # el editor abierto los lee al usarlos
         translation = self.settings.setdefault("translate", {})
         translation.clear()  # el mismo dict: Traducir, si está abierto, lo tiene y ve lo nuevo
         translation.update(values["translate"])
@@ -4109,7 +4290,9 @@ class App:
 
     def new_book_options(self):
         """Opciones con las que abre un libro sin revisión ni serie: «Libros nuevos» sobre los valores de fábrica."""
-        return {**self.factory, **self.settings.get("defaults", {})}
+        options = {**self.factory, **self.settings.get("defaults", {})}
+        options["separator"] = convert.separator_choice(options.get("separator", ""))  # «Original del PDF» de antes
+        return options
 
     def save_settings(self):
         self.settings["theme"] = self.theme_var.get()
@@ -5612,6 +5795,14 @@ class App:
         messagebox.showinfo("Instalar", "Instalado. Ya puedes abrirlo desde el menú Inicio o con clic derecho en "
                                         "un PDF → «Convertir a EPUB».")
 
+    def open_log(self):
+        """Abre registro.log (lo que hizo cada parte de la app) con el editor de texto de Windows."""
+        log = registro.path(SETTINGS.parent)
+        if not log.is_file():
+            messagebox.showinfo("Registro", f"Aún no hay nada apuntado en:\n{log}")
+            return
+        os.startfile(log)
+
     def uninstall(self):
         exe, link = _install_paths()
         if not messagebox.askyesno("Desinstalar", f"Se quitarán el acceso directo, «Convertir a EPUB» del menú de "
@@ -5712,6 +5903,7 @@ class App:
                      replacements=self.replacements, rows=self.rows(), problems=self.last_problems, words=self.words,
                      glossary=self.glossary, tr_glossary=self.tr_glossary, ignored=self.ignored, comments=self.comments,
                      alts=self.alts, tr_notes=self.tr_notes, editor_at=self.editor_at, work=self.work,
+                     editor_history=self.editor_history,
                      faithful=bool(getattr(self.book, "origin", "")))  # revisión del EPUB leído por su HTML
         return state
 
@@ -5740,6 +5932,7 @@ class App:
                     pass  # valor mal escrito a mano en el .json
         if self.style_var.get() not in convert.STYLES and self.style_var.get() != convert.ORIGINAL:  # .json a mano
             self.style_var.set("Clásico")
+        self.separator_var.set(convert.separator_choice(self.separator_var.get()))  # «Original del PDF» de antes
         if not _font_file(self.font_file_var.get()):  # ruta de red o que no es una fuente: ni se mira
             self.font_file_var.set("")
         font, path = self.font_var.get(), Path(self.font_file_var.get())
@@ -5794,6 +5987,8 @@ class App:
         self.alts = {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}
         self.comments = [c for c in state.get("comments", []) if isinstance(c, dict)  # el .json se edita a mano
                          and isinstance(c.get("note"), str) and isinstance(c.get("text"), str)]
+        history = state.get("editor_history")
+        self.editor_history = dict(history) if isinstance(history, dict) else {}  # history_older valida cada una
         at = state.get("editor_at")
         self.editor_at = at if isinstance(at, int) and not isinstance(at, bool) else None
         work = state.get("work") if isinstance(state.get("work"), dict) else {}
@@ -7427,6 +7622,53 @@ WEB_TAB = 2  # «Hoja web» en el panel derecho del editor, tras «Original» y 
 
 
 HISTORY_STEPS = 20  # aceptados que el deshacer del editor recuerda por capítulo
+# shortcut: se guardan los últimos 400 aceptados del libro; si alguien necesita más, por capítulo
+HISTORY_KEPT = 400
+
+
+def _history_lines(text):
+    return [line.strip() for line in text.split("\n\n") if line.strip()]
+
+
+def _history_key(text):
+    """Clave del texto de un capítulo en editor_history: sin el número de sus marcas («[Separador 7]»), que cambia
+    al añadir o quitar párrafos en otro capítulo, y corta, para guardarla en la revisión."""
+    plain = "\n\n".join(convert.TOKEN.sub(r"[\1]", line) for line in _history_lines(text))
+    return hashlib.sha1(plain.encode("utf-8")).hexdigest()[:20]
+
+
+def _history_delta(after, before):
+    """before escrito frente a after: [i, j] es after[i:j] tal cual y un texto es una línea suya. Así la revisión
+    guarda solo lo cambiado, y lo igual toma las marcas de ahora."""
+    a, b = _history_lines(after), _history_lines(before)
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        out += [[i1, i2]] if op == "equal" else b[j1:j2]
+    return out
+
+
+def _history_apply(delta, text):
+    lines = _history_lines(text)
+    return "\n\n".join(x for part in delta for x in (lines[part[0]:part[1]] if isinstance(part, list) else [part]))
+
+
+def history_older(history, text, which=0):
+    """El texto de antes de aceptar (which=0) o el del principio (1) del capítulo que ahora es text; None si no hay."""
+    entry = history.get(_history_key(text))
+    try:
+        return _history_apply(entry[which], text) if entry else None
+    except (TypeError, IndexError):  # revisión editada a mano
+        return None
+
+
+def history_add(history, before, after):
+    """Aceptado en el editor: el capítulo pasó de before a after."""
+    first = history_older(history, before, 1) or before
+    key = _history_key(after)
+    history.pop(key, None)  # al final: es lo más nuevo
+    history[key] = [_history_delta(after, before), _history_delta(after, first)]
+    for old in list(history)[:-HISTORY_KEPT]:
+        del history[old]
 
 
 class TextEditor:
@@ -7438,7 +7680,11 @@ class TextEditor:
 
     def __init__(self, app, item, start, end):
         self.app, self.item = app, item
+        LOG.info("Editor: abre la fila %s (bloques %s-%s)", item, start, end)
         self.win = win = Dialog(app.root)
+        # Word se abre a pantalla completa. Al crearla: cambiarlo con las vistas de Chromium ya puestas rehacía la
+        # ventana de Windows entera (0,19 s de los ~1,5 que tardaba en abrirse)
+        win.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         # Esc y la X de la ventana preguntan antes de descartar cambios; leyendo en voz alta, Esc solo calla la voz
         # En modo concentración, Esc vuelve a la vista normal antes que nada
@@ -7455,6 +7701,7 @@ class TextEditor:
         stamp = (os.path.getmtime(origin), os.path.getsize(origin)) if origin and os.path.exists(origin) else None
         editor.use_css(faithful.book_style(origin, stamp) if stamp else None)
         self.sheet = sheet = editor.Sheet()
+        sheet.route_undo = True  # Ctrl+Z y Ctrl+Y por do(): con «Todo el libro», también lo de otros capítulos
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
         sheet.mark_current = True
         # Una ilustración pegada desde otro capítulo llega con su imagen (Sheet.adopt)
@@ -7658,7 +7905,7 @@ class TextEditor:
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.text_zoom = QSlider(Qt.Orientation.Horizontal)
         self.text_zoom.setRange(50, 200)
-        self.text_zoom.setValue(100)
+        self.text_zoom.setValue(self.option("editor_zoom"))
         self.text_zoom.setFixedWidth(140)
         self.text_zoom_label = _label("100 %", "muted")
         # Del ancho de «200 %»: al pasar de 100 % a 90 % la barra cambiaba de ancho y los botones se movían
@@ -7683,12 +7930,23 @@ class TextEditor:
         self.drawn = None  # source_key() del dibujo actual del panel
         self.page_cache, self.file_starts = {}, None  # source_page: página de cada bloque de un EPUB
         self.pending, self.closed = {}, False  # trabajo diferido: nombre -> temporizador
-        self.set_text_zoom(100)
+        self.set_text_zoom(self.text_zoom.value())
+        # «Todo el libro» (Opciones → Editor): [(inicio, fin)] del capítulo de cada paso de deshacer y de rehacer, en
+        # orden; cada capítulo sigue con su deshacer de Qt (book_step)
+        self.book_undo, self.book_redo = [], []
+        if self.option("editor_changes"):
+            self.show_changes_action.setChecked(True)
         self.open_section(start, end, int(item))
         self.recover_draft()
-        self.offer_resume()
-        # La pestaña «Hoja web» se recuerda; se escribe en la hoja hasta que se pulsa en la web
-        if self.web is not None and app.settings.get("editor_web", False):
+        if self.option("editor_resume"):
+            self.offer_resume()
+        # Pestaña del panel: la elegida en Opciones o la última usada (la hoja web se recuerda); se escribe en la hoja
+        # hasta que se pulsa en la web
+        side = self.option("editor_side")
+        if side == "EPUB" and self.side_web is not None:
+            self.side_tabs.setCurrentIndex(1)
+        elif self.web is not None and (side == "Hoja web" or side == EDITOR_SIDES[0]
+                                       and app.settings.get("editor_web", False)):
             self.side_tabs.setCurrentIndex(WEB_TAB)
         if self.web is not None:
             QApplication.instance().focusChanged.connect(self.on_focus)
@@ -7708,8 +7966,10 @@ class TextEditor:
                                             and self.sheet.textCursor().position() != self.reading.position()
                                             and self.stop_reading())
         sheet.currentCharFormatChanged.connect(lambda _: self.update_tools())
-        sheet.undoAvailable.connect(self.undo_btn.setEnabled)
-        sheet.redoAvailable.connect(self.redo_btn.setEnabled)
+        sheet.undoAvailable.connect(lambda _: self.sync_undo())
+        sheet.redoAvailable.connect(lambda _: self.sync_undo())
+        self.code.undoAvailable.connect(lambda _: self.sync_undo())
+        self.code.redoAvailable.connect(lambda _: self.sync_undo())
         sheet.textChanged.connect(lambda: self.later("extra", 250, self.refresh_marks))
         sheet.textChanged.connect(lambda: self.later("spell", 1000, self.check_new_words))
         # La pestaña EPUB: lo escrito, al momento en su párrafo (patch_epub); rehecha entera, al parar de escribir
@@ -7718,10 +7978,10 @@ class TextEditor:
         sheet.command.connect(self.on_command)
         sheet.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         sheet.customContextMenuRequested.connect(self.context_menu)
-        self.spell = _start_spell_process() if app.spanish() else None  # el diccionario es de español
+        # el diccionario es de español; en Opciones → Editor se puede no subrayar
+        self.spell = _start_spell_process() if app.spanish() and self.option("editor_spell") else None
         if self.spell:  # todo el libro de una vez; luego, lo que se escriba
-            blocks = [b for b in app.book.blocks if b.kind in ("p", "heading")]
-            self.send_words(" ".join(convert._plain(b) for b in blocks))
+            self.send_words(words=app.spell_candidates())
             qtk.after(300, self.poll_spelling)
         editor.watch(self.scroll.viewport(), self.on_panel_event)
         editor.watch(win, lambda event: event.type() == QEvent.Type.Resize and self.later("ribbon", 60, self.fit_ribbon)
@@ -7729,10 +7989,12 @@ class TextEditor:
         win.finished.connect(lambda _: self.on_destroy())
         app.text_editor = self
         win.setModal(True)  # con la lista activa se podía abrir otro PDF u otro editor y aceptar sobre otros bloques
-        win.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint)  # Word se abre a pantalla completa
         self.fit_ribbon()  # antes de mostrarla: con la cinta ancha, maximizada quedaba más ancha que la pantalla
+        # Maximizada al crearla, Windows la dejaba del tamaño de su contenido: se maximiza ya mostrada, y hasta
+        # entonces ocupa la pantalla (a su tamaño se veía una ventana pequeña un instante, como si se abriera otra).
+        # Transparente no: Chromium no volvía a dibujarla
+        win.setGeometry(win.screen().availableGeometry())
         win.show()
-        # Maximizada al crearla, Windows la dejaba del tamaño de su contenido: se maximiza ya mostrada
         qtk.after(0, self.maximize)
         self.update_tools()
         self.draw_source()
@@ -7841,6 +8103,7 @@ class TextEditor:
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             box.addWidget(label)
             row.addLayout(box)
+            return label
 
         sheet = self.sheet
         bold_font, italic_font = QFont("Segoe UI", 11, QFont.Weight.Bold), QFont("Segoe UI", 11)
@@ -7854,7 +8117,7 @@ class TextEditor:
         self.redo_btn = tool("Rehacer", "Rehacer (Ctrl+Y)", lambda: self.do("redo"), glyph="redo")
         self.undo_btn.setEnabled(False)
         self.redo_btn.setEnabled(False)
-        group("Deshacer", [self.undo_btn], [self.redo_btn])
+        self.undo_group = group("Deshacer", [self.undo_btn], [self.redo_btn])
         self.bold_btn = tool("N", "Negrita (Ctrl+N)", lambda: self.do("toggle_bold"), True, bold_font)
         self.italic_btn = tool("K", "Cursiva (Ctrl+K)", lambda: self.do("toggle_italic"), True, italic_font)
         self.case_btn = tool("Aa Mayúsculas", "Mayúsculas y minúsculas (Mayús+F3)", lambda: self.do("change_case"), short="Aa",
@@ -8093,6 +8356,8 @@ class TextEditor:
             return
         screen = self.win.screen().availableGeometry().width()
         room = min(self.win.width(), screen) if self.win.isVisible() else screen  # se abre maximizado
+        if getattr(self, "fitted", None) == room:  # al maximizarla ya mostrada, el mismo ancho: medir no cambia nada
+            return
         column = self.win.layout()
         # Al medir un nivel ancho, Qt agrandaba la ventana a su mínimo y luego no la estrechaba: sin restricción
         column.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
@@ -8109,6 +8374,7 @@ class TextEditor:
                 # la cinta oculta no está dentro de ribbon_bar: se mide aparte
                 if max(self.ribbon_bar.sizeHint().width(), self.ribbon_pages.sizeHint().width() + 20) <= room:
                     break
+            self.fitted = room
         finally:
             column.setSizeConstraint(QLayout.SizeConstraint.SetDefaultConstraint)
 
@@ -8271,7 +8537,8 @@ class TextEditor:
 
     def on_command(self, name):
         """Atajos de la hoja que abren una barra: Ctrl+Alt+K enlace, Ctrl+F buscar, Ctrl+H reemplazar."""
-        actions = {"link": self.show_link_bar, "reviewed": self.toggle_reviewed, "next_change": self.next_change,
+        actions = {"undo": lambda: self.do("undo"), "redo": lambda: self.do("redo"),
+                   "link": self.show_link_bar, "reviewed": self.toggle_reviewed, "next_change": self.next_change,
                    "next_issue": self.next_issue, "nav": self.toggle_nav, "focus": self.toggle_focus,
                    # Ctrl+Mayús+F12 con un hueco a la vista: guarda pantalla, memoria y maquetación para hallar la causa
                    "diagnose": lambda: messagebox.showinfo("Diagnóstico de la hoja", "Guardado en:\n" + str(
@@ -8369,8 +8636,7 @@ class TextEditor:
     def code_originals(self):
         """Línea de código de antes de cada línea de la vista «Código HTML» (None: párrafo nuevo), en su orden."""
         out = []
-        for block in self.blocks():
-            lines = [line for line in editor.block_lines(block) if line.strip()]
+        for block, lines in zip(self.blocks(), self.sheet.all_lines()):
             original = editor.original_of(block)
             if editor.original_group(block)[1]:  # partido con Intro: el código lo compara con el primero (code_group)
                 original = None
@@ -9049,9 +9315,9 @@ class TextEditor:
             if start < 0 or (page is None and not history):
                 continue
             loaded = [line for _, line in (page["lines"] if page else self.section_lines(start, end)[0])]
-            now = [line for line in editor.dump(page["doc"]).split("\n\n") if line.strip()] if page else loaded
+            now = [line for line in self.sheet.dumped(page["doc"]).split("\n\n") if line.strip()] if page else loaded
             here = "\n\n".join(loaded)
-            old = [line for line in history.get(here, (here, here))[1].split("\n\n") if line.strip()]
+            old = [line for line in (history_older(history, here, 1) or here).split("\n\n") if line.strip()]
             diffs = []
             for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, now, autojunk=False).get_opcodes():
                 if op == "replace" and i2 - i1 == j2 - j1:  # párrafos seguidos cambiados: uno a uno
@@ -9228,10 +9494,12 @@ class TextEditor:
         self.sheet.ensureCursorVisible()
 
     # Ortografía en vivo
-    def send_words(self, text):
-        """Manda al proceso de ortografía las palabras de text que aún no revisó."""
-        skip = convert.spell_skip(self.app.words)
-        new = {w for w in convert.spell_words(text) if convert.spell_candidate(w, skip)} - self.checked
+    def send_words(self, text="", words=None):
+        """Manda al proceso de ortografía las palabras de text (o words, ya elegidas) que aún no revisó."""
+        if words is None:
+            skip = convert.spell_skip(self.app.words)
+            words = {w for w in convert.spell_words(text) if convert.spell_candidate(w, skip)}
+        new = words - self.checked
         if new and self.spell:
             self.checked |= new
             try:
@@ -9491,6 +9759,10 @@ class TextEditor:
     def do(self, name, *args):
         """Una acción de la cinta en la hoja a la vista: la de Qt o la web (WEB_ACTIONS); lo que la web aún no hace
         se dice en la barra de abajo."""
+        if self.code.isVisible() and name in ("undo", "redo") and not self.web_on:  # el deshacer del código
+            return getattr(self.code, name)()
+        if name in ("undo", "redo") and not self.web_on and self.book_wide():
+            return self.book_step(name == "redo")
         if not self.web_on:
             return getattr(self.sheet, name)(*args)
         call = self.web.call
@@ -9523,7 +9795,9 @@ class TextEditor:
         pasó por on_sheet, o lo escrito antes de cambiar de capítulo) se deshace allí."""
         def done(ok):
             doc = self.sheet.document()
-            if not ok and (doc.isRedoAvailable() if redo else doc.isUndoAvailable()):
+            if not ok and self.book_wide():  # lo de otro capítulo: se pasa a él y se sigue en la hoja
+                self.flush_web(lambda: (self.web_done(), self.book_step(redo)))
+            elif not ok and (doc.isRedoAvailable() if redo else doc.isUndoAvailable()):
                 self.on_sheet(self.sheet.redo if redo else self.sheet.undo)
         self.web.call("undo", redo, done=done)
 
@@ -9700,7 +9974,7 @@ class TextEditor:
         self.web_state = json.loads(st) if st else {}
         self.web_dirty = bool(self.web_state.get("dirty"))
         self.update_tools()
-        self.undo_btn.setEnabled(bool(self.web_state.get("canUndo")) or self.sheet.document().isUndoAvailable())
+        self.sync_undo()  # también Rehacer: antes solo Deshacer seguía a la web
         if self.web_state.get("wants") in ("undo", "redo"):  # Ctrl+Z o Ctrl+Y sin nada que hacer en Chromium
             self.web_undo(self.web_state["wants"] == "redo")
         if isinstance(self.reading, int) and self.web_state.get("i", -1) != self.reading:
@@ -9971,7 +10245,8 @@ class TextEditor:
         (un deshacer). Una línea que no se entiende o deja una etiqueta sin cerrar se avisa y no se sale."""
         if not self.code.isVisible():
             line = self.web_index(self.sheet.textCursor().block())
-            self.code.setPlainText(editor.to_code(editor.dump(self.sheet.document())))
+            # all_lines: las líneas de cada párrafo ya calculadas (dump las volvía a sacar todas)
+            self.code.setPlainText(editor.to_code("\n\n".join(x for lines in self.sheet.all_lines() for x in lines)))
             self.code_text = self.code.toPlainText()
             if not self.code.classes:  # para el autocompletado de class="…"
                 self.code.classes = self.book_classes()
@@ -9985,9 +10260,7 @@ class TextEditor:
                 self.code.setTextCursor(QTextCursor(block))
                 self.code.centerCursor()
             self.code.setFocus()
-            for n in range(self.ribbon_pages.count() - 1):  # lo de la hoja no vale aquí; Vista sí
-                self.ribbon_pages.widget(n).setEnabled(False)
-            self.sync_view()
+            self.sync_view()  # la cinta, solo Vista y Deshacer (fit_ribbon_to_view)
             return
         if self.code.toPlainText() != self.code_text:
             try:
@@ -10004,8 +10277,6 @@ class TextEditor:
         self.sheet.show()
         self.sheet.ensureCursorVisible()
         self.sheet.setFocus()
-        for n in range(self.ribbon_pages.count()):
-            self.ribbon_pages.widget(n).setEnabled(True)
         self.sync_view()
         self.update_tools()
 
@@ -10075,10 +10346,70 @@ class TextEditor:
         self.fit_ribbon_to_view()
 
     def fit_ribbon_to_view(self):
-        """La cinta, solo con lo que vale: con el código a la vista, Vista; si se escribe en la hoja web, toda."""
+        """La cinta, solo con lo que vale: con el código a la vista, Vista y Deshacer (el deshacer del código: con la
+        pestaña entera apagada se quedaba gris aunque hubiera qué deshacer); si se escribe en la hoja web, toda."""
         on = not self.code.isVisible() or self.web_on
+        keep = (self.undo_btn, self.redo_btn, self.undo_group)
         for n in range(self.ribbon_pages.count() - 1):
-            self.ribbon_pages.widget(n).setEnabled(on)
+            page = self.ribbon_pages.widget(n)
+            page.setEnabled(True)
+            for child in page.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+                if child not in keep:
+                    child.setEnabled(on)
+        self.sync_undo()
+
+    def sync_undo(self):
+        """Deshacer y Rehacer, según lo que se edita: el código, la hoja web (lo suyo o, sin nada, lo de la hoja de Qt,
+        como web_undo) o la hoja."""
+        if not hasattr(self, "undo_btn") or not shiboken6.isValid(self.undo_btn):  # aún sin cinta, o ya cerrado
+            return
+        doc = (self.code if self.code.isVisible() else self.sheet).document()
+        web = getattr(self, "web_state", {}) if getattr(self, "web_on", False) else {}
+        book = self.book_wide() and not self.code.isVisible() and hasattr(self, "book_undo")
+        self.undo_btn.setEnabled(bool(web.get("canUndo")) or doc.isUndoAvailable()
+                                 or book and self.book_pending(self.book_undo, False) is not None)
+        self.redo_btn.setEnabled(bool(web.get("canRedo")) or doc.isRedoAvailable()
+                                 or book and self.book_pending(self.book_redo, True) is not None)
+
+    def option(self, key):
+        """Opciones → Editor: lo elegido, o lo de siempre."""
+        return self.app.settings.get(key, EDITOR_DEFAULTS[key])
+
+    def book_wide(self):
+        """¿Deshacer y rehacer de todo el libro (Opciones → Editor), y no de cada capítulo?"""
+        return self.option("editor_undo") == UNDO_SCOPES[1]
+
+    def note_step(self, key):
+        """Un paso nuevo en el deshacer del capítulo key: el último del libro. Lo rehecho de antes ya no se rehace,
+        como en Word (Qt ya lo quitó de ese capítulo)."""
+        self.book_undo.append(key)
+        self.book_redo.clear()
+        self.sync_undo()
+
+    def book_pending(self, steps, redo):
+        """Posición en steps del último paso que aún se puede deshacer (o rehacer); None si no queda ninguno. Los
+        que ya no están en su capítulo (deshechos con su propia orden) se saltan."""
+        for n in range(len(steps) - 1, -1, -1):
+            page = self.pages.get(steps[n])
+            if page and (page["doc"].isRedoAvailable() if redo else page["doc"].isUndoAvailable()):
+                return n
+        return None
+
+    def book_step(self, redo):
+        """Deshacer (o rehacer) de todo el libro: el último cambio, en el capítulo que sea; si es otro, se abre. Sin
+        nada apuntado, lo de este capítulo."""
+        source, target = (self.book_redo, self.book_undo) if redo else (self.book_undo, self.book_redo)
+        n = self.book_pending(source, redo)
+        if n is None:
+            (self.sheet.redo if redo else self.sheet.undo)()
+            return
+        key = source[n]
+        del source[n:]  # los de detrás ya no se podían deshacer
+        if key != self.current:
+            self.open_section(*key)
+        (self.sheet.redo if redo else self.sheet.undo)()
+        target.append(key)
+        self.sync_undo()
 
     def book_openings(self):
         """[(clase, etiqueta)] de los párrafos <p class="…"> del EPUB de entrada, de más a menos usadas (15 como mucho)."""
@@ -10214,6 +10545,8 @@ class TextEditor:
             page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
             if start >= 0:
                 self.replay_history(doc, lines)
+            # Tras el historial de otras veces: ese queda en su capítulo, por detrás de lo de hoy en los demás
+            doc.undoCommandAdded.connect(lambda key=(start, end): self.note_step(key))
             if self.show_changes_action.isChecked():
                 look.show_changes(*self.change_colors(), self.changes_in_view())
         else:
@@ -10228,8 +10561,7 @@ class TextEditor:
         title = self.sections[row][0] if row is not None else self.app.tree.set(self.item, "title")
         self.win.setWindowTitle(f"Texto · {title}")
         self.show_chapter(row)
-        self.undo_btn.setEnabled(page["doc"].isUndoAvailable())
-        self.redo_btn.setEnabled(page["doc"].isRedoAvailable())
+        self.sync_undo()
         self.drawn = None
         self.update_tools()
         self.draw_source()
@@ -10247,7 +10579,7 @@ class TextEditor:
         text = "\n\n".join(line for _, line in lines)
         versions, seen = [], {text}
         while len(versions) < HISTORY_STEPS:
-            older = self.app.editor_history.get(versions[0] if versions else text, (None,))[0]
+            older = history_older(self.app.editor_history, versions[0] if versions else text)
             if older is None or older in seen:
                 break
             versions.insert(0, older)
@@ -10292,7 +10624,8 @@ class TextEditor:
             if start < 0:  # «Contenido» no va al borrador: sus cambios son nombres de la lista
                 continue
             # una vez: page_dirty la volcaba otra
-            text = current if current is not None and (start, end) == self.current else editor.dump(page["doc"])
+            here = current is not None and (start, end) == self.current
+            text = current if here else self.sheet.dumped(page["doc"])
             if self.page_dirty(page, text):
                 pages.append({"start": start, "end": end, "lines": [line for _, line in page["lines"]], "text": text})
         try:
@@ -10486,16 +10819,29 @@ class TextEditor:
         # un separador escrito («※ ・ ※») no tiene letras: se cuenta entre los párrafos sin ellas
         text = "" if editor.objects_of(block) else letters(block)
         words = text if len(text) <= 40 else text[len(text) // 4:][:30]  # un trozo del medio
-        nth = sum(1 for b in before if b.text().strip() and not self.drawn_object(b)
+        ghost = self.ghost_title()
+        nth = sum(1 for b in before if b.text().strip() and not self.drawn_object(b) and b != ghost
                   and (words in letters(b) if words else not letters(b)))
         return words, nth
+
+    def ghost_title(self):
+        """Primer párrafo de la hoja si es el título sintético de un EPUB de entrada (el nombre de la sección, que no
+        se escribe): la pestaña EPUB no lo tiene y contarlo llevaba «「ま──」» a la siguiente «ま» del capítulo."""
+        start = self.current[0] if self.current else -1
+        title = self.app.book.blocks[start] if start >= 0 else None
+        if title is None or title.kind != "heading" or not title.src or title.src[1] >= 0:
+            return None
+        first = self.sheet.document().firstBlock()
+        return first if self.epub_letters(first) == "".join(c for c in convert._plain(title).lower() if c.isalpha()) \
+            else None
 
     def tag_epub(self):
         """Tras dibujar la pestaña EPUB: cada párrafo suyo con su n.º en la hoja (webview.TAG_JS), y cómo era cada
         párrafo entonces: lo que se escriba luego va al suyo al momento (patch_epub)."""
         blocks = list(self.blocks())
         # como epub_key, con las letras de cada párrafo una sola vez: párrafo a párrafo tardaba segundos
-        shown = [bool(b.text().strip()) and not self.drawn_object(b) for b in blocks]
+        ghost = self.ghost_title()
+        shown = [bool(b.text().strip()) and not self.drawn_object(b) and b != ghost for b in blocks]
         letters = [self.epub_letters(b) if on else "" for b, on in zip(blocks, shown)]
         items = []
         for n, block in enumerate(blocks):
@@ -10617,9 +10963,17 @@ class TextEditor:
         En la pestaña «EPUB», las páginas del capítulo como saldrá."""
         if self.web_shown() or self.web_tab():  # una pantalla más abajo o más arriba, como la barra
             view = self.side_web if self.web_shown() else self.web
+            # Recién pasado de capítulo, la barra sigue siendo la del anterior (al final) hasta que Chromium carga el
+            # nuevo: con clics rápidos cada uno saltaba otro capítulo. Hasta que llegue (3 s como mucho), se ignoran
+            waiting = getattr(self, "turning", None)
+            if waiting and waiting[0] is view and waiting[1] == view.loads and time.monotonic() - waiting[2] < 3:
+                return
             bar = view.bar
             if bar.value() >= bar.maximum() if delta > 0 else bar.value() <= 0:  # al final: el capítulo de al lado
+                before = self.current
                 self.step_section(delta, at_end=delta < 0)
+                if self.current != before:
+                    self.turning = (view, view.loads, time.monotonic())
             else:
                 view.step(delta)
             return
@@ -10676,15 +11030,28 @@ class TextEditor:
     def pictures(self, start, end):
         """Miniaturas de las ilustraciones y adornos de la sección, y el texto de los separadores escritos."""
         found = {}
+        # Ya leídas y reducidas, de una vez a otra del editor (registro.log: abrir un capítulo con láminas a color
+        # congelaba la ventana 1,6 s leyéndolas enteras cada vez, para verlas de 160 px de alto)
+        memo = self.app.__dict__.setdefault("picture_memo", {})
         for k in range(start, end):
             block = self.app.book.blocks[k]
             if block.kind in ("image", "break") and block.image:
-                try:
-                    # el adorno transparente, del color del texto: un símbolo más, no una foto con fondo blanco
-                    found[k] = qtk.qimage(pymupdf.Pixmap(block.image),
-                                          self.colors["ink"] if block.kind == "break" else None)
-                except Exception:
-                    pass  # imagen que MuPDF no lee: queda su marca
+                ink = self.colors["ink"] if block.kind == "break" else None
+                key = (hash(block.image), len(block.image), ink)
+                if key not in memo:
+                    image = _scaled_jpeg(block.image, 1260, 3 * editor.THUMB) if ink is None else None
+                    try:
+                        # el adorno transparente, del color del texto: un símbolo más, no una foto con fondo blanco
+                        image = image or qtk.qimage(pymupdf.Pixmap(block.image), ink)
+                    except Exception:
+                        continue  # imagen que MuPDF no lee: queda su marca
+                    if image.height() > 3 * editor.THUMB or image.width() > 1260:  # 3 veces lo que se ve: nítida
+                        image = image.scaled(1260, 3 * editor.THUMB, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation)
+                    if len(memo) > 300:
+                        memo.clear()
+                    memo[key] = image
+                found[k] = memo[key]
             elif block.kind == "break":
                 found[k] = convert._plain(block).strip() or "❖"  # «<b>※ ・ ※</b>» de un EPUB: sin etiquetas
             elif block.kind == "heading" and block.image:  # título dibujado: con el texto de ahora (traducido)
@@ -10736,6 +11103,7 @@ class TextEditor:
         self.pending[name] = qtk.after(ms, lambda: (self.pending.pop(name, None), fn()))
 
     def on_destroy(self):
+        LOG.info("Editor: se cierra")
         if self.app.text_editor is self:
             self.app.text_editor = None
         if shiboken6.isValid(self.sheet):  # al destruirse, la hoja aún avisaría de cambios del cursor
@@ -11155,7 +11523,7 @@ class TextEditor:
     def find_box(page, block):
         """Recuadro del párrafo en su página, de sus 6 primeras palabras a sus 6 últimas. None si el texto no
         aparece tal cual (palabra partida con guion en el PDF, párrafo ya editado)."""
-        text = convert._plain(block)
+        text = _source_plain(block)
         words = (text if page.parent.is_pdf else text.translate(convert.PREVIEW_TABLE)).split()  # EPUB: «・» es «·»
         if convert.CJK.search(text):  # japonés: sin espacios, el párrafo entero era una «palabra» que cruza líneas
             return _cjk_box(page.parent, page.number, "".join(words))
@@ -11196,13 +11564,12 @@ class TextEditor:
         self.status.setText(f"Página {page} {source} · {where} · "
                             f"{words:,} palabra{'' if words == 1 else 's'}".replace(",", "."))
 
-    @staticmethod
-    def page_dirty(page, text=None):
+    def page_dirty(self, page, text=None):
         """¿Cambió algo que edit_section lea en esa sección? Líneas en blanco y espacios sobrantes no cuentan.
         text: su dump, si ya se tiene."""
         def lines(text):
             return [line.strip() for line in text.splitlines() if line.strip()]
-        text = editor.dump(page["doc"]) if text is None else text
+        text = self.sheet.dumped(page["doc"]) if text is None else text
         return lines(text) != lines("\n\n".join(line for _, line in page["lines"]))
 
     def sync_web(self):
@@ -11227,7 +11594,7 @@ class TextEditor:
         for (start, _), page in self.pages.items():
             old = [line for _, line in page["lines"]]
             source = [k for k, _ in page["lines"]]  # bloque de cada línea cargada (en «Contenido», salteados)
-            pairs = editor.dump_levels(page["doc"])  # [(línea, tipo de título o None)]
+            pairs = editor.dump_levels(page["doc"], self.sheet.all_lines(page["doc"]))  # [(línea, tipo o None)]
             new = [line for line, _ in pairs]
             for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
                 k = str(source[i1]) if i1 < len(source) else str(start + i1)
@@ -11255,7 +11622,7 @@ class TextEditor:
         count = 0
         for page in self.pages.values():
             old = [line for _, line in page["lines"]]
-            new = [line for line in editor.dump(page["doc"]).split("\n\n") if line.strip()]
+            new = [line for line in self.sheet.dumped(page["doc"]).split("\n\n") if line.strip()]
             count += sum(max(i2 - i1, j2 - j1) for op, i1, i2, j1, j2 in
                          difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes() if op != "equal")
         return count
@@ -11268,14 +11635,13 @@ class TextEditor:
         if self.dirty():
             self.saved_paragraphs = self.changed_count()
             edits, titles, kinds, retype = self.changes()
-            done = [("\n\n".join(line for _, line in page["lines"]), editor.dump(page["doc"]))
+            done = [("\n\n".join(line for _, line in page["lines"]), self.sheet.dumped(page["doc"]))
                     for (start, _), page in self.pages.items() if start >= 0 and self.page_dirty(page)]
+            LOG.info("Editor: guarda %d cambios", len(edits))
             self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype)
             for before, after in done:  # al reabrir el editor, su deshacer vuelve a lo de antes (replay_history)
-                after = "\n\n".join(line for line in after.split("\n\n") if line.strip())
-                if after != before:
-                    first = self.app.editor_history.get(before, (before, before))[1]
-                    self.app.editor_history[after] = (before, first)
+                if _history_lines(after) != _history_lines(before):
+                    history_add(self.app.editor_history, before, after)
         self.win.done(0)
 
     def cancel(self, _=None, asked=False):
@@ -11286,6 +11652,36 @@ class TextEditor:
                 "Descartar cambios", "El texto tiene cambios sin guardar. ¿Descartarlos?", parent=self.win):
             return
         self.win.done(0)
+
+
+def _log_start():
+    """Primera línea de cada sesión en el registro: versiones y si hay Chromium, lo que explica muchos fallos. Los
+    avisos de Qt y de Chromium, que en el .exe no tenían dónde salir, también van al registro."""
+    import platform
+
+    import PySide6
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    import webview
+    levels = {QtMsgType.QtDebugMsg: logging.DEBUG, QtMsgType.QtInfoMsg: logging.INFO,
+              QtMsgType.QtWarningMsg: logging.WARNING, QtMsgType.QtCriticalMsg: logging.ERROR,
+              QtMsgType.QtFatalMsg: logging.CRITICAL}
+    qt_log = logging.getLogger("qt")
+    qInstallMessageHandler(lambda kind, context, text: qt_log.log(levels.get(kind, logging.INFO), "%s", text))
+    freezes, beat = registro.Freezes(), QTimer()  # la ventana que no responde: cuánto y dónde (registro.Freezes)
+    beat.timeout.connect(freezes.beat)
+    beat.start(100)
+    _log_start.keep, _log_start.freezes = beat, freezes  # vivos mientras dure la app
+    qtk.log_actions()  # clics, atajos y ventanas: lo que pasó antes de un fallo
+    chromium = "sí" if webview.available() else f"no ({webview.ERROR or 'apagado'})"
+    screen = qtk.app().primaryScreen()
+    LOG.info("=== %s · %s · Python %s · Qt %s · PyMuPDF %s · %s · Chromium: %s · pantalla %s a %d %% · %s",
+             APP_NAME, "exe" if getattr(sys, "frozen", False) else "fuente", platform.python_version(),
+             PySide6.__version__, pymupdf.VersionBind, platform.platform(), chromium,
+             f"{screen.size().width()}×{screen.size().height()}" if screen else "?",
+             round(100 * screen.devicePixelRatio()) if screen else 100,
+             f"argumentos {sys.argv[1:]}" if sys.argv[1:] else "sin argumentos")
+    LOG.debug("Preferencias en %s%s", SETTINGS.parent, " (portable)" if SETTINGS.parent.name == "datos" else "")
 
 
 def _check_chromium(report):
@@ -11316,8 +11712,10 @@ def _check_chromium(report):
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()  # en el .exe, el proceso de trabajo vuelve a lanzar el ejecutable
-    sys.excepthook = lambda kind, value, tb: _log("".join(traceback.format_exception(kind, value, tb)))
+    sys.excepthook = lambda kind, value, tb: _log("".join(traceback.format_exception(kind, value, tb)), tb)
+    registro.setup(SETTINGS.parent)
     qtk.app()
+    _log_start()
     if sys.argv[1:2] == ["--comprobar-chromium"]:  # /build-exe: que el .exe trae Chromium entero y dibuja una página
         sys.exit(_check_chromium(sys.argv[2] if len(sys.argv) > 2 else "chromium.txt"))
     root = Window()

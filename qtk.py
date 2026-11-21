@@ -5,14 +5,17 @@ import re
 from contextlib import contextmanager
 
 import pymupdf
-from PySide6.QtCore import (QEasingCurve, QEvent, QItemSelectionModel, QPoint, QPointF, QRectF, Qt, QTimer,
+from PySide6.QtCore import (QEasingCurve, QEvent, QItemSelectionModel, QObject, QPoint, QPointF, QRectF, Qt, QTimer,
                             QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPalette,
                            QPen, QPixmap, QPolygonF, QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
                                QPushButton,
                                QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
-                               QStyleOptionViewItem, QTextEdit, QToolTip, QTreeWidget, QTreeWidgetItem, QWidget)
+                               QStyleOptionViewItem, QTabBar, QTextEdit, QToolTip, QTreeWidget, QTreeWidgetItem,
+                               QWidget)
+
+import registro
 
 IID = Qt.ItemDataRole.UserRole       # fila -> su iid (el índice del bloque, como texto)
 TAGS = Qt.ItemDataRole.UserRole + 1  # fila -> sus tags de aspecto
@@ -31,6 +34,72 @@ def app():
     import webview
     webview.prepare()  # Chromium (la vista previa del EPUB) pide su esquema y OpenGL compartido antes que nada
     return QApplication([])
+
+
+class ActionLog(QObject):
+    """Apunta en el registro (registro.note_action) lo que hace quien usa la app: el botón, la opción del menú, la
+    pestaña o la fila que pulsa, los atajos de teclado y las ventanas que se abren. Lo que escribe no: solo las
+    teclas con Ctrl o Alt y las F. Así un fallo o una congelación dicen tras qué pasaron. Un atajo de menú no llega
+    como KeyPress (Qt lo resuelve antes, en ShortcutOverride) y lo que el widget no acepta sube a sus padres: la misma
+    acción seguida se apunta una vez."""
+    KINDS = (QEvent.Type.MouseButtonRelease, QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride, QEvent.Type.Show)
+    last = ("", 0.0)
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind not in self.KINDS or not isinstance(obj, QWidget):  # lo demás (mover el ratón, pintar), sin coste
+            return False
+        try:
+            text = self.describe(obj, event, kind)
+        except Exception:  # apuntar nunca rompe el clic
+            text = None
+        if text:
+            import time
+            now = time.monotonic()
+            if text != self.last[0] or now - self.last[1] > 0.5:
+                registro.note_action(text)
+            self.last = (text, now)
+        return False
+
+    @staticmethod
+    def describe(obj, event, kind):
+        if kind == QEvent.Type.Show:
+            return f"Abre «{obj.windowTitle()}»" if obj.isWindow() and obj.windowTitle() else None
+        window = obj.window().windowTitle()
+        where = f" ({window})" if window else ""
+        if kind in (QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride):
+            mods = event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+            key = event.key()
+            if event.isAutoRepeat() or not (mods or Qt.Key.Key_F1 <= key <= Qt.Key.Key_F12 or key == Qt.Key.Key_Escape):
+                return None
+            from PySide6.QtGui import QKeySequence
+            return f"Tecla {QKeySequence(event.keyCombination()).toString()}{where}"
+        if event.button() != Qt.MouseButton.LeftButton and event.button() != Qt.MouseButton.RightButton:
+            return None
+        side = " (derecho)" if event.button() == Qt.MouseButton.RightButton else ""
+        from PySide6.QtWidgets import QAbstractButton, QMenu
+        if isinstance(obj, QMenu):
+            action = obj.actionAt(event.position().toPoint())
+            return f"Menú «{action.text().replace('&', '')}»{where}" if action and action.text() else None
+        if isinstance(obj, QAbstractButton):
+            name = obj.text().replace("&", "") or obj.toolTip().split("\n")[0] or obj.objectName()
+            state = (" → no" if obj.isChecked() else " → sí") if obj.isCheckable() else ""  # cambia tras soltar
+            return f"Clic{side} «{name}»{state}{where}"
+        if isinstance(obj, QTabBar):
+            tab = obj.tabAt(event.position().toPoint())
+            return f"Pestaña «{obj.tabText(tab)}»{where}" if tab >= 0 else None
+        view = obj.parent() if obj.objectName() == "qt_scrollarea_viewport" else None
+        if isinstance(view, QAbstractItemView):
+            index = view.indexAt(event.position().toPoint())
+            return f"Clic{side} en la fila {index.row()} de {type(view).__name__}{where}" if index.isValid() else None
+        return None
+
+
+def log_actions():
+    """Instala ActionLog en toda la app (una vez)."""
+    if getattr(log_actions, "done", None) is None:
+        log_actions.done = ActionLog()
+        app().installEventFilter(log_actions.done)
 
 
 _timers = set()  # referencias: un QTimer sin dueño que se recoge no dispara
@@ -102,30 +171,36 @@ class _MessageBox:
 
 
 class _FileDialog:
-    """tkinter.filedialog sobre QFileDialog: "" o () al cancelar, como Tk."""
+    """tkinter.filedialog sobre QFileDialog: "" o () al cancelar, como Tk. El diálogo de Windows no deja latir a la
+    ventana: registro.waiting() para que no salga en el registro como congelada."""
 
     @staticmethod
     def askopenfilename(filetypes=(), initialdir=None, title="Abrir", parent=None):
-        return QFileDialog.getOpenFileName(parent or QApplication.activeWindow(), title, initialdir or "",
-                                           filters(filetypes))[0]
+        with registro.waiting():
+            return QFileDialog.getOpenFileName(parent or QApplication.activeWindow(), title, initialdir or "",
+                                               filters(filetypes))[0]
 
     @staticmethod
     def askopenfilenames(filetypes=(), initialdir=None, title="Abrir", parent=None):
-        return tuple(QFileDialog.getOpenFileNames(parent or QApplication.activeWindow(), title, initialdir or "",
-                                                  filters(filetypes))[0])
+        with registro.waiting():
+            return tuple(QFileDialog.getOpenFileNames(parent or QApplication.activeWindow(), title, initialdir or "",
+                                                      filters(filetypes))[0])
 
     @staticmethod
     def asksaveasfilename(defaultextension="", filetypes=(), initialdir=None, initialfile="", title="Guardar como",
                           parent=None):
         start = os.path.join(initialdir or "", initialfile or "")
-        path = QFileDialog.getSaveFileName(parent or QApplication.activeWindow(), title, start, filters(filetypes))[0]
+        with registro.waiting():
+            path = QFileDialog.getSaveFileName(parent or QApplication.activeWindow(), title, start,
+                                               filters(filetypes))[0]
         if path and defaultextension and not os.path.splitext(path)[1]:
             path += defaultextension
         return path
 
     @staticmethod
     def askdirectory(initialdir=None, title="Elegir carpeta", parent=None):
-        return QFileDialog.getExistingDirectory(parent or QApplication.activeWindow(), title, initialdir or "")
+        with registro.waiting():
+            return QFileDialog.getExistingDirectory(parent or QApplication.activeWindow(), title, initialdir or "")
 
 
 messagebox, filedialog = _MessageBox(), _FileDialog()
@@ -1013,8 +1088,9 @@ class Caption(QWidget):
             button.setToolTip(tip)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(action)
-            button.setVisible(bool(shown))
             row.addWidget(button)
+            # después de addWidget: sin padre aún, Windows abría cada botón un instante como ventana suelta
+            button.setVisible(bool(shown))
             self.buttons[name] = button
         window.windowTitleChanged.connect(self.title.setText)
         window.windowIconChanged.connect(self.set_icon)
