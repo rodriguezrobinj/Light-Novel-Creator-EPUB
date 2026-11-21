@@ -6635,6 +6635,82 @@ def test_editor_navigation_panel():
     assert remembered is True and shown_again and window.settings["editor_nav"] is False
 
 
+def test_epub_file_groups_like_calibre():
+    """Archivos de un EPUB en los grupos del explorador de Calibre: el texto en orden de lectura (lo que no está en el
+    spine, al final), lo demás por nombre, y «mimetype» fuera. write_epub dice dónde empieza cada sección."""
+    import faithful
+
+    with zipfile.ZipFile(sigil_epub(TMP / "Sigil archivos.epub")) as z:
+        groups = faithful.file_groups(z)
+    B = convert.Block
+    pdf = convert.Book("Libro", "", JPEG, [B("p", 1, "Antes."), B("heading", 1, "Cap 1"), B("p", 1, "Uno."),
+                                           B("heading", 2, "Cap 2"), B("p", 2, "Dos.")], [1, 3])
+    firsts = convert.write_epub(pdf, [(1, "Cap 1"), (3, "Cap 2")], TMP / "secciones.epub")
+    texts = [f"OEBPS/Text/{n}.xhtml" for n in ("cubierta", "titulo", "capitulo01", "capitulo02", "notas", "nav")]
+    assert groups == [("Texto", texts), ("Estilos", ["OEBPS/Styles/style.css"]),
+                      ("Imágenes", ["OEBPS/Images/cover.jpg", "OEBPS/Images/lamina 1.jpg", "OEBPS/Images/lamina.jpg"]),
+                      ("Tipos de letra", ["OEBPS/Fonts/Lucida.ttf"]),
+                      ("Miscelánea", ["META-INF/container.xml", "OEBPS/content.opf"])], groups
+    assert firsts == {"sec001.xhtml": 0, "sec002.xhtml": 1, "sec003.xhtml": 3}, firsts
+
+
+def test_editor_file_explorer():
+    """Vista → «Archivos» abre el explorador de archivos, como el de Calibre: con un EPUB, sus archivos en grupos; un
+    clic en el de un capítulo lo abre en la hoja y uno en la hoja de estilo la muestra de solo lectura. Con un PDF,
+    los del EPUB que se generará (sec00N.xhtml, cada uno su capítulo). Se recuerda abierto."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import app
+
+    src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+    root, window = visible_window()
+    window.pdf = src
+    window.show_book(convert.analyze(src))
+    k = window.book.candidates[2]
+    window.tree.selection_set(str(k))
+    ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+    hidden = ed.files.isHidden()
+    ed.toggle_files()
+    groups = {ed.files.topLevelItem(n).text(0): ed.files.topLevelItem(n) for n in range(ed.files.topLevelItemCount())}
+    texts = [groups["Texto"].child(n).text(0) for n in range(groups["Texto"].childCount())]
+    second = next(groups["Texto"].child(n) for n in range(groups["Texto"].childCount())
+                  if groups["Texto"].child(n).text(0) == "capitulo02.xhtml")
+    ed.files_go(second)
+    opened = ed.current
+    expected = window.section_bounds(window.book.candidates[3])
+    where = ed.files.visualItemRect(groups["Estilos"].child(0)).center()
+    QTest.mouseClick(ed.files.viewport(), Qt.MouseButton.LeftButton, pos=where)  # doble clic como el ratón
+    QTest.mouseDClick(ed.files.viewport(), Qt.MouseButton.LeftButton, pos=where)
+    viewer = ed.file_view
+    shown = viewer.findChild(app.editor.CodeEdit)
+    css, read_only = shown.toPlainText(), shown.isReadOnly()
+    viewer.close()
+    remembered = window.settings.get("editor_files")
+    ed.win.done(0)
+    window.close()
+    root2, window2, pdf_ed = editor_on([convert.Block("heading", 1, "Capítulo 1"), convert.Block("p", 1, "Uno."),
+                                        convert.Block("heading", 2, "Capítulo 2"), convert.Block("p", 2, "Dos.")], [0, 2])
+    pdf_ed.toggle_files()
+    group = pdf_ed.files.topLevelItem(0)
+    names = [group.child(n).text(0) for n in range(group.childCount())]
+    pdf_ed.files_go(next(group.child(n) for n in range(group.childCount()) if group.child(n).text(0) == "sec002.xhtml"))
+    pdf_opened = pdf_ed.current
+    pdf_ed.win.done(0)
+    again = app.TextEditor(window2, "0", *window2.section_bounds(0))
+    shown_again = not again.files.isHidden()
+    again.toggle_files()
+    again.win.done(0)
+    window2.close()
+    assert hidden, "el explorador empieza oculto"
+    assert list(groups) == ["Texto", "Estilos", "Imágenes", "Tipos de letra", "Miscelánea"], list(groups)
+    assert texts[:3] == ["cubierta.xhtml", "titulo.xhtml", "capitulo01.xhtml"], texts
+    assert opened == expected, (opened, expected)
+    assert ".lucida" in css and read_only, (css, read_only)
+    assert remembered is True and shown_again and window2.settings["editor_files"] is False
+    assert group.text(0) == "Texto" and "sec001.xhtml" in names and "cover.xhtml" in names, names
+    assert pdf_opened == (2, 4), pdf_opened
+
+
 def test_code_completion_suggestions():
     """Autocompletado de «Código HTML», como VS Code: etiquetas tras «<» con su descripción de MDN (al principio de
     la línea, los párrafos; dentro, las en línea que el libro conserva; en <ruby>, rt y rp primero; buscando también

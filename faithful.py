@@ -157,6 +157,26 @@ def package(z):
     return path, opf, items, order, spine.get("toc", "")
 
 
+FILE_GROUPS = (("Texto", (".xhtml", ".html", ".htm")), ("Estilos", (".css",)),
+               ("Imágenes", (".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".bmp")),
+               ("Tipos de letra", (".ttf", ".otf", ".woff", ".woff2")))
+
+
+def file_groups(z):
+    """Archivos del EPUB en los grupos del explorador de Calibre: [(grupo, [rutas])], sin los vacíos. El texto en
+    orden de lectura (spine) y lo demás por nombre; «mimetype» no es del libro, es la marca del zip."""
+    try:
+        _, _, items, order, _ = package(z)
+        rank = {items[i][0]: n for n, i in enumerate(order)}
+    except Exception:  # sin OPF legible: todo por nombre
+        rank = {}
+    groups = {name: [] for name, _ in FILE_GROUPS} | {"Miscelánea": []}
+    names = (n for n in z.namelist() if not n.endswith("/") and n != "mimetype")
+    for name in sorted(names, key=lambda n: (rank.get(n, len(rank)), n)):
+        groups[next((g for g, ends in FILE_GROUPS if name.lower().endswith(ends)), "Miscelánea")].append(name)
+    return [(group, files) for group, files in groups.items() if files]
+
+
 def toc_labels(z, items, ncx_id):
     """{archivo: nombre en el índice}: del nav de EPUB 3 o, si no hay, del toc.ncx. El primero de cada archivo."""
     labels = {}
