@@ -20,7 +20,7 @@ import translate
 
 BOOK, APP = "El libro", "La aplicación"
 CATEGORIES = {BOOK: ("Perfil y formato", "Texto", "Ilustraciones", "PDF"),
-              APP: ("Apariencia", "Vista previa", "Traducción", "Carpeta vigilada", "Informe de calidad")}
+              APP: ("Apariencia", "Vista previa", "Editor", "Traducción", "Carpeta vigilada", "Informe de calidad")}
 Option = namedtuple("Option", "category key kind label help")
 OPTIONS = (
     Option("Perfil y formato", "profile", "choice", "Perfil",
@@ -66,6 +66,23 @@ OPTIONS = (
     Option("Apariencia", "theme", "choice", "Tema", "«Sistema» sigue el modo claro u oscuro de Windows."),
     Option("Vista previa", "device", "choice", "Dispositivo al abrir", "Tamaño de página de la vista previa del EPUB."),
     Option("Vista previa", "dark", "check", "Modo oscuro al abrir", "Las vistas previas en claro sobre negro."),
+    Option("Editor", "editor_undo", "choice", "Deshacer y rehacer",
+           "«Por capítulo»: cada capítulo con su propio deshacer, como hasta ahora. «Todo el libro»: Ctrl+Z deshace "
+           "el último cambio, en el capítulo que sea, y lo abre si es otro, como en Word."),
+    Option("Editor", "editor_side", "choice", "Pestaña del panel al abrir",
+           "Lo que se ve a la derecha de la hoja: la página original, el capítulo como saldrá en el EPUB o la hoja web."),
+    Option("Editor", "editor_zoom", "number", "Tamaño de la hoja al abrir (%)",
+           "El de la barra de abajo del editor; se puede cambiar mientras se escribe."),
+    Option("Editor", "editor_changes", "check", "Mostrar cambios al abrir",
+           "Lo editado, marcado en la hoja desde el principio (Vista → Mostrar cambios)."),
+    Option("Editor", "editor_nav", "check", "Panel de navegación al abrir",
+           "Títulos, avisos, comentarios y cambios del capítulo a la izquierda (F9)."),
+    Option("Editor", "editor_dark", "check", "Panel en modo oscuro",
+           "Original, EPUB y hoja web con fondo oscuro y letra clara; las ilustraciones no cambian."),
+    Option("Editor", "editor_spell", "check", "Subrayar las faltas de ortografía",
+           "Mientras se escribe, en rojo; el diccionario es de español. Sin esto, «Ortografía…» sigue funcionando."),
+    Option("Editor", "editor_resume", "check", "Ofrecer volver a donde lo dejaste",
+           "Al abrir el editor en otro capítulo, la barra «Lo dejaste en… · Ir allí»."),
     Option("Traducción", "translate", "translate", "Motor, modelo y clave de API",
            "Servicio que traduce, su modelo y su clave, e idiomas con los que empieza «Traducir»."),
     Option("Carpeta vigilada", "watch", "folder", "Carpeta vigilada",
@@ -80,6 +97,7 @@ BOOK_KEYS = tuple(o.key for o in OPTIONS if o.category in CATEGORIES[BOOK]) + ("
 
 
 FILE_TYPES = {"logo": ("Imagen", "*.png *.jpg *.jpeg"), "heading_font_file": ("Fuente", "*.ttf *.otf")}
+NUMBERS = {"shrink_size": (400, 4000, 100), "editor_zoom": (50, 200, 10)}  # (mínimo, máximo, paso) de cada número
 
 
 def fold(text):
@@ -295,8 +313,9 @@ class OptionsDialog:
         else:
             if option.kind == "number":
                 widget = QSpinBox()
-                widget.setRange(400, 4000)
-                widget.setSingleStep(100)
+                low, high, step = NUMBERS.get(key, (0, 10000, 1))
+                widget.setRange(low, high)
+                widget.setSingleStep(step)
                 widget.setValue(int(value))
                 widget.valueChanged.connect(lambda n, key=key: self.put(key, n))
             else:

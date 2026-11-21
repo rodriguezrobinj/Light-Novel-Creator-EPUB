@@ -5,6 +5,7 @@ Los archivos se sirven desde el zip del EPUB (esquema epub://), sin escribirlos 
 Chromium pide dos cosas antes de crear la QApplication: importar QtWebEngine y registrar el esquema. qtk.app() llama
 a prepare(); si QtWebEngine no está (otro equipo, un .exe sin él), available() es False y la ventana usa MuPDF."""
 import json
+import logging
 import mimetypes
 import posixpath
 import zipfile
@@ -24,6 +25,7 @@ MEDIA = {".xhtml": "application/xhtml+xml", ".html": "text/html", ".htm": "text/
          ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".svg": "image/svg+xml",
          ".ttf": "font/ttf", ".otf": "font/otf", ".woff": "font/woff", ".woff2": "font/woff2"}
 _prepared = False
+LOG = logging.getLogger("chromium")  # registro.log: lo que falla dentro de Chromium
 
 
 def prepare():
@@ -254,6 +256,8 @@ if AVAILABLE:
             elif message.startswith("lnc-scroll "):
                 top, height, view = (int(x) for x in message.split()[1:4])
                 self.scrolled.emit(top, height, view)
+            elif level == QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel:
+                LOG.warning("JavaScript: %s (%s:%s)", message, source, line)
 
     class EpubView(QWebEngineView):
         """Un archivo del EPUB como en un lector de size=(ancho, alto) en px de CSS, encogido o agrandado a lo que
@@ -265,11 +269,14 @@ if AVAILABLE:
 
         def __init__(self, parent=None):
             super().__init__(parent)
-            self.profile_ = QWebEngineProfile(self)  # propio y sin disco: nada del libro se queda en la caché
+            self.profile_ = QWebEngineProfile()  # propio y sin disco: nada del libro se queda en la caché
             self.profile_.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
-            self.zip = _Zip(self)
+            self.zip = _Zip(self.profile_)
             self.profile_.installUrlSchemeHandler(SCHEME, self.zip)
             self.setPage(_Page(self.profile_, self))
+            # El perfil, hijo de la página: se destruye tras ella. Hijo de la vista, caía antes y Qt avisaba al cerrar
+            # («Release of profile requested but WebEnginePage still not deleted»)
+            self.profile_.setParent(self.page())
             settings = self.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, False)  # la de Qt, fuera
@@ -283,10 +290,16 @@ if AVAILABLE:
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # solo se mira: el teclado sigue en la lista
             self.page().setBackgroundColor(Qt.GlobalColor.white)
             self.size_, self.dark, self.page_, self.pages, self.target = (300, 400), False, 0, 0, None
+            self.loads = 0  # páginas ya cargadas y medidas: quien pasa de capítulo sabe cuándo ha llegado el nuevo
             # Lo que se ve de antes tapa la página mientras carga la nueva: sin el blanco de una web que recarga
             self.cover = QLabel(self)
             self.cover.hide()
             self.loadFinished.connect(lambda ok: self.url().scheme() == SCHEME.decode() and self._loaded(ok))
+            self.loadFinished.connect(lambda ok: ok or LOG.warning("No se pudo cargar %s", self.url().toString()))
+            # Chromium dibuja en otro proceso: si muere (memoria, GPU), la vista se queda en blanco sin más aviso
+            self.page().renderProcessTerminated.connect(
+                lambda status, code: LOG.log(logging.DEBUG if status.name == "NormalTerminationStatus" else logging.ERROR,
+                                             "El proceso de Chromium terminó: %s (código %s)", status.name, code))
             # Una página vacía ya crea la superficie de Chromium: la ventana nace preparada para ella. Si no, Windows
             # la vuelve a crear al mostrarse la vista (parpadeaba como si se abriera dos veces)
             self.setHtml("")
@@ -366,6 +379,7 @@ if AVAILABLE:
 
         def _loaded(self, ok):
             if not ok:
+                self.loads += 1
                 self.pages = 0
                 self.cover.hide()
                 self.paged.emit(0)
@@ -383,6 +397,7 @@ if AVAILABLE:
             self.page().runJavaScript(script, 0, self._paged)
 
         def _paged(self, pages):
+            self.loads += 1
             self.pages = int(pages or 1)
             if self.target:
                 self.find_page(self.target, lambda n: (self.go(n), self.paged.emit(self.pages)))
@@ -460,8 +475,11 @@ if AVAILABLE:
             if ok:
                 self.page().runJavaScript(SCROLL_JS, 0)
                 self.page().runJavaScript(websheet.SHEET_JS, 0, lambda _: self._ready())
+            else:
+                self.loads += 1
 
         def _ready(self):
+            self.loads += 1
             if self.dark:
                 self.set_dark(True)
             self.loaded = True

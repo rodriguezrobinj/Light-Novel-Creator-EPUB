@@ -1060,7 +1060,7 @@ def test_separator_options():
     book = convert.Book("Libro", "", JPEG, blocks, [0])
     expected = {
         "Según el estilo": ['<p class="brk">* * *</p>'] * 2,
-        "Original del PDF": ['<p class="brk">☆</p>', '<div class="brk-img"><img src="img/b00004.jpg" alt="* * *"/></div>'],
+        "Imagen del original": ['<p class="brk">☆</p>', '<div class="brk-img"><img src="img/b00004.jpg" alt="* * *"/></div>'],
         "✦": ['<p class="brk">✦</p>'] * 2,
         "Línea": ['<hr class="brk"/>'] * 2,
         "Espacio en blanco": ['<div class="brk-gap"></div>'] * 2,
@@ -1383,6 +1383,7 @@ def visible_window(settings=None):
     app.SETTINGS = settings or TMP / f"ajustes-{time_ns()}.json"  # cada ventana sin preferencias de otra prueba
     app._start_spell_process = lambda: None  # sin el proceso de ortografía del editor (su prueba pone uno falso)
     app._start_thumbs = lambda jobs: None  # ni el de las miniaturas de recientes (su prueba llama a _render_thumbs)
+    app.STANDBY = False  # ni el de trabajo preparado (su prueba lo enciende)
     window = app.App(app.Window())
     window.theme_var.set("Claro")
     window.apply_theme()
@@ -1805,6 +1806,618 @@ def test_window_preview_page_navigation():
     window.close()
     assert "página 2" in pdf_caption, pdf_caption
     assert "1/" in first and "2/" in second and "1/" in back, (first, second, back)
+
+
+def test_log_records_each_part_of_the_app():
+    """registro.log: el motor apunta cuánto tardó cada análisis, la ventana sus fallos (también en errores.log) y lo
+    que el proceso de trabajo manda por su cola (ToQueue) se escribe con el nombre de su parte."""
+    import logging
+    import queue as queue_
+    import app
+    import registro
+    folder = TMP / f"registro-{time_ns()}"
+    registro.setup(folder)
+    handler = next(h for h in logging.getLogger().handlers if isinstance(h, logging.handlers.RotatingFileHandler))
+    try:
+        convert.analyze(make_novel())
+        app._log("Fallo de prueba")
+        events = queue_.Queue()
+        sent = logging.LogRecord("trabajo", logging.INFO, "", 0, "analyze terminó en %.1f s", (1.5,), None)
+        registro.ToQueue(events).emit(sent)
+        registro.replay(events.get())
+        handler.flush()
+        text = registro.path(folder).read_text(encoding="utf-8")
+    finally:
+        logging.getLogger().removeHandler(handler)
+        handler.close()
+    assert "[convert] analyze(" in text and "[app] Fallo de prueba" in text, text
+    assert "[trabajo] analyze terminó en 1.5 s" in text, text
+
+
+def test_window_work_uses_the_prepared_process():
+    """El proceso de trabajo se deja arrancado de antemano (warm_worker): el análisis lo usa (empieza sin esperar a
+    que arranque, 1,7 s en el .exe), da su resultado y, al terminar, queda otro preparado para el siguiente."""
+    import time
+
+    import app
+    root, window = visible_window()
+    app.STANDBY = True
+    try:
+        window.warm_worker()
+        prepared = window.standby[0]
+        got = []
+        window.run(convert.analyze, (str(make_novel()),), got.append)
+        used = window.proc is prepared
+        deadline = time.time() + 60
+        while window.done and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+        deadline = time.time() + 5
+        while window.standby is None and time.time() < deadline:  # finish lo pide al segundo
+            root.update()
+            time.sleep(0.05)
+        again = window.standby is not None and window.standby[0] is not prepared
+    finally:
+        app.STANDBY = False
+        window.close()
+    assert used and got and got[0].candidates, (used, got)
+    assert again
+
+
+def test_log_notes_window_freezes_with_where_it_was():
+    """registro.Freezes: si entre dos latidos de la ventana pasa más del límite, apunta cuánto y dónde estaba (la pila
+    que tomó su hilo mientras tanto). El primer latido mide el arranque: no cuenta."""
+    import logging
+    import registro
+    seen = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            seen.append(record.getMessage())
+    keep = Keep()
+    logging.getLogger("congelada").addHandler(keep)
+    try:
+        freezes = registro.Freezes(limit=0.3)
+        freezes.last -= 5  # el arranque
+        freezes.beat()
+        first = list(seen)
+        stuck_until = time_ns() + 900_000_000
+        while time_ns() < stuck_until:  # la ventana «ocupada» casi 1 s, sin latir
+            sum(range(1000))
+        freezes.beat()
+    finally:
+        logging.getLogger("congelada").removeHandler(keep)
+    assert first == [], first
+    assert len(seen) == 1 and "no respondió" in seen[0] and "test_log_notes_window_freezes" in seen[0], seen
+
+
+def test_log_freezes_skip_windows_dialogs_and_say_after_what():
+    """Un «Guardar como» de Windows no deja latir a la ventana: dentro de registro.waiting() no es una congelación
+    (salía una por cada EPUB guardado). La que sí lo es dice tras qué acción pasó y la pila más vista contando las
+    funciones, no las líneas."""
+    import logging
+    import registro
+    seen = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            seen.append(record.getMessage())
+    keep = Keep()
+    logging.getLogger("congelada").addHandler(keep)
+    try:
+        freezes = registro.Freezes(limit=0.3)
+        freezes.beat()  # el arranque
+        with registro.waiting():
+            stuck_until = time_ns() + 700_000_000
+            while time_ns() < stuck_until:
+                sum(range(1000))
+        freezes.beat()
+        quiet = list(seen)
+        registro.note_action("Clic «Generar EPUB»")
+        stuck_until = time_ns() + 900_000_000
+        while time_ns() < stuck_until:
+            sum(range(1000))
+        freezes.beat()
+    finally:
+        logging.getLogger("congelada").removeHandler(keep)
+        registro.LAST_ACTION = ""
+    assert quiet == [], quiet
+    assert len(seen) == 1 and "tras «Clic «Generar EPUB»»" in seen[0] and "muestras" in seen[0], seen
+    assert freezes.count == 1 and freezes.worst >= 0.8
+
+
+def test_log_keeps_library_debug_out_and_crash_variables_in():
+    """PIL apuntaba en DEBUG cada etiqueta TIFF de cada lámina: 7 de cada 10 líneas del registro. De las bibliotecas
+    solo van los avisos. Un fallo apunta las variables de donde saltó (el .exe no trae el código en la pila) y tras
+    qué acción."""
+    import logging
+    import app
+    import registro
+    folder = TMP / f"registro-ruido-{time_ns()}"
+    registro.setup(folder)
+    handler = next(h for h in logging.getLogger().handlers if isinstance(h, logging.handlers.RotatingFileHandler))
+    saved = app.SETTINGS
+    app.SETTINGS = folder / "ajustes.json"
+    try:
+        logging.getLogger("PIL.TiffImagePlugin").debug("tag: ImageWidth")
+        logging.getLogger("PIL.Image").warning("Imagen rara")
+        logging.getLogger("convert").debug("analyze(x): 0.10 s")
+        registro.note_action("Menú «Generar EPUB»")
+
+        def broken(chapter):
+            return chapter.text.strip()
+        try:
+            broken(None)
+        except AttributeError:
+            app._log(traceback.format_exc())
+        handler.flush()
+        text = registro.path(folder).read_text(encoding="utf-8")
+        errors = (folder / "errores.log").read_text(encoding="utf-8")
+    finally:
+        app.SETTINGS = saved
+        registro.LAST_ACTION = ""
+        logging.getLogger().removeHandler(handler)
+        handler.close()
+    assert "ImageWidth" not in text and "Imagen rara" in text and "analyze(x)" in text, text
+    assert "[acciones] Menú «Generar EPUB»" in text, text
+    assert "Variables en broken:" in errors and "chapter = None" in errors, errors
+    assert "Tras: Menú «Generar EPUB»" in errors, errors
+
+
+def test_log_summary_groups_errors_freezes_and_slow_work():
+    """python registro.py: el resumen cuenta sesiones, agrupa los fallos por su última línea, las congelaciones por
+    la función de la app más adentro y las operaciones por veces, media y peor."""
+    import registro
+    text = "\n".join([
+        "2026-11-20 18:00:00,000 INFO    10 [app] === Light Novel Creator · exe",
+        "2026-11-20 18:00:01,000 DEBUG   10 [convert] write_epub(a.epub): 0.02 s",
+        "2026-11-20 18:00:02,000 INFO    10 [convert] analyze(b.pdf): 3.50 s",
+        "2026-11-20 18:00:03,000 WARNING 10 [congelada] La ventana no respondió 1.5 s tras «x». Estaba en: 1 de 2",
+        '  File "app.py", line 3, in show_book',
+        '  File "editor.py", line 9, in insert_lines',
+        "2026-11-20 18:00:04,000 ERROR   10 [app] Traceback (most recent call last):",
+        '  File "editor.py", line 1548, in changed',
+        "AttributeError: 'NoneType' object has no attribute 'findBlock'",
+        "2026-11-20 18:00:05,000 ERROR   10 [app] Traceback (most recent call last):",
+        "AttributeError: 'NoneType' object has no attribute 'findBlock'",
+        "2026-11-20 18:00:06,000 INFO    10 [app] Trabajo _analyze: hecho en 4.0 s"])
+    out = registro.summary(text)
+    assert "1 sesiones" in out and "2 × AttributeError: 'NoneType' object has no attribute 'findBlock'" in out, out
+    assert "1 × editor.insert_lines: 1.5 s" in out, out
+    assert "convert.analyze: 1 · 3.50 s" in out and "app._analyze: 1 · 4.00 s" in out, out
+    assert registro.summary("") == "El registro está vacío."
+    # La memoria del proceso: salía «None MB» en el .exe (el HANDLE de 64 bits cortado por ctypes)
+    assert sys.platform != "win32" or (registro.peak_memory_mb() or 0) > 0, registro.peak_memory_mb()
+
+
+def test_window_actions_go_to_the_log():
+    """qtk.ActionLog: el clic en un botón, una pestaña y un atajo con Ctrl quedan en el registro (lo que pasó antes
+    de un fallo); lo que se escribe, no."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QKeyEvent, QMouseEvent
+    from PySide6.QtWidgets import QPushButton, QTabBar
+    import qtk
+    import registro
+    seen = []
+    saved = registro.note_action
+    registro.note_action = seen.append
+    qtk.app()  # antes que el primer widget
+    log = qtk.ActionLog()
+    try:
+        button, tabs = QPushButton("Generar EPUB"), QTabBar()
+        button.setWindowTitle("Prueba")
+        tabs.addTab("Original")
+        tabs.addTab("EPUB")
+        tabs.resize(300, 30)
+        tabs.show()
+        qtk.pump()
+        def release(widget, point):
+            return QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(point), QPointF(point),
+                               Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        log.eventFilter(button, release(button, button.rect().center()))
+        log.eventFilter(tabs, release(tabs, tabs.tabRect(1).center()))
+        log.eventFilter(button, QKeyEvent(QEvent.Type.ShortcutOverride, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier))
+        # el mismo atajo, que sube a los padres o llega luego como KeyPress: una vez
+        log.eventFilter(button, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier))
+        log.eventFilter(button, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier, "a"))
+        tabs.hide()
+    finally:
+        registro.note_action = saved
+    assert seen == ["Clic «Generar EPUB» (Prueba)", "Pestaña «EPUB»", "Tecla Ctrl+S (Prueba)"], seen
+
+
+def test_window_contents_row_looks_for_the_printed_index_once():
+    """«Contenido»: buscar el índice impreso leía 30 páginas en cada cambio de la opción y, en un EPUB, contar sus
+    páginas lo compone entero (registro.log: 2,3 s congelada al abrir un EPUB japonés). Una vez por documento."""
+    root, window = visible_window()
+    try:
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
+        first = window.toc_page()
+        calls = []
+        real = type(window.pdf_doc).load_page
+        type(window.pdf_doc).load_page = lambda self, *a, **k: calls.append(a) or real(self, *a, **k)
+        try:
+            window.contents_var.set(not window.contents_var.get())
+            window.contents_var.set(not window.contents_var.get())
+            again = window.toc_page()
+        finally:
+            type(window.pdf_doc).load_page = real
+    finally:
+        window.close()
+    assert again == first and calls == [], calls
+
+
+def test_window_printed_index_comes_from_the_worker():
+    """Strange Grief 1: aun una vez, leer sus 30 primeras páginas buscando el índice congelaba la ventana 0,8 s al
+    mostrar el libro (registro.log, .exe). Lo busca el proceso de trabajo con el análisis (_analyze)."""
+    import app
+    root, window = visible_window()
+    try:
+        window.pdf = make_novel()
+        result = app._analyze(str(window.pdf))
+        real, read = pymupdf.Page.get_text, []
+        pymupdf.Page.get_text = lambda self, *a, **k: read.append(self.number) or real(self, *a, **k)
+        try:
+            window.show_book(*result)
+            page = window.toc_page()
+        finally:
+            pymupdf.Page.get_text = real
+    finally:
+        window.close()
+    assert result[4] == {"toc": 0, "jpx": []} and page == 0, (result[4], page)  # make_novel: índice en la primera
+    assert 0 not in read, read
+
+
+def test_window_spell_words_of_the_book_once():
+    """Cada apertura del editor sacaba las palabras de todo el libro para la ortografía (0,16 s en Strange Grief 1).
+    Se sacan una vez por libro y se rehacen si cambia el texto o el diccionario propio."""
+    root, window = visible_window()
+    try:
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
+        calls, real = [], convert.spell_words
+        convert.spell_words = lambda text: calls.append(1) or real(text)
+        try:
+            first = window.spell_candidates()
+            again = window.spell_candidates()
+            once = len(calls)
+            block = next(b for b in window.book.blocks if b.kind == "p")
+            block.html += " palabrejo"
+            edited = window.spell_candidates()
+            window.words = ["palabrejo"]
+            own = window.spell_candidates()
+        finally:
+            convert.spell_words = real
+    finally:
+        window.close()
+    assert once == 1 and again is first, once
+    assert "palabrejo" in edited and "palabrejo" not in own and len(calls) == 3, (len(calls), edited - first)
+
+
+def test_editor_pictures_are_read_once_and_reduced():
+    """Las láminas del capítulo se leían enteras cada vez que se abría el editor (registro.log: 1,6 s congelada con
+    5 láminas a color) para verse de 160 px de alto. Se leen una vez, reducidas a 3 veces lo que se ve."""
+    import app
+    import editor
+    root, window = visible_window()
+    try:
+        big = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 1600, 2400), 0)
+        big.clear_with(200)
+        blocks = [convert.Block("heading", 1, "Capítulo 1"), convert.Block("image", 1, "", image=big.tobytes("png")),
+                  convert.Block("p", 1, "Texto.")]
+        window.pdf = make_novel()
+        window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+        ed = app.TextEditor(window, "0", *window.section_bounds(0))
+        read = []
+        real = pymupdf.Pixmap
+        pymupdf.Pixmap = lambda *a: read.append(1) or real(*a)
+        try:
+            pictures = ed.pictures(0, 3)
+        finally:
+            pymupdf.Pixmap = real
+        ed.win.done(0)
+    finally:
+        window.close()
+    assert read == [], read  # ya leída al abrir el editor
+    assert pictures[1].height() == 3 * editor.THUMB and pictures[1].width() == 320, pictures[1].size()
+    # Un JPEG, Qt lo descodifica ya reducido (2,4 veces más rápido); lo demás va por MuPDF
+    import io
+    from PIL import Image
+    data = io.BytesIO()
+    Image.new("RGB", (1600, 2400), (120, 30, 200)).save(data, "JPEG")
+    small = app._scaled_jpeg(data.getvalue(), 1260, 3 * editor.THUMB)
+    assert small.height() == 3 * editor.THUMB and small.width() == 320, small.size()
+    assert small.pixelColor(10, 10).blue() > 150  # sus colores, no un gris
+    assert app._scaled_jpeg(big.tobytes("png"), 1260, 480) is None
+
+
+def test_editor_opens_without_extra_work_and_without_holes():
+    """Abrir el editor congelaba la ventana 1,4-1,9 s (registro.log). Sobraba: rehacer la ventana de Windows al poner
+    el botón de maximizar con las vistas ya creadas, maquetar la hoja antes de mostrarla (se maqueta otra vez al
+    tomar su ancho) y volcar todos los párrafos para saber que ninguno había cambiado. Sin huecos: cada párrafo
+    con texto tiene sus líneas al mostrarse."""
+    from PySide6.QtCore import Qt
+    import app
+    import editor
+    root, window = visible_window()
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [
+        convert.Block("p", 1, f"Párrafo {n} con <i>cursiva</i> y algo más de texto para que ocupe.") for n in range(200)]
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    dumped, real = [0], editor._lines
+
+    def count(block):
+        dumped[0] += 1
+        return real(block)
+    editor._lines = count
+    try:
+        ed = app.TextEditor(window, "0", *window.section_bounds(0))
+        root.update()
+        dumped_at_open = dumped[0]
+        changed = ed.sheet.changed_blocks()
+        holes = []
+        block = ed.sheet.document().firstBlock()
+        while block.isValid():
+            if block.length() > 1 and not block.layout().lineCount():
+                holes.append(block.blockNumber())
+            block = block.next()
+        flags = ed.win.windowFlags()
+    finally:
+        editor._lines = real
+        ed.win.done(0)
+        window.close()
+    assert changed == [] and dumped_at_open < 20, (len(changed), dumped_at_open)
+    assert holes == [], holes
+    assert flags & Qt.WindowType.WindowMaximizeButtonHint
+
+
+def test_editor_code_view_paints_each_line_once():
+    """Hoja → «Código HTML» congelaba la ventana 8 s con un capítulo de 900 párrafos: cargar el código lo coloreaba,
+    darle aire entre párrafos lo volvía a colorear y «Mostrar cambios» otra vez, y cada línea subía hasta la primera
+    buscando su línea de antes. Ahora cada línea se colorea una vez al abrirlo."""
+    import app
+    import editor
+    root, window = visible_window()
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [
+        convert.Block("p", 1, f"Párrafo {n} con <i>cursiva</i> y <b>negrita</b>.") for n in range(300)]
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    ed = app.TextEditor(window, "0", *window.section_bounds(0))
+    painted, original = [0], editor.CodeLook.highlightBlock
+
+    def count(self, text):
+        painted[0] += 1
+        return original(self, text)
+    editor.CodeLook.highlightBlock = count
+    try:
+        ed.show_view(1)
+        root.update()
+        lines = ed.code.blockCount()
+    finally:
+        editor.CodeLook.highlightBlock = original
+        ed.win.done(0)
+        window.close()
+    assert lines >= 301 and painted[0] <= lines + 5, (painted[0], lines)
+
+
+def test_window_thumbnails_stop_each_batch_in_time():
+    """Re:Zero 1 (EPUB): la primera tanda de miniaturas eran sus 6 láminas a color y paraba la ventana 0,9 s. Una
+    tanda dibuja al menos una página y deja el resto para la siguiente cuando se le acaba el tiempo."""
+    import app
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    saved, app.THUMBS_TICK_S = app.THUMBS_TICK_S, 0
+    try:
+        window.thumb_job += 1  # sin las tandas que show_book ya dejó en marcha
+        window.thumbs = {}
+        window.add_thumbs(window.thumb_job, 0, set(), set())
+        first = sorted(window.thumbs)
+    finally:
+        app.THUMBS_TICK_S = saved
+        window.close()
+    assert first == [0], first
+
+
+def test_editor_undo_buttons_work_in_code_view():
+    """«Código HTML» apagaba la pestaña Inicio entera: Deshacer y Rehacer se quedaban grises aunque el código tenía
+    qué deshacer. Ahora siguen al código y lo deshacen; de vuelta en la hoja, siguen a la hoja."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    root, window = visible_window()
+    window.pdf = make_novel()
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, f"Párrafo {n}.") for n in range(5)]
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    ed = app.TextEditor(window, "0", *window.section_bounds(0))
+    try:
+        ed.show_view(1)
+        root.update()
+        cursor = ed.code.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.movePosition(QTextCursor.MoveOperation.Left, n=4)  # antes de «</p>»
+        ed.code.setTextCursor(cursor)
+        ed.code.insertPlainText(" más")
+        root.update()
+        typed = ed.undo_btn.isEnabled(), ed.redo_btn.isEnabled(), ed.bold_btn.isEnabled()
+        ed.do("undo")
+        root.update()
+        undone = ed.undo_btn.isEnabled(), ed.redo_btn.isEnabled(), "más" in ed.code.toPlainText()
+        ed.show_view(0)
+        root.update()
+        sheet = (ed.undo_btn.isEnabled(), ed.redo_btn.isEnabled(), ed.bold_btn.isEnabled()) == (
+            ed.sheet.document().isUndoAvailable(), ed.sheet.document().isRedoAvailable(), True)
+    finally:
+        ed.win.done(0)
+        window.close()
+    assert typed == (True, False, False), typed  # la negrita no vale en el código
+    assert undone == (False, True, False), undone
+    assert sheet
+
+
+def test_editor_fast_page_turns_skip_one_chapter_at_a_time():
+    """Pestaña EPUB del editor: ‹ › al final de un capítulo pasan al siguiente, pero la barra sigue siendo la del
+    capítulo de antes (al final) hasta que Chromium carga el nuevo: pulsando rápido, cada clic saltaba otro capítulo.
+    Hasta que la vista del nuevo carga, los clics de más no hacen nada."""
+    import app
+    from PySide6.QtWidgets import QScrollBar
+    root, window = visible_window()
+    window.pdf = make_novel()
+    blocks = [convert.Block("heading", 1, f"Capítulo {n}") if k == 0 else convert.Block("p", 1, f"Texto {n}.")
+              for n in range(1, 5) for k in range(2)]
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 2, 4, 6]))
+    ed = app.TextEditor(window, "0", *window.section_bounds(0))
+
+    class View:  # la pestaña EPUB, sin Chromium: su barra y cuántas páginas cargó
+        bar, loads, steps = QScrollBar(), 0, []
+
+        def step(self, delta):
+            self.steps.append(delta)
+    view = View()
+    view.bar.setRange(0, 100)
+    view.bar.setValue(100)  # al final del capítulo 1
+    ed.side_web, ed.web_shown = view, lambda: True
+    try:
+        for _ in range(3):  # clics rápidos: el capítulo 2 aún no ha cargado
+            ed.step_page(1)
+        fast = ed.current
+        view.loads += 1  # cargó el capítulo 2, desde arriba
+        view.bar.setValue(0)
+        ed.step_page(1)
+        moved = view.steps
+    finally:
+        ed.win.done(0)
+        window.close()
+    assert fast == (2, 4), fast
+    assert moved == [1], moved
+
+
+def editor_book(window, chapters=3):
+    """Libro de chapters capítulos («Capítulo n» y dos párrafos) en la ventana, con un PDF para el panel."""
+    window.pdf = make_novel()
+    blocks = [b for n in range(1, chapters + 1) for b in (convert.Block("heading", 1, f"Capítulo {n}"),
+              convert.Block("p", 1, f"Uno del {n}."), convert.Block("p", 1, f"Dos del {n}."))]
+    window.show_book(convert.Book("Libro", "", b"", blocks, list(range(0, 3 * chapters, 3))))
+
+
+def test_editor_undo_of_the_whole_book():
+    """Opciones → Editor → «Deshacer y rehacer»: «Todo el libro» deshace el último cambio en el capítulo que sea y lo
+    abre (Ctrl+Z también); Rehacer vuelve por el mismo camino. «Por capítulo» (como antes) solo deshace el suyo."""
+    import app
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    root, window = visible_window()
+    editor_book(window)
+
+    def write(ed, text):
+        ed.sheet.moveCursor(QTextCursor.MoveOperation.End)
+        ed.sheet.insertPlainText(text)
+        root.update()
+
+    def other(ed, k):  # al capítulo que empieza en el bloque k
+        ed.open_section(*window.section_bounds(k))
+        root.update()
+    window.settings["editor_undo"] = "Por capítulo"
+    ed = app.TextEditor(window, "0", *window.section_bounds(0))
+    write(ed, " uno")
+    other(ed, 3)
+    by_chapter = ed.undo_btn.isEnabled()
+    ed.win.done(0)
+    window.settings["editor_undo"] = "Todo el libro"
+    ed = app.TextEditor(window, "0", *window.section_bounds(0))
+    try:
+        write(ed, " uno")
+        other(ed, 3)
+        write(ed, " dos")
+        other(ed, 6)
+        ready = ed.undo_btn.isEnabled()
+        QTest.keyClick(ed.sheet, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)  # deshace « dos», en el 2
+        root.update()
+        first = ed.current, "dos" in ed.sheet.toPlainText()
+        ed.do("undo")  # deshace « uno», en el 1
+        root.update()
+        second = ed.current, "uno" in ed.sheet.toPlainText(), ed.undo_btn.isEnabled(), ed.redo_btn.isEnabled()
+        ed.do("redo")
+        ed.do("redo")
+        root.update()
+        again = ed.current, "dos" in ed.sheet.toPlainText(), ed.redo_btn.isEnabled()
+    finally:
+        ed.win.done(0)
+        window.close()
+    assert not by_chapter
+    assert ready
+    assert first == ((3, 6), False), first
+    assert second == ((0, 3), False, False, True), second
+    assert again == ((3, 6), True, False), again
+
+
+def test_options_editor_page_shapes_the_editor():
+    """Opciones → La aplicación → «Editor»: lo elegido se guarda en los ajustes al aceptar y el editor lo usa al
+    abrir: tamaño de la hoja, Mostrar cambios, sin «Lo dejaste en…», sin corrector y la pestaña EPUB del panel."""
+    import app
+    root, window = visible_window()
+    editor_book(window)
+    window.open_options("Editor")
+    root.update()
+    dialog = window.options_window
+    widgets = dialog.parts["widgets"]
+    shown = sorted(widgets)
+    widgets["editor_zoom"].setValue(140)
+    widgets["editor_changes"].setChecked(True)
+    widgets["editor_resume"].setChecked(False)
+    widgets["editor_spell"].setChecked(False)
+    dialog.put("editor_side", "Original")
+    dialog.put("editor_undo", "Todo el libro")
+    dialog.parts["accept"]()
+    root.update()
+    saved = {k: window.settings.get(k) for k in ("editor_zoom", "editor_changes", "editor_resume", "editor_spell",
+                                                 "editor_side", "editor_undo")}
+    window.editor_at = 6  # «Lo dejaste en…» saldría
+    started = []
+    real, app._start_spell_process = app._start_spell_process, lambda: started.append(1)
+    try:
+        ed = app.TextEditor(window, "0", *window.section_bounds(0))
+        root.update()
+        used = (ed.text_zoom.value(), ed.show_changes_action.isChecked(), ed.resume_frame.isHidden(), started,
+                ed.side_tabs.currentIndex(), ed.book_wide())
+        ed.win.done(0)
+    finally:
+        app._start_spell_process = real
+        window.close()
+    assert {"editor_undo", "editor_side", "editor_zoom", "editor_changes", "editor_nav", "editor_dark",
+            "editor_spell", "editor_resume"} <= set(shown), shown
+    assert saved == {"editor_zoom": 140, "editor_changes": True, "editor_resume": False, "editor_spell": False,
+                     "editor_side": "Original", "editor_undo": "Todo el libro"}, saved
+    assert used == (140, True, True, [], 0, True), used
+
+
+def test_window_reading_skips_illustrations_inside_a_chapter():
+    """Re:Zero 1 (EPUB): su primer capítulo es la portada con las láminas a color. ▶ al final de un capítulo pasa al
+    siguiente, no a sus ilustraciones, que ya se vieron con él (salían dos veces); ◀ desde el siguiente vuelve al
+    capítulo. Las de antes del primer capítulo sí se leen una a una, y una ilustración seleccionada, también."""
+    root, window = visible_window()
+    picture = _jpeg_bytes()
+    blocks = [convert.Block("image", 1, image=picture), convert.Block("heading", 2, "Cap 1"),
+              convert.Block("image", 2, image=picture), convert.Block("p", 2, "Uno."),
+              convert.Block("image", 3, image=picture), convert.Block("heading", 4, "Cap 2"),
+              convert.Block("p", 4, "Dos."), convert.Block("image", 4, image=picture)]
+    window.show_book(convert.Book("Libro", "", b"", blocks, [1, 5]))
+    steps = []
+    for start, delta in (("0", 1), ("1", 1), ("5", -1), ("2", 1), ("5", 1)):
+        window.tree.selection_set(start)
+        root.update()
+        window.epub_page, window.epub_pages = 0, 0  # en el borde de la sección: ▶ ◀ pasan de fila
+        window.epub_step(delta)
+        steps.append(window.tree.selection()[0])
+    window.close()
+    assert steps == ["1", "5", "1", "5", "5"], steps
+
+
+def _jpeg_bytes():
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 60), False)
+    pix.clear_with(200)
+    return pix.tobytes("jpeg")
 
 
 def test_window_original_and_epub_previews_follow_each_other():
@@ -2367,15 +2980,19 @@ def test_window_cancels_work_and_cleans_up():
             path.write_bytes(b"x")
         os.utime(old, (time.time() - 2 * 86400,) * 2)
         os.utime(other, (time.time() - 2 * 86400,) * 2)
+        pdf_tmp = TMP / "lnepub-pdf-viejo"  # la de write_pdf que el antivirus no dejó borrar
+        pdf_tmp.mkdir()
+        (pdf_tmp / "libro0.epub").write_bytes(b"x")
+        os.utime(pdf_tmp, (time.time() - 2 * 86400,) * 2)
         app._sweep_temp()
-        swept = old.exists(), new.exists(), other.exists()
+        swept = old.exists(), new.exists(), other.exists(), pdf_tmp.exists()
     finally:
         tempfile.tempdir = saved
     assert failed == (False, None, True) and shown and "No se pudo empezar" in shown[0], (failed, shown)
     assert visible, "sin botón Cancelar durante el trabajo"
     assert cancelled == (False, False, False, None, False, "Cancelado", True), cancelled
     assert not closed, "quedó el archivo de datos del trabajo"
-    assert swept == (False, True, True), swept
+    assert swept == (False, True, True, False), swept
     assert app._batch_partials([TMP / "Libro.pdf"]) == [f"{TMP / 'Libro.epub'}.tmp", f"{TMP / 'Libro.kepub.epub'}.tmp"]
 
 
@@ -3126,6 +3743,10 @@ def test_indexed_jpeg2000_illustration_is_not_noise():
     doc.save(path)
     with convert.open_pdf(path) as shown:
         preview = shown[1].get_pixmap().pixel(50, 50)
+        fixed = shown.jpx
+    # La ventana lo abre con lo que el proceso de trabajo ya buscó: sin recorrer el PDF, igual de bien
+    with convert.open_pdf(path, fixed) as again:
+        assert again[1].get_pixmap().pixel(50, 50) == preview and again.jpx == fixed == [xref], (fixed, xref)
     picture = next(b.image for b in convert.analyze(path).blocks if b.kind == "image")
     pix = pymupdf.Pixmap(picture)
     middle = pix.pixel(pix.width // 2, pix.height // 2)[:3]
@@ -4613,7 +5234,7 @@ def test_editor_table_and_chapter_link_reach_the_epub():
     faithful_out = TMP / "Sigil enlaces (LNC).epub"
     chapters = [(c, faithful_book.blocks[c].title) for c in faithful_book.candidates]
     convert.write_epub(faithful_book, chapters, faithful_out, style=convert.ORIGINAL, typography=False,
-                       contents=False, separator="Original del PDF")
+                       contents=False, separator="Imagen del original")
     chapter1 = epub_file(faithful_out, "OEBPS/Text/capitulo01.xhtml")
     assert lines[:2] == ["Estado:", "<tabla cabecera>Columna 1 | Columna 2"], lines
     assert "<table class=\"tabla\"><tr><th>Columna 1</th><th>Columna 2</th></tr></table>" in first, first
@@ -5581,6 +6202,53 @@ def test_window_editor_undo_survives_accept():
     assert back[1] == "Uno." and again == "Primero: Uno.", (back, again)
 
 
+def test_window_code_view_with_changes_shown_no_error():
+    """Abrir «Código HTML» con «Mostrar cambios» encendido no da error (registro.log: «'NoneType' object has no
+    attribute 'findBlock'»): mientras se carga el código, sus colores no tienen documento."""
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos.")], [0])
+    errors = []
+    hook, sys.excepthook = sys.excepthook, lambda kind, error, tb: errors.append(repr(error))
+    try:
+        editor.show_changes_action.setChecked(True)
+        root.update()
+        editor.toggle_code()
+        root.update()
+    finally:
+        sys.excepthook = hook
+    editor.win.done(0)
+    window.close()
+    assert not errors, errors
+
+
+def test_window_editor_undo_survives_restart():
+    """Lo aceptado en el editor se deshace también tras cerrar la aplicación: el historial va en la revisión. Un
+    <hr> escrito vuelve como «<hr/>» (antes «[Separador N]», y el historial ya no casaba con el capítulo)."""
+    import app
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos.")], [0])
+    cursor = QTextCursor(editor.sheet.document().findBlockByNumber(1))
+    cursor.insertText("Primero: ")
+    editor.sheet.set_text(ed.dump(editor.sheet.document()) + "\n\n<hr/>")
+    editor.save()
+    root.update()
+    saved = json.loads(json.dumps(window.review_state()))  # como en el .lnepub.json
+    window.editor_history = {}  # aplicación cerrada: el libro, como recién leído
+    window.book.blocks, window.book.candidates = list(window.pristine[0]), list(window.pristine[1])
+    window.load_review(saved)
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    shown = ed.dump(editor.sheet.document())
+    editor.sheet.undo()
+    undone = ed.dump(editor.sheet.document())
+    editor.win.done(0)
+    window.close()
+    assert shown == "# Capítulo 1\n\nPrimero: Uno.\n\nDos.\n\n<hr/>", shown
+    assert undone == "# Capítulo 1\n\nUno.\n\nDos.", undone
+    assert len(json.dumps(saved["editor_history"])) < 300, saved["editor_history"]  # solo lo cambiado
+
+
 def editor_on(blocks, candidates, dark=False):
     """Ventana con un libro hecho a mano (y un PDF de una página por bloque) y su editor en la primera sección;
     dark: con el tema oscuro."""
@@ -5767,7 +6435,7 @@ def test_editor_styles_reach_the_epub():
     convert.edit_section(book, start, end, "\n\n".join(lines))
     out = TMP / "Sigil con título 3.epub"
     convert.write_epub(book, faithful_chapters(book), out, style=convert.ORIGINAL, typography=False, contents=False,
-                       separator="Original del PDF")
+                       separator="Imagen del original")
     chapter = epub_file(out, "OEBPS/Text/capitulo01.xhtml")
     with zipfile.ZipFile(src) as a, zipfile.ZipFile(out) as b:
         changed = [n for n in a.namelist() if n in b.namelist() and a.read(n) != b.read(n)]
@@ -5966,18 +6634,30 @@ def test_editor_navigation_panel():
 
 
 def test_code_completion_suggestions():
-    """Autocompletado de «Código HTML», como VS Code: etiquetas tras «<», la que cierra tras «</», atributos que la
-    etiqueta aún no tiene, clases del CSS en class="…", entidades y símbolos tras «&», abreviaturas tipo Emmet y la
-    etiqueta de cierre tras el «>» de una que abre."""
+    """Autocompletado de «Código HTML», como VS Code: etiquetas tras «<» con su descripción de MDN (al principio de
+    la línea, los párrafos; dentro, las en línea que el libro conserva; en <ruby>, rt y rp primero; buscando también
+    por la descripción: «<cursi» da i), escritas enteras con el cursor dentro; la que cierra tras «</»; atributos de
+    cada elemento y sus valores (dir, lang, clases del CSS en class="…"); entidades y símbolos tras «&»; abreviaturas
+    tipo Emmet y la etiqueta de cierre tras el «>» de una que abre."""
     import editor as ed
-    assert ed.complete_at("<sp") == (2, [("<span>", "span", 0)])
-    assert ed.complete_at("<p>Hola <i>x</") == (0, [("</i>", "i>", 0)])
-    assert ed.complete_at('<p class="a" cl')[1] == [] and ed.complete_at("<p cl") == (2, [("class", 'class=""', 1)])
+    assert ed.complete_at("<sp") == (2, [("<span>", "span></span>", 7, "Contenedor en línea (con clase)")])
+    start = [f[0] for f in ed.complete_at("<")[1]]
+    inside = [f[0] for f in ed.complete_at("<p>Hola <")[1]]
+    assert start[:2] == ["<p>", "<h1>"] and "<hr>" in start and "<i>" in start, start
+    assert "<p>" not in inside and "<hr>" not in inside and "<table>" not in inside and inside[:2] == ["<i>", "<b>"]
+    assert [f[0] for f in ed.complete_at("<p><ruby>漢<")[1]][:2] == ["<rt>", "<rp>"]
+    assert [f[0] for f in ed.complete_at("<p>Hola <cursi")[1]] == ["<i>", "<em>"]
+    assert ed.complete_at("<p>Un <b")[1][0][:3] == ("<b>", "b></b>", 4)
+    assert ed.complete_at("<p>Un <br")[1][0][:3] == ("<br>", "br/>", 0)  # vacía (MDN): sin cierre
+    assert ed.complete_at("<p>Hola <i>x</") == (0, [("</i>", "i>", 0, "")])
+    assert ed.complete_at('<p class="a" cl')[1] == [] and ed.complete_at("<p cl") == (2, [("class", 'class=""', 1, "")])
+    assert [f[0] for f in ed.complete_at('<p dir="')[1]] == ["ltr", "rtl", "auto"]
+    assert [f[0] for f in ed.complete_at("<a h")[1]][:2] == ["href", "hreflang"]  # los suyos antes que los globales
     cut, found = ed.complete_at('<p class="x no', ["nota", "no-indent", "x", "otra"])
     assert cut == 2 and [f[0] for f in found] == ["nota", "no-indent"], (cut, found)
     cut, found = ed.complete_at("Hola &am")
-    assert cut == 3 and ("& ampersand", "&amp;", 0) in found, found
-    assert ("— raya", "—", 0) in ed.complete_at("Ella &")[1]
+    assert cut == 3 and ("& ampersand", "&amp;", 0, "") in found, found
+    assert ("— raya", "—", 0, "") in ed.complete_at("Ella &")[1]
     assert ed.complete_at("Texto sin nada") == (0, []) and ed.complete_at('<a href="x') == (0, [])
     assert ed.expand_abbreviation("p.nota") == (6, '<p class="nota"></p>', 4)
     assert ed.expand_abbreviation("Hola br") == (2, "<br/>", 0)
@@ -6006,9 +6686,8 @@ def test_editor_code_view_autocompletes():
     root.update()
     popup = code.completer.popup().isVisible()
     first = code.completer.model().item(0).text() if code.completer.model().rowCount() else ""
-    QTest.keyClick(code.completer.popup(), Qt.Key.Key_Return)
+    QTest.keyClick(code.completer.popup(), Qt.Key.Key_Return)  # <i></i>, con el cursor dentro
     root.update()
-    QTest.keyClicks(code, ">")
     QTest.keyClicks(code, "ya")
     end = QTextCursor(code.textCursor())
     end.movePosition(QTextCursor.MoveOperation.EndOfBlock)
@@ -6022,9 +6701,90 @@ def test_editor_code_view_autocompletes():
     shown = editor.sheet.document().findBlockByNumber(1).text()
     editor.win.done(0)
     window.close()
-    assert popup and first == "<i>", (popup, first)
+    assert popup and first.startswith("<i>   Cursiva"), (popup, first)
     assert line == '<p>El gato duerme. <i>ya</i> <b class="sc">fin</b></p>', line
     assert shown.startswith("El gato duerme. ya fin"), shown
+
+
+def test_code_view_void_elements_and_rule():
+    """«Código HTML»: los elementos vacíos de MDN (br, hr, img, wbr…) no se cierran, con barra o sin ella; «<hr>» solo
+    en su línea sigue siendo la raya de HTML (con su barra y sus atributos), no «* * *». Una etiqueta a medio escribir
+    («<hr» sin «>», o el «<» con que empieza) no se pasa a la hoja como texto (salía «<hr» en la pestaña EPUB): avisa."""
+    import editor as ed
+    text = ed.from_code('<p>uno</p>\n<hr>\n<hr class="x" >\n<p>a<br>b<wbr>c</p>\n<p>dos</p>')
+    assert text.split("\n\n") == ["uno", "<hr/>", '<hr class="x"/>', "a<br>b<wbr>c", "dos"], text
+    assert ed.to_code(text).split("\n")[1:3] == ["<hr/>", '<hr class="x"/>']
+    for half in ("<p>uno</p>\n<hr", "<p>uno</p>\n<", "<p>uno</p>\n</", "<p>uno <i</p>", '<p>uno <b class="x"</p>'):
+        try:
+            ed.from_code(half)
+            raise AssertionError(half)
+        except ValueError as e:
+            assert "le falta el «>»" in str(e), e
+    assert ed.from_code("<p>3 < 4</p>") == "3 < 4"
+    assert convert._balanced("a<hr>b<br>c<img src='x'>") and not convert._balanced("<i>a")
+    assert convert._inline("Pulsa <kbd>Ctrl</kbd>") == "Pulsa <kbd>Ctrl</kbd>"  # en línea de MDN: se conserva
+
+
+def test_rule_written_in_code_stays_a_rule():
+    """Un <hr> escrito en «Código HTML» es la raya de HTML: en la hoja se ve como una raya, al aceptar es un
+    separador que en el EPUB sale como <hr/> (no «* * *»), en un libro de PDF y en uno de EPUB de entrada."""
+    import editor as ed
+    import qtk
+    from PySide6.QtGui import QTextFormat
+    qtk.app()
+    sheet = ed.Sheet()
+    sheet.set_content([(0, "Uno."), (None, "<hr/>"), (1, "Dos.")], {})
+    ruled = sheet.document().findBlockByNumber(1).blockFormat().hasProperty(
+        QTextFormat.Property.BlockTrailingHorizontalRulerWidth)
+    book = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"), convert.Block("p", 1, "Uno."),
+                                           convert.Block("p", 1, "Dos.")], [0])
+    convert.edit_section(book, 1, 3, "Uno.\n\n<hr/>\n\nDos.")
+    out = TMP / "raya.epub"
+    convert.write_epub(book, [(0, "Capítulo 1")], out, separator="Icono del original", typography=False,
+                       contents=False)
+    with zipfile.ZipFile(out) as z:
+        body = "".join(z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml"))
+    src = sigil_epub(TMP / "Sigil raya.epub")
+    epub = convert.analyze(src)
+    k = next(n for n, b in enumerate(epub.blocks) if b.kind == "p")
+    convert.edit_section(epub, k, k + 1, convert.section_text(epub, k, k + 1) + "\n\n<hr/>")
+    faithful_out = TMP / "Sigil raya (LNC).epub"
+    convert.write_epub(epub, [(c, epub.blocks[c].title) for c in epub.candidates], faithful_out,
+                       style=convert.ORIGINAL, separator="Icono del original", typography=False, contents=False)
+    with zipfile.ZipFile(faithful_out) as z:
+        faithful_body = "".join(z.read(n).decode("utf-8", "replace") for n in z.namelist() if n.endswith("html"))
+    assert ruled
+    assert [(b.kind, b.tag) for b in book.blocks][2] == ("break", "hr")
+    assert "<hr/>" in body and "* * *" not in body, body[-600:]
+    assert faithful_body.count("<hr/>") >= 1, faithful_body[:400]
+    # No es un separador: en el editor sigue siendo «<hr/>» (no «[Separador 2]»), el mismo bloque al volver a
+    # aceptar, fuera de la lista de capítulos y sin cambiar con la opción de separador
+    text = convert.section_text(book, 1, 4)
+    rule = book.blocks[2]
+    convert.edit_section(book, 1, 4, text + "\n\nTres.")
+    assert text.split("\n\n")[1] == "<hr/>", text
+    assert book.blocks[2] is rule
+    assert convert._separator(rule, 2, "Clásico", "* * *", {}) == "<hr/>"
+
+
+def test_drawn_separators_are_icons_by_default():
+    """Los adornos dibujados salen como icono del color del texto («Icono del original»): con «Original del PDF» de
+    antes (revisiones y ajustes guardados) salían como imagen con su fondo blanco, también en modo oscuro. La imagen tal
+    cual sigue en «Imagen del original»; un separador de texto («※ ・ ※») queda igual."""
+    import app
+    ornament = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 30), False)
+    ornament.clear_with(255)
+    ornament.set_rect(pymupdf.IRect(20, 5, 40, 25), (0, 0, 0))
+    drawn = convert.Block("break", 1, "", image=ornament.tobytes("png"))
+    written = convert.Block("break", 1, "※ ・ ※")
+    old = [convert._separator(b, 0, "Clásico", "Original del PDF", {}) for b in (drawn, written)]
+    image = convert._separator(drawn, 0, "Clásico", "Imagen del original", {})
+    assert "<svg" in old[0] and "<img" not in old[0], old
+    assert old[1] == '<p class="brk">※ ・ ※</p>', old
+    assert "<img" in image, image
+    assert app.EPUB_DEFAULTS["separator"] == "Icono del original"
+    assert "Original del PDF" not in convert.SEPARATOR_CHOICES and "Imagen del original" in convert.SEPARATOR_CHOICES
+    assert app._write_options({"separator": "Original del PDF"})["separator"] == "Icono del original"
 
 
 def test_editor_code_view_new_line_keeps_the_cursor():
@@ -8394,6 +9154,27 @@ def test_heading_decoration_and_lowercase_continuation_across_pages():
     assert len(joined) == 1 and "y pasabas" in joined[0], joined
 
 
+def test_dialogue_tag_after_quote_with_comma_joins_its_paragraph():
+    """Kage 7 (World Project): el diálogo a la inglesa acaba en coma dentro de las comillas («…a todos,"») y la
+    acotación va como párrafo aparte («dijo Sakura, bajando la mirada.»), también al pasar de página. La coma dice que
+    la frase sigue: era el aviso «Párrafo partido» más repetido del libro (12). Tras un punto, no se une."""
+    doc = pymupdf.open()
+    gap = lambda y, t: [(72, y, t, 11, "cour")]
+    add_page(doc, 1, [(72, 100, "Capitulo 1: Inicio", 16, "helv")]
+             + gap(150, line("Una o dos personas con rencor no serian ni de lejos", 60)) + gap(164, 'suficientes,"')
+             + gap(190, "dijo Sakura, bajando la mirada.") + gap(216, '"Tengo una propuesta."')
+             + gap(242, "dijo Otoutorion.") + gap(268, line("Un parrafo que acaba al pie de la pagina", 60))
+             + gap(282, 'con la guerra,"'))
+    add_page(doc, 2, gap(100, "dijo Lalanoa con emocion.") + gap(126, line("Otro parrafo cualquiera", 60))
+             + gap(140, "y su final."))
+    path = TMP / "acotacion-coma.pdf"
+    doc.save(path)
+    paras = [convert._plain(b) for b in convert.analyze(path).blocks if b.kind == "p"]
+    assert any(p.endswith('suficientes," dijo Sakura, bajando la mirada.') for p in paras), paras
+    assert any(p.endswith('con la guerra," dijo Lalanoa con emocion.') for p in paras), paras
+    assert "dijo Otoutorion." in paras, paras
+
+
 def test_bold_bare_number_marks_a_part():
     """Re Zero 4 y 5: los apartados de cada capítulo van marcados con un número solo, en negrita y del tamaño del
     texto («2»), y la numeración vuelve a empezar en cada capítulo. Salía como un párrafo «2» dentro del texto:
@@ -10226,11 +11007,22 @@ def test_worker_error_is_logged():
     events = multiprocessing_queue()
 
     def boom():
+        chapter = "Capítulo 3"
         raise ValueError("roto")
 
     app._worker(events, boom, (), False)
     first, second = events.get(timeout=5), events.get(timeout=5)
     assert first == ("error", "roto") and second[0] == "log" and "ValueError: roto" in second[1], (first, second)
+    assert "chapter = 'Capítulo 3'" in second[1], second[1]  # las variables de donde saltó
+    # Un PDF escaneado no es un fallo de la app: se avisa, sin pila en errores.log (salía como fallo en el registro)
+    scanned = pymupdf.open()
+    scanned.new_page()
+    path = TMP / "escaneado.pdf"
+    scanned.save(path)
+    app._worker(events, convert.analyze, (str(path),), False)
+    first = events.get(timeout=5)
+    assert first[0] == "error" and "no tiene texto" in first[1], first
+    assert events.empty(), events.get(timeout=1)
     path = app._log(second[1])
     assert path.parent == app.SETTINGS.parent and "ValueError: roto" in path.read_text(encoding="utf-8")
 
@@ -10691,6 +11483,20 @@ def test_edit_section_keeps_pages_of_unchanged_paragraphs():
     assert pages == [1, 2, 3, 3], pages
 
 
+def test_edit_section_repeated_paragraphs_keep_their_own_element():
+    """Re:Zero 1 (EPUB japonés): «「────ッ」» sale dos veces en el capítulo. Sin cambios, cada una sigue siendo su
+    elemento del EPUB (página y src); antes las dos tomaban el de la primera y la pestaña EPUB del editor (y el EPUB
+    guardado) la ponía donde no iba."""
+    blocks = [convert.Block("heading", 1, "Cap 1", src=("a.xhtml", 0, 5, 0, 9)),
+              convert.Block("p", 1, "「────ッ」", src=("a.xhtml", 10, 15, 9, 20)),
+              convert.Block("p", 1, "Texto.", src=("a.xhtml", 20, 25, 20, 30)),
+              convert.Block("p", 2, "「────ッ」", src=("b.xhtml", 10, 15, 9, 20))]
+    book = convert.Book("Libro", "", b"", blocks, [0])
+    convert.edit_section(book, 0, 4, convert.section_text(book, 0, 4))
+    assert [(b.page, b.src[0]) for b in book.blocks] == [(1, "a.xhtml"), (1, "a.xhtml"), (1, "a.xhtml"),
+                                                         (2, "b.xhtml")], book.blocks
+
+
 def test_edit_section_translated_paragraphs_keep_page_and_box():
     """Witch vol. 1 traducido con DeepSeek: tras «Aplicar al libro» el editor no recuadraba nada en el PDF, porque
     cada párrafo traducido perdía su recuadro y su página, y el texto en español no se encuentra en el PDF inglés.
@@ -10807,7 +11613,7 @@ def test_window_does_not_decode_illustrations_again():
 
     root, window = visible_window()
     window.pdf = make_novel()
-    book, twins, report, memos = app._analyze(str(window.pdf))
+    book, twins, report, memos, shown = app._analyze(str(window.pdf))
     found = convert.duplicate_images
     original = convert.pymupdf.Pixmap
     decoded = []
@@ -11485,8 +12291,10 @@ def test_editor_epub_tab_marks_every_paragraph_and_pages_into_next_chapter():
             # al final del capítulo, «Página siguiente» abre el siguiente; al principio, «anterior» vuelve por el final
             bar = ed.side_web.bar
             bar.setValue(bar.maximum())
+            loads = ed.side_web.loads
             ed.step_page(1)
             ahead = ed.current
+            wait_for(lambda: ed.side_web.loads > loads, 10)  # hasta que carga, los clics de más no saltan otro
             ed.side_web.bar.setValue(0)
             ed.step_page(-1)
             back = ed.current
@@ -11670,6 +12478,28 @@ def test_note_html_takes_the_note_without_its_backlink():
     assert webview.note_html(xhtml, "nt10") == "<p>Otra.</p>" and webview.note_html(xhtml, "zz") == ""
 
 
+def test_websheet_redo_follows_chromium():
+    """Hoja web: Rehacer no seguía a Chromium (solo Deshacer lo hacía) y, tras deshacer lo escrito en la web, se
+    quedaba gris aunque se podía rehacer con Ctrl+Y."""
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14 rehacer.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            ed = web_editor(window, window.book.candidates[2])
+            js(ed.web, "(function(){var p=document.querySelector('#lnc-sheet p');var r=document.createRange();"
+                       "r.selectNodeContents(p);r.collapse(false);var s=getSelection();s.removeAllRanges();"
+                       "s.addRange(r);document.execCommand('insertText',false,' escrito');return true;})()")
+            typed = wait_for(lambda: ed.undo_btn.isEnabled(), 5)
+            ed.do("undo")
+            redo = wait_for(lambda: ed.redo_btn.isEnabled(), 5)
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert typed and redo, (typed, redo)
+
+
 def test_websheet_cleans_what_chromium_writes():
     """Lo que Chromium deja al editar vuelve como lo escribiría la app: <strike> como <s>, sin <font>, sin style
     vacíos ni xmlns repetidos, &nbsp; como espacio, <br /> como <br/>, sin bloques dentro de un párrafo ni el <br>
@@ -11748,7 +12578,7 @@ def test_websheet_round_trip_and_editing_reach_the_book():
             ed.save()
             out = TMP / "Sigil hoja web.epub"
             convert.write_epub(window.book, faithful_chapters(window.book), out, style=convert.ORIGINAL,
-                               typography=False, contents=False, separator="Original del PDF")
+                               typography=False, contents=False, separator="Imagen del original")
             chapter = epub_file(out, "OEBPS/Text/capitulo01.xhtml")
         finally:
             window.close()
@@ -12307,7 +13137,7 @@ def test_faithful_epub_pages_without_index_entry_continue_their_chapter():
     kinds = [b.kind for b in book.blocks]
     out = TMP / "Kadokawa (LNC).epub"
     convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], out, style=convert.ORIGINAL,
-                       separator="Original del PDF", typography=False, contents=False)
+                       separator="Imagen del original", typography=False, contents=False)
     assert titles == ["序章 春", "一章 夏"], titles
     assert kinds.count("break") == 3 and kinds.count("image") == 2, kinds
     assert book.candidates[1] > kinds.index("break"), book.candidates  # el texto de p-002 va en el primer capítulo
@@ -12320,7 +13150,7 @@ def test_faithful_epub_pages_without_index_entry_continue_their_chapter():
         cut = pymupdf.Pixmap(z.read("item/image/kugiri.jpg"))
     kept = TMP / "Kadokawa vertical.epub"
     convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], kept, style=convert.ORIGINAL,
-                       separator="Original del PDF", typography=False, contents=False, horizontal=False)
+                       separator="Imagen del original", typography=False, contents=False, horizontal=False)
     with zipfile.ZipFile(kept) as z:
         vertical_opf = z.read("item/standard.opf").decode()
     assert book.vertical and 'page-progression-direction="ltr"' in opf and "horizontal-tb" in css, opf
@@ -12398,6 +13228,129 @@ def test_editor_original_marks_japanese_paragraphs():
     assert box is not None and box.height > 3 * line, (box, line)
 
 
+def test_window_original_page_with_a_sentence_of_the_next_chapter_goes_to_its_own():
+    """Re:Zero 1 (EPUB japonés): con el capítulo 1 elegido, ◀ del original a una página del prólogo con una frase
+    que también está en el capítulo 1 dejaba la fila en el capítulo 1 y el EPUB en su final. Un párrafo solo cuenta
+    en las páginas de su archivo: la fila pasa al prólogo."""
+    src = kadokawa_epub(TMP / "Kadokawa frase base.epub")
+    out = TMP / "Kadokawa frase.epub"
+    same = "<p>同じ一文がどちらの章にも出てくる。</p>"
+    with zipfile.ZipFile(src) as z, zipfile.ZipFile(out, "w") as copy:
+        for info in z.infolist():
+            data = z.read(info)
+            if info.filename.endswith(("p-002.xhtml", "p-004.xhtml")):
+                data = data.replace(b'<div class="main">', b'<div class="main">' + same.encode())
+            copy.writestr(info, data)
+    root, window = visible_window()
+    window.pdf = out
+    window.show_book(convert.analyze(out))
+    blocks = window.book.blocks
+    second = str(window.book.candidates[1])
+    window.tree.selection_set(second)
+    root.update()
+    page = next(b.page - 1 for b in blocks if b.src and b.src[0].endswith("p-002.xhtml"))  # texto del prólogo
+    window.pdf_page = page
+    window.follow_original()
+    chosen = window.tree.selection()[0]
+    window.close()
+    assert chosen == str(window.book.candidates[0]), (chosen, page)
+
+
+def test_window_repeated_paragraph_in_a_file_keeps_original_and_epub_together():
+    """Re:Zero 1, 奥付: «Ｒｅ：ゼロ…１» abre la sección y vuelve a salir en su 2.ª página. Esa página del original
+    llevaba el EPUB a su página 1 (se tomaba la primera aparición) y la página del EPUB que la tiene empezaba en el
+    párrafo de después. Cada aparición cuenta en su sitio."""
+    src = kadokawa_epub(TMP / "Kadokawa repetido base.epub")
+    out = TMP / "Kadokawa repetido.epub"
+    same = "<p>同じ題名がもう一度ここに出てくる</p>"
+    filler = [f"<p>{n}番目の段落はこのページを埋めるための長い文章です。</p>" for n in range(60)]
+    with zipfile.ZipFile(src) as z, zipfile.ZipFile(out, "w") as copy:
+        for info in z.infolist():
+            data = z.read(info)
+            if info.filename.endswith("p-004.xhtml"):
+                # 21 párrafos llenan la página: la repetición abre la siguiente
+                data = re.sub(rb"<p>.*</p>", (same + "".join(filler[:21]) + same + "".join(filler[21:])).encode(), data)
+            copy.writestr(info, data)
+    import app
+    root, window = visible_window()
+    window.pdf = out
+    window.show_book(convert.analyze(out))
+    blocks = window.book.blocks
+    first, second = [k for k, b in enumerate(blocks) if "同じ題名" in b.html]
+    window.tree.selection_set(str(window.book.candidates[1]))
+    root.update()
+    key = app._match_key(convert._plain(blocks[second]))
+    pages = [n for n in range(window.pdf_doc.page_count) if key in app._match_key(window.pdf_doc[n].get_text())]
+    at = window.block_at_original(pages[-1])
+    firsts = window.epub_firsts()
+    window.close()
+    assert len(pages) == 2 and at == second, (at, first, second, pages)
+    assert second in firsts or any(a < second < b for a, b in zip(firsts, firsts[1:])), firsts
+    assert sorted(firsts) == firsts and firsts.count(first) <= 1, firsts
+
+
+def test_translated_japanese_epub_keeps_original_page():
+    """陰の実力者 07: traducido del japonés, el original (en japonés) ya no tenía el texto de los párrafos y el
+    editor y las vistas previas iban a la primera página del archivo. Se busca el texto que se leyó (Block.orig)."""
+    src = kadokawa_epub(TMP / "Kadokawa traducido base.epub")
+    out = TMP / "Kadokawa traducido.epub"
+    filler = [f"<p>{n}番目の段落はこのページを埋めるための長い文章です。</p>" for n in range(60)]
+    with zipfile.ZipFile(src) as z, zipfile.ZipFile(out, "w") as copy:
+        for info in z.infolist():
+            data = z.read(info)
+            if info.filename.endswith("p-004.xhtml"):
+                data = re.sub(rb"<p>.*</p>", "".join(filler).encode(), data)
+            copy.writestr(info, data)
+    import app
+    root, window = visible_window()
+    window.pdf = out
+    book = convert.analyze(out)
+    k = next(k for k, b in enumerate(book.blocks) if "40番目" in b.html)
+    start = max(c for c in book.candidates if c <= k)
+    end = next((c for c in book.candidates if c > k), len(book.blocks))
+    lines = convert.section_text(book, start, end).split("\n\n")
+    convert.edit_section(book, start, end, "\n\n".join(
+        f"Párrafo {n} traducido al español." if "番目" in line else line for n, line in enumerate(lines)))
+    window.show_book(book)
+    window.tree.selection_set(str(start))
+    root.update()
+    doc = window.pdf_doc
+    page = next(n for n in range(doc.page_count) if "40番目" in doc[n].get_text())
+    found = app._epub_block_page(book, doc, k)
+    box = app.TextEditor.find_box(doc[page], book.blocks[k])
+    at = window.block_at_original(page)
+    window.close()
+    assert "español" in book.blocks[k].html and found == page, (found, page)
+    assert box is not None
+    assert at is not None and start < at <= k and "español" in book.blocks[at].html, at
+
+
+def test_editor_epub_tab_does_not_count_the_section_name():
+    """Re:Zero 1: un capítulo de EPUB sin título propio lleva en la hoja su nombre del índice («序章 春»), que no se
+    escribe. La pestaña EPUB busca un párrafo corto («「春──」») por sus letras y cuántos de antes las tienen;
+    contando ese nombre, el clic recuadraba el «春» siguiente del capítulo."""
+    import app
+    src = kadokawa_epub(TMP / "Kadokawa nombre base.epub")
+    out = TMP / "Kadokawa nombre.epub"
+    with zipfile.ZipFile(src) as z, zipfile.ZipFile(out, "w") as copy:
+        for info in z.infolist():
+            data = z.read(info)
+            if info.filename.endswith("p-002.xhtml"):
+                data = re.sub(rb"<p>.*</p>", "<p>春が来た。</p><p>「春──」</p><p>春の終わり。</p>".encode(), data)
+            copy.writestr(info, data)
+    root, window = visible_window()
+    window.pdf = out
+    window.show_book(convert.analyze(out))
+    ed = app.TextEditor(window, "0", *window.section_bounds(0))
+    blocks = list(ed.blocks())
+    n = next(n for n, b in enumerate(blocks) if b.text() == "「春──」")
+    key = ed.epub_key(blocks[n], blocks[:n])
+    first = blocks[0].text()
+    ed.win.done(0)
+    window.close()
+    assert first == "序章 春" and key == ("春", 1), (first, key)
+
+
 def test_fixed_layout_illustration_fills_its_original_page():
     """Página de maquetación fija (Kadokawa): la ilustración es un <svg width="100%" height="100%"> con su viewBox.
     En la vista «Original» MuPDF la dibujaba pequeña en la esquina de arriba de una página grande; ahora la llena."""
@@ -12417,7 +13370,7 @@ def test_faithful_preview_of_a_section_is_light():
     end = book.candidates[1]
     part = convert.Book(book.title, "", book.cover, book.blocks[k:end], [], origin=book.origin, vertical=book.vertical)
     out = TMP / "Kadokawa vista (LNC).epub"
-    convert.write_epub(part, [], out, style=convert.ORIGINAL, separator="Original del PDF", typography=False,
+    convert.write_epub(part, [], out, style=convert.ORIGINAL, separator="Imagen del original", typography=False,
                        contents=False, preview=True)
     with zipfile.ZipFile(out) as z:
         files = z.namelist()
@@ -12436,7 +13389,7 @@ def test_faithful_preview_puts_each_illustration_on_its_own_page():
     end = next(k for k, b in enumerate(book.blocks) if k > start and b.kind == "heading" and "Héroe" in b.title)
     part = convert.Book(book.title, "", book.cover, book.blocks[start:end], [], origin=book.origin)
     out = TMP / "Sigil láminas (LNC).epub"
-    convert.write_epub(part, [(0, "Capítulo 1")], out, style=convert.ORIGINAL, separator="Original del PDF",
+    convert.write_epub(part, [(0, "Capítulo 1")], out, style=convert.ORIGINAL, separator="Imagen del original",
                        typography=False, contents=False, preview=True)
     with pymupdf.open(out) as epub:
         epub.layout(width=360, height=640, fontsize=11)
@@ -12444,7 +13397,7 @@ def test_faithful_preview_puts_each_illustration_on_its_own_page():
                  or p.get_text().strip()]
     whole = TMP / "Sigil láminas completo (LNC).epub"
     convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], whole, style=convert.ORIGINAL,
-                       separator="Original del PDF", typography=False, contents=False)
+                       separator="Imagen del original", typography=False, contents=False)
     assert (False, True) in pages and (True, True) not in pages, pages
     assert "page-break" not in epub_file(whole, "OEBPS/Text/capitulo01.xhtml")
 
@@ -12464,10 +13417,10 @@ def test_faithful_preview_leaves_out_the_book_index():
     k = next(c for c in book.candidates if book.blocks[c].title.startswith("Capítulo 2"))
     part = convert.Book(book.title, "", book.cover, book.blocks[k:k + 2], [], origin=book.origin)
     out, whole = TMP / "Sigil índice vista.epub", TMP / "Sigil índice (LNC).epub"
-    convert.write_epub(part, [(0, "Capítulo 2: Héroe")], out, style=convert.ORIGINAL, separator="Original del PDF",
+    convert.write_epub(part, [(0, "Capítulo 2: Héroe")], out, style=convert.ORIGINAL, separator="Imagen del original",
                        typography=False, contents=False, preview=True)
     convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], whole, style=convert.ORIGINAL,
-                       separator="Original del PDF", typography=False)
+                       separator="Imagen del original", typography=False)
     with pymupdf.open(out) as doc:
         text = "".join(page.get_text() for page in doc)
     with zipfile.ZipFile(whole) as z:
@@ -12528,7 +13481,7 @@ def test_faithful_epub_small_caps_from_the_editor_get_their_css():
     convert.edit_section(book, start, end, text)
     out = TMP / "Sigil versalitas (LNC).epub"
     convert.write_epub(book, faithful_chapters(book), out, typography=False, style=convert.ORIGINAL,
-                       separator="Original del PDF", contents=False)
+                       separator="Imagen del original", contents=False)
     with zipfile.ZipFile(out) as z:
         sheets = [n for n in z.namelist() if n.endswith("lnc/estilo.css")]
         css = z.read(sheets[0]).decode() if sheets else ""
@@ -12546,7 +13499,7 @@ def test_faithful_epub_unchanged_is_identical_and_changes_are_patched():
     src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
     book = convert.analyze(src)
     out = TMP / "Sigil - Volumen 14 (LNC).epub"
-    options = {"typography": False, "style": convert.ORIGINAL, "separator": "Original del PDF", "contents": False}
+    options = {"typography": False, "style": convert.ORIGINAL, "separator": "Imagen del original", "contents": False}
     convert.write_epub(book, faithful_chapters(book), out, **options)
     with zipfile.ZipFile(src) as a, zipfile.ZipFile(out) as b:
         assert a.namelist() == b.namelist() or sorted(a.namelist()) == sorted(b.namelist())
@@ -14492,6 +15445,8 @@ def _run_tests(part, parts):
     global TMP
     failed = 0
     no_modal_dialogs()
+    import logging
+    logging.getLogger().addHandler(logging.NullHandler())  # el registro de la app, sin salir por la consola
     # prefijo lnepub-: el hook de limpieza borra lo que quede si las pruebas se cortan
     with tempfile.TemporaryDirectory(prefix="lnepub-test-", ignore_cleanup_errors=True) as tmp:
         TMP = Path(tmp)

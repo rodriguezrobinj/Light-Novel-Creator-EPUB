@@ -7,13 +7,14 @@ import difflib
 import hashlib
 import html
 import re
+import unicodedata
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QEvent, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QRegularExpression, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPalette, QStandardItem, QStandardItemModel,
                            QSyntaxHighlighter, QTextBlockFormat,
                            QTextBlockUserData, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat,
-                           QTextImageFormat, QTextListFormat)
+                           QTextImageFormat, QTextLength, QTextListFormat, QKeySequence)
 from PySide6.QtWidgets import QApplication, QCompleter, QTextEdit, QToolTip, QWidget
 
 import convert
@@ -69,7 +70,7 @@ STACK_SEP = "\x1f"
 VOID_CHAR = "⁠"  # unión de palabras: ni se ve ni separa; lleva una etiqueta vacía del libro (VOID)
 LINE_BREAK = " "  # salto de línea dentro del párrafo: <br/> (Mayús+Intro)
 TAG = re.compile(r'<(/?)([A-Za-z][\w:.-]*)((?:\s+[^\s=<>/"]+(?:\s*=\s*"[^"<>]*")?)*)\s*(/?)>')
-VOID_TAGS = {"br", "img", "wbr", "hr"}
+VOID_TAGS = convert.VOID_ELEMENTS  # los de MDN: sin cierre
 SIZES = (0.7, 0.8, 1.0, 1.2, 1.5, 2.0, 2.4)  # tamaños relativos de Qt: FontSizeAdjustment de -2 a 4
 HEADING_SIZES = {"h1": "1.5em", "h2": "1.3em", "h3": "1.15em", "h4": "1.05em"}
 CSS = None  # hoja del EPUB de entrada (faithful.BookStyle): sus clases y fuentes se ven en la hoja; None con un PDF
@@ -354,6 +355,8 @@ CODE_CLASSES = {"center": '<p class="center">', "right": '<p class="right">', "f
     "table": '<p class="tabla">', "table-head": '<p class="tabla cabecera">'}
 CODE_LINE = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>(.*)</\1>', re.S)
 CODE_TOKEN = re.compile(r"<!--\s*(\[[^\]]+\])\s*-->")
+# etiqueta empezada y sin su «>»; también «<» o «</» solos al final, la primera letra de «<hr>»
+HALF_TAG = re.compile(r"</?(?:[A-Za-z][\w:.-]*(?:\s[^<>]*)?)?(?=<|$)")
 
 
 def to_code(text):
@@ -363,6 +366,9 @@ def to_code(text):
         bare = line.strip()
         if convert.TOKEN.fullmatch(bare) or convert.PICTURE.fullmatch(bare):
             out.append(f"<!-- {bare} -->")
+            continue
+        if convert.RULE_LINE.fullmatch(bare):  # una raya <hr>: tal cual
+            out.append(bare)
             continue
         prefix, rest = convert.split_prefix(line)
         inner = convert._inline(rest.strip())
@@ -388,6 +394,11 @@ def from_code(code):
         if token:
             lines.append(token[1])
             continue
+        if convert.RULE_LINE.fullmatch(line):  # «<hr>» solo en su línea: la raya de HTML, tal cual
+            lines.append(re.sub(r"\s*/?>$", "/>", line))  # con su barra, como en XHTML, y sus atributos
+            continue
+        if half := HALF_TAG.search(line):  # «<hr» sin «>» aún: no se pone en la hoja como texto
+            raise ValueError(f"Línea {n}: a «{half[0][:20]}» le falta el «>» que la cierra")
         m = CODE_LINE.fullmatch(line)
         if not m:
             if line.startswith("<") and convert.OPENING.match(line):
@@ -413,12 +424,15 @@ class CodeLook(QSyntaxHighlighter):
         super().__init__(document)
         self.colors = colors  # theme.CODE: colores del tema
         self.changes, self.removed = None, None  # «Mostrar cambios», como en Look
+        # ¿Alguna línea sabe su línea de antes (show_changes)? Sin ninguna, code_group subía hasta la primera línea
+        # por cada una: al cargar un capítulo de 900 párrafos, millones de pasos
+        self.originals = False
         watch_groups(self, code_group)
 
     def highlightBlock(self, text):
         self.paint_code(text)
         block = self.currentBlock()
-        group, n = code_group(block)
+        group, n = code_group(block) if self.originals else ([block], 0)
         head = group[0].userData()
         before = head.original if isinstance(head, Changes) else None
         texts = [b.text() if b != block else text for b in group]
@@ -430,10 +444,16 @@ class CodeLook(QSyntaxHighlighter):
             block.userData().gone = []
 
     def paint_code(self, text):
+        # un formato por color y posiciones UTF-16 solo si hace falta: abrir el código de un capítulo largo pinta
+        # miles de etiquetas
+        at = (lambda i: u16(text, i)) if any(ord(c) > 0xFFFF for c in text) else (lambda i: i)
+        formats = {}
+
         def paint(start, size, key):
-            f = QTextCharFormat()
-            f.setForeground(QColor(self.colors[key]))
-            self.setFormat(u16(text, start), u16(text, start + size) - u16(text, start), f)
+            if key not in formats:
+                formats[key] = QTextCharFormat()
+                formats[key].setForeground(QColor(self.colors[key]))
+            self.setFormat(at(start), at(start + size) - at(start), formats[key])
         for m in re.finditer(r"&#?\w+;", text):
             paint(m.start(), m.end() - m.start(), "entity")
         for m in re.finditer(r"(</?)([\w:-]*)([^<>]*?)(/?>)", text):
@@ -449,15 +469,45 @@ class CodeLook(QSyntaxHighlighter):
 
 
 # Autocompletado de «Código HTML», como las extensiones de HTML de VS Code: etiquetas tras «<», la que cierra tras
-# «</», atributos dentro de una etiqueta, las clases del CSS del libro en class="…", entidades y símbolos tras «&»,
-# abreviaturas tipo Emmet con Tab («p.nota») y la etiqueta de cierre al escribir el «>» de una que abre
-HTML_TAGS = ("p", "i", "b", "em", "strong", "span", "br", "a", "ruby", "rt", "rp", "sup", "sub", "small", "s", "u",
-        "h1", "h2", "h3", "h4", "h5", "h6", "div", "img", "hr", "blockquote", "ul", "ol", "li", "table", "tr", "td",
-        "th", "figure", "figcaption", "section", "aside", "q", "cite", "code", "pre", "del", "ins", "mark", "abbr")
-HTML_VOID = {"br", "img", "hr", "wbr"}
-HTML_ATTRS = {"": ("class", "id", "style", "lang", "title", "dir", "epub:type", "xml:lang"),
-         "a": ("href",), "img": ("src", "alt", "width", "height"), "td": ("colspan", "rowspan"),
-         "th": ("colspan", "rowspan"), "ol": ("start",), "abbr": ("title",)}
+# «</», atributos dentro de una etiqueta y sus valores (las clases del CSS del libro en class="…"), entidades y
+# símbolos tras «&», abreviaturas tipo Emmet con Tab («p.nota») y la etiqueta de cierre al escribir el «>» de una que
+# abre. Las etiquetas, con su descripción de MDN (developer.mozilla.org/es/docs/Web/HTML/Reference/Elements); solo las
+# que la vista de código acepta: cada línea es un párrafo (BLOCK_TAGS) y dentro van las que el libro conserva
+# (convert.RAW_TAG): otra saldría escrita como texto en el EPUB
+BLOCK_TAGS = {
+    "p": "Párrafo", "h1": "Título de capítulo (nivel 1, el más importante)", "h2": "Subtítulo (nivel 2)",
+    "h3": "Encabezado de nivel 3", "h4": "Encabezado de nivel 4", "h5": "Encabezado de nivel 5",
+    "h6": "Encabezado de nivel 6", "blockquote": "Cita en bloque, apartada del texto",
+    "div": "Contenedor genérico, sin efecto hasta darle una clase", "pre": "Texto preformateado, tal como se escribe",
+    "li": "Elemento de una lista", "dt": "Término de una lista de descripciones",
+    "dd": "Descripción del término anterior", "hr": "Separador de escena (cambio de tema entre párrafos)"}
+INLINE_TAGS = {
+    "i": "Cursiva: términos, pensamientos, palabras extranjeras", "b": "Negrita: llama la atención",
+    "em": "Énfasis (cursiva)", "strong": "Importante o urgente (negrita)", "span": "Contenedor en línea (con clase)",
+    "a": "Enlace a otra página, nota o dirección web", "br": "Salto de línea dentro del párrafo",
+    "wbr": "Posible corte de línea en una palabra larga", "ruby": "Furigana: anotación sobre el texto base",
+    "rt": "Lectura del furigana (dentro de ruby)", "rp": "Paréntesis del furigana para lectores sin ruby",
+    "sup": "Superíndice (volado): 1.ᵉʳ, m²", "sub": "Subíndice: H₂O", "small": "Letra pequeña: texto secundario",
+    "s": "Tachado: ya no es cierto o relevante", "u": "Subrayado: anotación no textual",
+    "mark": "Resaltado, como con marcador", "q": "Cita corta en línea", "cite": "Título de una obra",
+    "abbr": "Abreviatura o sigla (su forma completa en title)", "code": "Fragmento de código",
+    "kbd": "Tecla o texto que se escribe", "samp": "Salida de un programa", "var": "Nombre de variable",
+    "dfn": "Término que se define aquí", "del": "Texto suprimido", "ins": "Texto añadido",
+    "bdi": "Aísla texto en otra dirección (árabe, hebreo)", "bdo": "Fuerza la dirección del texto (dir)",
+    "time": "Fecha u hora (datetime legible por máquina)", "data": "Dato con su valor legible por máquina (value)",
+    "img": "Imagen en línea (icono)"}
+HTML_TAGS = tuple(BLOCK_TAGS) + tuple(INLINE_TAGS)
+HTML_VOID = convert.VOID_ELEMENTS  # los de MDN: sin cierre
+# Atributos de cada elemento (MDN); "" son los globales que sirven en un libro
+HTML_ATTRS = {"": ("class", "id", "style", "lang", "xml:lang", "title", "dir", "translate", "hidden", "epub:type"),
+              "a": ("href", "hreflang", "rel", "target"), "img": ("src", "alt", "width", "height"),
+              "q": ("cite",), "blockquote": ("cite",), "del": ("cite", "datetime"), "ins": ("cite", "datetime"),
+              "time": ("datetime",), "data": ("value",), "bdo": ("dir",)}
+# Valores que MDN da para cada atributo (y el vocabulario de EPUB para epub:type)
+ATTR_VALUES = {"dir": ("ltr", "rtl", "auto"), "translate": ("yes", "no"), "target": ("_blank", "_self"),
+               "lang": ("es", "en", "ja", "zh", "ko", "fr", "pt", "it", "de"),
+               "xml:lang": ("es", "en", "ja", "zh", "ko", "fr", "pt", "it", "de"),
+               "epub:type": ("noteref", "footnote", "endnote", "pagebreak", "bridgehead", "title", "subtitle")}
 ENTITIES = (("&amp;", "& ampersand"), ("&lt;", "< menor que"), ("&gt;", "> mayor que"), ("&nbsp;", "espacio duro"),
             ("&quot;", "\" comillas"), ("&#160;", "espacio duro (número)"),
             ("—", "— raya"), ("–", "– semirraya"), ("…", "… puntos suspensivos"), ("«", "« comilla latina"),
@@ -480,33 +530,60 @@ def open_tags(text):
     return stack
 
 
+def _tag_items(typed, before):
+    """Etiquetas para «<typed» con before delante en la línea: al principio, los párrafos (BLOCK_TAGS) y luego las en
+    línea (la línea será un párrafo con ella); dentro, solo las en línea; en un <ruby>, rt y rp primero. Las que empiezan por lo escrito y luego las que lo tienen en el nombre o
+    en la descripción («<cursiva» da i). Cada una se escribe entera, con el cursor dentro (o tras la vacía)."""
+    stack = open_tags(before)
+    tags = BLOCK_TAGS | INLINE_TAGS if not stack and not before.strip() else INLINE_TAGS
+    order = list(tags)
+    if stack and stack[-1].lower() == "ruby":
+        order = ["rt", "rp"] + [t for t in order if t not in ("rt", "rp")]
+    typed = typed.lower()
+    first = [t for t in order if t.startswith(typed)]
+    more = [t for t in order if t not in first and len(typed) >= 2 and (typed in t or typed in fold(tags[t]))]
+
+    def item(t):
+        if t in HTML_VOID:
+            return f"<{t}>", f"{t}/>", 0, tags[t]
+        return f"<{t}>", f"{t}></{t}>", len(t) + 3, tags[t]
+    return [item(t) for t in first + more]
+
+
+def fold(text):
+    """Sin tildes ni mayúsculas: «cursíva» encuentra «Cursiva»."""
+    return "".join(c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn")
+
+
 def complete_at(before, classes=()):
     """Sugerencias para lo escrito antes del cursor en su línea: (cuántas letras de atrás sustituyen, [(lo que se
-    ve, lo que se escribe, cuántos caracteres atrás queda el cursor)]). Sin contexto, (0, [])."""
+    ve, lo que se escribe, cuántos caracteres atrás queda el cursor, descripción)]). Sin contexto, (0, [])."""
     if m := re.search(r"&([\w#]*)$", before):  # entidades y símbolos
         typed = m[1].lower()
-        found = [(label, text, 0) for text, label in ENTITIES
+        found = [(label, text, 0, "") for text, label in ENTITIES
                  if not typed or text.lstrip("&").lower().startswith(typed) or typed in label.lower()]
         return len(m[0]), found
     if m := re.search(r"</([\w:-]*)$", before):  # la etiqueta que cierra: la abierta más de dentro
         stack = open_tags(before[:m.start()])
-        return len(m[1]), [(f"</{n}>", f"{n}>", 0) for n in reversed(stack) if n.startswith(m[1])][:1]
+        return len(m[1]), [(f"</{n}>", f"{n}>", 0, "") for n in reversed(stack) if n.startswith(m[1])][:1]
     if m := re.search(r"<([\w:-]*)$", before):  # etiquetas
-        return len(m[1]), [(f"<{t}>", t, 0) for t in HTML_TAGS if t.startswith(m[1].lower())]
+        return len(m[1]), _tag_items(m[1], before[:m.start()])
     tag = re.search(r"<([A-Za-z][\w:-]*)\b([^<>]*)$", before)
     if not tag:
         return 0, []
     inside = tag[2]
-    if m := re.search(r'\bclass="([^"]*)$', inside):  # clases del CSS del libro
-        word = re.search(r"[\w-]*$", m[1])[0]
-        used = set(m[1].split())
-        return len(word), [(c, c, 0) for c in classes if c.startswith(word) and c not in used]
-    if inside.count('"') % 2:  # dentro del valor de otro atributo
-        return 0, []
+    if m := re.search(r'\b([\w:-]+)="([^"]*)$', inside):  # el valor de un atributo
+        if m[1] == "class":  # las clases del CSS del libro
+            word = re.search(r"[\w-]*$", m[2])[0]
+            used = set(m[2].split())
+            return len(word), [(c, c, 0, "") for c in classes if c.startswith(word) and c not in used]
+        values = [(v, v, 0, "") for v in ATTR_VALUES.get(m[1], ()) if v.startswith(m[2]) and v != m[2]]
+        return (len(m[2]), values) if values else (0, [])  # href, src…: lo que se escriba
     if m := re.search(r"\s([\w:-]*)$", inside):  # atributos que la etiqueta aún no tiene
         have = set(re.findall(r'([\w:-]+)=', inside))
-        names = HTML_ATTRS[""] + HTML_ATTRS.get(tag[1].lower(), ())
-        return len(m[1]), [(a, f'{a}=""', 1) for a in names if a.startswith(m[1]) and a not in have]
+        names = HTML_ATTRS.get(tag[1].lower(), ()) + HTML_ATTRS[""]  # los suyos primero
+        return len(m[1]), [(a, "hidden" if a == "hidden" else f'{a}=""', 0 if a == "hidden" else 1, "")
+                           for a in names if a.startswith(m[1]) and a not in have]
     return 0, []
 
 
@@ -579,17 +656,25 @@ class CodeEdit(QTextEdit):
         return cursor.block().text()[:cursor.positionInBlock()]
 
     def suggest(self, force=False):
-        """Sugerencias de lo de antes del cursor; sin forzar (Ctrl+Espacio), solo con algo escrito o tras < & / \"."""
+        """Sugerencias de lo de antes del cursor; sin forzar (Ctrl+Espacio), solo con algo escrito, tras < & / \" o
+        tras un espacio dentro de una etiqueta (sus atributos). Cada una con su descripción (MDN) al lado."""
         popup = self.completer.popup()
         before = self.before_cursor()
         self.cut, self.items = complete_at(before, self.classes)
-        if not self.items or not (force or self.cut or before[-1:] in ('<', '&', '/', '"')):
+        if not self.items or not (force or self.cut or before[-1:] in ('<', '&', '/', '"')
+                                  or before.endswith(" ") and open_tag_here(before)):
             popup.hide()
             return
         model = self.completer.model()
         model.clear()
-        for label, *_ in self.items[:60]:
-            model.appendRow(QStandardItem(label))
+        self.shown = {}  # lo que se ve en la lista -> la sugerencia
+        for item in self.items[:60]:
+            label, hint = item[0], item[3] if len(item) > 3 else ""
+            text = f"{label}   {hint}" if hint else label
+            row = QStandardItem(text)
+            row.setToolTip(hint)
+            model.appendRow(row)
+            self.shown[text] = item
         rect = self.cursorRect()
         rect.setWidth(popup.sizeHintForColumn(0) + popup.verticalScrollBar().sizeHint().width() + 24)
         self.completer.complete(rect)
@@ -597,7 +682,7 @@ class CodeEdit(QTextEdit):
 
     def accept_completion(self, label):
         """La sugerencia elegida: sustituye lo escrito y deja el cursor donde toca (dentro de class="")."""
-        item = next((i for i in self.items if i[0] == label), None)
+        item = getattr(self, "shown", {}).get(label) or next((i for i in self.items if i[0] == label), None)
         if item is None:
             return
         cursor = self.textCursor()
@@ -657,6 +742,7 @@ class CodeEdit(QTextEdit):
                     break
                 block.setUserData(Changes(line) if line is not None else None)
                 block = block.next()
+            self.look.originals = any(line is not None for line in originals)
         self.look.changes, self.look.removed = color, removed
         self.look.rehighlight()
         self.gutter.update()  # los números de las líneas cambiadas, de verde
@@ -695,8 +781,13 @@ class CodeEdit(QTextEdit):
             painter.end()
 
     def setPlainText(self, text):
+        # Sin colores mientras se carga y se espacia: cada paso volvía a colorear el documento entero (8 s al abrir
+        # el código de un capítulo de 900 párrafos). Al volver a ponerlos, se colorea una vez
+        self.look.setDocument(None)
         super().setPlainText(text)
         self.space_paragraphs()
+        self.look.originals = False  # líneas nuevas: aún sin su línea de antes
+        self.look.setDocument(self.document())
 
     def space_paragraphs(self):
         """Medio renglón bajo cada párrafo (una línea del código): pegados costaban de leer. Es el aspecto, no un
@@ -1004,9 +1095,10 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
         listed = align[5:] if align.startswith("list-") else None
         framed = i in frames
         scene = not raw and not token and bool(bare) and bool(convert.SCENE_BREAK.fullmatch(bare))
+        ruler = not raw and bool(convert.RULE_LINE.fullmatch(bare))  # <hr>: se ve como una raya
         drawn = pictures.get(f"título {k}") if heading and k is not None else None
         table = align if align in ("table", "table-head") else None
-        special = bool(token or heading or scene or centered or framed or right or listed or opened or table)
+        special = bool(token or heading or scene or centered or framed or right or listed or opened or table or ruler)
         if i or (special and cursor.block().length() > 1):
             cursor.insertBlock(QTextBlockFormat(), _plain_format())
         if i or special or remember:
@@ -1022,6 +1114,9 @@ def insert_lines(cursor, lines, pictures, remember=False, raw=False, color="#888
                 frame_format(f, *frames[i], kind=convert.box_kind(align))
             if table:
                 table_format(f, table)
+            if ruler:  # la raya que Qt dibuja para el <hr> de HTML, a lo ancho de la hoja
+                f.setProperty(QTextFormat.Property.BlockTrailingHorizontalRulerWidth,
+                              QTextLength(QTextLength.Type.PercentageLength, 100))
             if heading:
                 f.setProperty(HEADING, True)
                 if drawn is not None:  # el dibujo del título va centrado, como en el libro
@@ -1153,14 +1248,16 @@ def dump(document):
     return "\n\n".join(out)
 
 
-def dump_levels(document):
-    """Las líneas de dump con el tipo de cada título ("Capítulo", "Subtítulo"…; None en lo demás)."""
-    out, block = [], document.firstBlock()
+def dump_levels(document, known=None):
+    """Las líneas de dump con el tipo de cada título ("Capítulo", "Subtítulo"…; None en lo demás). known: las líneas
+    de cada párrafo, si ya se tienen (Sheet.all_lines)."""
+    out, block, n = [], document.firstBlock(), 0
     while block.isValid():
         f = block.blockFormat()
         level = (f.property(LEVEL) or "Capítulo") if f.property(HEADING) else None
-        out += [(line, level if is_heading_line(line) else None) for line in block_lines(block) if line.strip()]
-        block = block.next()
+        lines = known[n] if known is not None else [line for line in block_lines(block) if line.strip()]
+        out += [(line, level if is_heading_line(line) else None) for line in lines]
+        block, n = block.next(), n + 1
     return out
 
 
@@ -1446,9 +1543,9 @@ def watch_groups(look, group_of):
     """Al tocar un párrafo de un grupo (original_group, code_group), los demás del grupo se repintan también: lo
     quitado y lo puesto se reparten entre todos."""
     def changed(pos, removed, added):
-        if not look.changes:
-            return
         doc = look.document()
+        if not look.changes or doc is None:  # setPlainText suelta los colores mientras carga: nada que repintar
+            return
         first, last = doc.findBlock(pos), doc.findBlock(pos + added)
         touched = set()
         block = first
@@ -1509,7 +1606,22 @@ class Look(QSyntaxHighlighter):
         self.tags = {}
         self.changes = None  # color con que se subraya lo puesto en cada párrafo cambiado; None: no se marca
         self.removed = None  # color de lo quitado, tachado en su sitio (theme.mark_colors)
+        self.painting = False  # repintando: el documento avisa de un cambio que no lo es (Sheet.forget)
         watch_groups(self, original_group)
+
+    def rehighlight(self):
+        self.painting = True
+        try:
+            super().rehighlight()
+        finally:
+            self.painting = False
+
+    def rehighlightBlock(self, block):
+        self.painting = True
+        try:
+            super().rehighlightBlock(block)
+        finally:
+            self.painting = False
 
     def show_changes(self, color, removed=None, blocks=None):
         """«Mostrar cambios», como GitHub: fondo del color dado (None lo quita) en lo que se puso frente al original,
@@ -1675,7 +1787,17 @@ class Sheet(QTextEdit):
         look = self.look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
         look.tags = self.tags
         look.set_unknown(self.unknown)
-        settle(document)  # maqueta la hoja entera ya: Qt lo hace a trozos y pintaba con ella a medias
+        # Maqueta la hoja entera ya: Qt lo hace a trozos y pintaba con ella a medias. Sin mostrar todavía (el editor
+        # que se abre), no: al mostrarse toma su ancho y resizeEvent la maqueta entera otra vez (dos veces, 0,1 s)
+        if self.isVisible():
+            settle(document)
+        # Recién cargados, ningún párrafo ha cambiado: changed_blocks volcaba los 440 de un capítulo al abrirlo para
+        # saberlo (0,1 s). Lo que se toque cambia de revisión (o lo olvida forget) y se compara entonces
+        known, block = self.known[document], document.firstBlock()
+        while block.isValid():
+            if block.blockFormat().property(ORIGINAL) is not None:
+                known[block.fragmentIndex()] = (block.revision(), False)
+            block = block.next()
         self.moveCursor(QTextCursor.MoveOperation.Start)
         return document, look
 
@@ -1731,8 +1853,16 @@ class Sheet(QTextEdit):
         document.clearUndoRedoStacks()
         return document, look
 
+    def dumped(self, document=None):
+        """Como dump, con las líneas recordadas por all_lines: aceptar volcaba cada capítulo visitado cuatro veces
+        (1,6 s con uno de 900 párrafos)."""
+        return "\n\n".join(line for lines in self.all_lines(document) for line in lines)
+
     def forget(self, document, pos, added):
-        """Los párrafos tocados (texto, formato o deshacer) se vuelven a comparar en changed_blocks."""
+        """Los párrafos tocados (texto, formato o deshacer) se vuelven a comparar en changed_blocks. Lo que repinta el
+        aspecto (subrayar la ortografía) avisa igual y no toca nada: se recuerda."""
+        if getattr(self.look, "painting", False) and self.look.document() is document:
+            return
         known, block, last = self.known[document], document.findBlock(pos), document.findBlock(pos + added)
         lines = self.lines_known.setdefault(document, {})
         while block.isValid():
@@ -1742,10 +1872,11 @@ class Sheet(QTextEdit):
                 break
             block = block.next()
 
-    def all_lines(self):
-        """[[líneas de dump] de cada párrafo], en orden. Cada párrafo se recuerda hasta que se toca (forget): volcar
-        la hoja entera en cada tecla tardaba 50 ms en un capítulo largo."""
-        doc = self.document()
+    def all_lines(self, document=None):
+        """[[líneas de dump] de cada párrafo] de la hoja (o de document, otro capítulo ya cargado), en orden. Cada
+        párrafo se recuerda hasta que se toca (forget): volcar la hoja entera en cada tecla tardaba 50 ms en un
+        capítulo largo."""
+        doc = document or self.document()
         known, out, block = self.lines_known.setdefault(doc, {}), [], doc.firstBlock()
         while block.isValid():
             seen = known.get(block.fragmentIndex())
@@ -3032,6 +3163,11 @@ class Sheet(QTextEdit):
         return True
 
     def keyPressEvent(self, event):
+        # Ctrl+Z y Ctrl+Y, a la ventana: con «Todo el libro» deshacen lo de otro capítulo (TextEditor.do)
+        if getattr(self, "route_undo", False) and (event.matches(QKeySequence.StandardKey.Undo)
+                                                    or event.matches(QKeySequence.StandardKey.Redo)):
+            self.command.emit("redo" if event.matches(QKeySequence.StandardKey.Redo) else "undo")
+            return
         mods = event.modifiers()
         ctrl, alt = mods & Qt.KeyboardModifier.ControlModifier, mods & Qt.KeyboardModifier.AltModifier
         key = event.key()

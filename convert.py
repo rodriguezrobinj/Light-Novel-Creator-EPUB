@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pymupdf
 from PIL import Image, ImageChops, ImageOps
+import registro
 
 MEMO_SIZE = 50000  # resultados por función de _memo: de sobra para varios libros
 
@@ -64,8 +65,20 @@ SYMBOL_FONT = str.maketrans({"\xa7": "♣", "\xa8": "♦", "\xa9": "♥", "\xaa"
 END_PUNCT = (".", "!", "?", "…", '"', "'", "»", "”", "’", ":", ")", "]")  # "]": notas del traductor
 SOFT_HYPHEN = "\u00ad"  # guion de partición: solo se ve si cae al final de la línea
 TAGS = re.compile(r"<[^>]+>")
+# Elementos vacíos de HTML según MDN («Elemento vacío»): sin contenido ni etiqueta de cierre; «<hr>» vale igual que
+# «<hr/>» (en el EPUB, XHTML, se escriben con la barra). param está obsoleto, pero sigue sin cierre
+VOID_ELEMENTS = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+                           "track", "wbr"})
+# Una línea del editor que es solo una raya («<hr>», «<hr/>», con atributos): el elemento <hr> de HTML, que MDN define
+# como cambio temático (de escena); en el libro sigue siendo una raya, no «* * *» ni un adorno
+RULE_LINE = re.compile(r'<hr(?:\s+[\w:.-]+="[^"<>]*")*\s*/?>')
 # U+FFFC: el hueco que PyMuPDF deja en el texto por una imagen en l\u00ednea de un EPUB (la imagen sale aparte)
 BAD_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffc\ufffe\uffff]")
+
+
+class BookError(ValueError):
+    """Un libro que no se puede convertir y el porqué, para quien usa la app (sin texto, con contraseña, dañado). No
+    es un fallo de la app: el registro lo apunta como aviso, sin la pila ni errores.log."""
 
 
 @dataclass
@@ -1172,7 +1185,7 @@ def load_cover(path):
     try:
         data = Path(path).read_bytes()
     except OSError as e:
-        raise ValueError(f"No se pudo abrir la imagen: {e}") from e
+        raise BookError(f"No se pudo abrir la imagen: {e}") from e
     return to_jpeg(data)
 
 
@@ -1183,7 +1196,7 @@ def to_jpeg(data):
     try:
         pix = pymupdf.Pixmap(data)
     except Exception as e:
-        raise ValueError(f"No se pudo abrir la imagen: {e}") from e
+        raise BookError(f"No se pudo abrir la imagen: {e}") from e
     return _jpeg(_rgb(pix, alpha=False), 90)
 
 
@@ -1381,7 +1394,7 @@ PICTURE = re.compile(r"\[(Imagen) ([0-9a-f]{16}\.jpg)\]")
 INLINE = re.compile(r"&lt;(/?)(i|b|sup|sc)&gt;")
 # Etiquetas en línea de un EPUB de entrada que el editor muestra como texto (faithful): al guardar vuelven a serlo
 RAW_TAG = re.compile(r'&lt;(/?)(ruby|rb|rt|rp|rtc|span|br|small|sub|abbr|cite|code|q|s|u|mark|big|tt|del|ins|em|'
-                     r'strong|img|wbr|i|b|sup)((?:\s+[\w:.-]+="[^"<>]*")*)\s*(/?)&gt;')
+                     r'strong|img|wbr|i|b|sup|kbd|samp|var|dfn|bdi|bdo|time|data)((?:\s+[\w:.-]+="[^"<>]*")*)\s*(/?)&gt;')
 HEADING_TAGS = {f"h{n}" for n in range(1, 7)}
 # Etiqueta de apertura de un párrafo al principio de una línea del editor (Block.opening)
 OPENING = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>')
@@ -1474,14 +1487,21 @@ def _line(b, k):
         return prefix + html.unescape(text)
     if b.kind == "heading":
         return "# " + html.unescape(b.html)
+    if is_rule(b):
+        return "<hr/>"
     return f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]"
+
+
+def is_rule(b):
+    """Una raya <hr> (del EPUB o escrita en el código): el elemento de HTML tal cual, nunca un separador de escena."""
+    return b.kind == "break" and b.tag == "hr" and not b.image and not b.html
 
 
 def _balanced(out):
     """Cada etiqueta abierta se cierra, en orden (las vacías, como <br/>, no cuentan)."""
     stack = []
     for close, tag, empty in re.findall(r"<(/?)([A-Za-z][\w:.-]*)[^<>]*?(/?)>", out):
-        if empty or tag in ("br", "img", "wbr"):
+        if empty or tag.lower() in VOID_ELEMENTS:
             continue
         if not close:
             stack.append(tag)
@@ -1492,7 +1512,7 @@ def _balanced(out):
 
 def _raw_tag(m):
     """Etiqueta de un EPUB de entrada escrita en el editor (furigana, span con clase): vuelve a ser etiqueta."""
-    return f"<{m[1]}{m[2]}{m[3]}{'/' if m[4] or m[2] in ('br', 'img', 'wbr') else ''}>"
+    return f"<{m[1]}{m[2]}{m[3]}{'/' if m[4] or m[2] in VOID_ELEMENTS else ''}>"
 
 
 def _raw_link(m):
@@ -1521,11 +1541,14 @@ def edit_section(book, start, end, text, folder=None):
     page = old[start - 1].page if start else 1
     # Un párrafo o título sin cambios sigue igual (página, recuadro, centrado); lo cambiado o nuevo toma
     # la página del anterior
+    # Línea -> sus bloques en orden: una repetida («「────ッ」») toma cada vez el siguiente, no siempre el primero
+    # (en un EPUB eso la escribía en el elemento de la otra)
     same = {}
     for k in range(start, end):
         if old[k].kind in ("p", "heading"):
-            same.setdefault(_line(old[k], k).strip(), old[k])
-            same.setdefault(_line(old[k], k).strip().removeprefix(CENTER), old[k])  # edición de antes de <center>
+            line = _line(old[k], k).strip()
+            for key in dict.fromkeys((line, line.removeprefix(CENTER))):  # edición de antes de <center>
+                same.setdefault(key, []).append(old[k])
     lines = [line for line in (line.strip() for line in text.splitlines()) if line]
     # Párrafo cambiado en su sitio, uno por uno (errata, traducción): sigue siendo el mismo del PDF y conserva
     # su página y su recuadro. Unir o partir párrafos no cuadra uno a uno y toma la página del anterior.
@@ -1550,14 +1573,20 @@ def edit_section(book, start, end, text, folder=None):
             new.append(old[k])
             page = old[k].page
         elif line in same:
-            new.append(replace(same[line]))  # copia: la línea puede estar dos veces
-            page = same[line].page
+            was = same[line].pop(0) if len(same[line]) > 1 else same[line][0]  # el último sirve a las copias de más
+            new.append(replace(was))  # copia: la línea puede estar dos veces
+            page = was.page
         elif (opened := OPENING.match(line)) and line[opened.end():].strip():
             tag = opened[1].lower()
             new.append(Block("heading" if tag in HEADING_TAGS else "p", page, _inline(line[opened.end():].strip()),
                              tag=tag, opening=opened[0]))
         elif line.startswith("# ") and line[2:].strip():
             new.append(Block("heading", page, _inline(line[2:].strip())))
+        elif RULE_LINE.fullmatch(line):  # <hr>: el de antes si queda uno (EPUB: su elemento), si no uno nuevo
+            k = next((k for k in range(start, end) if is_rule(old[k]) and k not in kept), None)
+            if k is not None:
+                kept[k] = start + len(new)
+            new.append(old[k] if k is not None else Block("break", page, "", tag="hr"))
         elif SCENE_BREAK.fullmatch(line):
             new.append(Block("break", page, html.escape(line, quote=False)))
         else:
@@ -2624,6 +2653,7 @@ def _issue_span(issue, blocks):
     return lead, lead + len(text)
 
 
+@registro.timed
 def quality_report(book, echoes=False, glossary=(), lang="es"):
     """Lo sospechoso del libro, para revisarlo: [Issue], por página. Cada aviso dice el problema, la
     solución y, si se puede arreglar solo, el cambio para edit_section y su vista previa. Con echoes, también
@@ -2941,28 +2971,36 @@ def _preview_epub(path):
         return out.getvalue()
 
 
-def open_pdf(path):
+def open_pdf(path, jpx=None):
     """Abre el PDF (o EPUB) para leerlo o dibujarlo. Una imagen JPEG 2000 que trae su propia paleta y el PDF
     marca /Indexed salía como ruido al dibujarla más pequeña que su tamaño (Eminence 7, las ilustraciones):
     MuPDF la reduce promediando los índices de la paleta como si fueran colores. Sin el /ColorSpace del PDF
-    usa los colores del propio JPEG 2000. Solo en memoria: el archivo no cambia."""
+    usa los colores del propio JPEG 2000. Solo en memoria: el archivo no cambia. doc.jpx: los objetos
+    arreglados; jpx: esos mismos, ya buscados por otro proceso (buscarlos recorre todo el PDF: 0,23 s en la
+    ventana con los 6347 objetos de Strange Grief 1)."""
     preview = _preview_epub(path) if str(path).lower().endswith(".epub") else None
     doc = pymupdf.open(stream=preview, filetype="epub") if preview else pymupdf.open(path)
+    doc.jpx = []
     if doc.is_pdf and not doc.needs_pass:
-        for xref in range(1, doc.xref_length()):
+        for xref in range(1, doc.xref_length()) if jpx is None else jpx:
             try:
-                if doc.xref_get_key(xref, "Filter")[1] != "/JPXDecode":
-                    continue
-                kind, value = doc.xref_get_key(xref, "ColorSpace")
-                if kind == "xref":
-                    value = doc.xref_object(int(value.split()[0]), compressed=True)
-                if "/Indexed" in value and b"pclr" in doc.xref_stream_raw(xref)[:4096]:  # la paleta va en la cabecera
-                    doc.xref_set_key(xref, "ColorSpace", "null")
+                if jpx is None:
+                    if doc.xref_get_key(xref, "Filter")[1] != "/JPXDecode":
+                        continue
+                    kind, value = doc.xref_get_key(xref, "ColorSpace")
+                    if kind == "xref":
+                        value = doc.xref_object(int(value.split()[0]), compressed=True)
+                    # la paleta va en la cabecera
+                    if "/Indexed" not in value or b"pclr" not in doc.xref_stream_raw(xref)[:4096]:
+                        continue
+                doc.xref_set_key(xref, "ColorSpace", "null")
+                doc.jpx.append(xref)
             except Exception:  # Re Zero 3: una entrada de la tabla sin objeto detrás; el libro abre igual
                 continue
     return doc
 
 
+@registro.timed
 def analyze(pdf_path, progress=None):
     """Lee el PDF (o un EPUB, que PyMuPDF compone en páginas) y lo devuelve como bloques, con los títulos de
     capítulo candidatos."""
@@ -2973,10 +3011,10 @@ def analyze(pdf_path, progress=None):
     try:
         doc = open_pdf(pdf_path)
     except Exception as e:
-        raise ValueError(f"No se pudo abrir el {kind}: {e}") from e
+        raise BookError(f"No se pudo abrir el {kind}: {e}") from e
     with doc:
         if doc.needs_pass:
-            raise ValueError(f"El {kind} está protegido con contraseña.")
+            raise BookError(f"El {kind} está protegido con contraseña.")
         n = doc.page_count
         pages, page_infos = [], []  # page_infos: get_image_info de cada página, para no pedirlo dos veces
         for i, page in enumerate(doc):
@@ -2986,7 +3024,7 @@ def analyze(pdf_path, progress=None):
                 progress(i + 1, 2 * n)
         pages = _strip_margins(pages, [page.rect.height for page in doc])
         if not any(pages):
-            raise ValueError(f"El {kind} no tiene texto (parece escaneado). Hace falta OCR, que no está soportado.")
+            raise BookError(f"El {kind} no tiene texto (parece escaneado). Hace falta OCR, que no está soportado.")
 
         sizes = collections.Counter()  # tamaño de letra -> caracteres
         for rows in pages:
@@ -3197,8 +3235,9 @@ def analyze(pdf_path, progress=None):
                     else:
                         new = r.y - prev.y > line_gap * 1.3
                     # Una minúscula sigue la frase; también tras «¡Gran escritor!"» (Psychology of Harem 2, pág. 300)
+                    # y tras la coma del diálogo a la inglesa: «…a todos,"» / «dijo Sakura» (Kage 7, World Project)
                     if (new and para is not None and not switch and r.text[:1].islower()
-                            and (not last_text.endswith(END_PUNCT) or re.search(r"[!?][\"”»’)]*\s*$", last_text))):
+                            and (not last_text.endswith(END_PUNCT) or re.search(r"[!?,][\"”»’)]*\s*$", last_text))):
                         new = False  # algunos PDF ponen con sangría el final de una frase sin acabar
                     if new:
                         para = Block("p", num, r.html, align="frame" if framed else "center" if centered else "",
@@ -3234,7 +3273,7 @@ def analyze(pdf_path, progress=None):
                     del blocks[k]
 
         if not any(b.kind in ("p", "heading") for b in blocks):
-            raise ValueError("No se encontró texto de la novela en el PDF (¿solo tiene el índice?).")
+            raise BookError("No se encontró texto de la novela en el PDF (¿solo tiene el índice?).")
 
         if blocks and blocks[0].kind == "image" and blocks[0].page == 1:
             cover = blocks.pop(0).image
@@ -3539,7 +3578,7 @@ ORIGINAL = "Original"  # estilo de un EPUB de entrada (faithful): su CSS tal cua
 SEPARATORS = {"Novela ligera": "❖"}  # separador de escena; el resto usa "* * *"
 # En la ventana, desplegable "Separador"; editable: un texto que no es de la lista se usa tal cual (_separator)
 # «Icono del original»: el adorno dibujado, como silueta SVG del color del texto; «Icono propio»: una imagen elegida
-SEPARATOR_CHOICES = ["Según el estilo", "Original del PDF", "Icono del original", "Icono propio", "* * *", "❖", "✦",
+SEPARATOR_CHOICES = ["Según el estilo", "Icono del original", "Imagen del original", "Icono propio", "* * *", "❖", "✦",
                      "⁂", "◆ ◆ ◆", "※ ・ ※ ・ ※", "~", "Línea", "Espacio en blanco"]
 CHAPTER_NUMBER = re.compile(  # "Capítulo 3: Nombre" -> número y nombre, para el inicio de capítulo
     r"((?:cap[ií]tulo|chapter|pr[oó]logo|prologue|ep[ií]logo|epilogue|interludio|interlude|parte|part"
@@ -3785,10 +3824,21 @@ def icon_html(svg, alt="* * *"):
                                 f'role="img" aria-label="{html.escape(alt)}" ', 1)
 
 
+def separator_choice(choice):
+    """La opción de separador de una revisión o unos ajustes de antes: «Original del PDF» (el adorno como imagen, con
+    su fondo blanco) es ahora «Icono del original», que deja igual los de texto; la imagen tal cual es «Imagen del
+    original»."""
+    return "Icono del original" if choice == "Original del PDF" else choice
+
+
 def _separator(block, index, style, choice, images, icon=""):
-    """XHTML de un separador de escena según la opción elegida (SEPARATOR_CHOICES). Con "Original del
-    PDF" usa el adorno dibujado o el texto que traía; si no trae nada, el del estilo. "Icono del original": el
-    adorno dibujado como icono (trace_svg); "Icono propio": icon (el SVG de la imagen elegida)."""
+    """XHTML de un separador de escena según la opción elegida (SEPARATOR_CHOICES). Con "Imagen del original" usa
+    el adorno dibujado o el texto que traía (una raya <hr> sigue siéndolo); si no trae nada, el del estilo. "Icono del
+    original": el adorno dibujado como icono (trace_svg), y los demás como "Imagen del original"; "Icono propio": icon
+    (el SVG de la imagen elegida)."""
+    if is_rule(block):  # una raya <hr> no es un separador: ninguna opción la cambia
+        return "<hr/>"
+    choice = separator_choice(choice)
     if choice == "Icono propio":
         if icon:
             return f'<p class="brk">{icon_html(icon)}</p>'
@@ -3796,8 +3846,8 @@ def _separator(block, index, style, choice, images, icon=""):
     if choice == "Icono del original":
         if block.image and (svg := trace_svg(block.image)):
             return f'<p class="brk">{icon_html(svg)}</p>'
-        choice = "Original del PDF"
-    if choice == "Original del PDF":
+        choice = "Imagen del original"
+    if choice == "Imagen del original":
         if block.image:
             ext = "png" if block.image[:4] == b"\x89PNG" else "jpg"
             src = f"img/b{index:05d}.{ext}"
@@ -4066,6 +4116,7 @@ def skipped(book, chapters, removed):
     return skip
 
 
+@registro.timed
 def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False, style="Clásico", contents=True,
                separator="Según el estilo", shrink=False, replacements=(), credits=False, gray=False,
                breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
@@ -4697,6 +4748,25 @@ def _stranded_subtitles(pdf, toc, fontsize, done=()):
     return {a.split("#", 1)[1]: gap for a, gap in found.items()}
 
 
+def _restyle(epub, target, old, new):
+    """Copia el EPUB epub en target con las reglas old (las del final de su hoja de estilo, css_extra) cambiadas por
+    new. Otro archivo y no el mismo: recién leído por MuPDF, Windows (el antivirus) a veces no deja reescribirlo.
+    False si no las encuentra: entonces hay que escribirlo de nuevo."""
+    old, new = old.encode(), new.encode()
+    with zipfile.ZipFile(epub) as z:
+        items = [(info, z.read(info)) for info in z.infolist()]
+    if not any(info.filename.endswith(".css") and old in data for info, data in items):
+        return False
+    # Sin comprimir: es el EPUB de paso que solo lee MuPDF, y volver a comprimir las ilustraciones tardaba más que
+    # escribirlo de nuevo
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as z:
+        for info, data in items:  # en su orden: «mimetype» primero
+            z.writestr(info.filename, data.replace(old, new, 1) if info.filename.endswith(".css") and old in data
+                       else data)
+    return True
+
+
+@registro.timed
 def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     """PDF maquetado: el mismo libro que write_epub (con sus opciones), compuesto por MuPDF al tamaño de
     PDF_SIZES, con el índice como marcadores, título y autor en las propiedades y número de página al pie
@@ -4706,14 +4776,21 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     step = progress or (lambda done, total: None)
     width, height, fontsize = PDF_SIZES[size]
     pushed = {}  # ancla de un subtítulo -> relleno que lo pasa a la página siguiente
-    with tempfile.TemporaryDirectory(prefix="lnepub-pdf-") as tmp:
-        epub = Path(tmp) / "libro.epub"
+    # ignore_cleanup_errors: el antivirus aún lee un EPUB de paso recién escrito y Windows no deja borrarlo; no es
+    # motivo para perder el PDF (lo que quede lo borra la limpieza de lnepub-*)
+    with tempfile.TemporaryDirectory(prefix="lnepub-pdf-", ignore_cleanup_errors=True) as tmp:
+        epub = None
         for attempt in range(4):  # cada vuelta, el primer subtítulo colgado de cada capítulo; casi siempre basta 1
             # MuPDF no hace caso de page-break-before: un relleno arriba del alto que queda lo empuja, y en la
             # página nueva el relleno que sobra no se ve
             css = PDF_CSS + "".join(f"#{a} {{ padding-top: {gap:.0f}px; }}\n" for a, gap in pushed.items())
-            write_epub(book, chapters, epub, **{**options, "kepub": False, "epub2": False, "css_extra": css},
-                       progress=lambda done, total: step(done * 40 // total, 100) if not attempt else None)
+            # Entre vueltas solo cambia el relleno: se cambia en la hoja de estilo del EPUB ya escrito (reescribir el
+            # libro entero costaba 1 s por vuelta, y Re Zero 2 da 4)
+            target = Path(tmp) / f"libro{attempt}.epub"
+            if not attempt or not _restyle(epub, target, written, css):
+                write_epub(book, chapters, target, **{**options, "kepub": False, "epub2": False, "css_extra": css},
+                           progress=lambda done, total: step(done * 40 // total, 100) if not attempt else None)
+            epub, written = target, css
             with pymupdf.open(epub) as source:
                 source.layout(width=width, height=height, fontsize=fontsize)
                 toc = source.get_toc(simple=False)
@@ -4759,6 +4836,7 @@ def _zip_path(base, href):
     return posixpath.normpath(posixpath.join(posixpath.dirname(base), href)) if href else base
 
 
+@registro.timed
 def check_epub(path):
     """Revisa un EPUB ya escrito: XML válido, mimetype el primero y sin comprimir, ningún archivo, imagen
     ni enlace (también «#ancla» del mismo archivo) que falte, imágenes del tipo declarado y ningún capítulo

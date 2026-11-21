@@ -12,6 +12,7 @@ import zipfile
 from dataclasses import replace
 
 import convert
+import registro
 
 OPF_NS = "{http://www.idpf.org/2007/opf}"
 DC = "{http://purl.org/dc/elements/1.1/}"
@@ -309,6 +310,7 @@ def _file_title(text):
     return _plain(m.group(1)) if m else ""
 
 
+@registro.timed
 def read_epub(path, progress=None):
     """Libro de un EPUB: cada párrafo, título, ilustración y separador del spine como un bloque que recuerda su
     elemento (Block.src). Cada archivo del spine es un capítulo, con el nombre de su índice; si el EPUB tiene índice,
@@ -317,12 +319,12 @@ def read_epub(path, progress=None):
     try:
         z = zipfile.ZipFile(path)
     except (OSError, zipfile.BadZipFile) as e:
-        raise ValueError(f"No se pudo abrir el EPUB: {e}") from e
+        raise convert.BookError(f"No se pudo abrir el EPUB: {e}") from e
     with z:
         try:
             opf_path, opf, items, order, ncx_id = package(z)
         except (KeyError, StopIteration, ET.ParseError, AttributeError) as e:
-            raise ValueError(f"El EPUB está dañado: no se puede leer su lista de archivos ({e}).") from e
+            raise convert.BookError(f"El EPUB está dañado: no se puede leer su lista de archivos ({e}).") from e
         names = set(z.namelist())
         labels = toc_labels(z, items, ncx_id)
         ornaments, generic = _repeated(z, items, order, names)
@@ -394,7 +396,7 @@ def read_epub(path, progress=None):
             if progress:
                 progress(n + 1, len(order))
         if not any(b.kind in ("p", "heading") for b in blocks):
-            raise ValueError("El EPUB no tiene texto.")
+            raise convert.BookError("El EPUB no tiene texto.")
         book = convert.Book("", "", b"", blocks, candidates, origin=str(path))
         # En vertical: el spine de derecha a izquierda o alguna hoja de estilo con writing-mode vertical
         book.vertical = 'page-progression-direction="rtl"' in z.read(opf_path).decode("utf-8", "replace") or any(
@@ -611,6 +613,7 @@ def _cut_tree(text, container, remove, rename):
     return text
 
 
+@registro.timed
 def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=False, style=ORIGINAL, contents=False,
                    separator=ORIGINAL, shrink=False, replacements=(), credits=False, gray=False, breaks=(), trim=False,
                    font="", reading=False, kepub=False, hyphenate=False, alts=None, progress=None, fit=None,
@@ -621,6 +624,7 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
     un XHTML sin cambios sale con los mismos bytes. Mismas opciones que convert.write_epub; style, font y separator
     con ORIGINAL (o vacíos) dejan el aspecto del original."""
     rules = convert._rules(replacements)
+    separator = convert.separator_choice(separator)  # «Original del PDF» de antes: el adorno como icono
     hyphenate = hyphenate and not whole_words and lang.split("-")[0].lower() == "es"
     note_mark = convert.NOTE_STYLES.get(note_style, "{}").format
     limit = convert.SHRINK if shrink is True else int(shrink or 0)
@@ -691,6 +695,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
             return convert.NOTE.sub(ref, new)
 
         def rebreak(b, k):
+            if convert.is_rule(b):  # una raya <hr> no es un separador: ninguna opción la cambia
+                return "<hr/>"
             icon = separator_icon if separator == "Icono propio" else (
                 convert.trace_svg(b.image) if separator == "Icono del original" and b.image else "")
             if icon:  # SVG en el texto, del color de la letra
@@ -700,7 +706,7 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
             if separator == "Espacio en blanco":
                 return '<p style="margin: 1.5em 0; text-indent: 0">&#160;</p>'
             symbol = (html.escape(separator, quote=False)
-                      if separator not in (ORIGINAL, "Original del PDF", "Según el estilo", "", "Icono propio",
+                      if separator not in (ORIGINAL, "Imagen del original", "Según el estilo", "", "Icono propio",
                                            "Icono del original") else b.html or "* * *")
             return f'<p style="text-align: center; text-indent: 0; margin: 1em 0">{symbol}</p>'
 
@@ -729,7 +735,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                                f'{picture(part, base, alt or "")}</div>'
                                for part in (convert._spread(b.image, b.layout) if b.layout else [b.image]) if part)
             if b.kind == "break" or k in breaks:
-                if own and b.kind == "break" and (separator in (ORIGINAL, "Original del PDF", "Según el estilo", "")
+                if own and b.kind == "break" and (convert.is_rule(b)
+                                                  or separator in (ORIGINAL, "Imagen del original", "Según el estilo", "")
                                                   or separator == "Icono del original" and not b.image):
                     return source(base)[b.src[3]:b.src[4]]
                 return rebreak(b, k)
