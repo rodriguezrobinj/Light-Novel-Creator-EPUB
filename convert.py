@@ -4180,6 +4180,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     note_style: una de NOTE_STYLES. heading_font: una de HEADING_FONTS o la ruta de un .ttf/.otf, para los títulos.
     box_style: uno de BOX_STYLES, el aspecto de los recuadros. separator_icon: el SVG (trace_svg) del separador
     «Icono propio».
+    Devuelve {archivo de sección: su primer bloque} (None con un EPUB de entrada: ahí lo dice Block.src).
     Un libro leído de un EPUB (book.origin) se escribe parcheando el original (faithful.write_faithful), salvo en
     EPUB 2, que no puede llevar su HTML de EPUB 3 y se rehace."""
     if book.origin and Path(book.origin).is_file():
@@ -4198,11 +4199,13 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     sections = []  # [título, es_capítulo, [(índice, bloque)]]
     drawn = {}  # número de sección -> (bloque, imagen) de su título dibujado (Witch 1)
     veiled = set()  # números de sección con el título oculto del editor
+    firsts = {}  # archivo de cada sección -> su primer bloque: el explorador de archivos del editor abre ese capítulo
     for k, b in enumerate(book.blocks):
         if k in skip or (b.kind == "image" and not b.keep):  # sección quitada o imagen descartada
             continue
         if k in starts:
             sections.append([starts[k], True, []])
+            firsts[f"sec{len(sections):03d}.xhtml"] = k
             if b.kind == "heading" and b.image:
                 drawn[len(sections)] = k, b.image
             if b.kind == "heading" and b.opening == HIDDEN_TITLE:
@@ -4210,6 +4213,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         else:
             if not sections:
                 sections.append(["Inicio", False, []])
+                firsts["sec001.xhtml"] = k
             sections[-1][2].append((k, b))
 
     if sections and not sections[0][1] and sections[0][2] and all(b.kind == "image" for _, b in sections[0][2]):
@@ -4558,6 +4562,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
+    return firsts
 
 
 XHTML = "{http://www.w3.org/1999/xhtml}"

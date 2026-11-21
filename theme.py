@@ -22,7 +22,7 @@ ICONS = {"warn": "▲", "ok": "✓", "close": "✕", "menu": "▾", "menu_open":
          "frame": "▭", "right": "⇥", "join": "⤒", "scene": "❖", "nav": "☰", "search": "⌕", "read": "♪",
          "link": "↗", "doc": "🗎", "dot": "●", "minus": "−", "symbols": "Ω", "changes": "±", "stats": "Σ",
          "show": "◉", "image": "▣", "justify": "≣", "indent": "↦", "ruby": "ふ", "newline": "↵", "code": "</>", "clear": "⌫", "web": "◎",
-         "style": "¶", "table": "▦", "inlink": "⤷"}
+         "style": "¶", "table": "▦", "inlink": "⤷", "files": "▤"}
 
 # edge: borde de botones, campos y casillas; line: el de tarjetas y separadores. En claro, con el mismo gris
 # para los dos, los controles se perdían sobre el blanco (en oscuro se veían bien)

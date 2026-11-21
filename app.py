@@ -40,7 +40,8 @@ import pymupdf
 import segno
 import shiboken6
 from PySide6.QtCore import QEvent, QEventLoop, QLockFile, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPainterPath,
+from PySide6.QtGui import (QAction, QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
+                           QPainterPath,
                            QPalette, QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QInputDialog, QTreeWidget, QTreeWidgetItem,
@@ -7917,10 +7918,11 @@ class TextEditor:
         left_column.addWidget(desk, 1)
         self.split = QSplitter()
         self.split.addWidget(self.nav_panel())
+        self.split.addWidget(self.files_panel())
         self.split.addWidget(left)
         self.split.addWidget(side)
-        self.split.setStretchFactor(1, 1)
         self.split.setStretchFactor(2, 1)
+        self.split.setStretchFactor(3, 1)
         self.split.splitterMoved.connect(lambda *_: self.later("panel", 80, self.redraw))
         column.addWidget(self.split, 1)
         # Barra de estado como Word: dónde estás y el zoom del texto
@@ -8294,6 +8296,8 @@ class TextEditor:
         page("Vista")
         self.nav_btn = tool("Navegación", "Panel con los títulos, avisos, comentarios y cambios del capítulo (F9)",
                             self.toggle_nav, True, icon="nav")
+        self.files_btn = tool("Archivos", "Explorador de archivos del EPUB, como el de Calibre: texto, estilos, imágenes, "
+                              "tipos de letra y lo demás", self.toggle_files, True, icon="files")
         # Casilla como las de «Mostrar» de Word; va a la par que «Mostrar cambios» del menú Cambios
         self.show_changes_box = QCheckBox("Mostrar cambios")
         self.show_changes_box.setToolTip("Marca en la hoja los párrafos que editaste")
@@ -8306,7 +8310,7 @@ class TextEditor:
                                  "lectores; las ilustraciones no cambian")
         self.dark_box.setChecked(self.side_dark)
         self.dark_box.toggled.connect(self.set_side_dark)
-        group("Mostrar", [self.nav_btn, self.show_changes_box, self.dark_box])
+        group("Mostrar", [self.nav_btn, self.files_btn, self.show_changes_box, self.dark_box])
         for row in self.ribbon_rows:
             row.addStretch(1)
 
@@ -8606,7 +8610,8 @@ class TextEditor:
             self.tabs_row.insertWidget(2, self.chapter_btn)
             self.tabs_row.insertWidget(3, self.review_btn)
         if self.focused:
-            self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.view_tabs, self.find_frame,
+            self.before_focus = [w for w in (self.ribbon_bar, self.side, self.nav, self.files, self.view_tabs,
+                                             self.find_frame,
                                              self.link_frame, self.split_frame, self.issue_frame, self.resume_frame)
                                  if not w.isHidden()]
             for widget in self.before_focus:
@@ -9064,6 +9069,129 @@ class TextEditor:
         if block.isValid():
             self.goto_block(block)
             (self.web if self.web_on else self.sheet).setFocus()
+
+    # Explorador de archivos, como el de Calibre «Modificar libro»: los archivos del EPUB por grupos
+    def files_panel(self):
+        self.files = QTreeWidget()
+        self.files.setHeaderHidden(True)
+        self.files.setMinimumWidth(200)
+        self.files.itemClicked.connect(lambda item: self.files_go(item, False))
+        self.files.itemActivated.connect(lambda item: self.files_go(item))  # doble clic o Intro (sin la columna)
+        self.files_path = os.path.join(tempfile.gettempdir(), f"lnepub-vista-archivos-{os.getpid()}.epub")
+        self.file_sections, self.file_view = {}, None
+        self.files.setVisible(bool(self.app.settings.get("editor_files")))
+        self.files_btn.setChecked(not self.files.isHidden())
+        if not self.files.isHidden():
+            self.fill_files()
+        return self.files
+
+    def toggle_files(self):
+        """Muestra u oculta el explorador; se recuerda para la próxima vez."""
+        self.files.setVisible(self.files.isHidden())
+        self.files_btn.setChecked(not self.files.isHidden())
+        self.app.settings["editor_files"] = not self.files.isHidden()
+        self.app.save_settings()
+        if not self.files.isHidden():
+            self.fill_files()
+
+    def fill_files(self):
+        """Los archivos del EPUB original o, con un PDF, los del que se generará con las opciones de ahora (escrito
+        aparte, sin reducir imágenes: los nombres son los mismos)."""
+        book = self.app.book
+        self.files.clear()
+        try:
+            if book.origin:
+                path = book.origin
+                self.file_sections = {}
+                for k, b in enumerate(book.blocks):
+                    if b.src:
+                        self.file_sections.setdefault(b.src[0], k)
+            else:
+                path = self.files_path
+                chapters, removed, breaks = _plan(book, self.app.rows())
+                options = self.app.write_options(breaks)
+                options.update(shrink=False, trim=False, gray=False, kepub=False, preview=True)
+                firsts = convert.write_epub(book, chapters, path, removed=removed, **options)
+                self.file_sections = {f"OEBPS/{name}": k for name, k in firsts.items()}
+            with zipfile.ZipFile(path) as z:
+                groups = faithful.file_groups(z)
+        except Exception:
+            _log(traceback.format_exc())
+            QTreeWidgetItem(self.files, ["No se pudo leer el EPUB"])
+            return
+        bold = QFont(self.files.font())
+        bold.setBold(True)
+        for name, paths in groups:
+            group = QTreeWidgetItem(self.files, [name])
+            group.setFont(0, bold)
+            for path in paths:
+                item = QTreeWidgetItem(group, [path.rsplit("/", 1)[-1]])
+                item.setToolTip(0, path)
+                item.setData(0, Qt.ItemDataRole.UserRole, path)
+            group.setExpanded(True)
+
+    def files_go(self, item, opening=True):
+        """Un clic en el archivo de un capítulo lo abre en la hoja; doble clic (opening) en otro, lo muestra."""
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path is None:
+            if not opening:
+                item.setExpanded(not item.isExpanded())
+            return
+        k = self.file_sections.get(path)
+        section = next((s for s in self.sections if s[1] <= k < s[2]), None) if k is not None else None
+        if section is not None:
+            if section[1:3] != self.current:
+                self.open_section(*section[1:3])
+        elif opening:
+            self.show_file(path)
+
+    def show_file(self, path):
+        """Un archivo del EPUB de solo lectura: el código con colores, la imagen con sus medidas o una muestra de la
+        letra."""
+        try:
+            with zipfile.ZipFile(self.app.book.origin or self.files_path) as z:
+                data = z.read(path)
+        except Exception:
+            _log(traceback.format_exc())
+            messagebox.showwarning("Explorador de archivos", f"No se pudo leer {path}.", parent=self.win)
+            return
+        win = Dialog(self.win)
+        win.setWindowTitle(path.rsplit("/", 1)[-1])
+        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        column = QVBoxLayout(win)
+        size = f"{len(data) / 1024:.1f} KB".replace(".", ",")
+        low = path.lower()
+        picture = QPixmap()
+        if low.endswith(faithful.FILE_GROUPS[2][1]) and not low.endswith(".svg") and picture.loadFromData(data):
+            label = QLabel()
+            label.setPixmap(picture.scaled(800, 560, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
+                            if picture.width() > 800 or picture.height() > 560 else picture)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            column.addWidget(label, 1)
+            column.addWidget(_label(f"{picture.width()} × {picture.height()} px · {size}", "muted"))
+        elif low.endswith(faithful.FILE_GROUPS[3][1]):
+            font_id = QFontDatabase.addApplicationFontFromData(data)
+            families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+            if font_id >= 0:  # solo mientras se ve: no se queda en las letras de la app
+                win.destroyed.connect(lambda: QFontDatabase.removeApplicationFont(font_id))
+            sample = QLabel("El veloz murciélago hindú comía feliz cardillo y kiwi.\n"
+                            "¿ABCDEFGHIJKLMNÑOPQRSTUVWXYZ? ¡0123456789! «áéíóú»")
+            if families:
+                sample.setFont(QFont(families[0], 20))
+            column.addWidget(sample, 1)
+            column.addWidget(_label(f"{families[0] if families else 'Letra que no se puede mostrar'} · {size}",
+                                    "muted"))
+        else:
+            code = editor.CodeEdit(theme.code_colors(self.app.dark))
+            code.setPlainText(data.decode("utf-8", "replace"))
+            code.setReadOnly(True)
+            column.addWidget(code, 1)
+            column.addWidget(_label(f"{path} · {size} · solo lectura", "muted"))
+            win.resize(900, 650)
+        column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
+        win.show()
+        self.file_view = win
 
     def show_counts(self):
         """Recuentos de Cambios y Avisos en la cinta y en la primera línea de su menú."""
@@ -9783,7 +9911,7 @@ class TextEditor:
     def center(self):
         """Barra divisoria al medio y el párrafo del cursor a la vista."""
         if shiboken6.isValid(self.split):
-            self.split.setSizes([240, 10 ** 4, 10 ** 4])  # panel de navegación (si se ve), hoja y PDF a medias
+            self.split.setSizes([240, 240, 10 ** 4, 10 ** 4])  # navegación y archivos (si se ven), hoja y PDF a medias
             self.sheet.ensureCursorVisible()
 
     def do(self, name, *args):
