@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame, QHBox
                                QSplitter, QVBoxLayout, QWidget)
 import shiboken6
 
+import grammar
 import qtk
 import theme
 import translate
@@ -122,6 +123,9 @@ OPTIONS = (
     Option("Ortografía", "words", "words", "Palabras añadidas al diccionario",
            "Las de «Añadir al diccionario»: valen para este libro y los demás tomos de su serie. Quita la que se "
            "añadió por error."),
+    Option("Ortografía", "grammar", "grammar", "Revisión de gramática",
+           "Dónde corre LanguageTool al pulsar «Revisar gramática» en el Informe de calidad. En este equipo es "
+           "privado y sin límites; languagetool.org no descarga nada, pero el texto sale del equipo y va más lento."),
     Option("Traducción", "translate", "translate", "Motor, modelo y clave de API",
            "Servicio que traduce, su modelo y su clave, e idiomas con los que empieza «Traducir»."),
     Option("Carpeta vigilada", "watch", "folder", "Carpeta vigilada",
@@ -357,7 +361,8 @@ class OptionsDialog:
 
     def add_option(self, layout, option):
         """Control de una opción y, debajo, su ayuda en gris."""
-        special = {"translate": self.translation_page, "words": self.words_option, "quality": self.quality_option}
+        special = {"translate": self.translation_page, "words": self.words_option, "quality": self.quality_option,
+                   "grammar": self.grammar_option}
         if option.kind in special:  # con su propia página: no son un valor suelto
             special[option.kind](layout, option)
             return
@@ -603,6 +608,54 @@ class OptionsDialog:
         note.setWordWrap(True)
         layout.addWidget(note)
         self.parts["widgets"]["words"] = listing
+
+    def grammar_option(self, layout, option):
+        """Motor de LanguageTool; la dirección del servidor propio y el usuario y la clave de Premium solo con el
+        suyo. La clave se guarda cifrada (translate.protect); todo espera a Aceptar."""
+        data = self.values["grammar"] = dict(self.values.get("grammar") or {})
+        engine, url, user, key = QComboBox(), QLineEdit(str(data.get("url") or "")), QLineEdit(), QLineEdit()
+        for code, name in grammar.ENGINES.items():
+            engine.addItem(name, code)
+        engine.setCurrentIndex(max(0, engine.findData(data.get("engine"))))
+        url.setPlaceholderText("http://localhost:8081")
+        user.setText(str(data.get("user") or ""))
+        user.setPlaceholderText("Correo de la cuenta")
+        key.setText(translate.unprotect(str(data.get("key") or "")))
+        key.setEchoMode(QLineEdit.EchoMode.Password)
+        key.setPlaceholderText("Clave API")
+        rows = {}
+        for name, text, widget in (("engine", "Revisión de gramática:", engine), ("url", "Servidor:", url),
+                                   ("user", "Usuario:", user), ("key", "Clave:", key)):
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.addWidget(QLabel(text))
+            line.addWidget(widget, 0 if name == "engine" else 1)
+            if name != "engine":
+                widget.setMinimumWidth(260)
+            line.addStretch(1)
+            layout.addWidget(row)
+            rows[name] = row
+
+        def keep():
+            try:
+                secret = translate.protect(key.text().strip())
+            except OSError:  # sin cifrar no se guarda
+                secret = ""
+            data.update(engine=engine.currentData(), url=url.text().strip(), user=user.text().strip(), key=secret)
+            rows["url"].setVisible(data["engine"] == "custom")
+            for name in ("user", "key"):
+                rows[name].setVisible(data["engine"] == "premium")
+
+        engine.activated.connect(lambda _: keep())
+        for widget in (url, user, key):
+            widget.editingFinished.connect(keep)
+        keep()
+        note = QLabel(option.help)
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.parts["widgets"]["grammar"] = engine
 
     def quality_option(self, layout, option):
         """Cada tipo de aviso del informe con su casilla (verlo o no) y su gravedad."""

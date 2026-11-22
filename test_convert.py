@@ -16618,6 +16618,48 @@ def test_grammar_download_is_checked_and_replaced_whole():
     assert sorted(p.name for p in base.iterdir()) == [inside.rstrip("/")], list(base.iterdir())
 
 
+def test_window_grammar_check_fills_the_report():
+    """«Revisar gramática» con un servidor propio: los avisos entran en el informe con su arreglo, y el párrafo
+    arreglado los pierde. Sin Java, el motor local lo dice y no ejecuta nada; sin párrafos nuevos, no manda nada."""
+    import app
+
+    base, posts, server = _fake_lt(lambda fields: (200, {}, {"matches": [
+        _lt_match(fields["text"], "fue", "fueron")] if "fue" in fields["text"] else []}))
+    root, window = visible_window()
+    told, ran = [], []
+    saved = app.shutil.which, app.messagebox.showinfo, window.run
+    app.messagebox.showinfo = lambda title, message, **_: told.append(message)
+    try:
+        window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                         convert.Block("p", 1, "Ellos fue a la casa."),
+                                                         convert.Block("p", 1, "Todo bien.")], [0]))
+        window.pdf = make_novel()
+        window.settings["grammar"] = {"engine": "local"}
+        app.shutil.which = lambda name: None
+        window.run = lambda work, args, done, **options: ran.append(work) or True
+        window.check_grammar()
+        no_java = list(told)
+        window.settings["grammar"] = {"engine": "custom", "url": base}
+        window.run = lambda work, args, done, report=False, **options: done(
+            work(*args, progress=lambda *_: None) if report else work(*args)) or True
+        window.check_grammar()
+        found = [i for i in window.quality_report() if i.kind.startswith("grammar")]
+        window.apply_edits([found[0].edit], "0")
+        after = [i for i in window.quality_report() if i.kind.startswith("grammar")]
+        sent = len(posts)
+        told.clear()
+        window.undo()
+        window.check_grammar()  # lo de antes de arreglar ya estaba revisado
+    finally:
+        app.shutil.which, app.messagebox.showinfo, window.run = saved
+        server.shutdown()
+        window.close()
+    assert ran == [] and "Java" in no_java[0], (ran, no_java)
+    assert [(i.title, i.edit) for i in found] == [("Gramática: «fue»", (1, 2, "Ellos fueron a la casa."))], found
+    assert after == [] and sent == 1 and "Ya está revisado" in told[0], (after, sent, told)
+    assert ("grammar", "Gramática", "Revisar") in window.quality_kinds()
+
+
 def _run_tests(part, parts):
     """Ejecuta las pruebas part, part+parts, part+2·parts… en este proceso. Devuelve cuántas fallaron."""
     global TMP
