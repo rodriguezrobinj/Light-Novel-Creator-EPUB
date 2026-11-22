@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFra
 import convert
 import editor
 import faithful
+import grammar
 import options
 import qtk
 import registro
@@ -131,7 +132,8 @@ RECENT = 8  # PDF recientes que recuerda el menú
 OUT_NAMES = ["Como el PDF", "Título del libro", "Serie - Volumen N"]  # Opciones → Salida → Nombre del EPUB
 # Lo de «La aplicación» en Opciones que no es del editor: sus valores de fábrica
 APP_DEFAULTS = {"accent": "Azul", "ui_font": "9 pt", "reopen_last": False, "recent_max": RECENT, "out_name": OUT_NAMES[0],
-                "out_folder": "", "spell_caps": False, "quality_off": [], "quality_levels": {}}
+                "out_folder": "", "spell_caps": False, "quality_off": [], "quality_levels": {},
+                "grammar": {"engine": "local", "url": "", "user": "", "key": ""}}  # key: cifrada (translate.protect)
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
 # Los de «Más datos…» (página de título y catálogo): también son datos del libro, como convert.Book
@@ -917,6 +919,10 @@ def _draft_path(pdf):
 
 def _translation_path(pdf):
     return Path(pdf).with_name(Path(pdf).stem + ".lnepub.traduccion.json")
+
+
+def _grammar_path(pdf):
+    return Path(pdf).with_name(Path(pdf).stem + ".lnepub.gramatica.json")
 
 
 def _read_translation(pdf):
@@ -2343,6 +2349,8 @@ class App:
         self.ignored = []                      # avisos del informe que no se muestran (_issue_key)
         self.unknown = set()                   # palabras desconocidas de la última revisión ortográfica
         self.spell_server = None               # proceso de ortografía del editor (spell_process)
+        self.lt_server = None                  # LanguageTool local: (proceso, dirección, registro), uno por sesión
+        self.grammar_memo = (None, [])         # (lo que mira grammar_issues, sus avisos)
         # ("page", n), ("file", ruta), ("image", k), ("text", "") o None: la que eligió el análisis
         self.cover_choice = None
         self.device_var, self.dark_var = qtk.Var('E-reader 6"'), qtk.Var(False)
@@ -2987,6 +2995,8 @@ class App:
             self.stop_work()
         if self.standby and self.standby[0].is_alive():
             self.standby[0].terminate()
+        if self.lt_server and self.lt_server[0].poll() is None:  # Java con ~1 GB: no se queda tras la ventana
+            self.lt_server[0].terminate()
         self.thumb_job += 1  # cancela las miniaturas pendientes
         if self.pdf_doc:
             self.pdf_doc.close()
@@ -4304,7 +4314,7 @@ class App:
         su casilla aparte."""
         return [k for k in convert.QUALITY_KINDS if k[0] != "echo"] + [
             ("comment", "Comentario del revisor", "Revisar"), ("toc", "Falta un capítulo del índice", "Revisar"),
-            ("toc-extra", "Capítulo que no está en el índice", "Menor")]
+            ("toc-extra", "Capítulo que no está en el índice", "Menor")] + grammar.KINDS
 
     @staticmethod
     def quality_levels():
@@ -5716,11 +5726,94 @@ class App:
                 del self.reports[next(iter(self.reports))]
             self.reports[key] = convert.quality_report(self.book, self.echoes_var.get(), self.glossary,
                                                        self.lang_var.get().strip() or "es")
-        found = list(self.reports[key]) + self.toc_issues() + self.comment_issues()
+        found = list(self.reports[key]) + self.toc_issues() + self.comment_issues() + self.grammar_issues()
         off, levels = set(self.settings.get("quality_off") or ()), self.settings.get("quality_levels") or {}
         # Opciones → Informe de calidad: los apagados no salen; los de otra gravedad cuentan como ella en la nota
         return [dataclasses.replace(i, level=levels[i.kind]) if levels.get(i.kind) in convert.LEVELS else i
                 for i in found if i.kind not in off]
+
+    def grammar_issues(self):
+        """Avisos de LanguageTool de los párrafos ya revisados con «Revisar gramática» (su caché junto al libro).
+        Recordados por la caché y los bloques: el informe se pide a menudo."""
+        if not self.book or not self.pdf:
+            return []
+        path, lang = _grammar_path(self.pdf), self.lang_var.get().strip() or "es"
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            return []
+        memo, issues = self.grammar_memo
+        if memo and memo[:3] == (str(path), stamp, lang) and memo[3] is self.book.blocks:
+            return issues
+        issues = grammar.issues(self.book.blocks, grammar.load(path, lang))
+        self.grammar_memo = ((str(path), stamp, lang, self.book.blocks), issues)
+        return issues
+
+    def grammar_engine(self):
+        """(motor, dirección, usuario, clave) de Opciones → Ortografía → Revisión de gramática."""
+        data = self.settings.get("grammar") if isinstance(self.settings.get("grammar"), dict) else {}
+        engine = data.get("engine") if data.get("engine") in grammar.ENGINES else "local"
+        base = {"public": grammar.PUBLIC_URL, "premium": grammar.PREMIUM_URL}.get(engine, str(data.get("url") or ""))
+        premium = engine == "premium"
+        return (engine, base.strip(), str(data.get("user") or "").strip() if premium else "",
+                translate.unprotect(str(data.get("key") or "")) if premium else "")
+
+    def check_grammar(self, parent=None, then=None):
+        """«Revisar gramática»: LanguageTool revisa los párrafos sin revisión (nuevos o editados) en el proceso de
+        trabajo y sus avisos entran en el informe. El motor local se descarga una vez si el usuario quiere y su
+        servidor arranca una vez por sesión. then: al acabar bien (el informe abierto se rellena)."""
+        if not self.book:
+            return
+        engine, base, user, key = self.grammar_engine()
+        texts = [convert._plain(b).strip() for b in self.book.blocks if b.kind == "p"]
+        path, lang = _grammar_path(self.pdf), self.lang_var.get().strip() or "es"
+        found = grammar.load(path, lang)
+        if not any(t and grammar.key(t) not in found for t in texts):
+            messagebox.showinfo("Gramática", "Ya está revisado: no hay párrafos nuevos ni cambiados desde la última "
+                                "revisión.", parent=parent)
+            return
+        if engine == "custom" and not base:
+            messagebox.showinfo("Gramática", "Falta la dirección del servidor propio: escríbela en Opciones → "
+                                "Ortografía.", parent=parent)
+            return
+        if engine == "premium" and not (user and key):
+            messagebox.showinfo("Gramática", "Faltan el usuario y la clave de LanguageTool Premium: escríbelos en "
+                                "Opciones → Ortografía.", parent=parent)
+            return
+        wait, log = 0, ""
+        if engine == "local":
+            java = shutil.which("java")
+            if not java:
+                messagebox.showinfo("Gramática", "Revisar la gramática en este equipo necesita Java, que no está "
+                                    "instalado.\n\nInstálalo gratis desde java.com y vuelve a pulsar «Revisar "
+                                    "gramática», o elige languagetool.org en Opciones → Ortografía.", parent=parent)
+                return
+            home = SETTINGS.parent
+            if not grammar.installed(home):
+                if messagebox.askyesno("Gramática", "Para revisar la gramática en este equipo hay que descargar "
+                                       f"LanguageTool una vez (unos {grammar.LT_SIZE}, de languagetool.org). "
+                                       "¿Descargarlo ahora?", parent=parent):
+                    self.run(grammar.download, (str(home),), lambda _: self.check_grammar(parent, then), report=True,
+                             busy="Descargando LanguageTool…")
+                return
+            if not self.lt_server or self.lt_server[0].poll() is not None:
+                try:
+                    self.lt_server = grammar.start(home, java)
+                except OSError as e:
+                    messagebox.showerror("Gramática", f"No se pudo arrancar LanguageTool.\n{e}", parent=parent)
+                    return
+            _, base, log = self.lt_server
+            wait = 90  # al arrancar tarda unos segundos; si ya responde, no espera
+
+        def done(result):
+            count, matches = result
+            self.update_quality()
+            self.status.setText(f"Gramática: {count} párrafos revisados, {matches} avisos")
+            if then:
+                then()
+
+        self.run(grammar.review, (str(path), base, texts, lang, user, key, grammar.LIMITS[engine], wait, log), done,
+                 report=True, busy="Revisando gramática…")
 
     def comment_issues(self):
         """Los comentarios del revisor como avisos «Revisar»: salen en F8, en el informe y al exportarlo. El de un
@@ -5865,6 +5958,10 @@ class App:
             "Informe de calidad", on_close=lambda: shiboken6.isValid(win) and fill()))
         export_btn = _button("Exportar…", lambda: self.export_report(state["all"], state["score"], win))
         export_btn.setToolTip("Guardar el informe como página web (.html) o tabla para Excel (.csv), para otra persona")
+        grammar_btn = _button("Revisar gramática", lambda: self.check_grammar(
+            win, then=lambda: shiboken6.isValid(win) and fill()))
+        grammar_btn.setToolTip("LanguageTool busca tildes, concordancia y queísmo; solo revisa lo nuevo o editado. "
+                               "Dónde corre, en Opciones → Ortografía")
         bars = report.KindBars(self.dark)
         bars.picked.connect(lambda kind: (state.update(kind=kind), fill()))
         strip = report.ChapterStrip(self.dark)
@@ -5880,6 +5977,7 @@ class App:
         kinds_box.addWidget(bars)
         kinds_box.addStretch(1)
         actions = QVBoxLayout()
+        actions.addWidget(grammar_btn)
         actions.addWidget(options_btn)
         actions.addWidget(export_btn)
         actions.addStretch(1)

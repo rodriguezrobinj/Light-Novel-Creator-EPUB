@@ -180,9 +180,13 @@ def load(path, lang):
 def _save(path, lang, found):
     """Escribe la caché de una vez: un corte a mitad no deja un JSON roto."""
     tmp = Path(str(path) + ".tmp")
-    tmp.write_text(json.dumps({"rules": RULES_ID, "lang": lang, "found": found}, ensure_ascii=False),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps({"rules": RULES_ID, "lang": lang, "found": found}, ensure_ascii=False),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        raise GrammarError(f"No se pudo guardar la revisión de gramática junto al libro ({Path(path).name}): "
+                           "comprueba que la carpeta no es de solo lectura.") from e
 
 
 def review(path, base, texts, lang, user="", api_key="", limit=50_000, wait=0, log="", progress=None):
