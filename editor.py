@@ -2403,18 +2403,48 @@ class Sheet(QTextEdit):
 
     def set_text(self, text):
         """Pone text (como dump) en la hoja, en un solo deshacer: lo que vuelve de la vista de código. Un párrafo
-        igual que uno de antes sigue siendo de su bloque (su página) y, si es el cargado, recuerda su línea."""
+        igual que uno de antes sigue siendo de su bloque (su página) y, si es el cargado, recuerda su línea.
+        False: la hoja ya tenía ese texto."""
         doc = self.document()
-        before, levels, block = [], {}, doc.firstBlock()
-        while block.isValid():
+        lines = [line for line in text.split("\n\n") if line.strip()]
+        old = self.all_lines()
+        if lines == [line for group in old for line in group]:
+            return False
+        # Solo los párrafos entre el primero y el último que cambian: rehacer la hoja entera tardaba medio
+        # segundo en un capítulo largo, y la hoja web y el código la ponen al día en cada tecla
+        n, a, i = len(old), 0, 0
+        while a < n and lines[i:i + len(old[a])] == old[a]:
+            i += len(old[a])
+            a += 1
+        b, j = n, len(lines)
+        while b > a and j - len(old[b - 1]) >= i and lines[j - len(old[b - 1]):j] == old[b - 1]:
+            j -= len(old[b - 1])
+            b -= 1
+
+        def tied(k):  # en una lista o un recuadro: depende de sus vecinos, se rehacen con él
+            block = doc.findBlockByNumber(k)
+            return block.textList() is not None or bool(block.blockFormat().property(FRAMED))
+        while b < n and (a == b or i == j or tied(b)):
+            j += len(old[b])
+            b += 1
+        while a > 0 and (a == b or i == j or tied(a - 1)):
+            a -= 1
+            i -= len(old[a])
+        before, levels, last, block = [], {}, None, doc.findBlockByNumber(a)
+        for k in range(a - 1, -1, -1):  # el bloque del libro del párrafo de antes: lo heredan los nuevos
+            last = source_of(doc.findBlockByNumber(k))
+            if last is not None:
+                break
+        first = block.position()
+        for _ in range(b - a):
             for line in block_lines(block):
                 if line.strip():
                     before.append((source_of(block), line))
             if block.blockFormat().property(LEVEL):
                 levels[source_of(block)] = block.blockFormat().property(LEVEL)
-            block = block.next()
-        lines = [line for line in text.split("\n\n") if line.strip()]
-        pairs, last = [], None
+            end, block = block.position() + block.length() - 1, block.next()
+        lines = lines[i:j]
+        pairs = []
         for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, [line for _, line in before], lines,
                                                           autojunk=False).get_opcodes():
             for n in range(j2 - j1):
@@ -2425,11 +2455,13 @@ class Sheet(QTextEdit):
         loaded = {line for _, line in self.origins.get(doc, [])}
         cursor = QTextCursor(doc)
         cursor.beginEditBlock()
-        cursor.select(QTextCursor.SelectionType.Document)
-        cursor.removeSelectedText()
+        if b > a:
+            cursor.setPosition(first)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
         insert_lines(cursor, pairs, self.pictures, remember=True, color=self.color, levels=levels)
-        block = doc.firstBlock()
-        while block.isValid():  # solo los párrafos como al cargar recuerdan su línea (Volver al original, cambios)
+        block = doc.findBlockByNumber(a)
+        for _ in pairs:  # solo los párrafos como al cargar recuerdan su línea (Volver al original, cambios)
             f = block.blockFormat()
             if f.property(ORIGINAL) is not None and f.property(ORIGINAL) not in loaded:
                 f.clearProperty(ORIGINAL)
@@ -2438,6 +2470,7 @@ class Sheet(QTextEdit):
                 cursor.setBlockFormat(f)
             block = block.next()
         cursor.endEditBlock()
+        return True
 
     def toggle_underline(self):
         self._toggle(lambda f: f.fontUnderline() and not f.isAnchor(), lambda f, on: f.setFontUnderline(on))
