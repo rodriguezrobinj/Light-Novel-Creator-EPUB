@@ -171,6 +171,27 @@ LEVEL_PLURAL = {level: names[1] for level, names in LEVEL_NAMES.items()}
 BLOCK_TOOLS = ("spelling_window", "page_window", "quality_window", "images_window", "cover_window")
 # Las que guardan en el libro abierto lo que leyeron del anterior: se cierran al abrir otro libro
 BOOK_TOOLS = ("translate_window", "versions_window", "replacements_window", "glossary_window", "online_window")
+# Atajos de teclado por grupos: la ventana «Atajos de teclado…» los enseña en tabla. «+» separa teclas que van a la
+# vez; «/» alternativas
+SHORTCUT_GROUPS = [
+    ("Lista de capítulos", [
+        ("C", "Marcar como capítulo"), ("S", "Marcar como subtítulo"), ("X", "Marcar como separador de escena"),
+        ("Q", "Quitar del libro"), ("I", "Marcar como ilustración"), ("D / G", "Ilustración doble: dividir o girar"),
+        ("F2", "Cambiar el título (también doble clic)"), ("E", "Editar el texto de la fila"),
+        ("R", "Marcar como revisado"), ("Alt+↑ / Alt+↓", "Mover la fila (también arrastrándola)")]),
+    ("Editor de texto", [
+        ("Ctrl+K / Ctrl+I", "Cursiva"), ("Ctrl+N / Ctrl+B", "Negrita"), ("Ctrl+S", "Subrayado"),
+        ("Ctrl+T", "Título o párrafo"), ("Ctrl+E", "Centrar"), ("Ctrl+D", "Alinear a la derecha"),
+        ("Ctrl+J", "Unir con el párrafo siguiente"), ("Mayús+Intro", "Salto de línea en el mismo párrafo"),
+        ("Mayús+F3", "Mayúsculas y minúsculas"), ("Ctrl+Alt+-", "Raya (—)"), ("Ctrl+Alt+.", "Puntos suspensivos (…)"),
+        ("Ctrl+Alt+Q", "Comillas «»"), ("Ctrl+Alt+K", "Enlace"), ("Ctrl+F", "Buscar"), ("Ctrl+H", "Reemplazar"),
+        ("F7", "Cambio siguiente"), ("F8", "Aviso siguiente"), ("F9", "Panel de navegación"),
+        ("F11", "Modo concentración"), ("Ctrl+Intro", "Revisado y al capítulo siguiente sin revisar"),
+        ("Ctrl+RePág / Ctrl+AvPág", "Capítulo anterior o siguiente")]),
+    ("General", [
+        ("Ctrl+Z", "Deshacer"), ("Ctrl+Y", "Rehacer (en el editor)"), ("Ctrl+F", "Buscar en el libro"),
+        ("Ctrl+,", "Opciones")]),
+]
 SHORTCUTS = ("Clic en Tipo, o teclas C (capítulo), S (subtítulo), X (separador), Q (quitar), I (ilustración),"
              " D/G (doble: dividir o girar)\nDoble clic o F2: editar título · E: editar texto · R: revisado\n"
              "Arrastrar o Alt+↑/↓: mover · Ctrl+F: buscar · Ctrl+Z: deshacer · Ctrl+,: opciones")
@@ -697,12 +718,6 @@ def _write_json(path, data):
         raise
 
 
-def _ps_quote(text):
-    """Texto entre comillas simples de PowerShell: un apóstrofo (O'Neil) se escribe doble, también los tipográficos
-    (‘ ’ ‚ ‛), que PowerShell toma por comillas."""
-    return "'" + re.sub(r"(['‘’‚‛])", r"\1\1", str(text)) + "'"
-
-
 def _same_type(value, like):
     """Valor de ajustes.json válido para una opción: el mismo tipo que su valor de fábrica (escrito a mano puede
     traer «sí» donde va true)."""
@@ -801,6 +816,22 @@ def _sources(folder):
 
 
 KINDLE_MAIL = 50_000_000  # límite de Send to Kindle por correo; la web admite hasta 200 MB
+
+
+# Etiquetas de formato en un título: en la lista (y en el índice del EPUB) el título va sin ellas. Solo estas: un
+# título como «<Interludio>» se queda como está
+TITLE_TAGS = re.compile(r"</?(?:b|i|em|strong|span|sup|sub|small|u|s|br)\b[^>]*>", re.I)
+
+
+def _title_text(text):
+    """Título de una fila sin etiquetas de formato («<b>La Tienda</b>» -> «La Tienda»)."""
+    cut = TITLE_TAGS.sub(lambda m: " " if m[0][1:3].lower() == "br" else "", text)  # «Capí<i>tulo</i>» sin espacio
+    return " ".join(html.unescape(cut).split()) if "<" in text or "&" in text else text
+
+
+def _block_title(block):
+    """El nombre de la fila de un título: el del índice del EPUB de entrada o su texto, sin etiquetas."""
+    return block.title or _title_text(block.html)
 
 
 def _size_text(size):
@@ -1609,7 +1640,7 @@ def _plan(book, rows):
             book.blocks[k].keep = kind in (IMG, SPLIT, ROTATED)
             book.blocks[k].layout = LAYOUT.get(kind, "")
         elif kind == ON:
-            chapters.append((k, title))
+            chapters.append((k, _title_text(title)))  # sin «<b>» de revisiones de antes
         elif kind == CUT:
             removed.append(k)
         elif kind == SEP:
@@ -1662,7 +1693,7 @@ def _prepare(pdf, options):
     else:
         state = {**options, **(EPUB_DEFAULTS if book.origin else {}), **_inherited(pdf, book.series)}
         state["author"] = book.author or state.get("author", "")
-        chapters = [(k, book.blocks[k].title or html.unescape(book.blocks[k].html)) for k in book.candidates]
+        chapters = [(k, _block_title(book.blocks[k])) for k in book.candidates]
         removed, breaks = convert.link_sections(book), []
         for k in convert.duplicate_images(book):
             book.blocks[k].keep = False
@@ -1857,51 +1888,6 @@ def _calibre():
         if not found and os.environ.get(var) and (Path(os.environ[var]) / "Calibre2" / "calibre.exe").is_file():
             found = str(Path(os.environ[var]) / "Calibre2" / "calibre.exe")
     return found
-
-
-def _install_paths():
-    """Dónde queda instalado el .exe y su acceso directo del menú Inicio (solo para este usuario)."""
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Programs" / "PDF a EPUB"
-    menu = Path(os.environ.get("APPDATA") or Path.home()) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
-    return base / "PDF a EPUB.exe", menu / "PDF a EPUB.lnk"
-
-
-OPEN_WITHS = [rf"Software\Classes\SystemFileAssociations\{ext}\shell\PDFaEPUB"  # "Convertir a EPUB" en su menú
-              for ext in (".pdf", ".epub")]
-
-
-def _install(source):
-    """Copia el .exe a la carpeta de programas del usuario, crea el acceso directo del menú Inicio y
-    añade "Convertir a EPUB" al menú contextual de los PDF. Sin permisos de administrador."""
-    import winreg
-    exe, link = _install_paths()
-    exe.parent.mkdir(parents=True, exist_ok=True)
-    if Path(source).resolve() != exe.resolve():
-        shutil.copy2(source, exe)
-    script = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({_ps_quote(link)});"
-              f"$s.TargetPath={_ps_quote(exe)};$s.IconLocation={_ps_quote(f'{exe},0')};$s.Save()")
-    subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script], check=True,
-                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    for open_with in OPEN_WITHS:
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, open_with) as key:
-            winreg.SetValue(key, "", winreg.REG_SZ, "Convertir a EPUB")
-            winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, str(exe))
-            winreg.SetValue(key, "command", winreg.REG_SZ, f'"{exe}" "%1"')
-    return exe
-
-
-def _uninstall():
-    """Deshace _install: borra el acceso directo, la entrada del menú de los PDF y el .exe copiado."""
-    import winreg
-    exe, link = _install_paths()
-    link.unlink(missing_ok=True)
-    for sub in [key for open_with in OPEN_WITHS for key in (open_with + r"\command", open_with)]:
-        try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
-        except OSError:
-            pass  # ya no estaba
-    if Path(sys.executable).resolve() != exe.resolve():  # el .exe en uso no se puede borrar
-        exe.unlink(missing_ok=True)
 
 
 def _dropped_pdf(mime):
@@ -2403,10 +2389,9 @@ class App:
         # Las que trabajan sobre el libro abierto: en gris sin libro (update_chrome), no un aviso al pulsarlas
         self.book_actions = [tools.addAction(text, action) for text, action in (
             ("Buscar en el libro…  (Ctrl+F)", self.find), ("Informe de calidad…", self.quality),
-            ("Ortografía…", self.spelling), ("Añadir página…", self.add_page),
+            ("Ortografía…", self.spelling),
             ("Página de personajes…", self.character_page), ("Ilustraciones…", self.images_dialog),
-            ("Cambiar ilustración…", self.change_image),
-            ("Describir ilustración…", self.describe_image), ("Traducir…", self.translate_book),
+            ("Traducir…", self.translate_book),
             ("Versiones…", self.versions))]
         self.book_actions.append(tools.addSeparator())
         tools.addAction("Panel de serie…", self.series_panel)
@@ -2414,11 +2399,8 @@ class App:
         tools.addAction("Vigilar una carpeta…", lambda: self.open_options("Carpeta vigilada"))
         tools.addSeparator()
         tools.addAction("Opciones…  (Ctrl+,)", lambda: self.open_options())
-        tools.addAction("Atajos de teclado…", lambda: messagebox.showinfo("Atajos de teclado", SHORTCUTS))
+        tools.addAction("Atajos de teclado…", self.show_shortcuts)
         tools.addAction("Registro de la aplicación", self.open_log)
-        tools.addSeparator()
-        tools.addAction("Instalar en este equipo", self.install)
-        tools.addAction("Desinstalar", self.uninstall)
         self.file_label = _label("Ningún archivo", "muted")
         self.recent_btn, self.find_btn = _menu_button("Recientes", self.recent_menu), _button("Buscar", self.find)
         top.setLayout(_row(self.open_btn, self.batch_btn, self.recent_btn, _menu_button("Herramientas", tools),
@@ -3837,7 +3819,7 @@ class App:
         for i, block in enumerate(blocks):
             if block.kind == "heading":
                 # el nombre del índice del EPUB de entrada; si no, el texto del título
-                mark, title = (ON if i in chapters else OFF), block.title or html.unescape(block.html)
+                mark, title = (ON if i in chapters else OFF), _block_title(block)
             elif block.kind == "image":
                 double = " doble" if str(i) in self.wide else ""
                 mark, title = (IMG if block.keep else DROPPED), f"Ilustración{double} · página {block.page}"
@@ -3847,6 +3829,8 @@ class App:
             else:
                 continue
             mark, title, *done = rows.get(str(i), (mark, title))
+            if block.kind == "heading":  # revisiones de antes guardaron «<b>…» como título
+                title = _title_text(title)
             reading = f"{minutes[i]} min" if minutes.get(i) else ""
             self.tree.insert("", "end", iid=str(i), values=(mark, title, reading, block.page, done[0] if done else ""),
                              tags=(KIND_TAG[mark],))
@@ -4604,7 +4588,7 @@ class App:
             rows = self.tree.get_children()
             if not rows:  # libro sin títulos ni ilustraciones: el editor se abre siempre desde una fila
                 messagebox.showinfo("Abrir en el editor", "El libro no tiene ninguna fila en la lista, y el editor se "
-                                    "abre por secciones. Añade un capítulo con «Añadir página…» y vuelve a intentarlo.")
+                                    "abre por capítulos: este libro aún no tiene ninguno.")
                 return None
             start, end = self.section_bounds(issue.block)
             item = next((str(j) for j in range(issue.block, -1, -1) if self.tree.exists(str(j))), rows[0])
@@ -4642,7 +4626,7 @@ class App:
                 heads = [j for j in range(edit[0], edit[0] + count) if self.book.blocks[j].kind == "heading"]
                 for j, kind in zip(heads, kinds[n]):
                     if kind in NEXT:  # el editor da Capítulo o Subtítulo; la traducción, el que tenía la fila
-                        rows[str(j)] = [kind, self.book.blocks[j].title or html.unescape(self.book.blocks[j].html), ""]
+                        rows[str(j)] = [kind, _block_title(self.book.blocks[j]), ""]
             if follow and item is not None:
                 item = str(mapping[int(item)]) if int(item) in mapping else None
         self.fill_tree(rows)
@@ -4791,10 +4775,12 @@ class App:
         win.parts = {"table": table, "places": places, "fix": fix, "change": change_btn, "add": add_btn}
         self.spelling_window = win
 
-    def insert_page(self, name, lines, first=True):
-        """Capítulo nuevo con título name y un párrafo por línea, antes del primer capítulo o al final."""
+    def insert_page(self, name, lines, first=True, at=None):
+        """Capítulo nuevo con título name y un párrafo por línea, antes del primer capítulo, al final o en el bloque
+        at. Devuelve dónde quedó su título."""
         start = next((int(i) for i in self.tree.get_children() if self.tree.set(i, "inc") == ON), None)
-        at = start if start is not None and first else len(self.book.blocks)
+        if at is None:
+            at = start if start is not None and first else len(self.book.blocks)
         lines = [f"# {name}"] + [line.strip() for line in lines if line.strip()]
         self.apply_edits([(at, at, "\n\n".join(lines))], str(at))
         self.tree.set(str(at), "inc", ON)  # sin entrada propia en deshacer: Ctrl+Z quita la página entera
@@ -4802,6 +4788,7 @@ class App:
         self.update_reviewed()
         self.update_preview()
         self.status.setText(f"Página «{name}» añadida · E para editarla · Ctrl+Z para quitarla")
+        return at
 
     def character_page(self):
         """Página «Personajes» con los de la serie en AniList (character_dialog)."""
@@ -4862,17 +4849,19 @@ class App:
         win.parts = {"rows": rows, "save": save}
         win.show()
 
-    def add_page(self):
-        """Página propia (créditos del grupo, agradecimientos, nota del traductor) como capítulo nuevo, antes
-        del primer capítulo o al final. Luego se edita con «Editar texto…» y se deshace con Ctrl+Z."""
+    def add_page(self, parent=None, choices=None, done=None):
+        """Página propia (créditos del grupo, agradecimientos, nota del traductor) como capítulo nuevo: desde el
+        editor (Insertar → «Página nueva…»), tras su capítulo, antes del primero o al final. Se deshace con Ctrl+Z.
+        done(título, líneas, dónde): lo que hace el editor; sin él, se inserta aquí."""
         if not self.book:
             return
-        win, column = self.dialog("Añadir página")
+        choices = choices or ["Antes del primer capítulo", "Al final del libro"]
+        win, column = self.dialog("Página nueva", parent=parent)
         title = QLineEdit("Nota del traductor")
         body = QPlainTextEdit()
         body.setPlaceholderText("Un párrafo por línea. <i>cursiva</i> y <b>negrita</b>, como en «Editar texto…».")
         body.setMinimumSize(520, 220)
-        where = qtk.Var("Antes del primer capítulo")
+        where = qtk.Var(choices[0])
         column.addWidget(_label("Título", "muted"))
         column.addWidget(title)
         column.addWidget(_label("Texto", "muted"))
@@ -4881,25 +4870,19 @@ class App:
         def save():
             name = title.text().strip()
             if not name:
-                messagebox.showerror("Añadir página", "Escribe un título.", parent=win)
+                messagebox.showerror("Página nueva", "Escribe un título.", parent=win)
                 return
-            self.insert_page(name, body.toPlainText().splitlines(), where.get().startswith("Antes"))
             win.close()
+            if done:
+                done(name, body.toPlainText().splitlines(), where.get())
+            else:
+                self.insert_page(name, body.toPlainText().splitlines(), where.get().startswith("Antes"))
 
-        column.addLayout(_row(_label("Dónde:"), _combo(where, ["Antes del primer capítulo", "Al final del libro"], 22),
-                              1, _button("Añadir", save, "primary")))
+        where.set(choices[0])
+        column.addLayout(_row(_label("Dónde:"), _combo(where, choices, 22), 1, _button("Añadir", save, "primary")))
         win.show()
-        win.parts = {"title": title, "body": body, "where": where, "save": save}
+        win.parts = {"title": title, "body": body, "where": where, "save": save, "choices": choices}
         self.page_window = win
-
-    def change_image(self):
-        """Cambia la ilustración elegida en la lista por una imagen de archivo (mejor calidad, otra versión).
-        Se apunta en la revisión como ["image", bloque, archivo]."""
-        selected = self.tree.selection()
-        if not self.book or not selected or not self.is_image(selected[0]):
-            messagebox.showinfo("Cambiar ilustración", "Elige primero una ilustración en la lista.")
-            return
-        self.replace_image(int(selected[0]))
 
     def replace_image(self, k, parent=None):
         """Elige un archivo para la ilustración del bloque k y, tras ver el antes y el después, la cambia."""
@@ -5025,8 +5008,9 @@ class App:
         return len(changes), skipped, found
 
     def images_dialog(self):
-        """Herramientas → «Ilustraciones…»: todas las del libro con su miniatura, para exportarlas (una o todas) y
-        reemplazarlas (una, o las de una carpeta con los nombres de la exportación) viendo antes y después."""
+        """Herramientas → «Ilustraciones…»: todas las del libro con su miniatura, para exportarlas (una o todas),
+        cambiarlas (una, o las de una carpeta con los nombres de la exportación) viendo antes y después y describirlas
+        (el texto que lee un lector de pantalla)."""
         if not self.book:
             return
         order = self.image_blocks()
@@ -5048,9 +5032,13 @@ class App:
         preview.setMinimumSize(360, 440)
         info = _label("", "muted")
         info.setWordWrap(True)
+        described = _label("")  # su descripción, a la vista: antes había que ir a otra herramienta para verla
+        described.setWordWrap(True)
+        described.setTextFormat(Qt.TextFormat.PlainText)
         right = QVBoxLayout()
         right.addWidget(preview, 1)
         right.addWidget(info)
+        right.addWidget(described)
         body = _row(listing, right, spacing=16)
         body.setStretch(1, 1)
         column.addLayout(body, 1)
@@ -5077,6 +5065,9 @@ class App:
                                             Qt.TransformationMode.SmoothTransformation))
             info.setText(f"{self.image_title(row + 1, k)}\n{_image_info(self.book.blocks[k].image)} · "
                          f"se exporta como {self.image_name(row + 1, k)}")
+            alt = self.alts.get(convert.image_key(self.book.blocks[k].image), "")
+            described.setText(f"Descripción: {alt}" if alt else "Sin descripción: el lector de pantalla dirá "
+                                                               "«Ilustración de «capítulo»»")
 
         def folder_of_book():
             return str(self.pdf.parent) if self.pdf else self.settings.get("folder")
@@ -5102,7 +5093,12 @@ class App:
             row = listing.currentRow()
             if self.replace_image(order[row], win):
                 fill(row)
-                note.setText("Ilustración reemplazada · Ctrl+Z en la ventana principal para deshacer")
+                note.setText("Ilustración cambiada · Ctrl+Z en la ventana principal para deshacer")
+
+        def describe_one():
+            row = listing.currentRow()
+            if self.describe(order[row], win) is not None:
+                show(row)
 
         def replace_folder():
             folder = filedialog.askdirectory(initialdir=folder_of_book(), title="Carpeta con las ilustraciones nuevas",
@@ -5124,29 +5120,29 @@ class App:
         listing.currentRowChanged.connect(show)
         column.addWidget(note)
         column.addLayout(_row(_button("Exportar todas…", export_all), _button("Exportar esta…", export_one), 1,
-                              _button("Reemplazar…", replace_one),
-                              _button("Reemplazar desde carpeta…", replace_folder), _button("Cerrar", win.close)))
+                              _button("Describir…", describe_one), _button("Cambiar…", replace_one),
+                              _button("Cambiar desde carpeta…", replace_folder), _button("Cerrar", win.close)))
         fill()
         win.show()
-        win.parts = {"list": listing, "note": note, "preview": preview}
+        win.parts = {"list": listing, "note": note, "preview": preview, "described": described,
+                     "describe": describe_one}
         self.images_window = win
 
-    def describe_image(self):
-        """Texto alternativo de la ilustración elegida: lo que dice un lector de pantalla en su lugar."""
-        selected = self.tree.selection()
-        if not self.book or not selected or not self.is_image(selected[0]):
-            messagebox.showinfo("Describir ilustración", "Elige primero una ilustración en la lista.")
-            return
-        key = convert.image_key(self.book.blocks[int(selected[0])].image)
-        text = _ask_line(self.root, "Describir ilustración", "Qué se ve, en una frase: lo lee en voz alta el lector de "
-                         "pantalla de quien no la ve.\nVacío: «Ilustración de «capítulo»».", self.alts.get(key, ""))
+    def describe(self, k, parent=None):
+        """Pide la descripción de la ilustración del bloque k (por su imagen: sigue con ella aunque cambie de sitio).
+        Devuelve el texto nuevo ("" sin descripción) o None si se canceló."""
+        key = convert.image_key(self.book.blocks[k].image)
+        text = _ask_line(parent or self.root, "Describir ilustración", "Qué se ve, en una frase: lo lee en voz alta el "
+                         "lector de pantalla de quien no la ve.\nVacío: «Ilustración de «capítulo»».",
+                         self.alts.get(key, ""))
         if text is None:
-            return
+            return None
         if text.strip():
             self.alts[key] = text.strip()
         else:
             self.alts.pop(key, None)
         self.status.setText("Descripción guardada" if text.strip() else "Sin descripción propia")
+        return text.strip()
 
     def find(self, _=None):
         """Ctrl+F: barra de búsqueda sobre la lista; al elegir un resultado, las vistas previas van a él."""
@@ -5827,23 +5823,49 @@ class App:
         self.run(_omnibus, (pdfs, out, options), lambda problems: self.saved(out, problems, of_book=False), report=True,
                  busy="Preparando el recopilatorio…", partial=[convert.partial_path(out)])
 
-    def install(self):
-        """Instala el .exe para este usuario (ver _install). Desde Python no hay .exe que instalar."""
-        if not getattr(sys, "frozen", False):
-            messagebox.showinfo("Instalar", "Esto se hace desde el .exe (PDF a EPUB.exe).")
-            return
-        exe, link = _install_paths()
-        if not messagebox.askyesno("Instalar en este equipo", f"Se copiará el programa a:\n{exe}\n\ny se añadirá:\n"
-                                   "· un acceso directo en el menú Inicio\n"
-                                   "· «Convertir a EPUB» en el menú del clic derecho de los PDF\n\n¿Continuar?"):
-            return
-        try:
-            _install(sys.executable)
-        except (OSError, subprocess.CalledProcessError) as e:
-            messagebox.showerror("Instalar", f"No se pudo instalar:\n{e}")
-            return
-        messagebox.showinfo("Instalar", "Instalado. Ya puedes abrirlo desde el menú Inicio o con clic derecho en "
-                                        "un PDF → «Convertir a EPUB».")
+    def show_shortcuts(self):
+        """Herramientas → «Atajos de teclado…»: una tabla por grupo, cada tecla dibujada como una tecla."""
+        win, column = self.dialog("Atajos de teclado")
+        colors = theme.colors(self.dark)
+        key_style = (f"QLabel#key {{ border: 1px solid {colors['edge']}; border-bottom-width: 2px; border-radius: 4px; "
+                     f"background: {colors['card']}; padding: 1px 6px; font-weight: 600; }}")
+        win.setStyleSheet(key_style)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inner = QWidget()
+        grid = QGridLayout(inner)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(6)
+        row = 0
+        for group, keys in SHORTCUT_GROUPS:
+            title = _label(group, "title")
+            grid.addWidget(title, row, 0, 1, 2)
+            row += 1
+            for combo, action in keys:
+                keys_row = QHBoxLayout()
+                keys_row.setSpacing(4)
+                for n, alternative in enumerate(combo.split(" / ")):
+                    if n:
+                        keys_row.addWidget(_label("o", "muted"))
+                    for m, key in enumerate(alternative.split("+")):
+                        if m:
+                            keys_row.addWidget(_label("+", "muted"))
+                        keys_row.addWidget(QLabel(key, objectName="key"))
+                keys_row.addStretch(1)
+                grid.addLayout(keys_row, row, 0)
+                grid.addWidget(_label(action), row, 1)
+                row += 1
+            grid.setRowMinimumHeight(row, 10)
+            row += 1
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(row, 1)
+        scroll.setWidget(inner)
+        column.addWidget(scroll, 1)
+        column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
+        win.resize(560, 620)
+        win.show()
+        self.shortcuts_window = win
 
     def open_log(self):
         """Abre registro.log (lo que hizo cada parte de la app) con el editor de texto de Windows."""
@@ -5852,19 +5874,6 @@ class App:
             messagebox.showinfo("Registro", f"Aún no hay nada apuntado en:\n{log}")
             return
         os.startfile(log)
-
-    def uninstall(self):
-        exe, link = _install_paths()
-        if not messagebox.askyesno("Desinstalar", f"Se quitarán el acceso directo, «Convertir a EPUB» del menú de "
-                                   f"los PDF y el programa copiado en:\n{exe}\n\nTus preferencias y revisiones se "
-                                   "conservan. ¿Continuar?"):
-            return
-        try:
-            _uninstall()
-        except OSError as e:
-            messagebox.showerror("Desinstalar", f"No se pudo desinstalar del todo:\n{e}")
-            return
-        messagebox.showinfo("Desinstalar", "Desinstalado.")
 
     def section_of(self, item):
         """Tramo de bloques de una fila: un capítulo hasta el siguiente capítulo (con sus subtítulos);
@@ -8286,8 +8295,9 @@ class TextEditor:
         group("Tabla", [tool("Tabla…", "Tabla de filas y columnas (pantallas de estado, listas de objetos): una fila por "
                              "línea, con « | » entre las celdas", self.table_dialog, icon="table")])
         # un botón con menú: dos grandes ensanchaban «Insertar» más que la pantalla
-        chapter_tools, _ = menu_tool("Capítulo ▾", "Dividir el capítulo en el cursor, o un capítulo nuevo con el "
-                                     "título oculto (en el índice, no en la página)", [
+        chapter_tools, _ = menu_tool("Capítulo ▾", "Una página nueva, dividir el capítulo en el cursor, o un "
+                                     "capítulo nuevo con el título oculto (en el índice, no en la página)", [
+            ("Página nueva…   (créditos, nota del traductor: un capítulo propio)", self.new_page),
             ("Dividir el capítulo aquí", self.show_split_bar),
             ("Título oculto…   (capítulo de solo una ilustración: «Contenido», un mapa)", self.hidden_title_dialog)],
             icon="split")
@@ -9169,6 +9179,43 @@ class TextEditor:
                 item.setData(0, Qt.ItemDataRole.UserRole, path)
             group.setExpanded(True)
 
+    def image_actions(self, win, column, path, k, data):
+        """Bajo una ilustración del explorador: su descripción y «Describir…», «Cambiar…» y «Exportar…», como en
+        Herramientas → «Ilustraciones…»."""
+        described = _label("")
+        described.setWordWrap(True)
+        described.setTextFormat(Qt.TextFormat.PlainText)
+
+        def show_alt():
+            alt = self.app.alts.get(convert.image_key(self.app.book.blocks[k].image), "")
+            described.setText(f"Descripción: {alt}" if alt else "Sin descripción: el lector de pantalla dirá "
+                                                               "«Ilustración de «capítulo»»")
+
+        def describe():
+            if self.app.describe(k, win) is not None:
+                show_alt()
+
+        def change():
+            if self.change_picture(k, win):
+                self.files_written = False  # el EPUB del explorador lleva aún la de antes
+                self.fill_files()
+                win.close()
+                self.show_file(path)
+
+        def export():
+            name = path.rsplit("/", 1)[-1]
+            chosen = filedialog.asksaveasfilename(initialfile=name, filetypes=IMAGE_TYPES, parent=win)
+            target = chosen if Path(chosen).suffix else chosen + Path(name).suffix
+            if chosen and _confirm_name(chosen, target, win):
+                Path(target).write_bytes(data)
+                described.setText(f"Exportada en {target}")
+
+        show_alt()
+        column.addWidget(described)
+        column.addLayout(_row(_button("Describir…", describe), _button("Cambiar…", change),
+                              _button("Exportar…", export), 1))
+        win.parts = {"described": described, "describe": describe, "change": change, "export": export}
+
     def files_go(self, item, opening=True):
         """Un clic en el archivo de un capítulo lo abre en la hoja; doble clic (opening) en otro, lo muestra."""
         path = item.data(0, Qt.ItemDataRole.UserRole)
@@ -9184,12 +9231,26 @@ class TextEditor:
         elif opening:
             self.show_file(path)
 
+    def image_block(self, path):
+        """Bloque del libro de una imagen del EPUB: con un PDF por su nombre (img/b00012.jpg es el bloque 12), con
+        un EPUB por el archivo del que se leyó (Block.ref). None si no es una ilustración del libro (portada,
+        iconos)."""
+        blocks = self.app.book.blocks
+        if self.app.book.origin:
+            return next((k for k, b in enumerate(blocks) if b.kind == "image" and b.ref == path), None)
+        m = re.search(r"/img/b(\d{5})(?:_\d+)?\.\w+$", path)
+        k = int(m[1]) if m else None
+        return k if k is not None and k < len(blocks) and blocks[k].kind == "image" else None
+
     def show_file(self, path):
         """Un archivo del EPUB de solo lectura: el código con colores, la imagen con sus medidas o una muestra de la
-        letra."""
+        letra. Una ilustración del libro, además, se cambia, se describe o se exporta desde aquí."""
+        k = self.image_block(path)
         try:
             with zipfile.ZipFile(self.app.book.origin or self.files_path) as z:
                 data = z.read(path)
+            if k is not None and self.app.book.blocks[k].image:
+                data = self.app.book.blocks[k].image  # la de ahora: cambiada, el EPUB de entrada aún tiene la vieja
         except Exception:
             _log(traceback.format_exc())
             messagebox.showwarning("Explorador de archivos", f"No se pudo leer {path}.", parent=self.win)
@@ -9203,12 +9264,14 @@ class TextEditor:
         picture = QPixmap()
         if low.endswith(faithful.FILE_GROUPS[2][1]) and not low.endswith(".svg") and picture.loadFromData(data):
             label = QLabel()
-            label.setPixmap(picture.scaled(800, 560, Qt.AspectRatioMode.KeepAspectRatio,
+            label.setPixmap(picture.scaled(800, 480, Qt.AspectRatioMode.KeepAspectRatio,  # con sus botones cabe en 768
                                            Qt.TransformationMode.SmoothTransformation)
-                            if picture.width() > 800 or picture.height() > 560 else picture)
+                            if picture.width() > 800 or picture.height() > 480 else picture)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             column.addWidget(label, 1)
             column.addWidget(_label(f"{picture.width()} × {picture.height()} px · {size}", "muted"))
+            if k is not None:
+                self.image_actions(win, column, path, k, data)
         elif low.endswith(faithful.FILE_GROUPS[3][1]):
             font_id = QFontDatabase.addApplicationFontFromData(data)
             families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
@@ -9927,14 +9990,17 @@ class TextEditor:
         self.sheet.insert_picture(data)
         self.tell(f"Página {self.page + 1} del original insertada como imagen")
 
-    def change_picture(self, k):
-        """Cambia la ilustración del bloque k por un archivo (App.replace_image) y la hoja la muestra ya."""
-        if self.app.replace_image(k, parent=self.win):
-            pictures = self.pictures(k, k + 1)
-            if k in pictures:
-                self.sheet.refresh_picture(k, pictures[k])
-            self.drawn = None
-            self.draw_source()
+    def change_picture(self, k, parent=None):
+        """Cambia la ilustración del bloque k por un archivo (App.replace_image) y la hoja la muestra ya. True si
+        cambió."""
+        if not self.app.replace_image(k, parent=parent or self.win):
+            return False
+        pictures = self.pictures(k, k + 1)
+        if k in pictures:
+            self.sheet.refresh_picture(k, pictures[k])
+        self.drawn = None
+        self.draw_source()
+        return True
 
     def replace_word(self, cursor, new):
         cursor.beginEditBlock()
@@ -11910,10 +11976,11 @@ class TextEditor:
                          difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes() if op != "equal")
         return count
 
-    def save(self):
-        """Aplica solo lo que cambió: un párrafo rehecho pierde su página del PDF, y un título rehecho su tipo."""
+    def save(self, then=None):
+        """Aplica solo lo que cambió: un párrafo rehecho pierde su página del PDF, y un título rehecho su tipo.
+        then: lo que se hace con el editor ya cerrado (la página nueva)."""
         if getattr(self, "web_on", False):  # lo escrito en la hoja web, primero a la hoja
-            self.flush_web(lambda: (self.web_done(), self.save()))
+            self.flush_web(lambda: (self.web_done(), self.save(then)))
             return
         if self.code.isVisible() and not self.take_shell():
             return
@@ -11929,6 +11996,30 @@ class TextEditor:
                 if _history_lines(after) != _history_lines(before):
                     history_add(self.app.editor_history, before, after)
         self.win.done(0)
+        if then:
+            then()
+
+    def new_page(self):
+        """Insertar → «Página nueva…» (créditos, nota del traductor): se guarda lo editado, se crea la página tras
+        este capítulo, antes del primero o al final, y el editor se abre en ella."""
+        blocks, (start, end) = self.app.book.blocks, self.current
+        follows = blocks[end] if start >= 0 and end < len(blocks) else None  # el bloque que va tras este capítulo
+
+        def create(name, lines, where):
+            def after_save():
+                app, book = self.app, self.app.book
+                if where == "Tras este capítulo":
+                    # el mismo bloque (guardar no toca lo que sigue al capítulo), o el final del libro
+                    at = next((i for i, b in enumerate(book.blocks) if b is follows), len(book.blocks)) \
+                        if follows is not None else len(book.blocks)
+                else:
+                    at = None if where.startswith("Antes") else len(book.blocks)
+                k = app.insert_page(name, lines, at=at)
+                app.tree.selection_set(str(k))
+                TextEditor(app, str(k), *app.section_bounds(k))
+            self.save(after_save)
+        self.app.add_page(parent=self.win, choices=["Tras este capítulo", "Antes del primer capítulo",
+                                                     "Al final del libro"] if start >= 0 else None, done=create)
 
     def cancel(self, _=None, asked=False):
         if self.web_on and not asked:  # lo último escrito en la web cuenta: se pregunta a la hoja antes

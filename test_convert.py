@@ -3278,7 +3278,7 @@ def test_window_illustrations_export_and_replace_with_comparison():
         (folder / exported[1]).write_bytes(new2)
         (folder / exported[2]).write_bytes(new3)
         window.confirm_image = lambda k, data, batch=False, parent=None: asked.append((k, batch)) or answers.pop(0)
-        click("Reemplazar desde carpeta…")
+        click("Cambiar desde carpeta…")
         note = dialog.parts["note"].text()
         after = [b.image for b in window.book.blocks if b.kind == "image"]
         state = app.json.loads(app.json.dumps(window.review_state()))  # como se guarda: Ctrl+Z ya no la toca
@@ -3342,8 +3342,8 @@ def test_window_illustrations_list_rows_are_even():
     assert title in tip, tip
 
 def test_window_describe_image_reaches_the_epub():
-    """«Describir ilustración…» guarda la descripción por la imagen (no por la fila) en la revisión, y el EPUB la
-    lleva como texto alternativo; sin una ilustración elegida, un aviso lo pide."""
+    """«Describir…» en «Ilustraciones…» guarda la descripción por la imagen (no por la fila) en la revisión, la
+    enseña bajo la vista previa, y el EPUB la lleva como texto alternativo."""
     import app
 
     pic = jpeg(300, 400)
@@ -3356,10 +3356,12 @@ def test_window_describe_image_reaches_the_epub():
     try:
         root, window = visible_window()
         window.show_book(convert.Book("Libro", "", b"", blocks, [0]))  # sin portada: la parecida se descarta
-        window.tree.selection_set("0")
-        window.describe_image()  # un título: no es una ilustración
-        window.tree.selection_set("2")
-        window.describe_image()
+        window.images_dialog()
+        dialog = window.images_window
+        before = dialog.parts["described"].text()
+        dialog.parts["describe"]()
+        shown = dialog.parts["described"].text()
+        dialog.close()
         state = window.review_state()
         out = TMP / "descrita.epub"
         chapters, removed, breaks = app._plan(window.book, window.rows())
@@ -3367,7 +3369,7 @@ def test_window_describe_image_reaches_the_epub():
         window.close()
     finally:
         app._ask_line, app.messagebox.showinfo = original, info
-    assert told == ["Elige primero una ilustración en la lista."], told
+    assert before.startswith("Sin descripción") and shown == "Descripción: Emilia en el mercado", (before, shown)
     assert state["alts"] == {convert.image_key(pic): "Emilia en el mercado"}, state["alts"]
     with zipfile.ZipFile(out) as z:
         pages = {n: z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml")}
@@ -6761,7 +6763,7 @@ def test_editor_code_view_whole_page_with_editable_head():
         ed.toggle_code()
         shown = ed.code.code().split("\n")
         first = ed.code.document().findBlockByNumber(6)
-        indented = first.text() == "<h1>Capítulo 1</h1>" and first.blockFormat().leftMargin() > 0
+        indented = first.text() == "<h1>Capítulo 1</h1>" and first.blockFormat().leftMargin() >= 45  # 3 niveles
         family = ed.code.font().family()
         ed.code.setPlainText(ed.code.code().replace('<meta charset="utf-8"/>', '<meta charset="utf-8"/><meta '
                                                     'name="lnc" content="sí"/>'))
@@ -10122,6 +10124,122 @@ def test_opening_marks_with_many_dots_is_fast():
     assert fixed == "—¡No! Pensé" + "." * 26 + " y nada más.", fixed
 
 
+def test_editor_file_explorer_image_actions():
+    """Una ilustración del explorador de archivos se describe desde su visor (la descripción va a la revisión y se
+    ve allí); la portada no es una ilustración del libro y no lleva esas acciones."""
+    import app
+
+    pic = jpeg(300, 400)
+    B = convert.Block
+    original = app._ask_line
+    app._ask_line = lambda parent, title, label, text: "Una espada en la nieve"
+    try:
+        root, window, ed = editor_on([B("heading", 1, "Capítulo 1"), B("image", 1, image=pic), B("p", 1, "Uno.")], [0])
+        ed.toggle_files()
+        tree = ed.files
+        items = {tree.topLevelItem(g).child(c).text(0): tree.topLevelItem(g).child(c)
+                 for g in range(tree.topLevelItemCount()) for c in range(tree.topLevelItem(g).childCount())}
+        picture = next(name for name in items if name.startswith("b0"))
+        ed.files_go(items[picture])
+        viewer = ed.file_view
+        viewer.parts["describe"]()
+        shown = viewer.parts["described"].text()
+        viewer.close()
+        ed.files_go(items["cover.jpg"])
+        cover_parts = getattr(ed.file_view, "parts", None)
+        ed.file_view.close()
+        alts = dict(window.alts)
+        ed.win.done(0)
+        window.close()
+    finally:
+        app._ask_line = original
+    assert ed.image_block(f"OEBPS/img/{picture}") == 1, picture
+    assert shown == "Descripción: Una espada en la nieve", shown
+    assert alts == {convert.image_key(pic): "Una espada en la nieve"} and cover_parts is None, (alts, cover_parts)
+
+
+def test_window_shortcuts_table():
+    """«Atajos de teclado…» es una tabla por grupos (lista, editor, general), cada tecla en su recuadro, con los del
+    editor (F9, Ctrl+Intro) que antes no salían."""
+    from PySide6.QtWidgets import QLabel
+
+    root, window = visible_window()
+    window.show_shortcuts()
+    win = window.shortcuts_window
+    texts = [label.text() for label in win.findChildren(QLabel)]
+    keys = [label.text() for label in win.findChildren(QLabel) if label.objectName() == "key"]
+    window.close()
+    assert {"Lista de capítulos", "Editor de texto", "General"} <= set(texts), texts
+    assert "F9" in keys and "Intro" in keys and "Panel de navegación" in texts, keys
+
+
+def test_editor_new_page_after_this_chapter():
+    """Insertar → «Página nueva…» en el editor: guarda lo escrito, pone la página tras el capítulo abierto (o al
+    final), abre el editor en ella y Ctrl+Z en la ventana la quita."""
+    import app
+
+    B = convert.Block
+    root, window, ed = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("heading", 2, "Capítulo 2"),
+                                  B("p", 2, "Dos.")], [0, 2])
+    c = ed.sheet.textCursor()
+    c.setPosition(ed.sheet.document().findBlockByNumber(1).position())
+    c.insertText("Editado. ")
+    ed.new_page()
+    dialog = window.page_window
+    dialog.parts["title"].setText("Nota del traductor")
+    dialog.parts["body"].setPlainText("Gracias por leer.")
+    choices = dialog.parts["choices"]
+    dialog.parts["save"]()
+    titles = [window.tree.set(i, "title") for i in window.tree.get_children() if window.book.blocks[int(i)].kind ==
+              "heading"]
+    edited = window.book.blocks[1].html
+    opened = window.text_editor
+    page = opened.win.windowTitle() if opened else ""
+    opened.win.done(0)
+    window.undo()
+    undone = [window.tree.set(i, "title") for i in window.tree.get_children()
+              if window.book.blocks[int(i)].kind == "heading"]
+    window.close()
+    assert choices[0] == "Tras este capítulo", choices
+    assert titles == ["Capítulo 1", "Nota del traductor", "Capítulo 2"], titles
+    assert edited == "Editado. Uno." and "Nota del traductor" in page, (edited, page)
+    assert undone == ["Capítulo 1", "Capítulo 2"], undone
+
+
+def test_window_titles_without_format_tags():
+    """Un título en negrita (subtítulo hecho en el editor) sale en la lista sin «<b>», también el guardado así en una
+    revisión de antes, y no llega al índice del EPUB; un título «<Interludio>» se queda como está."""
+    import app
+
+    B = convert.Block
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", JPEG, [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."),
+                                                      B("heading", 2, "<b>La Tienda</b> &amp; más"), B("p", 2, "Dos."),
+                                                      B("heading", 3, "&lt;Interludio&gt;"), B("p", 3, "Tres.")],
+                                  [0, 2, 4]))
+    shown = [window.tree.set(i, "title") for i in ("0", "2", "4")]
+    window.fill_tree({"2": [app.ON, "<b>Guardado</b>", ""]})
+    saved = window.tree.set("2", "title")
+    chapters, _, _ = app._plan(window.book, {"2": [app.ON, "<i>Otro</i>", ""]})
+    window.close()
+    assert shown == ["Capítulo 1", "La Tienda & más", "<Interludio>"], shown
+    assert saved == "Guardado" and chapters == [(2, "Otro")], (saved, chapters)
+
+
+def test_opening_marks_skip_abbreviations():
+    """El punto de «Sr.» no acaba la frase: «¡Lo siento mucho, Sr. Drago!» no lleva otro «¡» (Backstabbed 1 salía
+    «Sr. ¡Drago!»), y a «Lo siento, Sr. Drago!» se le pone al principio de la frase, no tras la abreviatura."""
+    B = convert.Block
+    texts = ["“¡Lo siento mucho, Sr. Drago! Si tienes un problema conmigo, ¡me aseguraré de solucionarlo!”",
+             "Lo siento, Sr. Drago!", "Llegó la Dra. Pérez. Qué haces aquí?", "Etc. Hola!"]
+    book = convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1")] + [B("p", 1, t) for t in texts], [0])
+    fixes = {i.block: i.edit[2] for i in convert.quality_report(book) if i.kind == "opening"}
+    assert 1 not in fixes, fixes[1]
+    assert fixes[2] == "¡Lo siento, Sr. Drago!", fixes
+    assert fixes[3] == "Llegó la Dra. Pérez. ¿Qué haces aquí?", fixes
+    assert fixes[4] == "Etc. ¡Hola!", fixes  # al principio de un párrafo, «Etc.» es la frase anterior y no se junta
+
+
 def test_quality_report_unifies_honorific_variants():
     """«Subaru-kun» y «Subaru kun», «senpai» y «sempai» en el mismo libro: aviso en la forma menos usada, con
     arreglo a la más usada. Lo que solo cambia de mayúscula, una sola forma o «San Pedro» no avisan."""
@@ -10611,7 +10729,7 @@ def test_window_add_page_change_image_and_reviewed():
         image = str(len(window.book.blocks) - 1)
         window.tree.selection_set(image)
         window.confirm_image = lambda k, data, batch=False, parent=None: "replace"  # el antes y después: Reemplazar
-        window.change_image()
+        window.replace_image(int(window.tree.selection()[0]))  # «Cambiar…» de «Ilustraciones…»
     finally:
         app.filedialog.askopenfilename = original
     changed = pymupdf.Pixmap(window.book.blocks[int(image)].image).width
@@ -10650,7 +10768,7 @@ def test_window_change_double_image_for_single():
     app.filedialog.askopenfilename = lambda **kwargs: str(picture)
     window.confirm_image = lambda k, data, batch=False, parent=None: "replace"  # el antes y después: Reemplazar
     try:
-        window.change_image()
+        window.replace_image(int(window.tree.selection()[0]))  # «Cambiar…» de «Ilustraciones…»
     finally:
         app.filedialog.askopenfilename = original
     kind = window.tree.set("1", "inc")
@@ -11100,7 +11218,7 @@ def test_window_quality_report_editor_in_a_book_without_rows():
     editor = window.text_editor
     window.close()
     assert editor is None, editor
-    assert shown and "Añadir página" in shown[0], shown
+    assert shown and "aún no tiene ninguno" in shown[0], shown
 
 def test_window_quality_report_previews_fixes_and_undo():
     """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
@@ -11690,13 +11808,6 @@ def test_window_error_is_logged_and_shown():
     assert "RuntimeError: fallo de prueba" in log
 
 
-def test_install_paths_are_per_user():
-    import app
-
-    exe, link = app._install_paths()
-    assert "Programs" in str(exe) and exe.name == "PDF a EPUB.exe" and link.suffix == ".lnk", (exe, link)
-
-
 def test_portable_exe_keeps_data_next_to_it():
     """El zip portable trae «datos» junto al .exe: las preferencias van ahí y no a %APPDATA%. Sin esa
     carpeta, o desde Python, siguen en %APPDATA%."""
@@ -12025,20 +12136,6 @@ def test_reader_kind_and_size_text():
     assert app._size_text(18_400_000) == "18,4 MB" and app._size_text(51_000_000) == "51,0 MB"
     assert app.KINDLE_MAIL == 50_000_000
     assert all(len(root) == 3 and root.endswith(":\\") for root, _ in app._drives())
-
-
-def test_install_quotes_paths_with_apostrophes_for_powershell():
-    """Un usuario llamado O'Neil: la ruta del acceso directo no debe romper el script de PowerShell."""
-    import subprocess
-
-    import app
-
-    path = r"C:\Users\O'Neil\AppData\PDF a EPUB.lnk"
-    out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Write-Output {app._ps_quote(path)}"],
-                         capture_output=True, text=True, check=True).stdout.strip()
-    assert out == path, out
-    # PowerShell toma también ‘ ’ ‚ ‛ por comillas simples: sin doblarlos, el resto de la ruta se ejecutaba
-    assert app._ps_quote("O’Neil‘s ‚x‛") == "'O’’Neil‘‘s ‚‚x‛‛'", app._ps_quote("O’Neil‘s ‚x‛")
 
 
 def test_qtk_rowlist_works_like_treeview():

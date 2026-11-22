@@ -214,9 +214,11 @@ def editor_tags(dark):
 # Vista de código del editor: etiquetas, atributos, valores y comentarios (las ilustraciones). 4,5:1 sobre la hoja
 # Colores de la vista «Código HTML», los de los editores de código (Light+ y Dark+ de VS Code)
 CODE = {False: {"tag": "#800000", "punct": "#800000", "attr": "#e50000", "value": "#0000ff", "entity": "#a31515",
-                "comment": "#008000", "gutter": "#f5f5f5", "number": "#237893", "number_on": "#0b216f"},
+                "comment": "#008000", "gutter": "#f5f5f5", "number": "#237893", "number_on": "#0b216f",
+                "guide": "#d3d3d3"},
         True: {"tag": "#569cd6", "punct": "#808080", "attr": "#9cdcfe", "value": "#ce9178", "entity": "#d7ba7d",
-               "comment": "#6a9955", "gutter": "#1e1e1e", "number": "#858585", "number_on": "#c6c6c6"}}
+               "comment": "#6a9955", "gutter": "#1e1e1e", "number": "#858585", "number_on": "#c6c6c6",
+               "guide": "#404040"}}  # guide: las guías de la sangría, como VS Code
 
 
 # Colores de texto del editor (cinta → Formato → Color), como los de Word: (nombre, color o None = el del libro)

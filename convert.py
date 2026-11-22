@@ -2188,8 +2188,18 @@ LEAD = re.compile(r"(?:\s|[«»“”\"'(—–-]|</?(?:i|b|sup)>|<small class=\
 DOUBLED = re.compile(r"\b(de|la|el|que|en|y|los|las|un|una|por|con|se|lo) \1\b", re.I)
 
 
+# Tratamientos que van delante de un nombre: su punto nunca acaba la frase («¡Lo siento, Sr. Drago!»). «etc.» no:
+# suele cerrar una
+TITLE_DOT = re.compile(r"\b(Srta|Sra|Sr|Dra|Dr|Uds|Ud|Vd|Prof|Lic|Ing|Mrs|Mr|Ms|St)\.", re.I)
+HELD_DOT = ""  # el punto de un tratamiento mientras se buscan las frases (uso privado: no sale en un libro)
+
+
 def _opening_marks(line):
     """Pone ¿ o ¡ al principio de las oraciones que solo llevan el signo de cierre ("Qué haces?")."""
+    if "?" not in line and "!" not in line:  # sin signos, nada que recorrer
+        return line
+    held = TITLE_DOT.sub(r"\1" + HELD_DOT, line)
+
     def fix(m):
         body, close = m[1], m[2]
         lead = LEAD.match(body).end()
@@ -2197,7 +2207,7 @@ def _opening_marks(line):
         if "¿" in body or "¡" in body or not any(c.isalpha() for c in body) or body[lead:lead + 1] in ",;:":
             return m[0]
         return body[:lead] + ("¿" if close[0] == "?" else "¡") + body[lead:] + close
-    return SENTENCE.sub(fix, line) if "?" in line or "!" in line else line  # sin signos, nada que recorrer
+    return SENTENCE.sub(fix, held).replace(HELD_DOT, ".")
 
 
 # "(N.T.: …)", "[NdT: …]", "(Nota del traductor: …)" dentro del párrafo; sin paréntesis dentro de la nota
