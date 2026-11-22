@@ -14,8 +14,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
@@ -40,7 +40,7 @@ jobs:
           # 7-Zip y no Compress-Archive: este pierde la carpeta vacía datos/, y sin ella la app escribe en %APPDATA%
           Push-Location portable-zip; 7z a -tzip ..\LightNovelCreator-portable.zip LightNovelCreator | Out-Null; Pop-Location
           7z l LightNovelCreator-portable.zip | Select-String "datos|LEEME|LICENSE|PDF a EPUB.exe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: github.event_name == 'workflow_dispatch'
         with:
           name: LightNovelCreator-portable
