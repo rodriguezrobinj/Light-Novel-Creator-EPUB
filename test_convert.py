@@ -14074,6 +14074,24 @@ def test_window_fixed_layout_epub_preview_matches_original_and_device():
     assert pages[0] == (0, 0) and pages[1][1] == 1, pages
 
 
+def test_window_epub_illustration_preview_skips_app_cover():
+    """Ilustración de un libro leído de un EPUB: la vista previa la escribe sin el EPUB de origen (portada de la app
+    en cover.xhtml) y solo saltaba la portada de la copia fiel (lnc/portada.xhtml): salía «1/2», la portada antes de
+    la ilustración. Ahora es «1/1», la ilustración."""
+    root, window = visible_window()
+    window.pdf = kadokawa_epub(TMP / "Kadokawa ilustración.epub")
+    window.show_book(convert.analyze(window.pdf))
+    image = next(str(n) for n, b in enumerate(window.book.blocks) if b.kind == "image" and window.tree.exists(str(n)))
+    window.tree.selection_set(image)
+    root.update()
+    pages = window.epub_pages
+    first = window.epub_load(0)
+    text = first.get_text().strip()
+    pictured = bool(first.get_image_info()) and not text
+    window.close()
+    assert pages == 1 and pictured, (pages, text)
+
+
 def test_editor_original_marks_japanese_paragraphs():
     """«Editar texto…» de un EPUB japonés (陰の実力者 07): el panel Original no recuadraba uno de cada cuatro
     párrafos. Sin espacios, el párrafo entero era una «palabra» y search_for no la halla si cruza de línea; con

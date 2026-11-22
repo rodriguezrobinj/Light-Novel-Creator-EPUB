@@ -2298,6 +2298,7 @@ class App:
         # Lo que se escribió en preview_path y ese EPUB ya maquetado ((ancho, alto), documento, páginas): un
         # cambio pedía la vista previa hasta 4 veces y maquetarla cada vez paraba la ventana medio segundo
         self.preview_key, self.preview_doc = None, None
+        self.preview_faithful = False  # la vista previa del EPUB es una copia fiel (book.origin): sin portada de la app
         self.pdf_page = 0                      # página del PDF que muestra la vista previa (desde 0)
         self.highlight = None                  # (página, rectángulo) del título seleccionado
         self.epub_page, self.epub_pages = 0, 0  # página mostrada y total de la sección en el EPUB
@@ -3150,7 +3151,7 @@ class App:
                 if key != self.preview_key:  # «Contenido» va justo tras la portada: el capítulo 1 del EPUB
                     self.preview_key, self.preview_doc = None, self.preview_doc and self.preview_doc[1].close()
                     convert.write_epub(part, chapters, self.preview_path, **options)
-                    self.preview_key = key
+                    self.preview_key, self.preview_faithful = key, False
             except Exception:
                 self.epub_pages = -1
         self.draw_epub()
@@ -3207,7 +3208,7 @@ class App:
                 if key != self.preview_key:  # lo mismo que ya está escrito y maquetado: no se rehace
                     self.preview_key, self.preview_doc = None, self.preview_doc and self.preview_doc[1].close()
                     convert.write_epub(part, chapters, self.preview_path, **options)
-                    self.preview_key = key
+                    self.preview_key, self.preview_faithful = key, bool(part.origin) and Path(part.origin).is_file()
             except Exception:
                 self.epub_pages = -1  # no se pudo generar
         self.draw_epub()
@@ -3257,9 +3258,10 @@ class App:
             epub = pymupdf.open(stream=data, filetype="epub")
             epub.layout(width=size[0], height=size[1], fontsize=11)
             # La portada (capítulo 0) no es de la sección, salvo en un EPUB cuya sección empieza en la portada del
-            # original: entonces no se añade la de la app (faithful) y saltarla desfasaba el original una página
+            # original: entonces no se añade la de la app (faithful) y saltarla desfasaba el original una página.
+            # Solo en la copia fiel: una ilustración o «Contenido» se escriben sin el origen, siempre con portada
             with zipfile.ZipFile(io.BytesIO(data)) as z:
-                skip = 0 if self.book and self.book.origin and not any(
+                skip = 0 if self.preview_faithful and not any(
                     n.endswith("lnc/portada.xhtml") for n in z.namelist()) else 1
             # Todas las páginas de la sección: un capítulo de un EPUB puede ocupar varios archivos (portadilla y texto)
             pages = [(c, p) for c in range(skip, epub.chapter_count) for p in range(epub.chapter_page_count(c))]
