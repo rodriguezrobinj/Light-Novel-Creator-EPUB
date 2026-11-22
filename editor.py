@@ -416,6 +416,175 @@ def from_code(code):
     return "\n\n".join(lines)
 
 
+# «Código HTML» como un editor de código: sangría por nivel y, dentro de una línea, cada etiqueta que solo lleva
+# otras etiquetas en sus sub-líneas (U+2028). Es presentación: clean() las quita y deja la línea como era
+SUB_LINE = " "
+MARKUP_TOKEN = re.compile(r"<!--.*?-->|<\?.*?\?>|<![^>]*>|</?[A-Za-z][^<>]*>|[^<]+|<", re.S)
+VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+INDENT = "  "
+
+
+def _tag_kind(token):
+    """«open», «close» o None (texto, comentario, declaración o etiqueta que se cierra sola) y su nombre."""
+    m = re.match(r"<(/?)([A-Za-z][\w:.-]*)", token)
+    if not m or token.startswith(("<!", "<?")):
+        return None, ""
+    name = m[2].lower()
+    if m[1]:
+        return "close", name
+    return (None if token.endswith("/>") or name in VOID_TAGS else "open"), name
+
+
+def clean(text):
+    """Línea del código sin sus sub-líneas: como se escribió."""
+    return re.sub(SUB_LINE + " *", "", text)
+
+
+def pretty_line(line):
+    """La línea con cada etiqueta que solo contiene etiquetas partida en sub-líneas sangradas; los espacios de
+    entre ellas se quedan (al final de la sub-línea de antes): clean() devuelve la línea igual. Con texto suelto
+    (un párrafo con cursivas) va entera, como en VS Code."""
+    root, stack = [], []
+    for m in MARKUP_TOKEN.finditer(line):
+        token = m[0]
+        kind, name = _tag_kind(token)
+        if kind == "close" and any(n["name"] == name for n in stack):
+            while stack:
+                node = stack.pop()
+                if node["name"] == name:
+                    node["close"] = token
+                    break
+            continue
+        children = stack[-1]["kids"] if stack else root
+        if kind == "open":
+            node = {"name": name, "open": token, "kids": [], "close": ""}
+            children.append(node)
+            stack.append(node)
+        else:
+            children.append(token)
+
+    def raw(node):
+        return node if isinstance(node, str) else node["open"] + "".join(map(raw, node["kids"])) + node["close"]
+
+    def texty(nodes):
+        return any(isinstance(n, str) and not n.startswith("<") and n.strip() for n in nodes)
+
+    def render(nodes, depth, out):
+        for n in nodes:
+            if isinstance(n, str) and not n.strip():
+                if out:
+                    out[-1][1] += n  # espacio de entre etiquetas: se conserva
+                continue
+            if isinstance(n, str) or not n["kids"] or texty(n["kids"]):
+                out.append([depth, raw(n)])
+                continue
+            out.append([depth, n["open"]])
+            render(n["kids"], depth + 1, out)
+            if n["close"]:
+                out.append([depth, n["close"]])
+
+    if texty(root):
+        return line
+    out = []
+    render(root, 0, out)
+    if not out:
+        return line
+    pretty = (SUB_LINE).join(INDENT * depth + text if k else text for k, (depth, text) in enumerate(out))
+    return pretty if clean(pretty) == line else line  # nunca cambia lo escrito
+
+
+def line_depths(lines):
+    """Nivel de sangría de cada línea: las etiquetas abiertas antes de ella (una que empieza cerrando, uno menos)."""
+    depths, open_ = [], 0
+    for line in lines:
+        low = level = open_
+        for m in MARKUP_TOKEN.finditer(line):
+            kind, _ = _tag_kind(m[0])
+            level += {"open": 1, "close": -1}.get(kind, 0)
+            low = min(low, level)
+        depths.append(max(0, low))
+        open_ = max(0, level)
+    return depths
+
+
+def page_code(shell, body):
+    """El código de la página entera: lo de antes del texto (shell[1]), el texto (body) y lo de después."""
+    if not shell:
+        return body
+    head = [line for line in shell[1].rstrip().split("\n")]
+    foot = [line for line in shell[2].strip().split("\n") if line.strip()]
+    return "\n".join([line.strip() for line in head] + ([body] if body else []) + [line.strip() for line in foot])
+
+
+def _content_line(line):
+    """¿Una línea del texto del capítulo? (las de to_code: un párrafo o título con algo dentro, una marca, una raya
+    o texto suelto). Un ancla vacía o un <div> sin nada de la cabecera de un EPUB no lo es."""
+    m = CODE_LINE.fullmatch(line)
+    return bool(m and m[3].strip() or CODE_TOKEN.fullmatch(line) or convert.RULE_LINE.fullmatch(line)
+                or (line and not line.startswith("<")))
+
+
+def split_page(lines):
+    """(h, f) de las líneas de la página: cabecera lines[:h] (hasta <body> y lo que envuelve el texto), texto
+    lines[h:f] y pie lines[f:] (desde la primera que cierra un envoltorio). Sin <body>: (0, len), todo es texto."""
+    body = next((n for n, line in enumerate(lines) if re.search(r"<body\b", line)), None)
+    if body is None:
+        return 0, len(lines)
+    h = body + 1
+    while h < len(lines) and lines[h].strip() and not _content_line(lines[h].strip()):  # una línea vacía: del texto
+        h += 1
+    f = h
+    while f < len(lines):
+        net = sum({"open": 1, "close": -1}.get(_tag_kind(m[0])[0], 0) for m in MARKUP_TOKEN.finditer(lines[f]))
+        if net < 0:
+            break
+        f += 1
+    return h, f
+
+
+XML_ERRORS = {"mismatched tag": "una etiqueta se cierra con otro nombre o queda alguna sin cerrar antes",
+              "not well-formed (invalid token)": "hay un carácter o una etiqueta mal escrita",
+              "unbound prefix": "un prefijo (como epub:) sin su xmlns en <html>",
+              "junk after document element": "hay algo después de </html>",
+              "no element found": "falta cerrar alguna etiqueta",
+              "undefined entity": "una entidad (&…;) que XHTML no conoce: usa el carácter o &#número;",
+              "duplicate attribute": "un atributo repetido en la misma etiqueta",
+              "unclosed token": "una etiqueta o un comentario sin cerrar",
+              "syntax error": "hay un error de sintaxis"}
+
+
+def check_shell(head, foot, f):
+    """Error de la cabecera editada («Línea N: …») o "": XML bien formado, con <html>, <head> con <title> y <body>,
+    y dentro de <body> solo lo que envuelve el texto. head y foot: sus líneas; f: la línea del código donde empieza
+    el pie. Así lo escrito a mano no rompe el capítulo en el EPUB."""
+    import xml.etree.ElementTree as ET
+    doc = "\n".join(head) + "\n<lnc-texto/>\n" + "\n".join(foot)
+    try:
+        root = ET.fromstring(doc.encode("utf-8"))
+    except ET.ParseError as e:
+        line, col = e.position
+        where = line if line <= len(head) else f + line - len(head) - 1
+        reason = XML_ERRORS.get(str(e).split(":")[0], "no es XML bien formado")  # expat lo dice en inglés
+        return f"Línea {where}, columna {col + 1}: la cabecera no es XHTML válido: {reason}"
+    local = lambda el: el.tag.rsplit("}", 1)[-1]
+    if local(root) != "html":
+        return "La página tiene que empezar en <html>"
+    kids = {local(el): el for el in root}
+    if "head" not in kids or not any(local(el) == "title" for el in kids["head"]):
+        return "Falta <head> con su <title>"
+    if "body" not in kids:
+        return "Falta <body>"
+    if [local(el) for el in root] != ["head", "body"] or (root.text or "").strip() or \
+            any((el.tail or "").strip() for el in root):
+        return "Dentro de <html> solo van <head> y, tras él, <body>: lo demás va dentro de uno de los dos"
+    if not any(local(el) == "lnc-texto" for el in kids["body"].iter()):
+        return "El texto del capítulo tiene que quedar dentro de <body>"
+    if "".join(kids["body"].itertext()).strip():  # un párrafo escrito en la cabecera no lo vería la hoja
+        return ("Dentro de <body> la cabecera no lleva texto: pon cada párrafo en su propia línea, entre la cabecera "
+                "y el pie")
+    return ""
+
+
 class CodeLook(QSyntaxHighlighter):
     """Colores de la vista de código, como un editor de código: < > y /, nombre de la etiqueta, atributos, sus
     valores, entidades (&amp;) y comentarios."""
@@ -784,7 +953,7 @@ class CodeEdit(QTextEdit):
         # Sin colores mientras se carga y se espacia: cada paso volvía a colorear el documento entero (8 s al abrir
         # el código de un capítulo de 900 párrafos). Al volver a ponerlos, se colorea una vez
         self.look.setDocument(None)
-        super().setPlainText(text)
+        super().setPlainText("\n".join(pretty_line(line) for line in text.split("\n")))
         self.space_paragraphs()
         self.look.originals = False  # líneas nuevas: aún sin su línea de antes
         self.look.setDocument(self.document())
@@ -802,8 +971,29 @@ class CodeEdit(QTextEdit):
         self.blockSignals(True)  # el código no cambió: nada de aplicarlo en vivo
         doc.setUndoRedoEnabled(False)
         cursor.mergeBlockFormat(fmt)
+        # sangría por nivel, como un editor de código: en el margen del párrafo, y así sus líneas partidas por el
+        # ancho siguen bajo ella (con espacios volvían al borde)
+        step = self.fontMetrics().horizontalAdvance(INDENT)
+        block = doc.firstBlock()
+        for depth in line_depths([clean(b) for b in self.code_lines()]):
+            indent = QTextBlockFormat()
+            indent.setLeftMargin(depth * step)
+            QTextCursor(block).mergeBlockFormat(indent)
+            block = block.next()
         doc.setUndoRedoEnabled(True)
         self.blockSignals(False)
+
+    def code_lines(self):
+        """Texto de cada línea, con sus sub-líneas (toPlainText las da como líneas aparte)."""
+        out, block = [], self.document().firstBlock()
+        while block.isValid():
+            out.append(block.text())
+            block = block.next()
+        return out
+
+    def code(self):
+        """El código tal como se escribió: sin las sub-líneas de la presentación."""
+        return "\n".join(clean(line) for line in self.code_lines())
 
     def centerCursor(self):
         self.ensureCursorVisible()

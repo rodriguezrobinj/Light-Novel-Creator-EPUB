@@ -115,6 +115,9 @@ class Block:
     # Etiqueta de apertura del párrafo si no es la de siempre: la del EPUB de entrada (<p class="no-indent">) o la que
     # pone el editor (<h3>, <p style="text-align: justify">). En las líneas del editor va delante del texto
     opening: str = ""
+    # Primer bloque de una sección: su cabecera editada en «Código HTML», (archivo del EPUB de entrada o "", lo de
+    # antes del texto, lo de después). Vacía: la de siempre
+    shell: tuple = ()
 
 
 @dataclass
@@ -1611,6 +1614,8 @@ def edit_section(book, start, end, text, folder=None):
                 bullet = _plain(was)[:1]
                 if bullet in BULLETS and _plain(now)[:1] not in BULLETS:
                     now.html = f"{bullet} {now.html}"
+    if new and start < end and old[start].shell and not new[0].shell:  # la cabecera sigue con su capítulo
+        new[0] = replace(new[0], shell=old[start].shell)
     book.blocks = old[:start] + new + old[end:]
     mapping = _Shift(start, end, len(new) - (end - start), kept, len(old))
     book.candidates = [mapping[k] for k in book.candidates if k in mapping]
@@ -3647,6 +3652,22 @@ def _xhtml(title, body, lang, epub2=False, kind=None, css="style.css"):
             f'<body>\n{BAD_XML.sub("", body)}\n</body>\n</html>\n')  # un carácter de control rompe el XML
 
 
+def page_shell(title, lang="es", is_chapter=True):
+    """(antes, después) del texto en la página de una sección de write_epub (EPUB 3): lo que el editor enseña y deja
+    cambiar en «Código HTML». Un capítulo lleva su <h1 id="titulo">, y su <section> se nombra con él."""
+    tail = ' id="titulo"' if is_chapter else ""
+    mark = ""  # uso privado: BAD_XML quitaría un carácter de control
+    before, after = _xhtml(title, mark + tail, lang, False, _section_kind(title, is_chapter)).split(mark)
+    return before, after[len(tail):]
+
+
+def set_shell(book, k, shell):
+    """Cabecera editada (Block.shell) de la sección que empieza en el bloque k; () vuelve a la de siempre. Lista
+    nueva: la de antes sigue en el deshacer de la ventana."""
+    book.blocks = list(book.blocks)
+    book.blocks[k] = replace(book.blocks[k], shell=tuple(shell))
+
+
 KOBO_BLOCK = re.compile(r"(<(p|h1|h2)\b[^>]*>)(.*?)(</\2>)", re.S)
 
 
@@ -4343,8 +4364,12 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             parts += [f'<{tag}{kind} class="nota" id="nota{k}"><p><a href="#ref{k}">{note_mark(k)}</a>'
                       f'{"." if note_style == "1" else ""} {text}</p></{tag}>' for k, text in notes]
         kinds[name] = _section_kind(title, is_chapter)
-        files[name] = link_targets(_xhtml(html.unescape(heading), "\n".join(parts), lang, epub2, kinds[name]),
-                                   chapter_file.get)
+        shell = book.blocks[firsts[name]].shell if name in firsts else ()
+        if shell and not shell[0] and not epub2:  # cabecera editada (EPUB 3: en EPUB 2 no valdría)
+            page = BAD_XML.sub("", shell[1] + "\n".join(parts) + shell[2])
+        else:
+            page = _xhtml(html.unescape(heading), "\n".join(parts), lang, epub2, kinds[name])
+        files[name] = link_targets(page, chapter_file.get)
 
     title_src = logo_src = ""  # ilustración de la página de título y logo, si van
     # por su image_key: el índice del bloque cambia al editar, la ilustración no
