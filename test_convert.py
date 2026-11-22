@@ -3710,6 +3710,19 @@ def test_pdf_illustration_page_height_follows_the_image():
     assert sizes == [(420, 301), (420, 840)] and all(fills), (sizes, fills)
 
 
+def test_pdf_fixed_layout_cover_takes_the_book_width():
+    """即死チート 1 (EPUB japonés): la portada es de maquetación fija y MuPDF la maqueta a su tamaño (1125×1600);
+    en el PDF de 6″ salía casi cuatro veces más ancha que las demás páginas. Ahora tiene el ancho del libro."""
+    pdf = pymupdf.open()
+    cover = pdf.new_page(width=1125, height=1600)
+    cover.insert_image(cover.rect, stream=jpeg(1125, 1456))
+    for _ in range(2):
+        pdf.new_page(width=300, height=400).insert_text((40, 60), "Texto del capítulo.")
+    convert._full_page_images(pdf)
+    sizes = [(round(page.rect.width), round(page.rect.height)) for page in pdf]
+    assert sizes == [(300, 388), (300, 400), (300, 400)], sizes
+
+
 def painted(width, height, back, *boxes):
     """Pixmap RGB de color back con rectángulos (x0, y0, x1, y1, color). Con Pillow: set_rect de pymupdf 2.0
     recorre píxel a píxel en Python (40 s en 2000×3000)."""
