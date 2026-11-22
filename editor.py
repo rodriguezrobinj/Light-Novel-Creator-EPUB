@@ -1498,6 +1498,29 @@ def compared(block, firsts=None):
     return firsts.get(original, original) if firsts and original is not None else original
 
 
+def deleted_paragraphs(doc, baseline, firsts=None):
+    """{n.º del párrafo que sigue: [líneas de baseline que ya no tiene ningún párrafo]}, -1 si iban al final: los
+    párrafos quitados enteros, que «Mostrar cambios» no marcaba (no queda texto en que marcarlos)."""
+    where = {}
+    block = doc.firstBlock()
+    while block.isValid():
+        line = compared(block, firsts)
+        if line is not None:
+            where.setdefault(line, block.blockNumber())
+        block = block.next()
+    out, pending = {}, []
+    for line in baseline:
+        if line in where:
+            if pending:
+                out.setdefault(where[line], []).extend(pending)
+                pending = []
+        elif line.strip() and not convert.TOKEN.fullmatch(line.strip()):  # ilustración o separador: no es texto
+            pending.append(line)
+    if pending:
+        out[-1] = pending
+    return out
+
+
 def source_of(block):
     """Bloque del libro del que viene el párrafo: el de su objeto, o el que recuerda su formato."""
     objects = [name for name in objects_of(block) if name.split()[1].isdigit()]  # una imagen nueva no es del libro
@@ -1831,6 +1854,10 @@ class Look(QSyntaxHighlighter):
         self.removed = None  # color de lo quitado, tachado en su sitio (theme.mark_colors)
         self.painting = False  # repintando: el documento avisa de un cambio que no lo es (Sheet.forget)
         self.firsts = {}  # compared: lo aceptado otras veces se sigue viendo como cambio al reabrir
+        # Párrafos quitados enteros (deleted_paragraphs): baseline, las líneas con que se compara (las cargadas o,
+        # con historial, las del principio); deleted, {n.º del párrafo de después (-1: al final): [líneas]}
+        self.baseline, self.deleted, self.deleted_due = [], {}, False
+        document.contentsChange.connect(self.deleted_later)
         watch_groups(self, original_group)
 
     def rehighlight(self):
@@ -1853,11 +1880,33 @@ class Look(QSyntaxHighlighter):
         de la vista primero), por tandas; repintar la hoja entera congelaba la ventana segundos."""
         self.changes = color
         self.removed = removed or self.removed
+        old, self.deleted = self.deleted, self.deleted_now()
         if blocks is None:
             self.rehighlight()
             return
+        doc = self.document()  # y los párrafos con quitados delante, los de antes y los de ahora
+        anchors = [doc.lastBlock() if n < 0 else doc.findBlockByNumber(n) for n in old.keys() | self.deleted.keys()]
         self.jobs["changes"] += 1
-        self._repaint("changes", self.jobs["changes"], list(blocks))
+        self._repaint("changes", self.jobs["changes"], list(blocks) + [b for b in anchors if b.isValid()])
+
+    def deleted_now(self):
+        return deleted_paragraphs(self.document(), self.baseline, self.firsts) if self.changes else {}
+
+    def deleted_later(self, *_):
+        """Tras cada cambio, una vez: los párrafos quitados se vuelven a buscar al acabar el cambio."""
+        if self.changes and not self.deleted_due:
+            self.deleted_due = True
+            QTimer.singleShot(0, self, self.update_deleted)
+
+    def update_deleted(self):
+        """Repinta los párrafos cuyos quitados de delante cambiaron (borrar uno solo repinta el de al lado)."""
+        self.deleted_due = False
+        old, self.deleted = self.deleted, self.deleted_now()
+        doc = self.document()
+        for n in {n for n in old.keys() | self.deleted.keys() if old.get(n) != self.deleted.get(n)}:
+            block = doc.lastBlock() if n < 0 else doc.findBlockByNumber(n)
+            if block.isValid():
+                self.rehighlightBlock(block)
 
     def set_tags(self, tags):
         """Colores de theme.editor_tags del tema actual."""
@@ -1938,11 +1987,20 @@ class Look(QSyntaxHighlighter):
                 self.setFormat(c, stop - c, f)
                 c = stop
         original = compared(block, self.firsts)
-        if self.changes and text.strip() and not objects_of(block) and block_lines(block) != [original]:
+        changed = self.changes and text.strip() and not objects_of(block) and block_lines(block) != [original]
+        # párrafos quitados enteros: tachados delante de este, o tras el último si iban al final
+        before = self.deleted.get(block.blockNumber(), []) if self.changes and text.strip() else []
+        after = self.deleted.get(-1, []) if self.changes and text.strip() and not block.next().isValid() else []
+        if (changed or before or after) and not objects_of(block):
             group, n = original_group(block)
-            mark_changes(self, text, group_changes(None if original is None else plain_line(original),
-                                                   [b.text() if b != block else text for b in group], n),
-                         at, QColor(self.changes))
+            adds, gone = group_changes(None if original is None else plain_line(original),
+                                       [b.text() if b != block else text for b in group], n) if changed else ([], [])
+            if before:
+                lost = "¶ " + " ¶ ".join(plain_line(line) for line in before)
+                gone = ([(0, f"{lost} {gone[0][1]}")] + gone[1:]) if gone and gone[0][0] == 0 else [(0, lost)] + gone
+            if after:
+                gone = gone + [(len(text), "¶ " + " ¶ ".join(plain_line(line) for line in after))]
+            mark_changes(self, text, (adds, gone), at, QColor(self.changes))
         elif isinstance(block.userData(), Changes):
             block.userData().gone = []
 
@@ -2009,6 +2067,7 @@ class Sheet(QTextEdit):
         document.documentLayout().documentSizeChanged.connect(lambda size: self.viewport().update())
         document.documentLayout().update.connect(lambda rect: self.viewport().update())
         look = self.look = Look(document)  # después de cargar: colorea una vez, no párrafo a párrafo
+        look.baseline = [line for _, line in lines]
         look.tags = self.tags
         look.set_unknown(self.unknown)
         # Maqueta la hoja entera ya: Qt lo hace a trozos y pintaba con ella a medias. Sin mostrar todavía (el editor
@@ -2059,6 +2118,7 @@ class Sheet(QTextEdit):
                 originals.append(None)
         document, look = self.set_content(pairs, pictures, color, levels)
         self.origins[document] = list(lines)
+        look.baseline = [line for _, line in lines]
         block, n = document.firstBlock(), 0
         self.relinking = True  # solo se corrige lo que recuerda cada párrafo: no es una edición
         try:

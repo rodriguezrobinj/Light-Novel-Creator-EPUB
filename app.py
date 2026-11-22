@@ -40,7 +40,7 @@ import pymupdf
 import segno
 import shiboken6
 from PySide6.QtCore import QEvent, QEventLoop, QLockFile, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QImage, QKeySequence, QPainter,
+from PySide6.QtGui import (QAction, QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QImage, QKeyEvent, QKeySequence, QPainter,
                            QPainterPath,
                            QPalette, QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -8685,6 +8685,8 @@ class TextEditor:
         elif self.web is not None and (side == "Hoja web" or side == EDITOR_SIDES[0]
                                        and app.settings.get("editor_web", False)):
             self.side_tabs.setCurrentIndex(WEB_TAB)
+        self.forwarding, self.side_keys = False, editor._Filter(self.win, self.side_key)
+        QApplication.instance().installEventFilter(self.side_keys)
         if self.web is not None:
             QApplication.instance().focusChanged.connect(self.on_focus)
             sheet.textChanged.connect(lambda: not self.web_on and self.web_tab()
@@ -10869,6 +10871,29 @@ class TextEditor:
         self.fit_ribbon_to_view()
         self.update_tools()
 
+    def side_key(self, event):
+        """Con el foco en el panel de la derecha («Original», «EPUB»: un clic en la página), los atajos de la hoja
+        (Ctrl+Z, Ctrl+Y, Ctrl+N, F7…) iban a él y no hacían nada: van a la hoja o al código a la vista. Copiar y
+        seleccionar todo se quedan en el panel; la hoja web escribe por sí misma."""
+        if event.type() != QEvent.Type.KeyPress or self.closed or self.forwarding or not shiboken6.isValid(self.side):
+            return False
+        focus = QApplication.focusWidget()
+        if focus is None or not (focus is self.side or self.side.isAncestorOf(focus)):
+            return False
+        if self.web is not None and (focus is self.web or self.web.isAncestorOf(focus)):
+            return False
+        mods, key = event.modifiers(), event.key()
+        command = mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)             or Qt.Key.Key_F1 <= key <= Qt.Key.Key_F35
+        if not command or event.matches(QKeySequence.StandardKey.Copy)                 or event.matches(QKeySequence.StandardKey.SelectAll):
+            return False
+        target = self.code if self.code.isVisible() else self.sheet
+        self.forwarding = True  # la tecla reenviada pasa otra vez por este filtro
+        try:
+            QApplication.sendEvent(target, QKeyEvent(QEvent.Type.KeyPress, key, mods, event.text()))
+        finally:
+            self.forwarding = False
+        return True
+
     def on_focus(self, old, new):
         """El cursor pasa de una hoja a otra: a la web, se escribe en ella; a la hoja, lo escrito en la web pasa a la
         hoja antes (y el cursor se queda donde se pulsó)."""
@@ -11664,7 +11689,7 @@ class TextEditor:
         if entry is None:
             return
         versions, at, first = entry
-        look.firsts = history_firsts(first, versions)
+        look.firsts, look.baseline = history_firsts(first, versions), _history_lines(first)
         doc.setUndoRedoEnabled(False)  # la más vieja es el principio: no se deshace más allá
         self.sheet.set_text(versions[0])
         doc.setUndoRedoEnabled(True)
@@ -12226,6 +12251,7 @@ class TextEditor:
             qtk.cancel(job)
         self.pending.clear()
         self.closed = True
+        QApplication.instance().removeEventFilter(self.side_keys)
         if self.web is not None and shiboken6.isValid(self.web):  # lo que Chromium conteste ya no tiene a quién
             self.web.closing = True
             self.web_poll.stop()
@@ -12372,10 +12398,14 @@ class TextEditor:
 
     def source_key(self):
         """(bloque del cursor, bloques unidos a su párrafo en la misma página, PDF): lo que dibuja el panel. Los
-        párrafos unidos en la hoja se recuadran todos, no solo el primero."""
+        párrafos unidos en la hoja se recuadran todos, no solo el primero. Al final, el texto del párrafo si no es
+        el de su bloque (uno que ya no está en el libro y volvió con Ctrl+Z: draw_source lo busca en la página)."""
         k, blocks = self.source_block(), self.app.book.blocks
         joined = [j for j in self.sheet.current_sources()[1:] if j < len(blocks) and blocks[j].page == blocks[k].page]
-        return k, joined, id(self.app.pdf_doc)
+        lines = editor.block_lines(self.sheet.textCursor().block())
+        text = editor.plain_line(lines[0]) if lines else ""
+        stray = text if text.split() and text.split() != convert._plain(blocks[k]).split() else None
+        return k, joined, id(self.app.pdf_doc), stray
 
     def draw_source(self):
         """Panel: la ilustración del bloque del cursor, o su página del PDF con el párrafo recuadrado."""
@@ -12416,6 +12446,9 @@ class TextEditor:
             # trozo también se recuadra. En un EPUB las páginas son de MuPDF, no del libro: no se busca
             more = None if self.app.book.origin else self.continuation(([block] + [blocks[j] for j in joined])[-1])
             self.more = (block.page, more) if more else None
+            stray = key[3] and self.find_box(page, convert.Block("p", block.page, html.escape(key[3], quote=False)))
+            if stray:  # el párrafo tal como está en la hoja: el de su bloque recuadraba otro
+                self.box, self.more = stray, None
             self.show_page(index)
         self.update_status()
 
