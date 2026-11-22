@@ -6761,6 +6761,50 @@ def test_editor_file_explorer():
     assert pdf_opened == (2, 4), pdf_opened
 
 
+def test_editor_file_explorer_opens_one_window():
+    """Varios dobles clics en un archivo del explorador (imagen, estilo, texto o miscelánea) dejan una sola ventana:
+    el mismo archivo trae al frente la que ya está, otro la sustituye."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    import app
+
+    src = sigil_epub(TMP / "Sigil - Volumen 14 una ventana.epub")
+    root, window = visible_window()
+    window.pdf = src
+    window.show_book(convert.analyze(src))
+    k = window.book.candidates[2]
+    window.tree.selection_set(str(k))
+    ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+    ed.toggle_files()
+    groups = {ed.files.topLevelItem(n).text(0): ed.files.topLevelItem(n) for n in range(ed.files.topLevelItemCount())}
+
+    def viewers():
+        return [w for w in ed.win.findChildren(app.Dialog) if w.isVisible()]
+
+    def double_click(item, times):
+        where = ed.files.visualItemRect(item).center()
+        for _ in range(times):
+            QTest.mouseClick(ed.files.viewport(), Qt.MouseButton.LeftButton, pos=where)
+            QTest.mouseDClick(ed.files.viewport(), Qt.MouseButton.LeftButton, pos=where)
+            root.update()
+
+    double_click(groups["Estilos"].child(0), 3)
+    same = len(viewers())
+    double_click(groups["Miscelánea"].child(0), 2)
+    other = len(viewers())
+    title = ed.file_view.windowTitle()
+    ed.file_view.close()
+    root.update()
+    double_click(groups["Estilos"].child(0), 1)  # cerrada la de antes, abre otra
+    reopened = len(viewers())
+    ed.file_view.close()
+    ed.win.done(0)
+    window.close()
+    assert same == 1, same
+    assert other == 1 and title == groups["Miscelánea"].child(0).text(0), (other, title)
+    assert reopened == 1, reopened
+
+
 def test_code_view_layout_keeps_the_code():
     """«Código HTML» como un editor de código: una etiqueta que solo lleva etiquetas se parte en sub-líneas
     sangradas (los espacios entre ellas se quedan) y clean() da la línea de antes; un párrafo con texto va entero.
@@ -7967,6 +8011,7 @@ def test_text_editor_ribbon_fits_the_screen():
         editor.refresh_marks()  # «Avisos (1) ▾» o «▲ 1 ▾» según el nivel
         QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest.value)
         widths.append(editor.ribbon_bar.sizeHint().width())
+    editor.fitted = None  # si ya se ajustó al abrir (según lo rápido que vaya), no mediría y dejaría el último nivel
     editor.fit_ribbon()
     room = min(editor.win.width(), editor.win.screen().availableGeometry().width())
     level, undo, tip = editor.ribbon_level, editor.undo_btn.toolButtonStyle(), editor.undo_btn.toolTip()
@@ -12997,6 +13042,7 @@ def test_editor_epub_tab_marks_every_paragraph_and_pages_into_next_chapter():
             first = ed.current
             ed.side_tabs.setCurrentIndex(1)
             assert wait_for(lambda: ed.side_web.pages > 0), "la pestaña EPUB no cargó"
+            stamped = js(ed.side_web, "document.querySelectorAll('[data-lnc]').length")  # sellada también
             missing = []
             for b in list(ed.blocks()):
                 if not b.text().strip():
@@ -13026,9 +13072,59 @@ def test_editor_epub_tab_marks_every_paragraph_and_pages_into_next_chapter():
             ed.win.done(0)
         finally:
             window.close()
+    assert stamped, "la vista de un EPUB de entrada no lleva las líneas (data-lnc)"
     assert not missing, missing
     assert picked and symbol, (picked, symbol)
     assert ahead != first and back == first and at_end, (first, ahead, back, at_end)
+
+
+def test_editor_epub_tab_follows_the_cursor_line_by_line_in_a_pdf_book():
+    """Pestaña «EPUB» con un libro de PDF: el recuadro sale siempre en el elemento del párrafo del cursor, sellado
+    con su línea (data-lnc), y un clic en un elemento lleva la hoja a su párrafo. Un separador dibujado que sale
+    como texto («* * *», la opción por defecto) recuadraba la ilustración de después; también párrafos repetidos,
+    japonés, sin letras («—…») y un título."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    picture = jpeg(60, 80)
+    blocks = [convert.Block("heading", 1, "Capítulo 1"), convert.Block("p", 1, "Primero."),
+              convert.Block("break", 1, "", image=jpeg(40, 10)), convert.Block("p", 1, "Repetido."),
+              convert.Block("p", 1, "Repetido."), convert.Block("p", 2, "—…"),
+              convert.Block("image", 2, image=picture), convert.Block("p", 2, "「まさか……」と<ruby>彼<rt>かれ</rt></ruby>は言った。"),
+              convert.Block("heading", 2, "Un subtítulo"), convert.Block("break", 2, "* * *"),
+              convert.Block("p", 2, "Último.")]
+    with with_chromium():
+        root, window, ed = editor_on(blocks, [0])
+        try:
+            ed.side_tabs.setCurrentIndex(1)
+            assert wait_for(lambda: ed.side_web.pages > 0), "la pestaña EPUB no cargó"
+            starts = ed.line_starts()
+            wrong, unclicked = [], []
+            for b in list(ed.blocks()):
+                start, count = starts[b.blockNumber()]
+                if not count:
+                    continue
+                js(ed.side_web, "window.lncMarked && (window.lncMarked.style.outline = ''); window.lncMarked = null")
+                ed.sheet.setTextCursor(QTextCursor(b))
+                ed.mark_epub()
+                wait_for(lambda: js(ed.side_web, "window.lncMarked ? 1 : 0"), 5)
+                got = js(ed.side_web, "window.lncMarked ? window.lncMarked.getAttribute('data-lnc') + ' ' + "
+                                      "window.lncMarked.tagName : ''")
+                if not got or got.split()[0] != str(start):
+                    wrong.append((b.text() or " ".join(editor_objects(b)), start, got))
+            for b in list(ed.blocks()):
+                start, count = starts[b.blockNumber()]
+                if not count:
+                    continue
+                ed.sheet.setTextCursor(QTextCursor(ed.sheet.document().lastBlock() if b.blockNumber() == 0
+                                                   else ed.sheet.document().firstBlock()))
+                js(ed.side_web, f"document.querySelector('[data-lnc=\"{start}\"]').click()")
+                if not wait_for(lambda: ed.sheet.textCursor().blockNumber() == b.blockNumber(), 5):
+                    unclicked.append((b.text() or " ".join(editor_objects(b)), ed.sheet.textCursor().blockNumber()))
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert not wrong, wrong
+    assert not unclicked, unclicked
 
 
 def test_editor_epub_separator_plain_and_boxed_in_original():

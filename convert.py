@@ -3970,6 +3970,11 @@ def separator_choice(choice):
     return "Icono del original" if choice == "Original del PDF" else choice
 
 
+def _stamp(part, k):
+    """part con data-lnc="k" en su primer elemento (tras la marca de página, que no es del bloque)."""
+    return re.sub(r'^(\s*(?:<span [^>]*></span>)?<[A-Za-z][\w:]*)', rf'\1 data-lnc="{k}"', part, count=1)
+
+
 def _separator(block, index, style, choice, images, icon=""):
     """XHTML de un separador de escena según la opción elegida (SEPARATOR_CHOICES). Con "Imagen del original" usa
     el adorno dibujado o el texto que traía (una raya <hr> sigue siéndolo); si no trae nada, el del estilo. "Icono del
@@ -4261,7 +4266,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                breaks=(), trim=False, font="", epub2=False, reading=False, kepub=False, hyphenate=False, alts=None,
                progress=None, fit=None, whole_words=False, css_extra="", synopsis=False, title_image=None, logo="",
                endnotes=False, note_style="1", heading_font="", box_style="Sencillo", horizontal=True, preview=False,
-               separator_icon=""):
+               separator_icon="", stamp=False):
     """Escribe el EPUB. chapters: [(índice de bloque, título)] elegidos por el usuario.
     horizontal: un EPUB japonés en vertical sale de izquierda a derecha (faithful.HORIZONTAL_CSS).
     preview: para la vista previa de una sección: un EPUB de entrada se copia sin las imágenes que no usa.
@@ -4292,7 +4297,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     imagen PNG/JPG, en su propia página tras la de título. endnotes: todas las notas en «Notas», al final del libro.
     note_style: una de NOTE_STYLES. heading_font: una de HEADING_FONTS o la ruta de un .ttf/.otf, para los títulos.
     box_style: uno de BOX_STYLES, el aspecto de los recuadros. separator_icon: el SVG (trace_svg) del separador
-    «Icono propio».
+    «Icono propio». stamp: la pestaña EPUB del editor: cada elemento lleva data-lnc con el n.º de su bloque (_stamp),
+    y la hoja y la vista se encuentran por él, sin adivinar por las letras ni contar imágenes.
     Devuelve {archivo de sección: su primer bloque} (None con un EPUB de entrada: ahí lo dice Block.src).
     Un libro leído de un EPUB (book.origin) se escribe parcheando el original (faithful.write_faithful), salvo en
     EPUB 2, que no puede llevar su HTML de EPUB 3 y se rehace."""
@@ -4363,6 +4369,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             src = f"img/t{k:05d}.{'png' if data[:4] == b'\x89PNG' else 'jpg'}"
             images[src] = data
             parts = [f'<h1 class="imagen" id="titulo"><img src="{src}" alt="{html.escape(title)}"/></h1>']
+        if stamp and is_chapter:  # el título del capítulo es su primer bloque
+            parts = [_stamp(part, firsts[name]) for part in parts]
         pending = None  # página que empieza en este tramo: su marca va en el siguiente párrafo o título
         notes = []  # (número, html) de las notas de esta sección: van al final, tras el texto
 
@@ -4404,6 +4412,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
             if listed[at] and (at == 0 or listed[at - 1] != listed[at]):
                 tag = "ul" if listed[at] in LIST_STYLES[:3] else "ol"
                 parts.append(f'<{tag} class="lista" style="list-style-type: {listed[at]}">')
+            own = len(parts)  # los elementos de este bloque, sin los de recuadro y lista que lo envuelven
             if b.kind == "image":
                 alt = (alts or {}).get(image_key(b.image)) or (f"Ilustración de «{title}»" if is_chapter else "Ilustración")
                 for i, data in enumerate(_spread(b.image, b.layout) if b.layout else [b.image]):
@@ -4442,6 +4451,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     parts.append(f"{b.opening}{mark()}{body}</{tag}>")
                 else:
                     parts.append(f"<{item}{attr}>{mark()}{body}</{item}>")
+            if stamp:
+                parts[own:] = [_stamp(part, k) for part in parts[own:]]
             if listed[at] and (at == len(blocks) - 1 or listed[at + 1] != listed[at]):
                 parts.append("</ul>" if listed[at] in LIST_STYLES[:3] else "</ol>")
             if framed[at] and (at == len(blocks) - 1 or not framed[at + 1]

@@ -8308,6 +8308,7 @@ class TextEditor:
             self.side_web.moved.connect(lambda: self.web_shown() and self.show_web_page(self.side_web))
             self.side_web.page().clicked.connect(self.epub_clicked)
             self.side_web.page().picked.connect(self.epub_picked)
+            self.side_web.page().lined.connect(self.epub_line)
             # al borrarse la página Chromium aún contesta (como en WebSheet._ready): cerrado, nada que marcar
             self.side_web.paged.connect(lambda _: self.closed or (self.mark_epub(), self.tag_epub()))
         if self.web is not None:
@@ -9644,7 +9645,15 @@ class TextEditor:
 
     def show_file(self, path):
         """Un archivo del EPUB de solo lectura: el código con colores, la imagen con sus medidas o una muestra de la
-        letra. Una ilustración del libro, además, se cambia, se describe o se exporta desde aquí."""
+        letra. Una ilustración del libro, además, se cambia, se describe o se exporta desde aquí. Una sola ventana:
+        el mismo archivo trae al frente la abierta, otro la sustituye (varios dobles clics abrían varias)."""
+        old = self.file_view
+        if old is not None and shiboken6.isValid(old) and old.isVisible():
+            if old.property("path") == path:
+                old.raise_()
+                old.activateWindow()
+                return
+            old.close()
         k = self.image_block(path)
         try:
             with zipfile.ZipFile(self.app.book.origin or self.files_path) as z:
@@ -9657,6 +9666,7 @@ class TextEditor:
             return
         win = Dialog(self.win)
         win.setWindowTitle(path.rsplit("/", 1)[-1])
+        win.setProperty("path", path)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         column = QVBoxLayout(win)
         size = _file_size(len(data))
@@ -11522,7 +11532,7 @@ class TextEditor:
                          else convert._plain(first))] if first is not None and first.kind == "heading" else []
             options = self.app.write_options([])
             options.update(shrink=False, trim=False, epub2=False, credits=False, contents=False, synopsis=False,
-                           logo="", kepub=False, preview=True)
+                           logo="", kepub=False, preview=True, stamp=True)
             convert.write_epub(part, chapters, self.web_path, **options)
             data = Path(self.web_path).read_bytes()
             path, override = webview.section_path(data), None
@@ -11550,15 +11560,43 @@ class TextEditor:
         if not self.web_shown():
             return
         block = self.sheet.textCursor().block()
+        starts = self.line_starts()
+        start, count = starts[block.blockNumber()] if block.blockNumber() < len(starts) else (0, 0)
+        line = start if count else -1  # con un PDF, la vista va sellada por líneas (convert._stamp): sin adivinar
         before = [b for b in self.blocks() if b.blockNumber() < block.blockNumber()]
         if self.drawn_object(block):  # ilustración o separador dibujado: el n.º tal de las imágenes
-            self.side_web.mark("", MARK_COLORS["current"], image=sum(1 for b in before if self.drawn_object(b)))
+            self.side_web.mark("", MARK_COLORS["current"], image=sum(1 for b in before if self.drawn_object(b)),
+                               line=line)
             return
         if not block.text().strip():  # una línea vacía: nada que recuadrar
-            self.side_web.mark(None, MARK_COLORS["current"])
+            self.side_web.mark(None, MARK_COLORS["current"], line=line)
             return
         words, nth = self.epub_key(block, before)
-        self.side_web.mark(words, MARK_COLORS["current"], nth)
+        self.side_web.mark(words, MARK_COLORS["current"], nth, line=line)
+
+    def line_starts(self):
+        """[(primera línea, cuántas)] de cada párrafo de la hoja en el capítulo que escribe draw_web: edit_section
+        hace un bloque de cada línea con texto, y convert._stamp sella su elemento con ese n.º. Con los mismos
+        párrafos que cuando se dibujó, los de entonces: la vista es esa hasta que se rehaga."""
+        lines = self.sheet.all_lines()
+        drawn = self.epub_drawn if self.epub_drawn is not None and len(self.epub_drawn) == len(lines) else lines
+        starts, j = [], 0
+        for chunk in drawn:
+            count = sum(1 for line in chunk for part in line.splitlines() if part.strip())
+            starts.append((j, count))
+            j += count
+        return starts
+
+    def epub_line(self, j):
+        """Clic en la línea j de la pestaña EPUB sellada (convert._stamp): la hoja va a su párrafo."""
+        if self.web_on:  # lo escrito en la web, antes a la hoja
+            self.flush_web(lambda: (self.web_done(), self.epub_line(j)))
+            return
+        n = next((n for n, (start, count) in enumerate(self.line_starts()) if start <= j < start + count), None)
+        block = self.sheet.document().findBlockByNumber(n) if n is not None else None
+        if self.current and self.current[0] >= 0 and block is not None and block.isValid():
+            self.sheet.setTextCursor(QTextCursor(block))
+            self.sheet.ensureCursorVisible()
 
     @staticmethod
     def epub_letters(block):
@@ -11596,6 +11634,7 @@ class TextEditor:
         ghost = self.ghost_title()
         shown = [bool(b.text().strip()) and not self.drawn_object(b) and b != ghost for b in blocks]
         letters = [self.epub_letters(b) if on else "" for b, on in zip(blocks, shown)]
+        starts = self.line_starts()
         items = []
         for n, block in enumerate(blocks):
             if not shown[n]:
@@ -11603,7 +11642,7 @@ class TextEditor:
             text = "" if editor.objects_of(block) else letters[n]
             words = text if len(text) <= 40 else text[len(text) // 4:][:30]
             nth = sum(1 for k in range(n) if shown[k] and (words in letters[k] if words else not letters[k]))
-            items.append([n, words, nth])
+            items.append([n, words, nth, starts[n][0] if n < len(starts) and starts[n][1] else -1])
         self.side_web.tag(items)
         self.epub_lines = self.epub_drawn or self.sheet.all_lines()
         self.patch_epub()  # lo escrito mientras se dibujaba
