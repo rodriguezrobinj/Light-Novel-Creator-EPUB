@@ -10693,7 +10693,7 @@ def test_window_spelling():
         time.sleep(0.05)
     parts = root.dialogs()[-1].parts
     words = [parts["table"].set(i, "word") for i in parts["table"].get_children()]
-    first = (parts["fix"].currentText(), parts["places"].count())
+    first = (parts["fix"].text(), parts["places"].count())
     parts["change"].click()  # «dijó», la más repetida, por su sugerencia «dijo»
     root.update()
     fixed = [b.html for b in window.book.blocks]
@@ -10713,6 +10713,42 @@ def test_window_spelling():
     assert first == ("dijo", 2), first
     assert fixed[1:] == ["Ella dijo que la ciudd estaba lejos.", "Él dijo que la ciudad era grande y el golem también."], fixed
     assert state == (["golem"], ["ciudd"]) and marked == ["ciudd"], (state, marked)
+
+
+def test_window_spelling_change_one_ignore_and_search():
+    """Ortografía: cada aparición con su frase y la palabra resaltada; la vista previa enseña el cambio; «Cambiar
+    esta» solo toca el párrafo elegido (la palabra sigue en la lista con las demás), «Ignorar» la quita sin
+    añadirla al diccionario, el buscador filtra y «Revisadas X de N» lleva la cuenta."""
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Llegó tarde. Ella dijó que no. Luego se fue."),
+              B("p", 1, "Él dijó que sí."), B("p", 1, "La ciudd era grande.")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.spelling_dialog([("dijó", 2, ["dijo", "dijeron"]), ("ciudd", 1, ["ciudad"])])
+    parts = window.spelling_window.parts
+    places = parts["places"]
+    first_place = places.itemWidget(places.item(0)).text()
+    chips = [parts["chips"].itemAt(n).widget().text() for n in range(parts["chips"].count())
+             if parts["chips"].itemAt(n).widget()]
+    preview = parts["preview"].text()
+    places.setCurrentRow(1)  # «Él dijó que sí.»
+    parts["one"].click()
+    root.update()
+    after_one = ([b.html for b in window.book.blocks], places.count(),
+                 [parts["table"].set(i, "word") for i in parts["table"].get_children()])
+    parts["search"].setText("ciu")
+    filtered = [parts["table"].set(i, "word") for i in parts["table"].get_children()]
+    parts["ignore"].click()
+    root.update()
+    progress, words = parts["progress"].text(), list(window.words)
+    window.close()
+    plain_place = html.unescape(re.sub(r"<[^>]+>", "", first_place)).replace(" ", " ")
+    assert "pág. 1" in plain_place and "Ella dijó que no." in plain_place and "Llegó" not in plain_place, plain_place
+    assert "font-weight:600" in first_place.replace(" ", "") and chips == ["dijo", "dijeron"], (first_place, chips)
+    assert "Así quedaría" in preview and "line-through" in preview, preview
+    assert after_one[0][1:3] == ["Llegó tarde. Ella dijó que no. Luego se fue.", "Él dijo que sí."], after_one
+    assert after_one[1:] == (1, ["dijó", "ciudd"]), after_one
+    assert filtered == ["ciudd"] and progress == "Revisadas 1 de 2" and words == [], (filtered, progress, words)
 
 
 def test_window_add_page_change_image_and_reviewed():
