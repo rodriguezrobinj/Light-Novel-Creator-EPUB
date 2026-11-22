@@ -8,6 +8,7 @@
 [![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)](#ejecutar-y-compilar-desde-el-código)
 [![Interfaz](https://img.shields.io/badge/Qt%206-PySide6%20%2B%20Chromium-41CD52?logo=qt&logoColor=white)](#arquitectura-del-proyecto)
 [![Licencia](https://img.shields.io/badge/Licencia-GNU%20AGPL%20v3-blue.svg)](LICENSE)
+[![Tests](https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/actions/workflows/tests.yml/badge.svg)](https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/actions/workflows/tests.yml)
 [![Releases](https://img.shields.io/github/v/release/rodriguezrobinj/Light-Novel-Creator-EPUB?label=Release&color=success)](https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases)
 
 [Características](#características-principales) · [Descargar y usar](#descargar-y-usar) · [Perfiles de salida](#perfiles-y-formatos) · [Atajos](#atajos-de-teclado) · [Desarrollo](#ejecutar-y-compilar-desde-el-código) · [Arquitectura](#arquitectura-del-proyecto) · [Licencia](#licencia-y-atribuciones)
@@ -171,6 +172,17 @@ La suite incluye más de 500 pruebas automatizadas (conversión con PDF sintéti
 
 - El ejecutable se genera en modo carpeta dentro de `dist\Light Novel Creator\` (`PDF a EPUB.exe` junto a `_internal\`, optimizado para el arranque rápido con Chromium).
 - **Para armar el `.zip` portable**: copia el contenido de `dist\Light Novel Creator\` junto con `portable\LEEME.txt` y `LICENSE`, crea dentro una carpeta vacía llamada `datos` y comprime la carpeta resultante.
+
+### Integración continua y versiones
+
+- **Tests** ([`tests.yml`](.github/workflows/tests.yml)): cada PR y cada push a `master` ejecutan la suite en Windows. `master` solo acepta PR con el check `tests` en verde.
+- **Release** ([`release.yml`](.github/workflows/release.yml)): al empujar un tag `v*`, GitHub construye el `.exe`, comprueba Chromium, arma `LightNovelCreator-portable.zip` y publica la pre-release con las notas de los PR:
+  ```powershell
+  git tag v0.5.0; git push origin v0.5.0
+  ```
+  Ejecutado a mano desde la pestaña *Actions*, deja el zip como artefacto sin publicar nada.
+- **Dependabot** ([`dependabot.yml`](.github/dependabot.yml)): cada mes abre PR con versiones nuevas de `requirements.txt` y de las acciones; las tres de PySide6 van juntas. Se fusionan a mano tras probar el `.exe`.
+- **Seguridad**: CodeQL analiza el código en cada PR; los fallos se avisan en privado según [`SECURITY.md`](SECURITY.md).
 
 ### Diagnóstico y registro
 

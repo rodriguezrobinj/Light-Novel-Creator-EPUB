@@ -1,0 +1,46 @@
+name: Error
+description: El programa falla, se cierra o hace algo que no debería.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Gracias por avisar. Cuanto más concreto, antes se arregla.
+  - type: input
+    id: version
+    attributes:
+      label: Versión
+      description: La del zip que descargaste, por ejemplo v0.4.0.
+    validations:
+      required: true
+  - type: dropdown
+    id: windows
+    attributes:
+      label: Windows
+      options: [Windows 11, Windows 10, Otro]
+    validations:
+      required: true
+  - type: textarea
+    id: pasos
+    attributes:
+      label: Qué hiciste
+      description: Los pasos para que vuelva a pasar.
+      placeholder: |
+        1. Abrí el PDF…
+        2. Pulsé «Generar EPUB…»
+    validations:
+      required: true
+  - type: textarea
+    id: esperado
+    attributes:
+      label: Qué esperabas y qué pasó
+    validations:
+      required: true
+  - type: textarea
+    id: registro
+    attributes:
+      label: Registro
+      description: Menú Herramientas → «Registro de la aplicación». Pega las últimas líneas o adjunta registro.log.
+      render: text
+  - type: markdown
+    attributes:
+      value: No adjuntes PDF ni EPUB con derechos de autor. Si hace falta el libro, di cuál es y en qué página falla.
