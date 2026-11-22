@@ -5765,8 +5765,11 @@ class App:
         if not self.book:
             return
         engine, base, user, key = self.grammar_engine()
-        texts = [convert._plain(b).strip() for b in self.book.blocks if b.kind == "p"]
         path, lang = _grammar_path(self.pdf), self.lang_var.get().strip() or "es"
+        # Lo que sigue en inglés (ya es «Texto sin traducir») revisado como español solo da avisos sin sentido
+        english = not lang.lower().startswith("en")
+        texts = [t for t in (convert._plain(b).strip() for b in self.book.blocks if b.kind == "p")
+                 if not (english and convert._facts(t)[3])]
         found = grammar.load(path, lang)
         if not any(t and grammar.key(t) not in found for t in texts):
             messagebox.showinfo("Gramática", "Ya está revisado: no hay párrafos nuevos ni cambiados desde la última "

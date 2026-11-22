@@ -16620,7 +16620,8 @@ def test_grammar_download_is_checked_and_replaced_whole():
 
 def test_window_grammar_check_fills_the_report():
     """«Revisar gramática» con un servidor propio: los avisos entran en el informe con su arreglo, y el párrafo
-    arreglado los pierde. Sin Java, el motor local lo dice y no ejecuta nada; sin párrafos nuevos, no manda nada."""
+    arreglado los pierde. Sin Java, el motor local lo dice y no ejecuta nada; sin párrafos nuevos, no manda nada;
+    lo que sigue en inglés no se manda."""
     import app
 
     base, posts, server = _fake_lt(lambda fields: (200, {}, {"matches": [
@@ -16632,7 +16633,9 @@ def test_window_grammar_check_fills_the_report():
     try:
         window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
                                                          convert.Block("p", 1, "Ellos fue a la casa."),
-                                                         convert.Block("p", 1, "Todo bien.")], [0]))
+                                                         convert.Block("p", 1, "Todo bien."),
+                                                         convert.Block("p", 1, "He said that he would never go back "
+                                                                       "to the house where it all began.")], [0]))
         window.pdf = make_novel()
         window.settings["grammar"] = {"engine": "local"}
         app.shutil.which = lambda name: None
@@ -16657,6 +16660,7 @@ def test_window_grammar_check_fills_the_report():
     assert ran == [] and "Java" in no_java[0], (ran, no_java)
     assert [(i.title, i.edit) for i in found] == [("Gramática: «fue»", (1, 2, "Ellos fueron a la casa."))], found
     assert after == [] and sent == 1 and "Ya está revisado" in told[0], (after, sent, told)
+    assert "never" not in posts[0]["text"], posts  # sin traducir: revisarlo como español no sirve
     assert ("grammar", "Gramática", "Revisar") in window.quality_kinds()
 
 
