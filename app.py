@@ -2236,6 +2236,18 @@ def _label(text="", name=None):
     return label
 
 
+def _fold_icon(dark, up):
+    """La flecha ▾ (▴ con up) de las listas como icono de 20x12 con 8 px vacíos a la izquierda: el hueco con el
+    texto del botón, que Qt deja en 4 px y la pegaba."""
+    pixmap = QPixmap(40, 24)  # al doble, como el PNG: nítida con zoom
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.drawPixmap(16, 0, QPixmap(theme.chevron(theme.colors(dark)["muted"], up=up)))
+    painter.end()
+    pixmap.setDevicePixelRatio(2)
+    return QIcon(pixmap)
+
+
 def _glyph_icon(glyph, color, size=GLYPH):
     """Glifo de theme.ICONS dibujado como icono monocromo de size px, con el color del texto del tema. Se escala
     a la caja: a tamaño de letra, «±» salía diminuto y «▲» enorme al lado."""
@@ -2431,7 +2443,11 @@ class App:
         self.cover_thumb = QLabel()
         self.cover_thumb.setFixedSize(40, 56)
         self.book_title, self.book_line = _label("", "title"), _label("", "muted")
-        self.data_btn = _button("Editar datos ▾", self.toggle_data)
+        self.data_btn = _button("Editar datos", self.toggle_data)
+        # La flecha a la derecha, la misma de «Recientes» y «Herramientas» (el «▾» de texto no se parecía)
+        self.data_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.data_btn.setIconSize(QSize(20, 12))  # la flecha mide 12: lo de más es el hueco con el texto (_fold_icon)
+        self.data_btn.setStyleSheet("padding-right: 6px;")  # a 9 px del borde, como la de «menu» en el QSS
         text = QVBoxLayout()
         text.setSpacing(2)
         text.addWidget(self.book_title)
@@ -2655,6 +2671,7 @@ class App:
         column = QVBoxLayout(recent)
         column.addWidget(_label("Recientes", "title"))
         self.recent_list = QListWidget()
+        self.recent_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)  # tarjetas altas
         self.recent_list.itemClicked.connect(lambda item: item.data(Qt.ItemDataRole.UserRole)
                                              and self.open_path(item.data(Qt.ItemDataRole.UserRole)))
         self.recent_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2728,7 +2745,8 @@ class App:
             self.data_panel.setMaximumHeight(full)
             self.data_panel.setMinimumHeight(min(full, int(room * 0.45)))
         self.data_panel.setVisible(shown)
-        self.data_btn.setText("Ocultar datos ▴" if shown else "Editar datos ▾")
+        self.data_btn.setText("Ocultar datos" if shown else "Editar datos")
+        self.data_btn.setIcon(_fold_icon(self.dark, shown))
 
     def update_header(self):
         """Tarjeta del libro: título, y autor · grupo · serie y tomo · idioma."""
@@ -2763,6 +2781,7 @@ class App:
             self.text_editor.recolor(self.dark)
         if self.book is None:  # las tarjetas de recientes llevan colores del tema
             self.fill_recent()
+        self.data_btn.setIcon(_fold_icon(self.dark, not self.data_panel.isHidden()))
 
     def show_panes(self):
         mode = self.tabs.currentIndex()  # 0 PDF, 1 EPUB, 2 los dos
@@ -4317,8 +4336,10 @@ class App:
         changed = [key for key, value in book.items() if fields[key].get() != value]
         for key in changed:
             fields[key].set(book[key])
-        if self.theme_var.get() != values["theme"]:
+        look = {key: values[key] for key in ("accent", "ui_font")}  # se ven al elegirlos: Cancelar los devuelve
+        if self.theme_var.get() != values["theme"] or any(self.settings.get(k) != v for k, v in look.items()):
             self.theme_var.set(values["theme"])
+            self.settings.update(look)
             self.apply_theme()
         if changed and self.book:
             self.update_preview()
@@ -5183,6 +5204,8 @@ class App:
         win, column = self.dialog("Ilustraciones")
         win.resize(980, 600)
         listing = QListWidget()
+        # Por píxeles: por filas, al final quedaba el trozo de una fila vacío abajo y arriba no
+        listing.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         listing.setIconSize(QSize(*THUMB_BOX))
         listing.setMinimumWidth(420)
         # Filas iguales: el icono de una ilustración apaisada era más bajo y la fila se encogía; un título largo
@@ -5427,6 +5450,7 @@ class App:
     def illustration_grid(self, chosen):
         """Miniaturas de las ilustraciones del libro; un clic llama a chosen(índice del bloque)."""
         grid = QListWidget()
+        grid.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)  # sin hueco al final
         grid.setViewMode(QListWidget.ViewMode.IconMode)
         grid.setIconSize(QPixmap(130, 130).size())
         grid.setGridSize(QPixmap(150, 160).size())
@@ -5835,8 +5859,10 @@ class App:
         # --- lista y detalle
         panes = QSplitter(Qt.Orientation.Horizontal)
         column.addWidget(panes, 1)
-        table = qtk.RowList(("level", "page", "where", "title"), {"level": "Gravedad", "page": "Pág.", "where": "Dónde",
-                                                                  "title": "Aviso"}, {"level": 110, "page": 44, "where": 130})
+        # El aviso primero y sin columna de gravedad: la dice el color, y el grupo la nombra (antes cada fila
+        # repetía «● Menor» y el grupo ponía «N avisos» bajo «Dónde»: parecía otra fila más)
+        table = qtk.RowList(("title", "where", "page"), {"title": "Aviso", "where": "Dónde", "page": "Pág."},
+                            {"where": 150, "page": 48})
         for level, color in levels.items():
             table.tag_configure(level, foreground=color)
         bold = QFont(table.font())
@@ -5847,6 +5873,12 @@ class App:
         right = QWidget()
         side = QVBoxLayout(right)
         side.setContentsMargins(theme.SPACE["section"], 0, 0, 0)
+        # El detalle con su barra: entero pedía 752 px de alto y la ventana no cabía en 1366x728
+        detail = QScrollArea()
+        detail.setWidgetResizable(True)
+        detail.setFrameShape(QFrame.Shape.NoFrame)
+        detail.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        detail.setWidget(right)
         heading = _label("", "title")
         heading.setWordWrap(True)
         side.addWidget(heading)
@@ -5865,7 +5897,7 @@ class App:
             side.addWidget(_label(caption, "muted"))
             box = QTextBrowser()
             box.setOpenLinks(False)
-            box.setFixedHeight(92)
+            box.setFixedHeight(80)
             side.addWidget(box)
             previews[name] = box
         legend = _label("¶ marca un salto de párrafo", "muted")
@@ -5875,9 +5907,15 @@ class App:
         ignore_btn = _button("Ignorar", lambda: ignore(chosen_issue()))
         edit_btn = _button("Abrir en el editor", lambda: open_issue())
         edit_btn.setToolTip("Abre el capítulo con el trozo del aviso elegido (también con doble clic en la lista)")
-        side.addLayout(_row(fix_btn, all_btn, edit_btn, 1, ignore_btn))
         side.addStretch(1)
-        panes.addWidget(right)
+        aside = QWidget()  # el detalle se desplaza; los botones, siempre a la vista debajo
+        aside_column = QVBoxLayout(aside)
+        aside_column.setContentsMargins(0, 0, 0, 0)
+        aside_column.addWidget(detail, 1)
+        actions_row = _row(fix_btn, all_btn, edit_btn, 1, ignore_btn)
+        actions_row.setContentsMargins(theme.SPACE["section"], 0, 0, 0)
+        aside_column.addLayout(actions_row)
+        panes.addWidget(aside)
         panes.setSizes([500, 600])
 
         def chosen_issue():
@@ -5950,14 +5988,15 @@ class App:
             for kind, n in order:
                 issue = next(i for i in shown if i.kind == kind)
                 gid = f"k:{kind}"
-                table.insert("", "end", iid=gid, values=(f"● {issue.level}", "", f"{n} aviso{'' if n == 1 else 's'}",
-                                                         f"{kind_title(issue)} ({n})"), tags=(issue.level, "group"))
+                table.insert("", "end", iid=gid, values=(f"{kind_title(issue)} ({n})", "", ""),
+                             tags=(issue.level, "group"))
+                table.rows[gid].setFirstColumnSpanned(True)  # el grupo, de lado a lado: un encabezado, no una fila
+                table.rows[gid].setToolTip(0, f"{convert.counted(n, 'aviso')} · {LEVEL_NAMES[issue.level][n != 1]}")
                 groups[kind] = []
                 for k, found in enumerate(shown):
                     if found.kind == kind:
-                        table.insert(gid, "end", iid=str(k), values=(f"● {found.level}", found.page,
-                                                                     state["places"][k][0], found.title),
-                                     tags=(found.level,))
+                        table.insert(gid, "end", iid=str(k), values=(found.title, state["places"][k][0],
+                                                                     found.page), tags=(found.level,))
                         groups[kind].append(str(k))
                 table.rows[gid].setExpanded(n <= 25 or len(order) == 1)  # los muy numerosos, plegados
             rows = [iid for kind, _ in order for iid in groups[kind]]
@@ -6145,7 +6184,11 @@ class App:
         win, column = self.dialog("Atajos de teclado")
         colors = theme.colors(self.dark)
         key_style = (f"QLabel#key {{ border: 1px solid {colors['edge']}; border-bottom-width: 2px; border-radius: 4px; "
-                     f"background: {colors['card']}; padding: 1px 6px; font-weight: 600; }}")
+                     f"background: {colors['card']}; padding: 1px 6px; font-weight: 600; min-width: 12px; "
+                     f"qproperty-alignment: AlignCenter; }}"
+                     # «,», «.» y «-» a tamaño de letra apenas se veían: más grandes, en la misma tecla
+                     f"QLabel#key[sign=\"true\"] {{ font-size: {theme.UI_SIZES.get(self.settings.get('ui_font'), 9) + 4}pt; "
+                     f"padding: 0px 6px; }}")
         win.setStyleSheet(key_style)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -6160,7 +6203,11 @@ class App:
             grid.addWidget(title, row, 0, 1, 2)
             row += 1
             for combo, action in keys:
-                keys_row = QHBoxLayout()
+                # En su propio widget: en un layout anidado, la rejilla no se enteraba del alto con el QSS de las
+                # teclas y las dejaba aplastadas, con un hueco al final
+                keys_box = QWidget()
+                keys_row = QHBoxLayout(keys_box)
+                keys_row.setContentsMargins(0, 0, 0, 0)
                 keys_row.setSpacing(4)
                 for n, alternative in enumerate(combo.split(" / ")):
                     if n:
@@ -6168,9 +6215,11 @@ class App:
                     for m, key in enumerate(alternative.split("+")):
                         if m:
                             keys_row.addWidget(_label("+", "muted"))
-                        keys_row.addWidget(QLabel(key, objectName="key"))
+                        cap = QLabel(key, objectName="key")
+                        cap.setProperty("sign", len(key) == 1 and not key.isalnum())
+                        keys_row.addWidget(cap)
                 keys_row.addStretch(1)
-                grid.addLayout(keys_row, row, 0)
+                grid.addWidget(keys_box, row, 0)
                 grid.addWidget(_label(action), row, 1)
                 row += 1
             grid.setRowMinimumHeight(row, 10)
@@ -7971,6 +8020,8 @@ class Dialog(QDialog):
 
     def showEvent(self, event):
         qtk.use_caption(self)  # barra de título del tema, con los botones que tenga la ventana
+        if self.layout():  # con el alto de la barra ya sumado: si no, se medía sin ella y luego crecía 32 px
+            self.layout().activate()
         super().showEvent(event)
         if self.windowState() & Qt.WindowState.WindowMaximized:  # moverla la sacaría de maximizada
             return

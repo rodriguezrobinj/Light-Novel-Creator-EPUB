@@ -6,8 +6,8 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPalette, QPen
-from PySide6.QtWidgets import QApplication, QComboBox, QProxyStyle, QStyle, QWidget
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPalette, QPen, QTransform
+from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QProxyStyle, QStyle, QWidget
 
 CHOICES = ("Sistema", "Claro", "Oscuro")
 
@@ -97,6 +97,16 @@ QPushButton#link {{ border: 0; background: transparent; color: {acc}; text-decor
 QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QListWidget {{ border: 1px solid {edge}; border-radius: 5px;
     background: {base}; selection-background-color: {acc}; selection-color: {acc_ink}; }}
 QLineEdit, QComboBox, QSpinBox {{ padding: 3px 6px; }}
+QAbstractSpinBox {{ padding: 3px 24px 3px 8px; min-width: 40px; }}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{ subcontrol-origin: border; width: 22px; border: 0;
+    background: transparent; }}
+QAbstractSpinBox::up-button {{ subcontrol-position: top right; border-top-right-radius: 5px; }}
+QAbstractSpinBox::down-button {{ subcontrol-position: bottom right; border-bottom-right-radius: 5px; }}
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{ background: {hover}; }}
+QAbstractSpinBox::up-arrow {{ image: url("{chevron_up}"); width: 10px; height: 10px; }}
+QAbstractSpinBox::down-arrow {{ image: url("{chevron}"); width: 10px; height: 10px; }}
+QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::up-arrow:off,
+QAbstractSpinBox::down-arrow:disabled, QAbstractSpinBox::down-arrow:off {{ image: none; }}
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus {{ border: 1px solid {acc}; }}
 QTextEdit#code, QTextEdit#code:focus {{ border: 0; border-radius: 0; background: {base}; selection-background-color: {acc};
     selection-color: {acc_ink}; }}
@@ -124,7 +134,8 @@ QTableWidget {{ background: {card}; border: 1px solid {line}; border-radius: 8px
 QTableWidget::item {{ padding: 4px 6px; }}
 QTableWidget::item:selected {{ background: {sel}; color: {ink}; }}
 QTabWidget::pane {{ border: 0; border-top: 1px solid {line}; }}
-QListWidget {{ show-decoration-selected: 1; outline: 0; }}
+QListWidget {{ show-decoration-selected: 1; outline: 0; padding: 4px; }}
+QListWidget::item {{ padding: 2px 4px; border-radius: 4px; }}
 QListWidget::item:selected {{ background: {sel}; color: {ink}; }}
 QHeaderView::section {{ background: {card}; border: 0; border-bottom: 1px solid {line}; padding: 4px 6px;
     color: {muted}; }}
@@ -346,6 +357,8 @@ class _Shown(QObject):
         if (kind == QEvent.Type.Polish and isinstance(obj, QComboBox) and not obj.isEditable()
                 and obj.focusPolicy() in (Qt.FocusPolicy.StrongFocus, Qt.FocusPolicy.WheelFocus)):
             obj.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        if kind == QEvent.Type.Polish and isinstance(obj, QAbstractSpinBox):  # el número pegado al borde: el QSS
+            obj.findChild(QLineEdit).setTextMargins(4, 0, 0, 0)               # no mueve el campo de dentro
         if kind != QEvent.Type.Show or not isinstance(obj, QWidget):
             return False
         if obj.windowType() in (Qt.WindowType.Window, Qt.WindowType.Dialog):
@@ -364,9 +377,10 @@ class _Shown(QObject):
 _shown = None
 
 
-def chevron(color):
-    """PNG de la flecha ▾ de las listas, del color dado: el QSS solo la pone con un archivo de imagen."""
-    path = Path(tempfile.gettempdir()) / "LightNovelCreator" / f"chevron-{color.lstrip('#')}.png"
+def chevron(color, up=False):
+    """PNG de la flecha ▾ de las listas (▴ con up, la de subir de las casillas de números), del color dado: el QSS
+    solo la pone con un archivo de imagen."""
+    path = Path(tempfile.gettempdir()) / "LightNovelCreator" / f"chevron-{'up-' if up else ''}{color.lstrip('#')}.png"
     if not path.exists():
         image = QImage(24, 24, QImage.Format.Format_ARGB32)  # al doble: nítida con zoom de Windows
         image.fill(Qt.GlobalColor.transparent)
@@ -377,7 +391,7 @@ def chevron(color):
         path_ = QPainterPath(QPointF(5, 9))
         path_.lineTo(12, 16)
         path_.lineTo(19, 9)
-        painter.drawPath(path_)
+        painter.drawPath(path_ if not up else QTransform(1, 0, 0, -1, 0, 25).map(path_))  # la misma, del revés
         painter.end()
         path.parent.mkdir(parents=True, exist_ok=True)
         image.save(str(path))
@@ -411,7 +425,8 @@ def apply(app, choice, accent=None, size=None):
     _style.c = colors(dark)  # el QSS de abajo repinta todo con los colores nuevos
     app.setFont(QFont("Segoe UI", _size))
     app.setPalette(palette(dark))
-    app.setStyleSheet(QSS.format(**colors(dark), chevron=chevron(colors(dark)["muted"]), size=_size,
+    app.setStyleSheet(QSS.format(**colors(dark), chevron=chevron(colors(dark)["muted"]),
+                                 chevron_up=chevron(colors(dark)["muted"], up=True), size=_size,
                                  title_size=_size + 2, big_size=_size + 4))
     for effect in (Qt.UIEffect.UI_AnimateCombo, Qt.UIEffect.UI_AnimateMenu, Qt.UIEffect.UI_FadeMenu):
         QApplication.setEffectEnabled(effect, False)  # las listas y menús se abren de golpe, sin deslizarse

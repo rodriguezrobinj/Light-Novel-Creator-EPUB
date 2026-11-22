@@ -87,10 +87,10 @@ OPTIONS = (
     _section("Apariencia", "Colores"),
     Option("Apariencia", "theme", "choice", "Tema", "«Sistema» sigue el modo claro u oscuro de Windows."),
     Option("Apariencia", "accent", "choice", "Color de acento",
-           "El de los botones principales, la pestaña elegida y lo seleccionado. Se ve al Aceptar."),
+           "El de los botones principales, la pestaña elegida y lo seleccionado."),
     _section("Apariencia", "Letra"),
     Option("Apariencia", "ui_font", "choice", "Tamaño de la letra de la ventana",
-           "Más grande se lee mejor en pantallas pequeñas o con el zoom de Windows bajo. Se ve al Aceptar."),
+           "Más grande se lee mejor en pantallas pequeñas o con el zoom de Windows bajo."),
     Option("Inicio", "reopen_last", "check", "Abrir el último libro al empezar",
            "Al abrir la aplicación, el libro con el que se trabajó la última vez, sin pasar por «Recientes»."),
     Option("Inicio", "recent_max", "number", "Libros en «Recientes»", "Cuántos recuerda el menú y la pantalla de inicio."),
@@ -265,8 +265,11 @@ class OptionsDialog:
             changes["profile"] = "Personalizado"
         for name, new in changes.items():
             self.store(name, new)
-        if key == "theme":  # el tema se ve al momento; Cancelar lo devuelve (restore_options)
-            self.owner.theme_var.set(value)
+        if key in ("theme", "accent", "ui_font"):  # la apariencia se ve al momento; Cancelar la devuelve
+            if key == "theme":
+                self.owner.theme_var.set(value)
+            else:  # apply_theme lee el acento y la letra de los ajustes (restore_options los devuelve)
+                self.owner.settings[key] = value
             self.owner.apply_theme()
         if key in BOOK_KEYS and self.scope == "book":
             self.owner.update_preview()
@@ -348,6 +351,7 @@ class OptionsDialog:
             self.owner.update_preview()
         if self.category == "Apariencia":
             self.owner.theme_var.set(self.values["theme"])
+            self.owner.settings.update(accent=self.values["accent"], ui_font=self.values["ui_font"])
             self.owner.apply_theme()
         self.show(self.category)
 
