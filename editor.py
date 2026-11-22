@@ -1491,6 +1491,13 @@ def original_of(block):
     return "" if value == [] else value
 
 
+def compared(block, firsts=None):
+    """Línea con que «Mostrar cambios» compara el párrafo: la del principio si se aceptaron cambios otras veces
+    (firsts: {línea: la del principio, None si el párrafo es nuevo desde entonces}), si no la cargada."""
+    original = original_of(block)
+    return firsts.get(original, original) if firsts and original is not None else original
+
+
 def source_of(block):
     """Bloque del libro del que viene el párrafo: el de su objeto, o el que recuerda su formato."""
     objects = [name for name in objects_of(block) if name.split()[1].isdigit()]  # una imagen nueva no es del libro
@@ -1586,9 +1593,10 @@ def plain_line(line):
 
 
 # Piezas que se comparan en «Mostrar cambios»: cada etiqueta entera (el código), cada letra de chino o japonés (no
-# llevan espacios: una «palabra» era el párrafo entero), las demás palabras y los espacios
+# llevan espacios: una «palabra» era el párrafo entero), las demás palabras, cada signo y los espacios. El signo va
+# aparte: con «atención.» de una pieza, escribir tras «atención» marcaba también la palabra de antes
 CJK = "⺀-鿿豈-﫿＀-￯"
-WORDS = re.compile(rf"<[^<>]*>|[{CJK}]|[^\s<{CJK}]+|\s+|<")
+WORDS = re.compile(rf"<[^<>]*>|[{CJK}]|\w+|[^\w\s<]|\s+|<")
 
 
 def diff_ops(before, after):
@@ -1602,6 +1610,8 @@ def diff_ops(before, after):
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes():
         if op in ("replace", "insert") and "".join(y[j1:j2]).strip():
             adds.append((starts[j1], starts[j2] - starts[j1]))
+        if op == "delete" and x[i1].isspace() and j1 < len(y) and y[j1] == x[i1]:
+            j1 += 1  # « dos» quitado de «Uno dos tres»: su sitio es tras el espacio que queda, ante «tres»
         if op in ("replace", "delete") and (old := "".join(x[i1:i2]).strip()):
             gone.append((starts[j1], old))
     return adds, gone
@@ -1820,6 +1830,7 @@ class Look(QSyntaxHighlighter):
         self.changes = None  # color con que se subraya lo puesto en cada párrafo cambiado; None: no se marca
         self.removed = None  # color de lo quitado, tachado en su sitio (theme.mark_colors)
         self.painting = False  # repintando: el documento avisa de un cambio que no lo es (Sheet.forget)
+        self.firsts = {}  # compared: lo aceptado otras veces se sigue viendo como cambio al reabrir
         watch_groups(self, original_group)
 
     def rehighlight(self):
@@ -1902,7 +1913,7 @@ class Look(QSyntaxHighlighter):
             # Capítulo grande; subtítulo un punto menor, como Título 1 y Título 2 en Word
             subtitle = block.blockFormat().property(LEVEL) not in (None, "Capítulo")
             f.setProperty(QTextFormat.Property.FontSizeAdjustment, 1 if subtitle else 2)
-            f.setForeground(self.color("heading"))
+            f.setForeground(self.color("subheading" if subtitle else "heading"))  # el tamaño solo no los distinguía
             self.setFormat(0, at(len(text)), f)
         elif text.strip() and convert.SCENE_BREAK.fullmatch(text.strip()):
             f = QTextCharFormat()
@@ -1926,7 +1937,7 @@ class Look(QSyntaxHighlighter):
                 f.setUnderlineColor(broken)
                 self.setFormat(c, stop - c, f)
                 c = stop
-        original = original_of(block)
+        original = compared(block, self.firsts)
         if self.changes and text.strip() and not objects_of(block) and block_lines(block) != [original]:
             group, n = original_group(block)
             mark_changes(self, text, group_changes(None if original is None else plain_line(original),
@@ -2452,7 +2463,8 @@ class Sheet(QTextEdit):
                 k = before[i1 + n][0] if same else last
                 pairs.append((k, lines[j1 + n]))
                 last = k if k is not None else last
-        loaded = {line for _, line in self.origins.get(doc, [])}
+        # y las de lo aceptado otras veces (replay_history): al deshacer hasta ellas se comparan con el principio
+        loaded = {line for _, line in self.origins.get(doc, [])} | set(self.look.firsts)
         cursor = QTextCursor(doc)
         cursor.beginEditBlock()
         if b > a:
@@ -3271,7 +3283,7 @@ class Sheet(QTextEdit):
             seen = known.get(block.fragmentIndex())
             if seen is None or seen[0] != block.revision():
                 lines = [line for line in block_lines(block) if line.strip()]
-                original = original_of(block)
+                original = compared(block, self.look.firsts)
                 seen = known[block.fragmentIndex()] = (block.revision(),
                                                        bool(lines and (original is None or lines != [original])))
             if seen[1]:
