@@ -16610,6 +16610,22 @@ def test_grammar_server_start_problems_stop_waiting():
     assert "Java 17" in message and time.monotonic() - started < 10, message
 
 
+def _download_server(data):
+    """urlopen falso de una descarga: como languagetool.org, responde 403 a quien llega con el nombre de Python."""
+    import io
+    import urllib.error
+
+    class Reply(io.BytesIO):
+        headers = {"Content-Length": str(len(data))}
+
+    def urlopen(request, timeout):
+        agent = request.get_header("User-agent") if hasattr(request, "get_header") else None
+        if not agent or agent.startswith("Python-urllib"):
+            raise urllib.error.HTTPError(str(request), 403, "Forbidden", {}, None)
+        return Reply(data)
+    return urlopen
+
+
 def test_grammar_download_is_checked_and_replaced_whole():
     """La descarga se compara con el SHA256 oficial antes de descomprimirla y reemplaza la carpeta entera."""
     import hashlib
@@ -16630,7 +16646,7 @@ def test_grammar_download_is_checked_and_replaced_whole():
         headers = {"Content-Length": str(len(data.getvalue()))}
 
     saved = grammar.urllib.request.urlopen, grammar.LT_SHA256
-    grammar.urllib.request.urlopen = lambda url, timeout: Reply(data.getvalue())
+    grammar.urllib.request.urlopen = _download_server(data.getvalue())
     try:
         try:
             grammar.download(base)
@@ -16759,7 +16775,7 @@ def test_upscale_download_keeps_only_what_is_used():
 
     base = TMP / "esrgan-descarga"
     saved = upscale.urllib.request.urlopen, upscale.ESR_SHA256
-    upscale.urllib.request.urlopen = lambda url, timeout: Reply(data.getvalue())
+    upscale.urllib.request.urlopen = _download_server(data.getvalue())
     try:
         try:
             upscale.download(base)
