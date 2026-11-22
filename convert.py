@@ -2188,6 +2188,9 @@ LEAD = re.compile(r"(?:\s|[«»“”\"'(—–-]|</?(?:i|b|sup)>|<small class=\
 DOUBLED = re.compile(r"\b(de|la|el|que|en|y|los|las|un|una|por|con|se|lo) \1\b", re.I)
 
 
+# Tratamientos en inglés delante de un nombre («Mr. Smith»): en español van traducidos
+ENGLISH_TITLE = re.compile(r"\b(Mrs|Mr|Ms|Miss)\.?(?= [A-ZÁÉÍÓÚÑ])")
+ENGLISH_TITLES = {"mrs": "Sra.", "mr": "Sr.", "ms": "Srta.", "miss": "Srta."}
 # Tratamientos que van delante de un nombre: su punto nunca acaba la frase («¡Lo siento, Sr. Drago!»). «etc.» no:
 # suele cerrar una
 TITLE_DOT = re.compile(r"\b(Srta|Sra|Sr|Dra|Dr|Uds|Ud|Vd|Prof|Lic|Ing|Mrs|Mr|Ms|St)\.", re.I)
@@ -2540,6 +2543,8 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
         (r"([¿¡])([^¿¡?!…—―─.”»\"')]*?)([^\W\d_]*)\.(?![.…\w])", _close)),
      "La pregunta o la exclamación se abre con ¿ o ¡ pero acaba en punto: le falta su signo de cierre.",
      "Corregirlo."),
+    ("mr", "Tratamiento en inglés", lambda s: ENGLISH_TITLE.sub(lambda m: ENGLISH_TITLES[m[1].lower()], s),
+     "«Mr.», «Mrs.» y «Ms.» son abreviaturas inglesas: en español, «Sr.», «Sra.» y «Srta.».", "Traducirlo."),
 )
 _dialog_fix = next(rule for kind, _, rule, _, _ in TYPOS if kind == "dialog")  # también en _typography
 
@@ -2659,12 +2664,18 @@ def _words_around(shown, start, end):
     return start, end
 
 
+def shown_text(b, k):
+    """El texto del bloque k como lo muestra el editor: sin etiquetas, con «[Nota: …]» y el icono como un carácter.
+    Sobre él van las posiciones de Issue.span (el informe lo enseña con lo señalado resaltado)."""
+    shown = TAGS.sub("", ICON.sub("￼", _line(b, k)))  # en la hoja, el icono es un objeto: un carácter
+    return shown[2:] if b.kind == "heading" else shown
+
+
 def _issue_span(issue, blocks):
     """(inicio, fin) del problema del aviso en el texto del párrafo como lo muestra el editor (sin etiquetas, con
     «[Nota: …]»): el editor lo subraya ahí, como Word, y no el párrafo entero. None si no se sabe."""
     b = blocks[issue.block]
-    shown = TAGS.sub("", ICON.sub("￼", _line(b, issue.block)))  # en la hoja, el icono es un objeto: un carácter
-    shown = shown[2:] if b.kind == "heading" else shown
+    shown = shown_text(b, issue.block)
     if issue.kind == "icon":
         return shown.find("￼"), shown.find("￼") + 1
     text, lead = shown.strip(), len(shown) - len(shown.lstrip())
@@ -2899,10 +2910,62 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
                                     "Busca su título en el PDF (Ctrl+F) y márcalo como Capítulo (tecla C). Si "
                                     "el PDF tampoco lo tiene, ignora el aviso.", title, text=title))
             last = n
+    if spanish:
+        report += _name_variants(blocks)
     for issue in report:
         if issue.block is not None:
             issue.span = _issue_span(issue, blocks)
     return sorted(report, key=lambda r: (r.page, r.block if r.block is not None else -1))
+
+
+# Un nombre propio a mitad de frase: mayúscula tras una minúscula o una coma (al principio de la frase, cualquier
+# palabra la lleva)
+MID_NAME = re.compile(r"(?<=[a-záéíóúñ,;] )([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{3,})\b")
+
+
+def _one_apart(rare, common):
+    """¿Una letra de diferencia, ni la primera ni las dos últimas? «Rimiru»/«Rimuru» sí; «Zeta»/«Beta» (otro
+    personaje), «Tino»/«Tina» o «Mágicas»/«Mágicos» (otro género) y «Rey»/«Reyes» (el plural) no."""
+    if abs(len(rare) - len(common)) > 1 or rare[0] != common[0] or rare[-2:] != common[-2:]:
+        return False
+    if len(rare) == len(common):
+        return sum(a != b for a, b in zip(rare, common)) == 1
+    short, long = sorted((rare, common), key=len)
+    return any(long[:i] + long[i + 1:] == short for i in range(1, len(long) - 2))
+
+
+def _name_variants(blocks):
+    """Nombre escrito de dos formas: un nombre propio que sale poco (3 veces o menos) a una letra de otro mucho
+    más usado (8 veces más) es casi siempre una errata del traductor («Nagsuki» entre muchos «Natsuki», Re Zero 1).
+    Una palabra inglesa no («Good» y «Gold», Mitsuha 6), ni una forma que sale a menudo («Tiro» 18 veces junto a
+    «Tino», Nageki 1: otro nombre). El arreglo pone la forma más usada."""
+    counts, where = collections.Counter(), collections.defaultdict(list)
+    for k, b in enumerate(blocks):
+        if b.kind == "p":
+            for name in MID_NAME.findall(_plain(b)):
+                counts[name] += 1
+                if k not in where[name]:
+                    where[name].append(k)
+    common = [name for name, n in counts.items() if n >= 8]
+    found = []
+    for rare, n in counts.items():
+        if n > 3 or rare.lower() in ENGLISH:
+            continue
+        best = max((c for c in common if c != rare and counts[c] >= 8 * n and _one_apart(rare, c)),
+                   key=counts.get, default=None)
+        if not best:
+            continue
+        word = re.compile(rf"(?<![\w]){re.escape(rare)}(?![\w])")
+        for k in where[rare]:
+            line, plain = _line(blocks[k], k), _plain(blocks[k])
+            fixed = word.sub(best, line)
+            before = _around(plain, *next(word.finditer(plain)).span())
+            found.append(Issue("name-variant", k, blocks[k].page, "Menor", "Nombre escrito de dos formas",
+                               f"«{rare}» sale {counted(n, 'vez', 'veces')} y «{best}», {counts[best]}: puede ser el "
+                               "mismo nombre mal escrito.",
+                               "Si es el mismo personaje, arréglalo; si son dos distintos, ignora el aviso.",
+                               before, word.sub(best, before), (k, k + 1, fixed) if fixed != line else None, text=rare))
+    return found
 
 
 SCORE_WEIGHTS = {"Grave": 10, "Revisar": 3, "Menor": 1}

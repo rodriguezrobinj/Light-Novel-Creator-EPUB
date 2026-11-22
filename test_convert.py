@@ -10226,6 +10226,30 @@ def test_window_titles_without_format_tags():
     assert saved == "Guardado" and chapters == [(2, "Otro")], (saved, chapters)
 
 
+def test_quality_report_new_checks():
+    """Avisos nuevos: tratamiento en inglés (con arreglo) y un nombre a una letra de otro mucho más usado
+    («Rimiru» entre «Rimuru», con arreglo). Parecidos que no avisan: «Miss» suelto, «Tina» junto a «Tino» (otro
+    personaje), el plural «Reyes» y «Zeta» junto a «Beta». Ni un espacio doble (la limpieza tipográfica lo quita y
+    el lector lo ve como uno) ni un diálogo con comillas en un libro con raya (en los libros reales eran
+    pensamientos, créditos y carteles)."""
+    B = convert.Block
+
+    def report(texts):
+        blocks = [B("heading", 1, "Capítulo 1")] + [B("p", 1, t) for t in texts]
+        book = convert.Book("Libro", "", b"", blocks, [0])
+        return [(i.kind, i.block, i.edit[2] if i.edit else None) for i in convert.quality_report(book)
+                if i.kind in ("mr", "name-variant")]
+
+    typos = report(["Dijo  que no.", "Llegó Mr. Smith con Mrs. Smith.", "<i>Hola</i>  <b>adiós</b> fue todo.",
+                    "La Miss del concurso sonrió."])
+    names = report(["Luego vino Rimuru a casa." for _ in range(16)] + ["Luego vino Rimiru a casa.", "Luego vino Tina.",
+                                                                     "Luego vinieron Reyes y más."]
+                   + ["Luego vino Tino." for _ in range(16)] + ["Luego vino Rey." for _ in range(16)]
+                   + ["Luego vino Beta." for _ in range(16)] + ["Luego vino Zeta."])
+    assert typos == [("mr", 2, "Llegó Sr. Smith con Sra. Smith.")], typos
+    assert names == [("name-variant", 17, "Luego vino Rimuru a casa.")], names
+
+
 def test_opening_marks_skip_abbreviations():
     """El punto de «Sr.» no acaba la frase: «¡Lo siento mucho, Sr. Drago!» no lleva otro «¡» (Backstabbed 1 salía
     «Sr. ¡Drago!»), y a «Lo siento, Sr. Drago!» se le pone al principio de la frase, no tras la abreviatura."""
@@ -10606,10 +10630,10 @@ def test_window_ignore_warning():
     parts = root.dialogs()[-1].parts
     parts["ignore"].click()
     root.update()
-    ignored = (window.quality_btn.text(), window.ignored, parts["table"].get_children())
+    ignored = (window.quality_btn.text(), window.ignored, tuple(parts["rows"]()))
     parts["show"].set("Ignorados")
     parts["fill"]()
-    listed = (parts["table"].get_children(), parts["ignore"].text())
+    listed = (tuple(parts["rows"]()), parts["ignore"].text())
     parts["ignore"].click()
     root.update()
     after = (window.quality_btn.text(), window.ignored)
@@ -11072,7 +11096,7 @@ def test_window_echoes_and_glossary_in_quality_report():
     window.quality()
     root.update()
     parts = root.dialogs()[-1].parts
-    titles = lambda: [parts["table"].set(i, "title") for i in parts["table"].get_children()]
+    titles = lambda: [parts["table"].set(i, "title") for i in parts["rows"]()]
     without = titles()
     parts["echoes"].click()  # «Opciones del informe…»
     root.update()
@@ -11169,7 +11193,7 @@ def test_window_quality_report_says_where_and_opens_the_editor_on_the_problem():
     dialog = root.dialogs()[-1]
     parts = dialog.parts
     table = parts["table"]
-    row = next(i for i in table.get_children() if table.set(i, "title") == "Mayúscula innecesaria")
+    row = next(i for i in parts["rows"]() if table.set(i, "title") == "Mayúscula innecesaria")
     table.selection_set(row)
     root.update()
     where, place = table.set(row, "where"), parts["place"].text()
@@ -11181,7 +11205,7 @@ def test_window_quality_report_says_where_and_opens_the_editor_on_the_problem():
     title = editor.win.windowTitle()
     editor.win.done(0)
     window.close()
-    assert where == "Capítulo 0 · ¶3", where
+    assert where == "Capítulo 0 · párr. 3", where
     assert place == "Capítulo 0: El discípulo regresa › Lado de Teto · párrafo 3 de 3 · pág. 2", place
     assert chosen == "Señora", chosen
     assert bar == (True, "● Menor · Mayúscula innecesaria"), bar
@@ -11209,7 +11233,7 @@ def test_window_quality_report_editor_in_a_book_without_rows():
         root.update()
         parts = root.dialogs()[-1].parts
         table = parts["table"]
-        table.selection_set(table.get_children()[0])
+        table.selection_set(parts["rows"]()[0])
         root.update()
         parts["edit"].click()
         root.update()
@@ -11221,8 +11245,9 @@ def test_window_quality_report_editor_in_a_book_without_rows():
     assert shown and "aún no tiene ninguno" in shown[0], shown
 
 def test_window_quality_report_previews_fixes_and_undo():
-    """El informe muestra problema, solución y vista previa; «Arreglar todos» quita los números de
-    página de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior cuenta los avisos."""
+    """El informe muestra problema, solución, el párrafo y el arreglo como diff; «Arreglar todos» enseña antes
+    los cambios con su casilla y quita los marcados de una vez, Ctrl+Z los devuelve, y el botón de la barra inferior
+    cuenta los avisos. Los avisos van agrupados por tipo, con su cuenta."""
     B = convert.Block
     blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella abrió la puerta y dijo que"), B("p", 2, "nadie vendría."),
               B("p", 2, "12"), B("p", 3, "Texto. " * 60), B("p", 3, "13")]
@@ -11234,28 +11259,74 @@ def test_window_quality_report_previews_fixes_and_undo():
     parts = root.dialogs()[-1].parts
     table = parts["table"]
     before, after = parts["previews"]["before"], parts["previews"]["after"]
-    listed = [table.set(i, "title") for i in table.get_children()]
-    shown = (before.get("1.0", "end").strip(), after.get("1.0", "end").strip(),
-             [before.get(*r) for r in zip(*[iter(before.tag_ranges("old"))] * 2)])
+    listed = [table.set(i, "title") for i in parts["rows"]()]
+    groups = [table.set(i, "title") for i in table.get_children()]
+    table.selection_set("0")  # el párrafo partido
+    root.update()
+    shown = (before.toPlainText(), after.toPlainText(), after.toHtml())
     table.selection_set("1")  # el primer número de página
     root.update()
     fix_all = parts["all"]
     label = fix_all.text()
     fix_all.click()
     root.update()
-    fixed = ([b.html for b in window.book.blocks], [table.set(i, "title") for i in table.get_children()],
+    confirm = window.fix_all_window.parts
+    choices = confirm["list"].count()
+    confirm["go"]()
+    root.update()
+    fixed = ([b.html for b in window.book.blocks], [table.set(i, "title") for i in parts["rows"]()],
              window.quality_btn.text())
     window.undo()
     undone = [b.html for b in window.book.blocks]
     window.close()
     assert button == "▲ 3 por revisar", button
-    assert listed == ["Párrafo partido", "Número suelto", "Número suelto"], listed
-    assert shown == ("Ella abrió la puerta y dijo que ¶\nnadie vendría.",
-                     "Ella abrió la puerta y dijo que nadie vendría.", ["¶\n"]), shown
-    assert label == "Arreglar todos los de este tipo (2)", label
+    assert listed == ["Número suelto", "Número suelto", "Párrafo partido"], listed  # el tipo con más, primero
+    assert groups == ["Número suelto (2)", "Párrafo partido (1)"], groups
+    assert shown[0] == "nadie vendría." and "dijo que ¶" in shown[1] and "line-through" in shown[2], shown
+    assert label == "Arreglar todos los de este tipo (2)" and choices == 2, (label, choices)
     assert "12" not in fixed[0] and "13" not in fixed[0] and fixed[1] == ["Párrafo partido"], fixed
     assert fixed[2] == "▲ 1 por revisar", fixed
     assert undone == [b.html for b in blocks], undone
+
+
+def test_window_quality_report_filters_and_chosen_fixes():
+    """Las fichas de gravedad, las barras de tipos y la franja de capítulos filtran la lista; «Arreglar todos» con
+    un cambio desmarcado arregla solo los marcados."""
+    from PySide6.QtCore import Qt
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Que haces?"), B("p", 1, "12"), B("p", 1, "Dónde estás?"),
+              B("heading", 2, "Capítulo 2"), B("p", 2, "Quién eres?"), B("p", 2, "13")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 4]))
+    window.quality()
+    root.update()
+    parts = window.quality_window.parts
+    table = parts["table"]
+    kinds = lambda: [parts["state"]["report"][int(i)].kind for i in parts["rows"]()]
+    everything = sorted(kinds())
+    parts["chips"]["Menores"].click()
+    minors = set(kinds())
+    parts["chips"]["Todos"].click()
+    parts["bars"].picked.emit("number")
+    numbers = kinds()
+    parts["clear"].click()
+    parts["strip"].picked.emit(1)  # el capítulo 2
+    second = sorted(kinds())
+    parts["clear"].click()
+    opening = next(i for i in parts["rows"]() if parts["state"]["report"][int(i)].kind == "opening")
+    table.selection_set(opening)
+    root.update()
+    parts["all"].click()
+    confirm = window.fix_all_window.parts
+    confirm["list"].item(0).setCheckState(Qt.CheckState.Unchecked)
+    confirm["go"]()
+    root.update()
+    html_now = [b.html for b in window.book.blocks]
+    window.close()
+    assert everything == ["number", "number", "opening", "opening", "opening", "short", "short"], everything
+    assert minors == {"opening"} and numbers == ["number", "number"], (minors, numbers)
+    assert second == ["number", "opening", "short"], second
+    assert html_now[1] == "Que haces?" and html_now[3] == "¿Dónde estás?" and html_now[5] == "¿Quién eres?", html_now
 
 
 def test_regex_replacements_and_counts():
@@ -15788,7 +15859,7 @@ def test_style_guide_tokens_icons_and_no_loose_colors():
     emoji = re.compile("[🀀-🗍🗏-🫿⚠⏮⏭⚙⛓❗⚓]")
     assert not [k for k, v in theme.ICONS.items() if emoji.search(v)], theme.ICONS
     allowed = {"app.py": {"#1f6fd1", "#2e9d4a", "#f08c00"}, "qtk.py": {"#f08c00"}, "options.py": set(),
-               "editor.py": {"#2a62c8", "#888888", "#2e9d4a"}}  # marcas que no cambian con el tema
+               "editor.py": {"#2a62c8", "#888888", "#2e9d4a"}, "report.py": set()}  # marcas que no cambian con el tema
     for name, colors in allowed.items():
         text = (Path(__file__).parent / name).read_text(encoding="utf-8")
         assert not emoji.findall(text), (name, emoji.findall(text))

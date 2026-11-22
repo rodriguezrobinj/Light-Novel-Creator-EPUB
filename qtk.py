@@ -412,12 +412,19 @@ class RowList(QTreeWidget):
         painter.end()
 
     def insert(self, parent, index, iid, values=(), tags=()):
+        """Fila nueva; con parent, hija de esa fila (como Treeview: el informe agrupa sus avisos por tipo)."""
         item = QTreeWidgetItem([str(v) for v in values])
         item.setData(0, IID, iid)
         for n, col in enumerate(self.columns):
             if col != self.stretch:
                 item.setTextAlignment(n, Qt.AlignmentFlag.AlignCenter)
-        if index == "end":
+        if parent:
+            self.setRootIsDecorated(True)  # la flecha para plegar el grupo
+            if index == "end":
+                self.rows[parent].addChild(item)
+            else:
+                self.rows[parent].insertChild(index, item)
+        elif index == "end":
             self.addTopLevelItem(item)
         else:
             self.insertTopLevelItem(index, item)
@@ -429,18 +436,27 @@ class RowList(QTreeWidget):
         # Qt avisa del cambio de selección a mitad del borrado, con la fila a medio quitar: se avisa al final
         before = self.selection()
         self.blockSignals(True)
-        if len(iids) == len(self.rows) - len(self.pinned):  # vaciar la lista: de golpe, no fila a fila, y las fijas
-            self.rows.clear()
+        if len(iids) == len(self.rows) - len(self.pinned) or (iids and set(iids) == set(self.get_children())):
+            self.rows.clear()  # vaciar la lista: de golpe, no fila a fila, y las fijas (y las hijas)
             self.pinned.clear()
             self.clear()
         else:
             for iid in iids:
-                self.takeTopLevelItem(self.indexOfTopLevelItem(self.rows.pop(iid)))
+                item = self.rows.pop(iid)
+                for n in range(item.childCount()):  # sus hijas se van con ella
+                    self.rows.pop(item.child(n).data(0, IID), None)
+                if item.parent():
+                    item.parent().removeChild(item)
+                else:
+                    self.takeTopLevelItem(self.indexOfTopLevelItem(item))
         self.blockSignals(False)
         if self.selection() != before:
             self.selected.emit()
 
-    def get_children(self, _=""):
+    def get_children(self, parent=""):
+        if parent:
+            item = self.rows[parent]
+            return tuple(item.child(n).data(0, IID) for n in range(item.childCount()))
         rows = (self.topLevelItem(n).data(0, IID) for n in range(self.topLevelItemCount()))
         return tuple(iid for iid in rows if iid not in self.pinned)
 
@@ -499,13 +515,16 @@ class RowList(QTreeWidget):
     def selection_set(self, iid):
         # Como Tk, sustituye la selección: con selección múltiple, Qt sumaría la fila si hay Ctrl pulsado
         flags = QItemSelectionModel.SelectionFlag
+        if self.rows[iid].parent():
+            self.rows[iid].parent().setExpanded(True)  # una hija elegida se ve
         self.setCurrentItem(self.rows[iid], 0, flags.ClearAndSelect | flags.Rows)
 
     def see(self, iid):
         self.scrollToItem(self.rows[iid])
 
     def index(self, iid):
-        return self.indexOfTopLevelItem(self.rows[iid])
+        item = self.rows[iid]
+        return item.parent().indexOfChild(item) if item.parent() else self.indexOfTopLevelItem(item)
 
     def bbox(self, iid, column):
         """(x, y, ancho, alto) de una celda en el viewport: para que las pruebas hagan clic en ella."""
