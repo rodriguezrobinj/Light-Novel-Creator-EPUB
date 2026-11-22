@@ -647,7 +647,7 @@ class OptionsDialog:
             for name in ("user", "key"):
                 rows[name].setVisible(data["engine"] == "premium")
 
-        engine.activated.connect(lambda _: keep())
+        engine.currentIndexChanged.connect(lambda _: keep())  # con ratón, teclado o rueda: los campos de ese motor
         for widget in (url, user, key):
             widget.editingFinished.connect(keep)
         keep()

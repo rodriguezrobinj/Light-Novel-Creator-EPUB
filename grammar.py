@@ -24,11 +24,13 @@ LT_SHA256 = "53600506b399bb5ffe1e4c8dec794fd378212f14aaf38ccef9b6f89314d11631"
 LT_SIZE = "250 MB"
 PUBLIC_URL = "https://api.languagetool.org"
 PREMIUM_URL = "https://api.languagetoolplus.com"
-# Lo que ya revisa la app (Hunspell, «Signo sin pareja», la limpieza tipográfica) o lo que en las novelas es ruido:
-# medido en Re Zero 1, son diálogos que empiezan con «…», «Ha-ha» y frases cortadas a propósito
+# Lo que ya revisa la app (Hunspell, «Signo sin pareja», la limpieza tipográfica: rayas, espacios, «....») o lo
+# que en las novelas es ruido, medido en Re Zero 1 y World Project 7: diálogos que empiezan con «…», «Ha-ha»,
+# frases cortadas a propósito, la coma tras cada adverbio («Probablemente,») y mayúsculas en «battle royale»
 DISABLED = ("MORFOLOGIK_RULE_ES", "WHITESPACE_RULE", "UNPAIRED_BRACKETS", "ES_UNPAIRED_BRACKETS",
             "ES_QUESTION_MARK", "ES_INITIAL_QUESTION_MARK", "UPPERCASE_SENTENCE_START", "ESPACIO_DESPUES_DE_PUNTO",
-            "HA_A", "PRONOMBRE_SIN_VERBO", "MORFOLOGIK_RULE_EN_US", "MORFOLOGIK_RULE_EN_GB")
+            "HA_A", "PRONOMBRE_SIN_VERBO", "COMMA_ADVERB", "WRONG_DASH", "INCORRECT_SPACES", "CUATRO_PUNTOS",
+            "ES_MULTITOKEN_SPELLING_TWO", "MORFOLOGIK_RULE_EN_US", "MORFOLOGIK_RULE_EN_GB")
 RULES_ID = LT_VERSION + ":" + ",".join(DISABLED)  # si cambia, lo revisado antes no vale
 STYLE = {"PUNCTUATION", "STYLE", "TYPOGRAPHY", "REDUNDANCY", "CASING"}  # sugerencias, no faltas
 KINDS = [("grammar", "Gramática", "Revisar"), ("grammar-style", "Estilo y puntuación", "Menor")]
