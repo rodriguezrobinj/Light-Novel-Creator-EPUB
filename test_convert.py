@@ -16664,6 +16664,140 @@ def test_window_grammar_check_fills_the_report():
     assert ("grammar", "Gramática", "Revisar") in window.quality_kinds()
 
 
+def _fake_esrgan(calls, stderr=b"", code=0):
+    """subprocess.run falso de Real-ESRGAN: agranda la entrada -s veces con MuPDF y la escribe en -o."""
+    import subprocess
+
+    def run(args, **_):
+        calls.append(args)
+        if not code:
+            src, dst, scale = args[args.index("-i") + 1], args[args.index("-o") + 1], int(args[args.index("-s") + 1])
+            pix = pymupdf.Pixmap(src)
+            pymupdf.Pixmap(pix, pix.width * scale, pix.height * scale, None).save(dst)
+        return subprocess.CompletedProcess(args, code, b"", stderr)
+    return run
+
+
+def _picture(width, height, gray=False):
+    pix = pymupdf.Pixmap(pymupdf.csGRAY if gray else pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
+    pix.clear_with(180)
+    return pix.tobytes("png")
+
+
+def test_upscale_reaches_the_target_and_keeps_gray():
+    """Se agranda lo justo (x2, x3 o x4) para llegar al tamaño del perfil y se reduce a él; la gris sigue gris; la que
+    ya llega se salta. Sin Vulkan, el mensaje lo dice."""
+    import upscale
+
+    calls = []
+    saved = upscale.subprocess.run
+    upscale.subprocess.run = _fake_esrgan(calls)
+    try:
+        done = upscale.upscale_many(TMP, [(3, _picture(300, 400)), (5, _picture(300, 400, gray=True)),
+                                          (7, _picture(1200, 800))], 1000)
+    finally:
+        upscale.subprocess.run = saved
+    sizes = [(k, pymupdf.Pixmap(d).width, pymupdf.Pixmap(d).height, pymupdf.Pixmap(d).n) for k, d in done]
+    assert sizes == [(3, 750, 1000, 3), (5, 750, 1000, 1)], sizes
+    assert [c[c.index("-s") + 1] for c in calls] == ["3", "3"] and upscale.MODEL in calls[0], calls
+    assert (upscale.scale_for(882, 1237, 1400), upscale.scale_for(400, 600, 2000), upscale.scale_for(1500, 9, 1400)) \
+        == (2, 4, 0)
+    upscale.subprocess.run = _fake_esrgan([], b"[0 Intel]\nvkCreateInstance failed -9\n", code=4294967295)
+    try:
+        upscale.upscale(TMP, _picture(300, 400), 1000)
+        message = ""
+    except upscale.UpscaleError as e:
+        message = str(e)
+    finally:
+        upscale.subprocess.run = saved
+    assert "Vulkan" in message, message
+
+
+def test_upscale_download_keeps_only_what_is_used():
+    """La descarga se compara con el SHA256 oficial y solo se descomprime el programa y los modelos que se usan."""
+    import hashlib
+    import io
+
+    import upscale
+
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as z:
+        for name in upscale.KEEP + ("onepiece_demo.mp4", "models/realesrgan-x4plus.bin"):
+            z.writestr(name, name.encode())
+
+    class Reply(io.BytesIO):
+        headers = {"Content-Length": str(len(data.getvalue()))}
+
+    base = TMP / "esrgan-descarga"
+    saved = upscale.urllib.request.urlopen, upscale.ESR_SHA256
+    upscale.urllib.request.urlopen = lambda url, timeout: Reply(data.getvalue())
+    try:
+        try:
+            upscale.download(base)
+            refused = ""
+        except upscale.UpscaleError as e:
+            refused = str(e)
+        upscale.ESR_SHA256 = hashlib.sha256(data.getvalue()).hexdigest()
+        home = Path(upscale.download(base))
+    finally:
+        upscale.urllib.request.urlopen, upscale.ESR_SHA256 = saved
+    assert "no coincide" in refused, refused
+    assert sorted(str(p.relative_to(home)).replace("\\", "/") for p in home.rglob("*") if p.is_file()) \
+        == sorted(upscale.KEEP), list(home.rglob("*"))
+    assert [p.name for p in base.iterdir()] == [home.name] and upscale.installed(base)
+
+
+def test_window_improve_small_illustrations():
+    """«Mejorar las pequeñas…» en «Ilustraciones…»: sin Real-ESRGAN pregunta antes de descargar; con él, mejora solo
+    las que no llegan al tamaño del perfil, enseña el antes y el después y lo aceptado se deshace con un Ctrl+Z. La
+    nueva queda guardada en la carpeta de ilustraciones (la revisión apunta ahí)."""
+    import app
+    import upscale
+
+    small, big = _picture(300, 400), _picture(1600, 1200)
+    root, window = visible_window()
+    asked, ran, calls, shown = [], [], [], []
+    saved = app.messagebox.askyesno, window.run, upscale.subprocess.run, window.confirm_image
+    app.messagebox.askyesno = lambda title, message, **_: asked.append(message) or False
+    try:
+        window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                         convert.Block("image", 2, image=small),
+                                                         convert.Block("p", 2, "Texto."),
+                                                         convert.Block("image", 3, image=big)], [0]))
+        window.shrink_var.set(True)
+        window.shrink_size_var.set(1400)
+        window.run = lambda work, args, done, **options: ran.append(work) or True
+        window.images_dialog()
+        dialog = window.images_window
+        buttons = {b.text(): b for b in dialog.findChildren(app.QPushButton)}
+        buttons["Mejorar las pequeñas…"].click()
+        no_download = (list(asked), list(ran))
+        for name in upscale.KEEP:  # instalado
+            (upscale.folder(app.SETTINGS.parent) / name).parent.mkdir(parents=True, exist_ok=True)
+            (upscale.folder(app.SETTINGS.parent) / name).write_bytes(b"x")
+        upscale.subprocess.run = _fake_esrgan(calls)
+        window.run = lambda work, args, done, report=False, **options: done(
+            work(*args, progress=lambda *_: None) if report else work(*args)) or True
+        window.confirm_image = lambda k, new, batch=False, parent=None: shown.append((k, batch)) or "replace"
+        dialog.parts["list"].setCurrentRow(1)
+        buttons["Mejorar esta"].click()  # la grande: ya llega
+        big_note = dialog.parts["note"].text()
+        buttons["Mejorar las pequeñas…"].click()
+        improved = window.book.blocks[1].image
+        note = dialog.parts["note"].text()
+        stored = [e for e in window.edits if e[0] == "image"]
+        window.undo()
+        undone = window.book.blocks[1].image
+    finally:
+        app.messagebox.askyesno, window.run, upscale.subprocess.run, window.confirm_image = saved
+        window.close()
+    assert "45 MB" in no_download[0][0] and no_download[1] == [], no_download
+    assert "Ya tiene buen tamaño" in big_note and len(calls) == 1, (big_note, calls)
+    assert shown == [(1, False)] and max(app._image_size(improved)) == 1400, (shown, app._image_size(improved))
+    assert "1 ilustración mejorada" in note, note
+    assert stored and Path(stored[-1][2]).read_bytes() == improved and undone == small, stored
+
+
 def _run_tests(part, parts):
     """Ejecuta las pruebas part, part+parts, part+2·parts… en este proceso. Devuelve cuántas fallaron."""
     global TMP

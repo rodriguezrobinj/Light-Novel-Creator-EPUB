@@ -62,6 +62,7 @@ import registro
 import report
 import theme
 import translate
+import upscale
 from qtk import filedialog, messagebox
 
 # Programas de Windows por su ruta, y sin buscar en la carpeta actual: un explorer.exe o un java.exe puesto en la
@@ -445,9 +446,9 @@ def _image_ext(data):
     return "png" if data[:4] == b"\x89PNG" else "jpg"
 
 
-def _image_info(data):
-    """«1200×1700 px · 340 KB · JPEG» de una imagen. El tamaño, de su cabecera: descodificarla entera para eso
-    era la mitad de lo que tardaba en abrirse «Ilustraciones…» (Eminence 7, 21 láminas: 0,29 s)."""
+def _image_size(data):
+    """(ancho, alto) de una imagen, de su cabecera: descodificarla entera para eso era la mitad de lo que tardaba en
+    abrirse «Ilustraciones…» (Eminence 7, 21 láminas: 0,29 s)."""
     from PySide6.QtCore import QBuffer, QByteArray
     from PySide6.QtGui import QImageReader
     buffer = QBuffer()
@@ -455,7 +456,13 @@ def _image_info(data):
     image = QImageReader(buffer).size()
     if not image.isValid():
         image = QImage.fromData(data).size()
-    return f"{image.width()}×{image.height()} px · {max(1, round(len(data) / 1024))} KB · {_image_ext(data).upper()}"
+    return image.width(), image.height()
+
+
+def _image_info(data):
+    """«1200×1700 px · 340 KB · JPEG» de una imagen."""
+    width, height = _image_size(data)
+    return f"{width}×{height} px · {max(1, round(len(data) / 1024))} KB · {_image_ext(data).upper()}"
 
 
 THUMB_BOX = (72, 72)  # miniatura de la lista de ilustraciones: marco cuadrado, igual para verticales y apaisadas
@@ -482,8 +489,12 @@ def _images():
 def _store_image(path):
     """Copia la imagen elegida junto a las preferencias y devuelve esa ruta: la revisión la guarda, y la del usuario
     (una carpeta de exportación) puede borrarse; entonces, al reabrir, el cambio se perdía."""
-    data = Path(path).read_bytes()
-    dest = _images() / (hashlib.sha1(data).hexdigest()[:16] + Path(path).suffix.lower())
+    return _store_bytes(Path(path).read_bytes(), Path(path).suffix.lower())
+
+
+def _store_bytes(data, suffix):
+    """Guarda una imagen hecha por la app (una mejorada) donde _store_image, por su contenido. Devuelve la ruta."""
+    dest = _images() / (hashlib.sha1(data).hexdigest()[:16] + suffix)
     if not dest.is_file():
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
@@ -5263,10 +5274,15 @@ class App:
         described = _label("")  # su descripción, a la vista: antes había que ir a otra herramienta para verla
         described.setWordWrap(True)
         described.setTextFormat(Qt.TextFormat.PlainText)
+        improve_btn = _button("Mejorar esta", lambda: improve([order[listing.currentRow()]]))
+        improve_btn.setToolTip("Agrandarla y quitarle los artefactos del JPEG con IA (Real-ESRGAN), hasta el tamaño de "
+                               "las imágenes del perfil")
+        improve_all = _button("Mejorar las pequeñas…", lambda: improve(order))
         right = QVBoxLayout()
         right.addWidget(preview, 1)
         right.addWidget(info)
         right.addWidget(described)
+        right.addLayout(_row(improve_btn, improve_all, 1))
         body = _row(listing, right, spacing=16)
         body.setStretch(1, 1)
         column.addLayout(body, 1)
@@ -5323,6 +5339,22 @@ class App:
                 fill(row)
                 note.setText("Ilustración cambiada · Ctrl+Z en la ventana principal para deshacer")
 
+        def improve(ks):
+            small = self.small_images(ks)
+            if not small:
+                note.setText(f"{'Ya tiene' if len(ks) == 1 else 'Todas tienen'} buen tamaño para el perfil "
+                             f"({self.upscale_target()} px de lado mayor): no hace falta mejorar")
+                return
+            row = listing.currentRow()
+
+            def finished(count):
+                if shiboken6.isValid(win):
+                    fill(row)
+                    note.setText(f"{convert.counted(count, 'ilustración mejorada', 'ilustraciones mejoradas')}"
+                                 + (" · Ctrl+Z en la ventana principal para deshacer" if count else ""))
+
+            self.improve_images(small, win, finished)
+
         def describe_one():
             row = listing.currentRow()
             if self.describe(order[row], win) is not None:
@@ -5355,6 +5387,51 @@ class App:
         win.parts = {"list": listing, "note": note, "preview": preview, "described": described,
                      "describe": describe_one}
         self.images_window = win
+
+    def upscale_target(self):
+        """Lado mayor al que se mejoran las ilustraciones: el de «Tamaño de las imágenes» si se reducen; si no, el de
+        una tablet. Más grande no se vería mejor en el lector y el EPUB pesaría más."""
+        return int(self.shrink_size_var.get() or convert.SHRINK) if self.shrink_var.get() else upscale.DEFAULT_TARGET
+
+    def small_images(self, ks):
+        """Las ilustraciones de ks que no llegan al tamaño del perfil: las que Real-ESRGAN puede mejorar."""
+        target = self.upscale_target()
+        return [k for k in ks if upscale.scale_for(*_image_size(self.book.blocks[k].image), target)]
+
+    def improve_images(self, ks, parent=None, then=None):
+        """«Mejorar»: Real-ESRGAN agranda y limpia las ilustraciones ks en el proceso de trabajo; luego, cada una con
+        su antes y después, y lo aceptado de una vez (un Ctrl+Z). Se descarga una vez si el usuario quiere.
+        then(cambiadas): al acabar."""
+        home = SETTINGS.parent
+        if not upscale.installed(home):
+            if messagebox.askyesno("Mejorar ilustraciones", "Para mejorar ilustraciones hay que descargar Real-ESRGAN "
+                                   f"una vez (unos {upscale.ESR_SIZE}, de GitHub). Funciona con la tarjeta gráfica del "
+                                   "equipo. ¿Descargarlo ahora?", parent=parent):
+                self.run(upscale.download, (str(home),), lambda _: self.improve_images(ks, parent, then), report=True,
+                         busy="Descargando Real-ESRGAN…")
+            return
+        images = {k: self.book.blocks[k].image for k in ks}
+
+        def done(results):
+            changes = []
+            for k, data in results:
+                # Mientras trabajaba, el libro pudo cambiar: solo se ofrece si sigue la misma ilustración
+                if k >= len(self.book.blocks) or self.book.blocks[k].image != images[k]:
+                    continue
+                answer = self.confirm_image(k, data, batch=len(results) > 1, parent=parent)
+                if answer is None:
+                    break
+                if answer == "replace":
+                    changes.append((k, data, _store_bytes(data, "." + _image_ext(data))))
+            if changes:
+                self.replace_images(changes)
+                self.status.setText(f"{convert.counted(len(changes), 'ilustración mejorada', 'ilustraciones mejoradas')}"
+                                    " · Ctrl+Z para deshacer")
+            if then:
+                then(len(changes))
+
+        self.run(upscale.upscale_many, (str(home), list(images.items()), self.upscale_target()), done, report=True,
+                 busy="Mejorando ilustraciones…")
 
     def describe(self, k, parent=None):
         """Pide la descripción de la ilustración del bloque k (por su imagen: sigue con ella aunque cambie de sitio).
