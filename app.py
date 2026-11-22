@@ -4684,43 +4684,73 @@ class App:
             self.status.setText("Espera a que termine el trabajo en curso")
 
     def spelling_dialog(self, found):
-        """Palabras que no están en el diccionario (convert.unknown_words): dónde salen, cambiarlas en todo el
-        libro o añadirlas al diccionario de la serie. El editor de texto las subraya."""
+        """Palabras que no están en el diccionario (convert.unknown_words): cada aparición con su página y su frase
+        entera, la palabra resaltada; las sugerencias como botones, el cambio visto antes de hacerlo, y cambiarla
+        en esa aparición o en todo el libro, ignorarla en esta sesión o añadirla al diccionario de la serie. El
+        editor de texto las subraya."""
         self.unknown = {w for w, _, _ in found}
         self.status.setText(f"Ortografía: {convert.counted(len(found), 'palabra que no está', 'palabras que no están')} "
                             "en el diccionario")
         win, column = self.dialog("Ortografía")
-        win.resize(900, 520)
+        win.resize(980, 600)
         column.addWidget(_label("Palabras que no están en el diccionario, las más repetidas primero. Las que empiezan "
                                 "en mayúscula no se revisan: suelen ser nombres.", "muted"))
         panes = QSplitter(Qt.Orientation.Horizontal)
         column.addWidget(panes, 1)
+        left = QWidget()
+        left_col = QVBoxLayout(left)
+        left_col.setContentsMargins(0, 0, 0, 0)
+        search = QLineEdit(placeholderText="Buscar palabra")
+        search.textChanged.connect(lambda: fill())
         table = qtk.RowList(("word", "count"), {"word": "Palabra", "count": "Veces"}, {"count": 60}, stretch="word")
-        panes.addWidget(table)
+        progress = _label("", "muted")
+        left_col.addWidget(search)
+        left_col.addWidget(table, 1)
+        left_col.addWidget(progress)
+        panes.addWidget(left)
         right = QWidget()
         side = QVBoxLayout(right)
-        side.setContentsMargins(12, 0, 0, 0)
-        side.addWidget(_label("Dónde sale (clic: verlo en las vistas previas)", "muted"))
+        side.setContentsMargins(theme.SPACE["section"], 0, 0, 0)
+        side.addWidget(_label("Dónde sale · clic: verla en las vistas previas", "muted"))
         places = QListWidget()
+        places.setWordWrap(True)
+        places.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         side.addWidget(places, 1)
         side.addWidget(_label("Cambiar por", "muted"))
-        fix = QComboBox()  # las sugerencias y, al final, «Otra palabra…» para escribirla
-        qtk.ask_other(fix, lambda now: _ask_line(win, "Cambiar por", "Palabra que la sustituye:", now))
+        chips_row = QHBoxLayout()
+        chips_row.setSpacing(theme.SPACE["gap"])
+        side.addLayout(chips_row)
+        fix = QLineEdit(placeholderText="Otra palabra: escríbela aquí")
         side.addWidget(fix)
+        preview = QLabel()
+        preview.setWordWrap(True)
+        preview.setTextFormat(Qt.TextFormat.RichText)
+        side.addWidget(preview)
+        one_btn = _button("Cambiar esta", lambda: change(only=True))
+        one_btn.setToolTip("Solo en el párrafo elegido en «Dónde sale»")
         change_btn = _button("Cambiar todas", lambda: change(), "primary")
+        ignore_btn = _button("Ignorar", lambda: ignore())
+        ignore_btn.setToolTip("No la vuelve a enseñar mientras la aplicación siga abierta; no se añade al diccionario")
         add_btn = _button("Añadir al diccionario", lambda: add())
-        side.addLayout(_row(change_btn, add_btn, 1))
+        side.addLayout(_row(one_btn, change_btn, 1, ignore_btn, add_btn))
         panes.addWidget(right)
-        panes.setSizes([300, 600])
-        state = {"found": list(found), "places": []}
+        panes.setSizes([300, 680])
+        state = {"found": list(found), "places": [], "total": len(found), "shown": []}
+        colors, tags = theme.colors(self.dark), theme.diff_tags(self.dark)
+        mark = tags["old"]
 
         def fill(select=0):
             table.delete(*table.get_children())
-            for n, (word, count, _) in enumerate(state["found"]):
+            wanted = search.text().strip().lower()
+            state["shown"] = [n for n, (word, _, _) in enumerate(state["found"]) if wanted in word.lower()]
+            for n in state["shown"]:
+                word, count, _ = state["found"][n]
                 table.insert("", "end", iid=str(n), values=(word, count))
             win.setWindowTitle(f"Ortografía · {convert.counted(len(state['found']), 'palabra')}")
-            if state["found"]:
-                item = str(min(select, len(state["found"]) - 1))
+            done_count = state["total"] - len(state["found"])
+            progress.setText(f"Revisadas {done_count} de {state['total']}")
+            if state["shown"]:
+                item = str(state["shown"][min(select, len(state["shown"]) - 1)])
                 table.selection_set(item)
                 table.see(item)
             else:
@@ -4730,38 +4760,113 @@ class App:
             selected = table.selection()
             return state["found"][int(selected[0])] if selected else None
 
+        def sentence(plain, start, end):
+            """La frase de la palabra: del punto de antes al de después (como mucho 120 letras a cada lado)."""
+            a = max((m.end() for m in re.finditer(r"[.!?…]\s+", plain[:start])), default=0)
+            stop = re.search(r"[.!?…](?=\s|$)", plain[end:])
+            b = end + stop.end() if stop else len(plain)
+            a, b = max(a, start - 120), min(b, end + 120)
+            return ("…" if a > 0 else "") + plain[a:b] + ("…" if b < len(plain) else ""), start - a + (1 if a else 0)
+
+        def place_html(page, text, at, word):
+            chip = (f'<span style="background-color: {colors["sel"]}; color: {colors["ink"]};">&nbsp;pág. {page}'
+                    '&nbsp;</span>&nbsp; ')
+            return (chip + html.escape(text[:at]) + f'<span style="background-color: {mark["background"]}; color: '
+                    f'{mark["foreground"]}; font-weight: 600;">{html.escape(text[at:at + len(word)])}</span>'
+                    + html.escape(text[at + len(word):]))
+
         def pick():
             entry = chosen()
             places.clear()
+            while chips_row.count():
+                old = chips_row.takeAt(0).widget()
+                if old:
+                    old.hide()  # hasta borrarse seguía a la vista, debajo de las nuevas
+                    old.deleteLater()
             fix.clear()
             state["places"] = []
-            change_btn.setEnabled(bool(entry))
-            add_btn.setEnabled(bool(entry))
+            for btn in (one_btn, change_btn, ignore_btn, add_btn):
+                btn.setEnabled(bool(entry))
+            preview.clear()
             if not entry:
                 return
             word, _, suggestions = entry
-            fix.addItems((suggestions or [word]) + ["Otra palabra…"])
+            for suggestion in (suggestions or [])[:6]:
+                chip = QPushButton(suggestion, objectName="chip", checkable=True)
+                chip.clicked.connect(lambda _=False, s=suggestion: fix.setText(s))
+                chips_row.addWidget(chip)
+            chips_row.addStretch(1)
             pattern = re.compile(rf"(?<!\w){re.escape(word)}(?!\w)", re.I)
             for k, block in enumerate(self.book.blocks):
                 plain = convert._plain(block) if block.kind == "p" else ""
                 m = pattern.search(plain)
                 if m and len(state["places"]) < 200:
-                    state["places"].append((k, block.page, word))
-                    places.addItem(f"pág. {block.page} · …{plain[max(0, m.start() - 40):m.end() + 50]}…")
+                    text, at = sentence(plain, m.start(), m.end())
+                    state["places"].append((k, block.page, word, text, at))
+                    item = QListWidgetItem()
+                    label = QLabel(place_html(block.page, text, at, m[0]))
+                    label.setWordWrap(True)
+                    label.setTextFormat(Qt.TextFormat.RichText)
+                    label.setContentsMargins(4, 3, 4, 3)
+                    label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # el clic, a la fila
+                    places.addItem(item)
+                    places.setItemWidget(item, label)
+                    item.setSizeHint(QSize(0, label.heightForWidth(max(200, places.viewport().width() - 12)) + 6))
+            fix.setText(suggestions[0] if suggestions else "")
+            if places.count():
+                places.setCurrentRow(0)
+            show_preview()
+
+        def show_preview():
+            row = places.currentRow()
+            new = fix.text().strip()
+            for n in range(chips_row.count()):
+                chip = chips_row.itemAt(n).widget()
+                if chip:
+                    chip.setChecked(chip.text() == new)
+            if not 0 <= row < len(state["places"]) or not new:
+                preview.setText("")
+                return
+            _, page, word, text, at = state["places"][row]
+            found = text[at:at + len(word)]
+            new = new[:1].upper() + new[1:] if found[:1].isupper() else new  # como replace_text
+            old_look, new_look = tags["old"], tags["new"]
+            # la palabra entera tachada y la nueva al lado: letra a letra, «elf» -> «elfo» solo marcaba la «o»
+            preview.setText(f"Así quedaría en la pág. {page}: " + html.escape(text[:at])
+                            + f'<span style="color: {old_look["foreground"]}; background-color: '
+                              f'{old_look["background"]}; text-decoration: line-through;">{html.escape(found)}</span>'
+                            + " → " + f'<span style="color: {new_look["foreground"]}; background-color: '
+                              f'{new_look["background"]};">{html.escape(new)}</span>' + html.escape(text[at + len(word):]))
 
         def done(word, message):
             self.unknown.discard(word)
             n = int(table.selection()[0])
             del state["found"][n]
-            fill(n)
+            position = state["shown"].index(n) if n in state["shown"] else 0
+            fill(position)
             self.status.setText(message)
 
-        def change():
-            word, new = chosen()[0], fix.currentText().strip()
-            edits = convert.replace_text(self.book, word, new, word=True) if new and new != word else []
+        def change(only=False):
+            word, new = chosen()[0], fix.text().strip()
+            if not new or new == word:
+                return
+            edits = convert.replace_text(self.book, word, new, word=True)
+            row = places.currentRow()
+            if only:  # solo el párrafo elegido
+                k = state["places"][row][0] if 0 <= row < len(state["places"]) else None
+                edits = [e for e in edits if e[0] == k]
             if edits:
                 self.apply_fixes(edits, "")
+            if only and len(state["places"]) > 1:
+                self.status.setText(f"«{word}» cambiada por «{new}» en ese párrafo · Ctrl+Z para deshacer")
+                pick()  # quedan otras apariciones: la palabra sigue en la lista
+                places.setCurrentRow(min(row, places.count() - 1))
+                return
             done(word, f"«{word}» cambiada por «{new}» en {convert.counted(len(edits), 'párrafo')} · Ctrl+Z para deshacer")
+
+        def ignore():
+            word = chosen()[0]
+            done(word, f"«{word}» ignorada mientras la aplicación siga abierta")
 
         def add():
             word = chosen()[0]
@@ -4769,11 +4874,14 @@ class App:
             done(word, f"«{word}» añadida al diccionario de la serie")
 
         table.selected.connect(pick)
-        places.currentRowChanged.connect(lambda row: 0 <= row < len(state["places"])
-                                         and self.show_match(*state["places"][row]))
+        places.currentRowChanged.connect(lambda row: (0 <= row < len(state["places"])
+                                                      and self.show_match(*state["places"][row][:3]), show_preview()))
+        fix.textChanged.connect(lambda _: show_preview())
         fill()
         win.show()
-        win.parts = {"table": table, "places": places, "fix": fix, "change": change_btn, "add": add_btn}
+        win.parts = {"table": table, "places": places, "fix": fix, "change": change_btn, "add": add_btn,
+                     "one": one_btn, "ignore": ignore_btn, "search": search, "progress": progress, "preview": preview,
+                     "chips": chips_row}
         self.spelling_window = win
 
     def insert_page(self, name, lines, first=True, at=None):
