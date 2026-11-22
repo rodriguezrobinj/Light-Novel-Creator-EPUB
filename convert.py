@@ -4703,12 +4703,12 @@ PDF_SIZES = {"A5": (420, 595, 10.5), "e-reader 6″": (300, 400, 9), "A4": (595,
 ILLUSTRATION_SHARE = 0.25  # una imagen que ocupa más de esto de la página es una ilustración, no un adorno
 
 
-def _image_page(pdf, xref, pno, rect):
+def _image_page(pdf, xref, pno, width):
     """Página nueva en la posición pno de pdf con su imagen xref llenándola entera: el ancho es el del libro
     (todas las páginas iguales de ancho) y el alto sigue a la imagen; con el alto del libro, una ilustración
     doble quedaba pequeña entre márgenes blancos (Witch 1)."""
     info = pdf.extract_image(xref)
-    page = pdf.new_page(pno, width=rect.width, height=rect.width * info["height"] / info["width"])
+    page = pdf.new_page(pno, width=width, height=width * info["height"] / info["width"])
     if info.get("smask"):  # con transparencia: la máscara va aparte en el PDF
         page.insert_image(page.rect, pixmap=pymupdf.Pixmap(pymupdf.Pixmap(pdf, xref), pymupdf.Pixmap(pdf, info["smask"])))
     else:
@@ -4740,6 +4740,9 @@ def _full_page_images(pdf):
             top = min(r.y0 for r in text)
             before = [xref for xref, box in big if box.y1 <= top + 1]
             plans.append((before, True, [xref for xref, _ in big if xref not in before], [box for _, box in big]))
+    # El ancho del libro, el de casi todas sus páginas: una de maquetación fija (la portada de un EPUB japonés)
+    # sale de MuPDF a su tamaño, 1125×1600, y su ilustración no debe heredarlo
+    width = collections.Counter(page.rect.width for page in pdf).most_common(1)[0][0] if len(pdf) else 0
     moved, count = [], 0
     for before, keep, after, _ in plans:
         moved.append(count)
@@ -4748,9 +4751,8 @@ def _full_page_images(pdf):
         before, keep, after, boxes = plans[n]
         if not before and keep and not after:
             continue
-        rect = pdf[n].rect
         for xref in reversed(after):
-            _image_page(pdf, xref, n + 1, rect)
+            _image_page(pdf, xref, n + 1, width)
         if keep:
             page = pdf[n]
             for box in boxes:  # quitar la imagen solo de esta página: delete_image cambia el objeto compartido
@@ -4758,7 +4760,7 @@ def _full_page_images(pdf):
             page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
                                   text=pymupdf.PDF_REDACT_TEXT_NONE)
         for xref in reversed(before):
-            _image_page(pdf, xref, n, rect)
+            _image_page(pdf, xref, n, width)
         if not keep:
             pdf.delete_page(n + len(before))
     return moved
