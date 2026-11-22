@@ -19,9 +19,17 @@ import theme
 import translate
 
 BOOK, APP = "El libro", "La aplicación"
-CATEGORIES = {BOOK: ("Perfil y formato", "Texto", "Ilustraciones", "PDF"),
-              APP: ("Apariencia", "Vista previa", "Editor", "Traducción", "Carpeta vigilada", "Informe de calidad")}
+CATEGORIES = {BOOK: ("Perfil y formato", "Aspecto", "Texto", "Páginas", "Ilustraciones", "PDF"),
+              APP: ("Apariencia", "Inicio", "Salida", "Vista previa", "Editor", "Ortografía", "Traducción",
+                    "Carpeta vigilada", "Informe de calidad")}
 Option = namedtuple("Option", "category key kind label help")
+SECTION = "section"  # un título dentro de la página, no una opción
+
+
+def _section(category, label):
+    return Option(category, "", SECTION, label, "")
+
+
 OPTIONS = (
     Option("Perfil y formato", "profile", "choice", "Perfil",
            "Fija las opciones que importan para ese lector: gris, tamaño de imagen, formato Kobo…"),
@@ -30,40 +38,66 @@ OPTIONS = (
            "El Kobo muestra páginas y estadísticas de lectura; el archivo acaba en .kepub.epub."),
     Option("Perfil y formato", "lang", "language", "Idioma del libro",
            "Decide cómo se parten las palabras, la voz de lectura y los avisos del informe."),
+    _section("Aspecto", "Texto"),
+    Option("Aspecto", "style", "choice", "Estilo",
+           "La maqueta del libro: márgenes, sangría, títulos. «Original», con un EPUB: su CSS, sin tocar. También en "
+           "la barra de abajo, junto a la vista previa."),
+    Option("Aspecto", "font", "choice", "Letra",
+           "«Del lector» deja elegir la letra en el lector. Una propia (.ttf, .otf), con «Otra…» en la barra de abajo."),
+    Option("Aspecto", "separator", "choice", "Separador de escena",
+           "Lo que va entre dos escenas. Uno escrito a mano o «Icono propio», en la barra de abajo."),
+    _section("Aspecto", "Títulos, notas y recuadros"),
+    Option("Aspecto", "heading_font", "choice", "Fuente de títulos",
+           "Los títulos de capítulo con otra letra: Eagle Lake es caligráfica. «Archivo propio» usa el de abajo."),
+    Option("Aspecto", "heading_font_file", "file", "Archivo de fuente de títulos", "Un .ttf o .otf, para «Archivo propio»."),
+    Option("Aspecto", "note_style", "choice", "Llamada de nota", "Cómo se ve el número de la nota en el texto."),
+    Option("Aspecto", "box_style", "choice", "Estilo de recuadros",
+           "«Pantalla de juego»: fondo negro, brillo azul y letra blanca, como las ventanas de opciones de un juego."),
     Option("Texto", "typography", "check", "Limpieza tipográfica",
            "Comillas «», puntos suspensivos, raya de diálogo y espacios, al estilo RAE."),
     Option("Texto", "hyphenate", "check", "Partir palabras con guiones (Kindle)",
            "El Kindle apenas parte palabras en español: sin esto el texto justificado queda con huecos."),
     Option("Texto", "horizontal", "check", "Texto en horizontal (EPUB japoneses)",
            "Un EPUB japonés escrito en vertical sale de izquierda a derecha, como un libro en español."),
-    Option("Texto", "reading", "check", "Minutos de lectura en el índice",
-           "Cuánto se tarda en leer cada capítulo, en la página «Contenido»."),
-    Option("Texto", "credits", "check", "Página de título y créditos",
-           "Tras la portada: título, volumen y los créditos por rol, con enlaces. Sus datos, en «Editar datos» → "
-           "«Más datos…»."),
-    Option("Texto", "synopsis", "check", "Página de sinopsis",
-           "Tras la portada, la sinopsis del libro. **negrita** y *cursiva* en la sinopsis se ven así."),
-    Option("Texto", "endnotes", "check", "Notas al final del libro",
-           "Todas las notas en una página «Notas», con enlace de vuelta. Si no, cada capítulo lleva las suyas al final."),
-    Option("Texto", "note_style", "choice", "Llamada de nota", "Cómo se ve el número de la nota en el texto."),
-    Option("Texto", "heading_font", "choice", "Fuente de títulos",
-           "Los títulos de capítulo con otra letra: Eagle Lake es caligráfica. «Archivo propio» usa el de abajo."),
-    Option("Texto", "heading_font_file", "file", "Archivo de fuente de títulos", "Un .ttf o .otf, para «Archivo propio»."),
-    Option("Texto", "box_style", "choice", "Estilo de recuadros",
-           "«Pantalla de juego»: fondo negro, brillo azul y letra blanca, como las ventanas de opciones de un juego."),
     Option("Texto", "autocase", "check", "Corregir las mayúsculas al abrir si vienen en MAYÚSCULAS",
            "Los títulos escritos todo en mayúsculas pasan a mayúsculas al estilo español."),
+    _section("Páginas", "Al principio"),
+    Option("Páginas", "credits", "check", "Página de título y créditos",
+           "Tras la portada: título, volumen y los créditos por rol, con enlaces. Sus datos, en «Editar datos» → "
+           "«Más datos…»."),
+    Option("Páginas", "synopsis", "check", "Página de sinopsis",
+           "Tras la portada, la sinopsis del libro. **negrita** y *cursiva* en la sinopsis se ven así."),
+    Option("Páginas", "logo", "file", "Logo del grupo",
+           "Una imagen PNG o JPG en su propia página, tras la página de título. En «Libros nuevos», para todos."),
+    Option("Páginas", "contents", "check", "Índice («Contenido»)",
+           "Una página con los capítulos y sus subtítulos, tras la portada. También en la barra de abajo."),
+    Option("Páginas", "reading", "check", "Minutos de lectura en el índice",
+           "Cuánto se tarda en leer cada capítulo, en la página «Contenido»."),
+    _section("Páginas", "Al final"),
+    Option("Páginas", "endnotes", "check", "Notas al final del libro",
+           "Todas las notas en una página «Notas», con enlace de vuelta. Si no, cada capítulo lleva las suyas al final."),
     Option("Ilustraciones", "shrink", "check", "Reducir imágenes", "Las imágenes son casi todo el peso del EPUB."),
     Option("Ilustraciones", "shrink_size", "number", "Lado mayor, en píxeles", "Tamaño de las imágenes reducidas."),
     Option("Ilustraciones", "gray", "check", "Imágenes en gris", "Para e-readers de tinta: pesa menos y se ve igual."),
     Option("Ilustraciones", "trim", "check", "Recortar márgenes blancos de las ilustraciones",
            "Quita el borde blanco que traen algunas ilustraciones escaneadas."),
-    Option("Ilustraciones", "logo", "file", "Logo del grupo",
-           "Una imagen PNG o JPG en su propia página, tras la página de título. En «Libros nuevos», para todos."),
     Option("PDF", "whole_words", "check", "No partir palabras al final de línea",
            "La palabra que no cabe pasa entera a la línea siguiente, sin guion."),
     Option("PDF", "pdf_size", "choice", "Tamaño preferido", "Sale primero en el menú «PDF ▾»."),
+    _section("Apariencia", "Colores"),
     Option("Apariencia", "theme", "choice", "Tema", "«Sistema» sigue el modo claro u oscuro de Windows."),
+    Option("Apariencia", "accent", "choice", "Color de acento",
+           "El de los botones principales, la pestaña elegida y lo seleccionado. Se ve al Aceptar."),
+    _section("Apariencia", "Letra"),
+    Option("Apariencia", "ui_font", "choice", "Tamaño de la letra de la ventana",
+           "Más grande se lee mejor en pantallas pequeñas o con el zoom de Windows bajo. Se ve al Aceptar."),
+    Option("Inicio", "reopen_last", "check", "Abrir el último libro al empezar",
+           "Al abrir la aplicación, el libro con el que se trabajó la última vez, sin pasar por «Recientes»."),
+    Option("Inicio", "recent_max", "number", "Libros en «Recientes»", "Cuántos recuerda el menú y la pantalla de inicio."),
+    Option("Salida", "out_name", "choice", "Nombre del EPUB",
+           "El nombre que propone «Generar EPUB»: el del PDF, el título del libro o «Serie - Volumen N»."),
+    Option("Salida", "out_folder", "folder", "Carpeta donde guardar",
+           "Dónde propone guardar «Generar EPUB». Sin ninguna, junto al PDF."),
     Option("Vista previa", "device", "choice", "Dispositivo al abrir", "Tamaño de página de la vista previa del EPUB."),
     Option("Vista previa", "dark", "check", "Modo oscuro al abrir", "Las vistas previas en claro sobre negro."),
     Option("Editor", "editor_undo", "choice", "Deshacer y rehacer",
@@ -83,21 +117,26 @@ OPTIONS = (
            "Mientras se escribe, en rojo; el diccionario es de español. Sin esto, «Ortografía…» sigue funcionando."),
     Option("Editor", "editor_resume", "check", "Ofrecer volver a donde lo dejaste",
            "Al abrir el editor en otro capítulo, la barra «Lo dejaste en… · Ir allí»."),
+    Option("Ortografía", "spell_caps", "check", "Revisar también las palabras en mayúscula",
+           "Sin esto, «Ortografía…» salta las que empiezan en mayúscula: suelen ser nombres propios."),
+    Option("Ortografía", "words", "words", "Palabras añadidas al diccionario",
+           "Las de «Añadir al diccionario»: valen para este libro y los demás tomos de su serie. Quita la que se "
+           "añadió por error."),
     Option("Traducción", "translate", "translate", "Motor, modelo y clave de API",
            "Servicio que traduce, su modelo y su clave, e idiomas con los que empieza «Traducir»."),
     Option("Carpeta vigilada", "watch", "folder", "Carpeta vigilada",
            "Mientras la ventana esté abierta, cada PDF nuevo que llegue a ella se convierte solo."),
     Option("Informe de calidad", "echoes", "check", "Buscar ecos (palabras repetidas cerca)",
            "Muchos avisos de estilo: solo si se piden."),
+    Option("Informe de calidad", "quality", "quality", "Avisos",
+           "Quita la marca de los que no quieras ver y cambia su gravedad: la nota del informe cuenta más los graves."),
 )
-# Lo que se guarda por libro y en «Libros nuevos». El aspecto (estilo, separador y letra, con la ruta de la propia)
-# está en la barra de abajo de la ventana: se cambia mirando la vista previa
-BOOK_KEYS = tuple(o.key for o in OPTIONS if o.category in CATEGORIES[BOOK]) + ("style", "separator", "font", "font_file",
-                                                                                    "contents")
+# Lo que se guarda por libro y en «Libros nuevos»; font_file es la ruta de la letra propia («Otra…» de la barra)
+BOOK_KEYS = tuple(o.key for o in OPTIONS if o.category in CATEGORIES[BOOK] and o.kind != SECTION) + ("font_file",)
 
 
 FILE_TYPES = {"logo": ("Imagen", "*.png *.jpg *.jpeg"), "heading_font_file": ("Fuente", "*.ttf *.otf")}
-NUMBERS = {"shrink_size": (400, 4000, 100), "editor_zoom": (50, 200, 10)}  # (mínimo, máximo, paso) de cada número
+NUMBERS = {"shrink_size": (400, 4000, 100), "editor_zoom": (50, 200, 10), "recent_max": (3, 30, 1)}  # mín, máx, paso
 
 
 def fold(text):
@@ -108,7 +147,7 @@ def fold(text):
 def find(text):
     """Opciones cuyo nombre o ayuda contiene text."""
     needle = fold(text).strip()
-    return [o for o in OPTIONS if needle and (needle in fold(o.label) or needle in fold(o.help))]
+    return [o for o in OPTIONS if needle and o.kind != SECTION and (needle in fold(o.label) or needle in fold(o.help))]
 
 
 class OptionsDialog:
@@ -266,41 +305,70 @@ class OptionsDialog:
         layout.setSpacing(4)
         title = QLabel(category)
         title.setObjectName("title")
-        layout.addWidget(title)
-        self.parts["widgets"], self.parts["notes"] = {}, {}
+        reset = QPushButton("Restablecer")
+        reset.setToolTip("Vuelve las opciones de esta página a como vienen de fábrica")
+        reset.clicked.connect(self.reset_page)
+        head = QHBoxLayout()
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(reset)
+        layout.addLayout(head)
+        self.parts["widgets"], self.parts["notes"], self.parts["reset"] = {}, {}, reset
         for option in OPTIONS:
-            if option.category == category:
+            if option.category == category and option.kind == SECTION:
+                caption = QLabel(option.label.upper())  # como los encabezados de la lista de la izquierda
+                caption.setObjectName("muted")
+                bold = QFont(caption.font())
+                bold.setBold(True)
+                caption.setFont(bold)
+                caption.setContentsMargins(0, theme.SPACE["section"], 0, theme.SPACE["tight"])
+                layout.addWidget(caption)
+            elif option.category == category:
                 self.add_option(layout, option)
         self.parts["copy"] = None
         if self.is_book() and self.scope == "book":
             copy_btn = QPushButton("Usar también para libros nuevos")
             copy_btn.setToolTip("Copia los valores de esta página a «Libros nuevos»")
-            keys = [o.key for o in OPTIONS if o.category == category]
+            keys = [o.key for o in OPTIONS if o.category == category and o.kind != SECTION]
             copy_btn.clicked.connect(lambda: self.defaults.update({k: self.owner.fields()[k].get() for k in keys}))
             layout.addWidget(copy_btn, 0, Qt.AlignmentFlag.AlignLeft)
             self.parts["copy"] = copy_btn
         layout.addStretch(1)
         self.scroll.setWidget(page)  # la página anterior se borra con su scroll
 
+    def reset_page(self):
+        """«Restablecer»: las opciones de la página a sus valores de fábrica (del libro, en el alcance elegido)."""
+        factory = {**self.owner.factory, **self.owner.app_factory()}
+        for option in OPTIONS:
+            if option.category == self.category and option.key in factory and option.kind != "translate":
+                self.store(option.key, copy.deepcopy(factory[option.key]))
+        if self.category == "Informe de calidad":  # todos los avisos, cada uno con su gravedad de siempre
+            self.values.update(quality_off=[], quality_levels={})
+        if self.is_book() and self.scope == "book":
+            self.owner.update_preview()
+        if self.category == "Apariencia":
+            self.owner.theme_var.set(self.values["theme"])
+            self.owner.apply_theme()
+        self.show(self.category)
+
     def add_option(self, layout, option):
         """Control de una opción y, debajo, su ayuda en gris."""
-        key, value = option.key, self.get(option.key)
-        if option.kind == "translate":
-            self.translation_page(layout, option)
+        special = {"translate": self.translation_page, "words": self.words_option, "quality": self.quality_option}
+        if option.kind in special:  # con su propia página: no son un valor suelto
+            special[option.kind](layout, option)
             return
+        key, value = option.key, self.get(option.key)
         if option.kind in ("folder", "file"):
             widget = QLabel(value or "Ninguna")
             widget.setWordWrap(True)
-            pick, stop = QPushButton("Elegir…"), QPushButton("Dejar de vigilar")
+            pick, stop = QPushButton("Elegir…"), QPushButton("Dejar de vigilar" if key == "watch" else "Quitar")
             stop.setEnabled(bool(value))
             pick.clicked.connect(lambda: self.pick_folder(key) if option.kind == "folder" else self.pick_file(key))
-            if option.kind == "file":
-                stop.setText("Quitar")
             stop.clicked.connect(lambda: (self.put(key, ""), self.show(self.category)))
             row = QWidget()
             line = QHBoxLayout(row)
             line.setContentsMargins(0, 0, 0, 0)
-            if option.kind == "file":  # la carpeta vigilada tiene su página; un archivo comparte la suya
+            if key != "watch":  # la carpeta vigilada tiene su página; lo demás comparte la suya
                 line.addWidget(QLabel(f"{option.label}:"))
             line.addWidget(widget, 1)
             line.addWidget(pick)
@@ -330,6 +398,8 @@ class OptionsDialog:
                     widget.setCurrentIndex(max(0, widget.findData(str(value))))
                     widget.activated.connect(lambda _, w=widget, key=key: self.put(key, w.currentData()))
                 else:
+                    if str(value) not in values and value not in (None, ""):  # uno propio («◇», una letra suelta)
+                        values.append(str(value))
                     widget.addItems(values)
                     widget.setCurrentText(str(value))
                     widget.activated.connect(lambda _, w=widget, key=key: self.put(key, w.currentText()))
@@ -354,7 +424,8 @@ class OptionsDialog:
         if option.kind == "folder":
             self.parts["watch_error"] = None
             if value and not Path(value).is_dir():
-                error = QLabel("La carpeta ya no existe: elige otra o deja de vigilarla.")
+                error = QLabel("La carpeta ya no existe: elige otra o deja de vigilarla." if key == "watch" else
+                               "La carpeta ya no existe: elige otra o quítala.")
                 error.setObjectName("warn")
                 layout.addWidget(error)
                 self.parts["watch_error"] = error
@@ -496,6 +567,65 @@ class OptionsDialog:
         self.parts.update(engine=engine, model=model, base=base, key=key, eye=eye, src=src, dst=dst,
                           models=find_models, status=status)
 
+    def words_option(self, layout, option):
+        """Las palabras del diccionario del libro (y de su serie), cada una con «Quitar». Sin libro no hay."""
+        layout.addWidget(QLabel(f"{option.label}:"))
+        words = self.values.get("words")
+        if words is None:
+            note = QLabel("Abre un libro para ver las palabras de su diccionario.")
+            note.setObjectName("muted")
+            layout.addWidget(note)
+            return
+        listing = QListWidget()
+        listing.addItems(sorted(words, key=fold))
+        listing.setMinimumHeight(160)
+        remove = QPushButton("Quitar")
+        remove.setEnabled(False)
+        listing.currentRowChanged.connect(lambda row: remove.setEnabled(row >= 0))
+
+        def drop():
+            item = listing.currentItem()
+            if item:
+                self.values["words"] = [w for w in self.values["words"] if w != item.text()]
+                listing.takeItem(listing.row(item))
+
+        remove.clicked.connect(drop)
+        line = QHBoxLayout()
+        line.addWidget(listing, 1)
+        line.addWidget(remove, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(line)
+        note = QLabel(option.help if words else "Aún no hay ninguna: se añaden en «Ortografía…».")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.parts["widgets"]["words"] = listing
+
+    def quality_option(self, layout, option):
+        """Cada tipo de aviso del informe con su casilla (verlo o no) y su gravedad."""
+        note = QLabel(option.help)
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        off, levels = set(self.values["quality_off"]), dict(self.values["quality_levels"])
+        rows = {}
+        for kind, title, level in self.owner.quality_kinds():
+            check = QCheckBox(title)
+            check.setChecked(kind not in off)
+            pick = QComboBox()
+            pick.addItems(list(self.owner.quality_levels()))
+            pick.setCurrentText(levels.get(kind, level))
+            check.toggled.connect(lambda on, kind=kind: self.values.update(quality_off=sorted(
+                (set(self.values["quality_off"]) - {kind}) if on else (set(self.values["quality_off"]) | {kind}))))
+            pick.activated.connect(lambda _, w=pick, kind=kind, level=level: self.values.update(quality_levels={
+                **{k: v for k, v in self.values["quality_levels"].items() if k != kind},
+                **({kind: w.currentText()} if w.currentText() != level else {})}))
+            line = QHBoxLayout()
+            line.addWidget(check, 1)
+            line.addWidget(pick)
+            layout.addLayout(line)
+            rows[kind] = (check, pick)
+        self.parts["widgets"]["quality"] = rows
+
     def pick_file(self, key):
         path = qtk.filedialog.askopenfilename(filetypes=[FILE_TYPES[key]])
         if path:
@@ -503,7 +633,8 @@ class OptionsDialog:
             self.show(self.category)
 
     def pick_folder(self, key):
-        folder = self.owner.ask_folder()
+        folder = self.owner.ask_folder() if key == "watch" else qtk.filedialog.askdirectory(
+            title="Carpeta donde guardar los EPUB")
         if folder:
             self.put(key, folder)
             self.show(self.category)

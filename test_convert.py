@@ -4022,7 +4022,7 @@ def test_window_more_data_title_page_and_options_reach_the_epub():
         own_separator = (box.isEditable(), box.currentText(), window.separator_var.get(), box.itemText(box.count() - 1))
         window.separator_var.set("◇")  # uno propio guardado en la revisión: sale en la lista
         loaded = box.currentText()
-        options = window.open_options("Ilustraciones")
+        options = window.open_options("Páginas")  # el logo es una página más del libro
         labels = [w.text() for w in options.win.findChildren(QLabel) if w.isVisible()]
         options.cancel()
     finally:
@@ -8587,7 +8587,7 @@ def test_options_table_and_search():
     """Cada opción está una vez, en una categoría que existe; buscar «guion» lleva a Texto y a PDF, sin tildes ni
     mayúsculas; y las claves de libro son las que se guardan por libro."""
     import options
-    keys = [o.key for o in options.OPTIONS]
+    keys = [o.key for o in options.OPTIONS if o.kind != options.SECTION]  # los títulos de sección no son opciones
     categories = {c for group in options.CATEGORIES.values() for c in group}
     found = sorted({o.category for o in options.find("GUIÓN")})
     assert len(keys) == len(set(keys)), keys
@@ -8918,8 +8918,8 @@ def test_window_pdf_menu_puts_preferred_size_first():
 
 def test_window_options_are_only_in_options():
     """La barra deja Perfil, Estilo, Separador y Letra (se cambian mirando la vista previa), PDF y Generar; Opciones
-    solo en Herramientas, sin «Opciones del libro…» ni página Aspecto; ni Tema en Herramientas, ni idioma en «Editar
-    datos». El informe lleva a sus opciones."""
+    solo en Herramientas, sin «Opciones del libro…», y con su página Aspecto, que cambia lo mismo que la barra; ni
+    Tema en Herramientas, ni idioma en «Editar datos». El informe lleva a sus opciones."""
     from PySide6.QtWidgets import QAbstractButton, QComboBox, QPushButton, QToolButton
     root, window = visible_window()
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
@@ -8927,6 +8927,10 @@ def test_window_options_are_only_in_options():
     combos = [c.currentText() for c in window.options_row.findChildren(QComboBox)]
     dialog = window.open_options()
     pages = [dialog.parts["list"].item(n).text().strip() for n in range(dialog.parts["list"].count())]
+    dialog.parts["show"]("Aspecto")
+    style_shown = dialog.parts["widgets"]["style"].currentText()
+    dialog.parts["put"]("style", "Moderno")
+    from_options = window.style_box.currentText()
     dialog.parts["cancel"]()
     menus = [a.text() for b in window.root.findChildren(QToolButton) if b.menu() for a in b.menu().actions()]
     data_combos = window.data_panel.findChildren(QComboBox)
@@ -8935,9 +8939,92 @@ def test_window_options_are_only_in_options():
     link = [b.text() for b in report.findChildren(QPushButton) if b.text() == "Opciones del informe…"]
     window.close()
     assert "Opciones ▾" not in bar and "Opciones del libro…" not in bar and len(combos) == 4, (bar, combos)
-    assert window.style_var.get() in combos and "Aspecto" not in pages, (combos, pages)
+    assert window.style_var.get() in combos and "Aspecto" in pages and style_shown == combos[1], (combos, pages)
+    assert from_options == "Moderno", from_options
     assert "Tema" not in menus and "Opciones…  (Ctrl+,)" in menus, menus
     assert not data_combos and link, (data_combos, link)
+
+
+def test_window_options_new_pages_and_effects():
+    """Las opciones nuevas hacen lo que dicen: apagar un tipo de aviso lo quita del informe y cambiar su gravedad la
+    cambia; el nombre de salida propone «Serie - Volumen N»; quitar una palabra del diccionario la quita del libro;
+    «Restablecer» vuelve la página a como viene de fábrica; el acento y la letra se ponen al Aceptar; la
+    ortografía revisa también las mayúsculas si se pide."""
+    import app
+    import qtk
+    import theme
+
+    B = convert.Block
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Que haces?"),
+                                                     B("p", 1, "12")], [0]))
+    window.series_var.set("Re:Zero")
+    window.volume_var.set("3")
+    window.words = ["golem", "rimuru"]
+    kinds = lambda: sorted(i.kind for i in window.quality_report())
+    before = kinds()
+    dialog = window.open_options("Informe de calidad")
+    rows = dialog.parts["widgets"]["quality"]
+    rows["number"][0].setChecked(False)  # «Número suelto», fuera
+    rows["opening"][1].setCurrentText("Grave")
+    rows["opening"][1].activated.emit(rows["opening"][1].currentIndex())
+    dialog.parts["show"]("Ortografía")
+    words = dialog.parts["widgets"]["words"]
+    words.setCurrentRow([words.item(n).text() for n in range(words.count())].index("golem"))
+    next(b for b in dialog.win.findChildren(app.QPushButton) if b.text() == "Quitar").click()
+    dialog.parts["put"]("spell_caps", True)
+    dialog.parts["show"]("Salida")
+    dialog.parts["put"]("out_name", "Serie - Volumen N")
+    dialog.parts["show"]("Apariencia")
+    dialog.parts["put"]("accent", "Verde")
+    dialog.parts["put"]("ui_font", "10 pt")
+    dialog.parts["show"]("Inicio")
+    dialog.parts["put"]("recent_max", 3)
+    dialog.parts["accept"]()
+    after = kinds()
+    levels = {i.kind: i.level for i in window.quality_report()}
+    look = (theme.colors(False)["acc"], qtk.app().font().pointSize())
+    name, words_now = window.out_name(), list(window.words)
+    dialog = window.open_options("Apariencia")
+    dialog.parts["reset"].click()
+    reset = (dialog.get("accent"), dialog.get("ui_font"))
+    dialog.parts["accept"]()
+    back = (theme.colors(False)["acc"], qtk.app().font().pointSize())
+    window.close()
+    import convert as cv
+    caps = [w for w, _, _ in cv.unknown_words(["Ella vio a Zzyzx en la plaza."], caps=True)]
+    plain = [w for w, _, _ in cv.unknown_words(["Ella vio a Zzyzx en la plaza."])]
+    assert "number" in before and "number" not in after and levels["opening"] == "Grave", (before, after, levels)
+    assert name == "ReZero - Volumen 3", name  # sin «:», que Windows no deja en un nombre
+    assert words_now == ["rimuru"], words_now
+    assert look == (theme.ACCENTS["Verde"][False]["acc"], 10), look
+    assert reset == ("Azul", "9 pt") and back == (theme.LIGHT["acc"], 9), (reset, back)
+    assert caps == ["Zzyzx"] and plain == [], (caps, plain)
+
+
+def test_theme_accents_are_readable():
+    """Cada color de acento llega a 4,5:1 con su texto y sobre el fondo, en los dos temas (como los de siempre)."""
+    import theme
+
+    def luminance(color):
+        def channel(v):
+            v /= 255
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+        return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+    def ratio(a, b):
+        high, low = sorted((luminance(a), luminance(b)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    low = []
+    for accent in theme.ACCENTS:
+        for dark in (False, True):
+            c = theme.colors(dark, accent)
+            for fg, bg in (("acc_ink", "acc"), ("acc", "bg"), ("acc", "card"), ("ink", "sel")):
+                if ratio(c[fg], c[bg]) < 4.5:
+                    low.append((accent, dark, fg, bg, round(ratio(c[fg], c[bg]), 2)))
+    assert not low, low
 
 
 def test_window_kindle_profile_hyphenates():

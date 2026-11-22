@@ -72,7 +72,7 @@ DIFF = {False: {"old": {"background": "#f8d7da", "foreground": "#8a1c1c", "overs
                "head": {"foreground": "#7aa7ff"}}}
 
 QSS = """
-QWidget {{ font-family: "Segoe UI"; font-size: 9pt; color: {ink}; }}
+QWidget {{ font-family: "Segoe UI"; font-size: {size}pt; color: {ink}; }}
 QMainWindow, QDialog {{ background: {bg}; }}
 QPushButton, QToolButton {{ border: 1px solid {edge}; border-radius: 6px; padding: 4px 12px; background: {card}; }}
 QPushButton:hover, QToolButton:hover {{ background: {hover}; }}
@@ -143,8 +143,8 @@ QProgressBar::chunk {{ background: {acc}; border-radius: 3px; }}
 QLabel#muted {{ color: {muted}; }}
 QLabel#warn {{ color: {warn}; font-weight: 600; }}
 QLabel#ok {{ color: {ok}; }}
-QLabel#title {{ font-size: 11pt; font-weight: 600; }}
-QLabel#big {{ font-size: 13pt; font-weight: 600; }}
+QLabel#title {{ font-size: {title_size}pt; font-weight: 600; }}
+QLabel#big {{ font-size: {big_size}pt; font-weight: 600; }}
 QSplitter::handle {{ background: transparent; }}
 QScrollArea {{ border: 0; background: transparent; }}
 QFrame#desk {{ background: {line}; }}
@@ -168,8 +168,28 @@ QPushButton#edge:hover {{ background: {hover}; }}
 """
 
 
-def colors(dark):
-    return DARK if dark else LIGHT
+# Colores de acento de Opciones → Apariencia: el principal, el de encima del ratón y el de lo elegido, en claro y en
+# oscuro. «Azul» es el de siempre (LIGHT y DARK). Cada uno llega a 4,5:1 con su texto (test_theme_text_is_readable)
+ACCENTS = {
+    "Azul": None,
+    "Verde": {False: {"acc": "#1b6e30", "acc_hover": "#155a26", "sel": "#d7eedc"},
+              True: {"acc": "#6ccf85", "acc_hover": "#86d99a", "sel": "#24432c"}},
+    "Morado": {False: {"acc": "#6a3db5", "acc_hover": "#57319a", "sel": "#e9e0f8"},
+               True: {"acc": "#b49af0", "acc_hover": "#c4aef3", "sel": "#3a3058"}},
+    "Naranja": {False: {"acc": "#a8430a", "acc_hover": "#8a3708", "sel": "#fae3d3"},
+                True: {"acc": "#f5a35c", "acc_hover": "#f7b57a", "sel": "#4a3424"}},
+    "Rosa": {False: {"acc": "#ad2e72", "acc_hover": "#90265f", "sel": "#f8dfec"},
+             True: {"acc": "#f08cc0", "acc_hover": "#f3a3cd", "sel": "#4a2a3c"}},
+}
+UI_SIZES = {"9 pt": 9, "10 pt": 10, "11 pt": 11}  # letra de la ventana (Opciones → Apariencia)
+_accent, _size = "Azul", 9  # los de ahora: colors() los usa en toda la app
+
+
+def colors(dark, accent=None):
+    """Los colores del tema, con el acento elegido (o el de ahora)."""
+    base = DARK if dark else LIGHT
+    chosen = ACCENTS.get(accent or _accent)
+    return {**base, **chosen[bool(dark)]} if chosen else base
 
 
 def kind_colors(dark):
@@ -364,17 +384,22 @@ def chevron(color):
     return path.as_posix()
 
 
-def apply(app, choice):
-    """Pone el tema elegido (CHOICES; otro valor, como un ajustes.json escrito a mano, es «Sistema»).
-    Devuelve True si queda oscuro."""
+def apply(app, choice, accent=None, size=None):
+    """Pone el tema elegido (CHOICES; otro valor, como un ajustes.json escrito a mano, es «Sistema»), con su color de
+    acento (ACCENTS) y el tamaño de letra de la ventana (puntos). Devuelve True si queda oscuro."""
+    global _accent, _size
+    _accent = accent if accent in ACCENTS else _accent if accent is None else "Azul"
+    _size = size if size in UI_SIZES.values() else _size if size is None else 9
     hints = app.styleHints()
     scheme = {"Claro": Qt.ColorScheme.Light, "Oscuro": Qt.ColorScheme.Dark}.get(choice, Qt.ColorScheme.Unknown)
     hints.setColorScheme(scheme)  # también la barra de título: Windows la pinta oscura
     # Lo elegido manda aunque la plataforma no acepte el cambio (sin pantalla, en las pruebas, no lo acepta)
     dark = scheme == Qt.ColorScheme.Dark or (scheme == Qt.ColorScheme.Unknown
                                              and hints.colorScheme() == Qt.ColorScheme.Dark)
-    if app.property("theme_dark") == dark:  # rehacer el QSS repinta todas las ventanas: solo si cambia
+    look = (dark, _accent, _size)
+    if app.property("theme_look") == look:  # rehacer el QSS repinta todas las ventanas: solo si cambia
         return dark
+    app.setProperty("theme_look", look)
     app.setProperty("theme_dark", dark)
     global _style
     if _style is None:  # uno solo: cambiar de estilo borra el de antes, que Python aún tendría
@@ -384,9 +409,10 @@ def apply(app, choice):
         _shown = _Shown()
         app.installEventFilter(_shown)
     _style.c = colors(dark)  # el QSS de abajo repinta todo con los colores nuevos
-    app.setFont(QFont("Segoe UI", 9))
+    app.setFont(QFont("Segoe UI", _size))
     app.setPalette(palette(dark))
-    app.setStyleSheet(QSS.format(**colors(dark), chevron=chevron(colors(dark)["muted"])))
+    app.setStyleSheet(QSS.format(**colors(dark), chevron=chevron(colors(dark)["muted"]), size=_size,
+                                 title_size=_size + 2, big_size=_size + 4))
     for effect in (Qt.UIEffect.UI_AnimateCombo, Qt.UIEffect.UI_AnimateMenu, Qt.UIEffect.UI_FadeMenu):
         QApplication.setEffectEnabled(effect, False)  # las listas y menús se abren de golpe, sin deslizarse
     for window in app.topLevelWidgets():
