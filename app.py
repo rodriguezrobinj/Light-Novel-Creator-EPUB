@@ -58,6 +58,7 @@ import faithful
 import options
 import qtk
 import registro
+import report
 import theme
 import translate
 from qtk import filedialog, messagebox
@@ -4544,7 +4545,7 @@ class App:
         return start, end
 
     def issue_places(self, issues):
-        """Dónde está cada aviso, en una pasada por el libro: [(corto, completo)], como «Capítulo 0 · ¶4» y
+        """Dónde está cada aviso, en una pasada por el libro: [(corto, completo)], como «Capítulo 0 · párr. 4» y
         «Capítulo 0: El discípulo… › Lado de Teto · párrafo 4 de 38 · pág. 4». El número de párrafo es el de la
         barra de estado del editor: solo párrafos de texto."""
         blocks, heads = self.book.blocks, set(self.section_heads())
@@ -4572,7 +4573,7 @@ class App:
                 spot = "el título"
             else:
                 spot = f"párrafo {n} de {totals[start]}"
-            places.append((f"{short} · " + (f"¶{n}" if spot.startswith("párrafo") else "título"),
+            places.append((f"{short} · " + (f"párr. {n}" if spot.startswith("párrafo") else "título"),
                            chapter + (f" › {title(sub)}" if sub is not None and sub != issue.block else "")
                            + f" · {spot} · pág. {issue.page}"))
         return places
@@ -5611,36 +5612,75 @@ class App:
         self.quality_btn.setEnabled(bool(self.book))
 
     def quality(self):
-        """Informe de calidad (convert.quality_report): los avisos por gravedad y, del elegido, el problema,
-        la solución, la vista previa de antes y después y el botón que lo arregla. Al elegir un aviso, las
-        vistas previas de la ventana principal van a él."""
+        """Informe de calidad (convert.quality_report). Arriba, de un vistazo: la nota en un anillo, cuántos hay de
+        cada gravedad (un clic filtra), los tipos más frecuentes y un cuadro por capítulo (un clic filtra). Debajo,
+        los avisos agrupados por tipo y, del elegido, el problema, la solución, el párrafo con lo señalado
+        resaltado y el arreglo como un diff. «Arreglar todos» enseña antes la lista para marcar o desmarcar. Al
+        elegir un aviso, las vistas previas de la ventana principal van a él."""
         if not self.book:
             return
         win, column = self.dialog("Informe de calidad")
-        win.resize(1060, 600)
+        win.resize(1120, 660)  # cabe en 1366x728 con la barra de tareas
         levels = theme.level_colors(self.dark)
-        summary = _label("", "title")
-        summary.setWordWrap(True)  # nota, recuentos e ignorados: en 1093 px (125 %) baja a dos líneas
+        state = {"report": [], "places": [], "all": [], "score": 100, "kind": "", "chapter": -1, "groups": {}}
         show = qtk.Var("Todos")
-        shown = _combo(show, ["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS] + ["Ignorados"],
-                       12, changed=lambda: fill())
-        # Los ecos se activan en Opciones → Informe de calidad; al volver, la lista se rehace con ellos
-        echoes = _button("Opciones del informe…", lambda: self.open_options(
+        # --- resumen
+        ring = report.ScoreRing(self.dark)
+        summary = _label("", "title")  # «Nota 64/100 · 8 por revisar · 290 menores», en una línea
+        chips = {}
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(theme.SPACE["gap"])
+        for name in ["Todos"] + [LEVEL_PLURAL[level].capitalize() for level in convert.LEVELS] + ["Ignorados"]:
+            chip = QPushButton(name, objectName="chip", checkable=True)
+            chip.clicked.connect(lambda _=False, n=name: (show.set(n), fill()))
+            chips[name] = chip
+            chip_row.addWidget(chip)
+        chip_row.addStretch(1)
+        filters = _label("", "muted")
+        clear_filter = _button("Quitar filtro", lambda: (state.update(kind="", chapter=-1), fill()))
+        options_btn = _button("Opciones del informe…", lambda: self.open_options(
             "Informe de calidad", on_close=lambda: shiboken6.isValid(win) and fill()))
         export_btn = _button("Exportar…", lambda: self.export_report(state["all"], state["score"], win))
         export_btn.setToolTip("Guardar el informe como página web (.html) o tabla para Excel (.csv), para otra persona")
-        column.addLayout(_row(summary, 1, echoes, QLabel("Mostrar:"), shown, export_btn))
+        bars = report.KindBars(self.dark)
+        bars.picked.connect(lambda kind: (state.update(kind=kind), fill()))
+        strip = report.ChapterStrip(self.dark)
+        strip.picked.connect(lambda n: (state.update(chapter=n), fill()))
+        head = QVBoxLayout()
+        head.setSpacing(theme.SPACE["gap"])
+        head.addWidget(summary)
+        head.addLayout(chip_row)
+        head.addLayout(_row(filters, clear_filter, 1))
+        kinds_box = QVBoxLayout()
+        kinds_box.setSpacing(2)
+        kinds_box.addWidget(_label("Tipos más frecuentes · clic para ver solo ese", "muted"))
+        kinds_box.addWidget(bars)
+        kinds_box.addStretch(1)
+        actions = QVBoxLayout()
+        actions.addWidget(options_btn)
+        actions.addWidget(export_btn)
+        actions.addStretch(1)
+        # En tres filas: en una sola, las fichas, las barras y los botones no cabían en 1093 px (125 %)
+        column.addLayout(_row(ring, head, 1, spacing=theme.SPACE["section"]))
+        middle = _row(kinds_box, actions, spacing=theme.SPACE["section"])
+        middle.setStretch(0, 1)
+        column.addLayout(middle)
+        column.addLayout(_row(_label("Capítulos", "muted"), strip, spacing=theme.SPACE["pad"]))
+        # --- lista y detalle
         panes = QSplitter(Qt.Orientation.Horizontal)
         column.addWidget(panes, 1)
         table = qtk.RowList(("level", "page", "where", "title"), {"level": "Gravedad", "page": "Pág.", "where": "Dónde",
-                                                                  "title": "Aviso"}, {"level": 90, "page": 44, "where": 130})
+                                                                  "title": "Aviso"}, {"level": 110, "page": 44, "where": 130})
         for level, color in levels.items():
             table.tag_configure(level, foreground=color)
+        bold = QFont(table.font())
+        bold.setWeight(QFont.Weight.DemiBold)
+        table.tag_configure("group", font=bold)
         table.double_clicked.connect(lambda _: open_issue())  # doble clic: al editor, en el trozo exacto
         panes.addWidget(table)
         right = QWidget()
         side = QVBoxLayout(right)
-        side.setContentsMargins(12, 0, 0, 0)
+        side.setContentsMargins(theme.SPACE["section"], 0, 0, 0)
         heading = _label("", "title")
         heading.setWordWrap(True)
         side.addWidget(heading)
@@ -5652,94 +5692,155 @@ class App:
             side.addWidget(_label(caption, "muted"))
             texts[name] = QLabel()
             texts[name].setWordWrap(True)
+            texts[name].setTextFormat(Qt.TextFormat.PlainText)  # un «<i>» de un comentario no es HTML aquí
             side.addWidget(texts[name])
         previews = {}
-        for name, caption in (("before", "Ahora"), ("after", "Con el arreglo")):
+        for name, caption in (("before", "En el texto"), ("after", "Arreglo")):
             side.addWidget(_label(caption, "muted"))
-            box = qtk.TextBox()
-            box.setReadOnly(True)
-            box.setFixedHeight(96)
-            for tag, look in theme.diff_tags(self.dark).items():
-                box.tag_configure(tag, **look)
+            box = QTextBrowser()
+            box.setOpenLinks(False)
+            box.setFixedHeight(92)
             side.addWidget(box)
             previews[name] = box
-        fix_btn = _button("Arreglar", lambda: apply([state["report"][int(table.selection()[0])]]), "primary")
-        all_btn = _button("Arreglar todos", lambda: apply(same_kind(state["report"][int(table.selection()[0])])))
-        ignore_btn = _button("Ignorar", lambda: ignore(state["report"][int(table.selection()[0])]))
+        legend = _label("¶ marca un salto de párrafo", "muted")
+        side.addWidget(legend)
+        fix_btn = _button("Arreglar", lambda: apply([chosen_issue()]), "primary")
+        all_btn = _button("Arreglar todos", lambda: confirm_all(same_kind(chosen_kind())))
+        ignore_btn = _button("Ignorar", lambda: ignore(chosen_issue()))
         edit_btn = _button("Abrir en el editor", lambda: open_issue())
         edit_btn.setToolTip("Abre el capítulo con el trozo del aviso elegido (también con doble clic en la lista)")
         side.addLayout(_row(fix_btn, all_btn, edit_btn, 1, ignore_btn))
         side.addStretch(1)
         panes.addWidget(right)
-        panes.setSizes([470, 590])
-        state = {"report": [], "places": []}
+        panes.setSizes([500, 600])
+
+        def chosen_issue():
+            chosen = table.selection()
+            return state["report"][int(chosen[0])] if chosen and not chosen[0].startswith("k:") else None
+
+        def chosen_kind():
+            chosen = table.selection()
+            if not chosen:
+                return ""
+            return chosen[0][2:] if chosen[0].startswith("k:") else state["report"][int(chosen[0])].kind
 
         def open_issue():
-            chosen = table.selection()
-            if chosen:
-                self.edit_issue(state["report"][int(chosen[0])])
+            issue = chosen_issue()
+            if issue:
+                self.edit_issue(issue)
 
-        def fill(select=0):
+        def kind_title(issue):
+            """El nombre del tipo, sin lo de cada aviso: «Párrafo muy largo (900 caracteres)» -> «Párrafo muy largo»."""
+            return re.sub(r"\s*(\([^)]*\)|:\s*«.*)$", "", issue.title)
+
+        def sections():
+            """[(título, inicio, fin)] de los capítulos del libro, como el editor: lo de antes del primero, aparte."""
+            heads = self.section_heads() + [len(self.book.blocks)]
+            found = [("Inicio del libro", 0, heads[0])] if heads[0] > 0 else []
+            return found + [(self.tree.set(str(k), "title"), k, end) for k, end in zip(heads, heads[1:])]
+
+        def fill(select=None):
             everything = self.quality_report()
             ignored = [i for i in everything if _issue_key(i) in self.ignored]
-            report = [i for i in everything if _issue_key(i) not in self.ignored]
-            state["all"], state["score"] = report, convert.quality_score(report, self.word_count())
-            summary.setText(f"Nota {state['score']}/100 · " + (_quality_summary(report) or "No se encontró nada sospechoso.")
+            reported = [i for i in everything if _issue_key(i) not in self.ignored]
+            state["all"], state["score"] = reported, convert.quality_score(reported, self.word_count())
+            ring.set_score(state["score"])
+            summary.setText(f"Nota {state['score']}/100 · " + (_quality_summary(reported)
+                                                               or "No se encontró nada sospechoso.")
                             + (f" · {convert.counted(len(ignored), 'ignorado')}" if ignored else ""))
-            graves = any(i.level == "Grave" for i in report)
-            summary.setStyleSheet(f"color: {levels['Grave']};" if graves else "")
-            wanted = next((level for level in convert.LEVELS if LEVEL_PLURAL[level].capitalize() == show.get()), None)
-            state["report"] = ignored if show.get() == "Ignorados" else [i for i in report if wanted in (None, i.level)]
+            for name, chip in chips.items():
+                count = (len(reported) if name == "Todos" else len(ignored) if name == "Ignorados" else
+                         sum(1 for i in reported if LEVEL_PLURAL[i.level].capitalize() == name))
+                chip.setText(f"{name} ({count})")
+                chip.setChecked(name == show.get())
+            base = ignored if show.get() == "Ignorados" else [
+                i for i in reported if show.get() == "Todos" or LEVEL_PLURAL[i.level].capitalize() == show.get()]
+            # tipos y capítulos, de lo que deja la gravedad elegida: un clic en ellos filtra un poco más
+            counts = collections.Counter(i.kind for i in base)
+            first = {i.kind: i for i in reversed(base)}
+            bars.set_rows([(kind, kind_title(first[kind]), n, first[kind].level) for kind, n in counts.most_common()],
+                          state["kind"])
+            parts = sections()
+            words = [sum(len(convert._plain(b).split()) for b in self.book.blocks[s:e] if b.kind == "p")
+                     for _, s, e in parts]
+            per_chapter = [[i for i in base if i.block is not None and s <= i.block < e] for _, s, e in parts]
+            strip.set_cells([(title, len(found), n, next((lv for lv in convert.LEVELS if any(i.level == lv for i in found)),
+                                                         "")) for (title, _, _), found, n in zip(parts, per_chapter, words)],
+                            state["chapter"])
+            shown = [i for i in base if (not state["kind"] or i.kind == state["kind"])
+                     and (state["chapter"] < 0 or state["chapter"] >= len(parts) or i in per_chapter[state["chapter"]])]
+            notes = ([f"tipo «{kind_title(first[state['kind']])}»"] if state["kind"] in first else []) + (
+                [f"«{parts[state['chapter']][0]}»"] if 0 <= state["chapter"] < len(parts) else [])
+            filters.setText(("Solo " + " · ".join(notes)) if notes else "")
+            clear_filter.setVisible(bool(notes))
+            state["report"] = shown
             ignore_btn.setText("No ignorar" if show.get() == "Ignorados" else "Ignorar")
-            win.setWindowTitle(f"Informe de calidad · {convert.counted(len(report), 'aviso')}")
+            win.setWindowTitle(f"Informe de calidad · {convert.counted(len(reported), 'aviso')}")
             table.delete(*table.get_children())
-            state["places"] = self.issue_places(state["report"])
-            for n, issue in enumerate(state["report"]):
-                table.insert("", "end", iid=str(n), values=(f"● {issue.level}", issue.page, state["places"][n][0],
-                                                            issue.title), tags=(issue.level,))
-            if state["report"]:
-                item = str(min(select, len(state["report"]) - 1))
+            state["places"] = self.issue_places(shown)
+            order = sorted(collections.Counter(i.kind for i in shown).items(),
+                           key=lambda kv: (convert.LEVELS.index(next(i.level for i in shown if i.kind == kv[0])), -kv[1]))
+            groups = state["groups"] = {}
+            for kind, n in order:
+                issue = next(i for i in shown if i.kind == kind)
+                gid = f"k:{kind}"
+                table.insert("", "end", iid=gid, values=(f"● {issue.level}", "", f"{n} aviso{'' if n == 1 else 's'}",
+                                                         f"{kind_title(issue)} ({n})"), tags=(issue.level, "group"))
+                groups[kind] = []
+                for k, found in enumerate(shown):
+                    if found.kind == kind:
+                        table.insert(gid, "end", iid=str(k), values=(f"● {found.level}", found.page,
+                                                                     state["places"][k][0], found.title),
+                                     tags=(found.level,))
+                        groups[kind].append(str(k))
+                table.rows[gid].setExpanded(n <= 25 or len(order) == 1)  # los muy numerosos, plegados
+            rows = [iid for kind, _ in order for iid in groups[kind]]
+            if rows:
+                item = rows[min(select, len(rows) - 1)] if isinstance(select, int) else rows[0]
                 table.selection_set(item)
                 table.see(item)
             else:
                 pick()
 
-        def preview(box, text, spans, tag, empty):
-            box.delete("1.0", "end")
-            if text:
-                box.insert("1.0", text)
-                for i, j in spans:
-                    box.tag_add(tag, f"1.0+{i}c", f"1.0+{j}c")
-            else:
-                box.insert("1.0", empty)
-                box.tag_add("note", "1.0", "end")
-
-        def same_kind(issue):
-            return [i for i in state["report"] if i.kind == issue.kind and i.edit]
+        def same_kind(kind):
+            return [i for i in state["report"] if i.kind == kind and i.edit]
 
         def pick():
-            chosen = table.selection()
-            issue = state["report"][int(chosen[0])] if chosen else None
-            heading.setText(issue.title if issue else "")
-            heading.setStyleSheet(f"color: {levels[issue.level]};" if issue else "")
-            place.setText(state["places"][int(chosen[0])][1] if issue else "")
-            texts["problem"].setText(issue.problem if issue else "")
-            texts["solution"].setText(issue.solution if issue else "")
-            for box in previews.values():
-                for tag in ("old", "new", "note"):
-                    box.tag_remove(tag, "1.0", "end")
-            old, new = _diff_spans(issue.before, issue.after) if issue and issue.after else ([], [])
-            if issue and issue.edit and not issue.after:  # el arreglo quita el párrafo entero
-                old = [(0, len(issue.before))]
-            preview(previews["before"], issue.before if issue else "", old, "old",
-                    f"(texto de la página {issue.page} del original: míralo en la vista previa)" if issue else "")
-            preview(previews["after"], issue.after if issue else "", new, "new",
-                    "(se quita)" if issue and issue.edit else "Sin arreglo automático: sigue la solución.")
+            issue, kind = chosen_issue(), chosen_kind()
+            group = [state["report"][int(k)] for k in state["groups"].get(kind, [])] if kind and not issue else []
+            shown = issue or (group[0] if group else None)
+            heading.setText(issue.title if issue else (f"{group[0].title.split(' (')[0]} · "
+                                                        f"{convert.counted(len(group), 'aviso')}" if group else ""))
+            heading.setStyleSheet(f"color: {levels[shown.level]};" if shown else "")
+            place.setText(state["places"][int(table.selection()[0])][1] if issue else
+                          ("Elige uno en la lista para verlo en el texto" if group else ""))
+            texts["problem"].setText(shown.problem if shown else "")
+            texts["solution"].setText(shown.solution if shown else "")
+            if issue:
+                block = self.book.blocks[issue.block] if issue.block is not None and issue.block < len(
+                    self.book.blocks) else None
+                paragraph = convert.shown_text(block, issue.block) if block is not None else issue.before
+                previews["before"].setHtml(report.marked_html(paragraph.strip(), issue.span and (
+                    issue.span[0] - (len(paragraph) - len(paragraph.lstrip())),
+                    issue.span[1] - (len(paragraph) - len(paragraph.lstrip()))), self.dark)
+                    if paragraph.strip() else html.escape(f"(texto de la página {issue.page} del original: míralo "
+                                                          "en la vista previa)"))
+                if issue.edit and issue.after:
+                    previews["after"].setHtml(report.diff_html(issue.before, issue.after, self.dark))
+                elif issue.edit:  # el arreglo quita el párrafo entero
+                    previews["after"].setHtml(report.diff_html(issue.before, "", self.dark) + " <i>(se quita)</i>")
+                else:
+                    previews["after"].setHtml(html.escape("Sin arreglo automático: sigue la solución."))
+            else:
+                for box in previews.values():
+                    box.clear()
+            legend.setVisible(bool(issue and "¶" in (issue.before + issue.after)))
             fix_btn.setEnabled(bool(issue and issue.edit))
             ignore_btn.setEnabled(bool(issue))
-            count = len(same_kind(issue)) if issue and issue.edit else 0
+            edit_btn.setEnabled(bool(issue))
+            count = len(same_kind(kind)) if kind else 0
             all_btn.setText(f"Arreglar todos los de este tipo ({count})")
-            all_btn.setEnabled(count > 1)
+            all_btn.setEnabled(count > 1 or (count == 1 and not issue))
             if issue:
                 term = " ".join(issue.text.split()[:6])
                 if issue.block is None or not term:
@@ -5755,24 +5856,74 @@ class App:
                     edits.append(issue.edit)
                     limit = issue.edit[0]
             self.apply_fixes(edits, f"{convert.counted(len(edits), 'aviso arreglado', 'avisos arreglados')} · Ctrl+Z para deshacer")
-            fill(int(table.selection()[0]) if table.selection() else 0)
+            fill(position())
+
+        def position():
+            chosen = table.selection()
+            rows = [iid for kind in state["groups"] for iid in state["groups"][kind]]
+            return rows.index(chosen[0]) if chosen and chosen[0] in rows else 0
+
+        def confirm_all(issues):
+            """Antes de «Arreglar todos»: cada cambio con su casilla; solo los marcados, en un único Ctrl+Z."""
+            if not issues:
+                return
+            box, layout = self.dialog("Arreglar todos", parent=win)
+            box.resize(760, 460)
+            layout.addWidget(_label(f"{issues[0].title.split(' (')[0]}: desmarca los que no quieras cambiar", "title"))
+            listing = QListWidget()
+            for issue in issues:
+                change = report.change_snippet(issue.before, issue.after) if issue.after else f"se quita: {issue.before}"
+                item = QListWidgetItem(f"pág. {issue.page} · {change}")
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked)
+                item.setToolTip(f"Ahora: {issue.before}\nCon el arreglo: {issue.after or '(se quita)'}")
+                listing.addItem(item)
+            layout.addWidget(listing, 1)
+
+            def marked():
+                return [issue for n, issue in enumerate(issues) if listing.item(n).checkState() == Qt.CheckState.Checked]
+
+            def mark(on):
+                for n in range(listing.count()):
+                    listing.item(n).setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+
+            def go():
+                chosen = marked()
+                box.close()
+                if chosen:
+                    apply(chosen)
+
+            go_btn = _button(f"Arreglar {len(issues)}", go, "primary")
+            listing.itemChanged.connect(lambda _: (go_btn.setText(f"Arreglar {len(marked())}"),
+                                                   go_btn.setEnabled(bool(marked()))))
+            layout.addLayout(_row(_button("Marcar todos", lambda: mark(True)),
+                                  _button("Desmarcar todos", lambda: mark(False)), 1, go_btn,
+                                  _button("Cancelar", box.close)))
+            box.parts = {"list": listing, "go": go, "mark": mark}
+            box.show()
+            self.fix_all_window = box
 
         def ignore(issue):
             """Ignorar (o volver a mostrar) un aviso: se recuerda en la revisión. Un comentario del revisor se quita."""
+            if issue is None:
+                return
             key = _issue_key(issue)
             if issue.kind == "comment":
                 self.remove_comment(issue)
             else:
                 self.ignored = [k for k in self.ignored if k != key] if key in self.ignored else self.ignored + [key]
             self.update_quality()
-            fill(int(table.selection()[0]) if table.selection() else 0)
+            fill(position())
 
         table.selected.connect(pick)
         fill()
         win.show()
         win.parts = {"table": table, "summary": summary, "heading": heading, "texts": texts, "previews": previews,
-                     "fix": fix_btn, "all": all_btn, "ignore": ignore_btn, "show": show, "fill": fill, "echoes": echoes,
-                     "place": place, "edit": edit_btn}
+                     "fix": fix_btn, "all": all_btn, "ignore": ignore_btn, "show": show, "fill": fill,
+                     "echoes": options_btn, "place": place, "edit": edit_btn, "ring": ring, "chips": chips,
+                     "bars": bars, "strip": strip, "filters": filters, "clear": clear_filter,
+                     "rows": lambda: [iid for kind in state["groups"] for iid in state["groups"][kind]],
+                     "state": state}
         self.quality_window = win
 
     def series_panel(self):
