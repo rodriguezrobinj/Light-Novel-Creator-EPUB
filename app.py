@@ -808,6 +808,13 @@ def _size_text(size):
     return f"{size / 1e6:.1f} MB".replace(".", ",")
 
 
+def _file_size(size):
+    """Peso de un archivo para leerlo de un vistazo: B, KB o MB (decimales, como _size_text), con coma."""
+    if size < 1000:
+        return f"{size} B"
+    return f"{size / 1000:.1f} KB".replace(".", ",") if size < 1e6 else _size_text(size)
+
+
 def _reader_kind(root):
     """"kindle", "kobo" o "usb" según las carpetas de la unidad."""
     root = Path(root)
@@ -1082,6 +1089,8 @@ def _migrate_review(state, book):
             where = spans()
             if edit[0] == "image":
                 edits.append(["image", new(int(edit[1]), where), edit[2]])
+            elif edit[0] == "head":
+                edits.append(["head", new(int(edit[1]), where), *edit[2:5]])
             elif edit[0] == "move":
                 start, end, dest = int(edit[1]), int(edit[2]), int(edit[3])
                 if any(start < s + n and end > s for s, n in where):
@@ -1125,6 +1134,8 @@ def _migrate_dropped(state, book):
         for edit in state.get("edits", []):
             if edit[0] == "image":
                 edits.append(["image", new(int(edit[1])), edit[2]])
+            elif edit[0] == "head":
+                edits.append(["head", new(int(edit[1])), *edit[2:5]])
             elif edit[0] == "move" or int(edit[0]) <= max(marks):
                 raise LookupError  # mover, o reescribir antes de ellos (cambia dónde quedan): ya no se puede contar
             else:
@@ -1544,8 +1555,8 @@ def _remember_series(state):
 def _replay(book, state):
     """Vuelve a aplicar al libro recién analizado los cambios de bloques de una revisión, en su orden
     (cada uno cuenta los bloques tal como los dejó el anterior): textos editados [inicio, fin, texto],
-    secciones movidas ["move", inicio, fin, destino] e ilustraciones cambiadas ["image", bloque, archivo].
-    Devuelve los aplicados."""
+    secciones movidas ["move", inicio, fin, destino], ilustraciones cambiadas ["image", bloque, archivo] y
+    cabeceras de capítulo editadas ["head", bloque, archivo, antes, después]. Devuelve los aplicados."""
     done = []
     for edit in state.get("edits", []):
         try:
@@ -1559,6 +1570,13 @@ def _replay(book, state):
                 except ValueError:
                     pass  # la imagen ya no está: se queda la del PDF, y el cambio se recuerda por si vuelve
                 done.append(["image", k, path])
+                continue
+            if edit[0] == "head":
+                k, shell = int(edit[1]), [str(part) for part in edit[2:5]]
+                if not 0 <= k < len(book.blocks) or len(shell) != 3:
+                    break
+                convert.set_shell(book, k, shell)
+                done.append(["head", k, *shell])
                 continue
             if edit[0] == "move":
                 start, end, dest = int(edit[1]), int(edit[2]), int(edit[3])
@@ -4598,18 +4616,23 @@ class App:
     def apply_edit(self, edit, item):
         self.apply_edits([edit], item)
 
-    def apply_edits(self, edits, item, titles=None, follow=False, kinds=None, retype=None):
+    def apply_edits(self, edits, item, titles=None, follow=False, kinds=None, retype=None, heads=()):
         """Aplica textos editados: cambia los bloques, renumera la lista conservando los tipos elegidos
         y los apunta para la revisión. Guarda una copia de antes para deshacerlos de una vez con Ctrl+Z.
         Varios cambios van de atrás adelante: así los índices de los siguientes siguen valiendo.
         titles: {fila: título nuevo} de títulos renombrados en el editor (conservan su tipo). follow: item es
         la fila de antes de los cambios y se vuelve a elegir donde quede. kinds: por cada edición, el tipo
-        (Capítulo/Subtítulo) de sus títulos, en orden. retype: {fila: tipo} de títulos que solo cambian de tipo."""
+        (Capítulo/Subtítulo) de sus títulos, en orden. retype: {fila: tipo} de títulos que solo cambian de tipo.
+        heads: [(bloque, (archivo, antes, después))] cabeceras editadas en «Código HTML»; van antes que los textos,
+        con los índices de antes, y edit_section las deja con su capítulo."""
         rows = self.rows()
         self.remember({"blocks": self.book.blocks, "candidates": self.book.candidates, "rows": rows,
                              "edits": len(self.edits), "item": item})  # edit_section crea listas nuevas
         rows = {k: [v[0], titles[k], *v[2:]] if titles and k in titles else v for k, v in rows.items()}
         rows = {k: [retype[k], *v[1:]] if retype and k in retype else v for k, v in rows.items()}
+        for k, shell in heads:
+            convert.set_shell(self.book, k, shell)
+            self.edits.append(["head", k, *shell])
         for n, edit in enumerate(edits):
             mapping = convert.edit_section(self.book, *edit, _images())
             self.edits.append(list(edit))
@@ -7779,7 +7802,9 @@ class TextEditor:
         self.code.textChanged.connect(lambda: self.code.isVisible() and self.code.hasFocus()
                                       and self.later("codelive", 600, self.apply_code_live))
         self.applying_code = False  # la hoja cambia por el código: el código no se vuelve a escribir
-        self.code.setFont(QFont("Consolas", 10))
+        self.code.setFont(QFont("Segoe UI", 9))  # la de la ventana, como el visor del explorador de archivos
+        self.shells = {}  # (inicio, fin) -> cabecera editada en «Código HTML» sin guardar aún
+        self.code_shell, self.code_frame = None, ([], [])  # la cabecera que enseña el código y sus líneas
         self.code.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.code.hide()
         desk_row.addWidget(self.code, 20)
@@ -9074,11 +9099,15 @@ class TextEditor:
     def files_panel(self):
         self.files = QTreeWidget()
         self.files.setHeaderHidden(True)
-        self.files.setMinimumWidth(200)
+        self.files.setColumnCount(2)  # nombre y peso
+        self.files.header().setStretchLastSection(False)
+        self.files.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.files.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.files.setMinimumWidth(240)
         self.files.itemClicked.connect(lambda item: self.files_go(item, False))
         self.files.itemActivated.connect(lambda item: self.files_go(item))  # doble clic o Intro (sin la columna)
         self.files_path = os.path.join(tempfile.gettempdir(), f"lnepub-vista-archivos-{os.getpid()}.epub")
-        self.file_sections, self.file_view = {}, None
+        self.file_sections, self.file_view, self.files_written = {}, None, False
         self.files.setVisible(bool(self.app.settings.get("editor_files")))
         self.files_btn.setChecked(not self.files.isHidden())
         if not self.files.isHidden():
@@ -9096,7 +9125,8 @@ class TextEditor:
 
     def fill_files(self):
         """Los archivos del EPUB original o, con un PDF, los del que se generará con las opciones de ahora (escrito
-        aparte, sin reducir imágenes: los nombres son los mismos)."""
+        aparte, sin reducir imágenes: los nombres son los mismos). Ese se escribe una vez por editor: tarda un segundo
+        en un libro grande, con el cursor de espera."""
         book = self.app.book
         self.files.clear()
         try:
@@ -9108,13 +9138,20 @@ class TextEditor:
                         self.file_sections.setdefault(b.src[0], k)
             else:
                 path = self.files_path
-                chapters, removed, breaks = _plan(book, self.app.rows())
-                options = self.app.write_options(breaks)
-                options.update(shrink=False, trim=False, gray=False, kepub=False, preview=True)
-                firsts = convert.write_epub(book, chapters, path, removed=removed, **options)
-                self.file_sections = {f"OEBPS/{name}": k for name, k in firsts.items()}
+                if not self.files_written:
+                    chapters, removed, breaks = _plan(book, self.app.rows())
+                    options = self.app.write_options(breaks)
+                    options.update(shrink=False, trim=False, gray=False, kepub=False, preview=True)
+                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                    try:
+                        firsts = convert.write_epub(book, chapters, path, removed=removed, **options)
+                    finally:
+                        QApplication.restoreOverrideCursor()
+                    self.file_sections = {f"OEBPS/{name}": k for name, k in firsts.items()}
+                    self.files_written = True
             with zipfile.ZipFile(path) as z:
                 groups = faithful.file_groups(z)
+                sizes = {info.filename: info.file_size for info in z.infolist()}
         except Exception:
             _log(traceback.format_exc())
             QTreeWidgetItem(self.files, ["No se pudo leer el EPUB"])
@@ -9125,7 +9162,9 @@ class TextEditor:
             group = QTreeWidgetItem(self.files, [name])
             group.setFont(0, bold)
             for path in paths:
-                item = QTreeWidgetItem(group, [path.rsplit("/", 1)[-1]])
+                item = QTreeWidgetItem(group, [path.rsplit("/", 1)[-1], _file_size(sizes.get(path, 0))])
+                item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                item.setForeground(1, QColor(self.colors["muted"]))  # gris: el nombre es lo primero
                 item.setToolTip(0, path)
                 item.setData(0, Qt.ItemDataRole.UserRole, path)
             group.setExpanded(True)
@@ -9159,7 +9198,7 @@ class TextEditor:
         win.setWindowTitle(path.rsplit("/", 1)[-1])
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         column = QVBoxLayout(win)
-        size = f"{len(data) / 1024:.1f} KB".replace(".", ",")
+        size = _file_size(len(data))
         low = path.lower()
         picture = QPixmap()
         if low.endswith(faithful.FILE_GROUPS[2][1]) and not low.endswith(".svg") and picture.loadFromData(data):
@@ -10404,32 +10443,42 @@ class TextEditor:
         if not self.code.isVisible():
             line = self.web_index(self.sheet.textCursor().block())
             # all_lines: las líneas de cada párrafo ya calculadas (dump las volvía a sacar todas)
-            self.code.setPlainText(editor.to_code("\n\n".join(x for lines in self.sheet.all_lines() for x in lines)))
-            self.code_text = self.code.toPlainText()
+            body = editor.to_code("\n\n".join(x for lines in self.sheet.all_lines() for x in lines))
+            self.code_shell = self.shell_of(*self.current)  # la página entera: su cabecera, el texto y su pie
+            self.code.setPlainText(editor.page_code(self.code_shell, body))
+            self.code_text = body
+            self.code_frame = self.frame_of(self.code_shell)
+            h = len(self.code_frame[0])
             if not self.code.classes:  # para el autocompletado de class="…"
                 self.code.classes = self.book_classes()
             color, removed = self.change_colors()  # «Mostrar cambios» frente a cada línea de antes
+            saved = self.frame_of(self.shell_of(*self.current, saved=True))
             self.code.show_changes(color if self.show_changes_action.isChecked() else None, removed,
-                                   self.code_originals())
+                                   [editor.pretty_line(o) for o in saved[0]]
+                                   + [o and editor.pretty_line(o) for o in self.code_originals()]
+                                   + [editor.pretty_line(o) for o in saved[1]])
             self.sheet.hide()
             self.code.show()
-            block = self.code.document().findBlockByNumber(line)
+            block = self.code.document().findBlockByNumber(h + line)
             if block.isValid():
                 self.code.setTextCursor(QTextCursor(block))
                 self.code.centerCursor()
             self.code.setFocus()
             self.sync_view()  # la cinta, solo Vista y Deshacer (fit_ribbon_to_view)
             return
-        if self.code.toPlainText() != self.code_text:
+        if not self.take_shell():
+            return
+        lines, h, f = self.code_parts()
+        if "\n".join(lines[h:f]) != self.code_text:
             try:
-                text = editor.from_code(self.code.toPlainText())
+                text = editor.from_code("\n".join(lines[h:f]))
             except ValueError as e:
                 self.sync_view()
                 messagebox.showwarning("Código HTML", f"{e}\n\nArréglalo para volver a la hoja.", parent=self.win)
                 return
             if editor.to_code(text) != self.code_text:  # solo líneas vacías de más: la hoja ya es esa
                 self.sheet.set_text(text)
-        code = self.code.toPlainText().split("\n")[:self.code.textCursor().blockNumber()]
+        code = lines[h:self.code.textCursor().blockNumber()]
         self.sheet.setTextCursor(QTextCursor(self.web_block(sum(1 for raw in code if raw.strip()))))
         self.code.hide()
         self.sheet.show()
@@ -10438,10 +10487,78 @@ class TextEditor:
         self.sync_view()
         self.update_tools()
 
+    # La cabecera del capítulo en «Código HTML»: lo de antes y después del texto en su página del EPUB
+    def shell_of(self, start, end, saved=False):
+        """(archivo, antes, después) de la página del capítulo start..end: la editada en esta sesión (salvo con saved),
+        la guardada en el libro o la de siempre (la del original, o la que escribe write_epub). None en «Contenido»
+        o si el original no se puede leer: el código enseña solo el texto, como antes."""
+        book = self.app.book
+        if start < 0 or start >= len(book.blocks):
+            return None
+        if not saved and (start, end) in self.shells:
+            return self.shells[(start, end)]
+        if book.blocks[start].shell:
+            return book.blocks[start].shell
+        if book.origin:
+            name = websheet_text_file(book.blocks[start:end])
+            try:
+                with zipfile.ZipFile(book.origin) as z:
+                    return (name, *faithful.file_shell(z.read(name).decode("utf-8", "replace")))
+            except (KeyError, OSError, zipfile.BadZipFile, TypeError):
+                return None
+        heads = self.app.section_heads()
+        title = self.app.tree.set(str(start), "title") if start in heads and self.app.tree.exists(str(start)) \
+            else "Inicio"
+        return ("", *convert.page_shell(title, self.app.write_options().get("lang", "es"), start in heads))
+
+    @staticmethod
+    def frame_of(shell):
+        """([líneas de la cabecera], [líneas del pie]) de shell, como las enseña el código."""
+        if not shell:
+            return [], []
+        lines = editor.page_code(shell, "\ue000").split("\n")
+        cut = lines.index("\ue000")
+        return lines[:cut], lines[cut + 1:]
+
+    def code_parts(self):
+        """(líneas del código, h, f): cabecera lines[:h], texto lines[h:f], pie lines[f:] (editor.split_page)."""
+        lines = self.code.code().split("\n")
+        if not self.code_shell:
+            return lines, 0, len(lines)
+        head, foot = self.code_frame  # sin tocar (lo normal): donde estaban, aunque el texto esté a medio escribir
+        if len(lines) >= len(head) + len(foot) and lines[:len(head)] == head and lines[len(lines) - len(foot):] == foot:
+            return lines, len(head), len(lines) - len(foot)
+        return (lines, *editor.split_page(lines))
+
+    def shell_changed(self):
+        lines, h, f = self.code_parts()
+        return bool(self.code_shell) and (lines[:h], lines[f:]) != self.code_frame
+
+    def take_shell(self):
+        """La cabecera escrita en el código, para guardarla con el capítulo: si no vale (XML roto, sin <head> o
+        <body>, texto en ella), se avisa y False: el código sigue a la vista para arreglarla."""
+        if not self.shell_changed():
+            return True
+        lines, h, f = self.code_parts()
+        error = editor.check_shell(lines[:h], lines[f:], f + 1) if h else \
+            "Falta <body>: la cabecera tiene que acabar en él y en lo que envuelve el texto"
+        if error:
+            self.sync_view()
+            messagebox.showwarning("Código HTML", f"{error}\n\nArréglalo para volver a la hoja.", parent=self.win)
+            return False
+        head, foot = lines[:h], lines[f:]
+        if (head, foot) == self.frame_of(self.shell_of(*self.current, saved=True)):
+            self.shells.pop(self.current, None)  # como estaba: nada que guardar
+        else:
+            self.shells[self.current] = (self.code_shell[0], "\n".join(head) + "\n", "\n" + "\n".join(foot) + "\n")
+        self.code_shell, self.code_frame = self.shell_of(*self.current), (head, foot)
+        return True
+
     def apply_code_live(self):
         """Lo escrito en el código, a la hoja si ya vale (a medio escribir una etiqueta, aún no): así la hoja web, el
         EPUB y el original lo enseñan sin salir del código. Cada vez es un deshacer de la hoja."""
-        code = self.code.toPlainText()
+        lines, h, f = self.code_parts()
+        code = "\n".join(lines[h:f])
         if not self.code.isVisible() or code == self.code_text:
             return
         try:
@@ -10451,7 +10568,7 @@ class TextEditor:
         # code_text es el código de la hoja, sin líneas vacías: con una (Intro sin escribir aún) las líneas ya no
         # casan con los párrafos y el cursor del código no sigue al de la hoja (saltaba a la línea de arriba)
         canonical = editor.to_code(text)
-        line = sum(1 for raw in code.split("\n")[:self.code.textCursor().blockNumber()] if raw.strip())
+        line = sum(1 for raw in lines[h:self.code.textCursor().blockNumber()] if raw.strip())
         if canonical != self.code_text:
             self.code_text = canonical
             self.applying_code = True
@@ -10466,11 +10583,12 @@ class TextEditor:
         if not self.code.isVisible() or self.applying_code:
             return
         code = editor.to_code(editor.dump(self.sheet.document()))
-        if code == self.code.toPlainText():
+        lines, h, f = self.code_parts()
+        if code == "\n".join(lines[h:f]):
             return
         line = self.code.textCursor().blockNumber()
         self.code.blockSignals(True)
-        self.code.setPlainText(code)
+        self.code.setPlainText("\n".join(lines[:h] + ([code] if code else []) + lines[f:]))  # la cabecera, como está
         self.code.blockSignals(False)
         self.code_text = code
         block = self.code.document().findBlockByNumber(min(line, self.code.blockCount() - 1))
@@ -10479,8 +10597,10 @@ class TextEditor:
 
     def code_moved(self):
         """El cursor del código cambió de línea: la hoja (oculta) va a ese párrafo."""
-        if self.code.isVisible() and self.code.toPlainText() == self.code_text:  # sin editar: las líneas casan
-            block = self.web_block(self.code.textCursor().blockNumber())
+        lines, h, f = self.code_parts()
+        if self.code.isVisible() and "\n".join(lines[h:f]) == self.code_text:  # sin editar: las líneas casan
+            n = self.code.textCursor().blockNumber() - h  # en la cabecera, el primer párrafo; en el pie, el último
+            block = self.web_block(max(0, min(n, f - h - 1)))
             if block != self.sheet.textCursor().block():
                 self.sheet.setTextCursor(QTextCursor(block))
 
@@ -11102,8 +11222,9 @@ class TextEditor:
         if self.closed:
             return
         self.mark_epub()
-        if self.code.isVisible() and self.code.toPlainText() == self.code_text:  # sin editar: las líneas casan
-            block = self.code.document().findBlockByNumber(self.web_index(self.sheet.textCursor().block()))
+        lines, h, f = self.code_parts() if self.code.isVisible() else ([], 0, 0)
+        if self.code.isVisible() and "\n".join(lines[h:f]) == self.code_text:  # sin editar: las líneas casan
+            block = self.code.document().findBlockByNumber(h + self.web_index(self.sheet.textCursor().block()))
             if block.isValid() and block != self.code.textCursor().block():
                 self.code.setTextCursor(QTextCursor(block))
                 self.code.centerCursor()
@@ -11224,7 +11345,9 @@ class TextEditor:
         self.sheet.set_zoom(percent)
         share = self.page_share if self.focused else 1.0  # más ancha solo en pantalla completa
         self.sheet.setMaximumWidth(int(self.page_width(percent) * share))
-        self.code.setFont(QFont("Consolas", max(6, round(10 * percent / 100))))  # el código, a la par
+        font = QFont("Segoe UI")
+        font.setPointSizeF(max(6.0, 9 * percent / 100))  # el código, a la par
+        self.code.setFont(font)
         self.text_zoom_label.setText(f"{percent} %")
 
     def on_desk_event(self, event):
@@ -11743,7 +11866,8 @@ class TextEditor:
 
     def dirty(self):
         """¿Hay algo sin guardar? También lo escrito en la hoja web y aún no volcado (según su último sondeo)."""
-        return (self.web_on and self.web_dirty) or any(self.page_dirty(page) for page in self.pages.values())
+        return ((self.web_on and self.web_dirty) or bool(self.shells) or (self.code.isVisible() and self.shell_changed())
+                or any(self.page_dirty(page) for page in self.pages.values()))
 
     def changes(self):
         """Lo que cambió en las secciones visitadas, línea a línea frente a lo cargado: [[inicio, fin, texto]]
@@ -11791,13 +11915,16 @@ class TextEditor:
         if getattr(self, "web_on", False):  # lo escrito en la hoja web, primero a la hoja
             self.flush_web(lambda: (self.web_done(), self.save()))
             return
+        if self.code.isVisible() and not self.take_shell():
+            return
         if self.dirty():
             self.saved_paragraphs = self.changed_count()
             edits, titles, kinds, retype = self.changes()
             done = [("\n\n".join(line for _, line in page["lines"]), self.sheet.dumped(page["doc"]))
                     for (start, _), page in self.pages.items() if start >= 0 and self.page_dirty(page)]
             LOG.info("Editor: guarda %d cambios", len(edits))
-            self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype)
+            self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype,
+                                 heads=[(start, shell) for (start, _), shell in self.shells.items()])
             for before, after in done:  # al reabrir el editor, su deshacer vuelve a lo de antes (replay_history)
                 if _history_lines(after) != _history_lines(before):
                     history_add(self.app.editor_history, before, after)

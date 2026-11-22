@@ -6471,7 +6471,7 @@ def test_window_editor_code_view_reaches_the_book():
         window.tree.selection_set(str(k))
         editor_window = app.TextEditor(window, str(k), *window.section_bounds(k))
         editor_window.toggle_code()
-        code = editor_window.code.toPlainText()
+        code = editor_window.code.code()
         # aire entre párrafos (una línea del código cada uno), sin paso de deshacer
         doc = editor_window.code.document()
         spaced = all(doc.findBlockByNumber(n).blockFormat().bottomMargin() > 0 for n in range(doc.blockCount()))
@@ -6480,10 +6480,11 @@ def test_window_editor_code_view_reaches_the_book():
         editor_window.toggle_code()
         sheet_after = editor_window.sheet.isVisible() or not editor_window.code.isVisible()
         editor_window.toggle_code()
-        editor_window.code.setPlainText(editor_window.code.toPlainText() + "\n<p>Roto <b>sin cerrar</p>")
+        editor_window.code.setPlainText(editor_window.code.code().replace("</section>", "<p>Roto <b>sin cerrar</p>\n"
+                                                                          "</section>"))
         editor_window.toggle_code()
         still_code = editor_window.view_tabs.currentIndex() == 1 and editor_window.code.isVisibleTo(editor_window.win)
-        editor_window.code.setPlainText(editor_window.code.toPlainText().replace("\n<p>Roto <b>sin cerrar</p>", ""))
+        editor_window.code.setPlainText(editor_window.code.code().replace("<p>Roto <b>sin cerrar</p>\n", ""))
         editor_window.toggle_code()
         editor_window.save()
         html_now = [b.html for b in window.book.blocks]
@@ -6673,6 +6674,7 @@ def test_editor_file_explorer():
     ed.toggle_files()
     groups = {ed.files.topLevelItem(n).text(0): ed.files.topLevelItem(n) for n in range(ed.files.topLevelItemCount())}
     texts = [groups["Texto"].child(n).text(0) for n in range(groups["Texto"].childCount())]
+    css_size = groups["Estilos"].child(0).text(1)
     second = next(groups["Texto"].child(n) for n in range(groups["Texto"].childCount())
                   if groups["Texto"].child(n).text(0) == "capitulo02.xhtml")
     ed.files_go(second)
@@ -6706,9 +6708,118 @@ def test_editor_file_explorer():
     assert texts[:3] == ["cubierta.xhtml", "titulo.xhtml", "capitulo01.xhtml"], texts
     assert opened == expected, (opened, expected)
     assert ".lucida" in css and read_only, (css, read_only)
+    assert css_size.endswith(" B") and css_size[0].isdigit(), css_size  # el peso de cada archivo, a su lado
     assert remembered is True and shown_again and window2.settings["editor_files"] is False
     assert group.text(0) == "Texto" and "sec001.xhtml" in names and "cover.xhtml" in names, names
     assert pdf_opened == (2, 4), pdf_opened
+
+
+def test_code_view_layout_keeps_the_code():
+    """«Código HTML» como un editor de código: una etiqueta que solo lleva etiquetas se parte en sub-líneas
+    sangradas (los espacios entre ellas se quedan) y clean() da la línea de antes; un párrafo con texto va entero.
+    La página se parte en cabecera, texto y pie, y una cabecera rota o con texto dentro de <body> se avisa."""
+    import editor
+
+    lines = ['<h1><i>Capítulo 1</i> <br/><span class="small"><i>El Templo</i></span></h1>',
+             '<p>Las <em>leyendas</em> dicen.</p>', '<head><meta charset="utf-8"/><title>T</title></head>',
+             '<li><a href="x.xhtml">Uno</a></li>', 'texto <b>suelto</b>', '<p>a < b</p>']
+    pretty = [editor.pretty_line(line) for line in lines]
+    shell = ("",) + convert.page_shell("Capítulo 1", "es", True)
+    page = editor.page_code(shell, "<h1>Capítulo 1</h1>\n<p>Uno.</p>").split("\n")
+    h, f = editor.split_page(page)
+    epub_head = ['<html xmlns="http://www.w3.org/1999/xhtml">', "<head><title>T</title></head>",
+                 '<body class="x">', '<div class="main">', '<a id="p5"></a>', "<p>Uno.</p>", "</div>", "</body>",
+                 "</html>"]
+    assert [editor.clean(p) for p in pretty] == lines, pretty
+    assert pretty[0].count(editor.SUB_LINE) == 6 and "</i> " + editor.SUB_LINE in pretty[0], pretty[0]
+    assert pretty[1] == lines[1] and pretty[4] == lines[4], pretty
+    assert editor.line_depths(page) == [0, 0, 0, 1, 1, 2, 3, 3, 2, 1, 0], editor.line_depths(page)
+    assert (h, f) == (6, 8) and page[h] == "<h1>Capítulo 1</h1>", (h, f, page)
+    assert editor.split_page(epub_head) == (5, 6), "un ancla vacía es de la cabecera, no un párrafo"
+    assert editor.check_shell(page[:h], page[f:], f + 1) == ""
+    assert editor.check_shell([line.replace("</head>", "") for line in page[:h]], page[f:], f + 1).startswith("Línea")
+    assert "no lleva texto" in editor.check_shell(page[:h] + ["<p>x</p><div>"], ["</div>"] + page[f:], f + 1)
+    assert "<title>" in editor.check_shell([line.replace("<title>Capítulo 1</title>", "") for line in page[:h]],
+                                           page[f:], f + 1)
+    assert "solo van <head>" in editor.check_shell([line.replace("<body", '<meta name="x" content="y"/><body')
+                                                     for line in page[:h]], page[f:], f + 1)
+
+
+def test_editor_code_view_whole_page_with_editable_head():
+    """«Código HTML» enseña la página entera del capítulo (<?xml>, <head>, <body>…) con la letra del visor y el
+    texto sangrado. La cabecera se puede editar: llega al EPUB (PDF y EPUB de entrada, el resto del original igual),
+    se apunta en la revisión y vuelve al rehacer el libro; una cabecera rota se avisa y no se sale del código."""
+    import app
+
+    warned = []
+    original = app.messagebox.showwarning
+    app.messagebox.showwarning = lambda title, message, **kw: warned.append(message)
+    try:
+        B = convert.Block
+        root, window, ed = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno <i>dos</i>."),
+                                      B("heading", 2, "Capítulo 2"), B("p", 2, "Tres.")], [0, 2])
+        ed.toggle_code()
+        shown = ed.code.code().split("\n")
+        first = ed.code.document().findBlockByNumber(6)
+        indented = first.text() == "<h1>Capítulo 1</h1>" and first.blockFormat().leftMargin() > 0
+        family = ed.code.font().family()
+        ed.code.setPlainText(ed.code.code().replace('<meta charset="utf-8"/>', '<meta charset="utf-8"/><meta '
+                                                    'name="lnc" content="sí"/>'))
+        ed.toggle_code()
+        left = not ed.code.isVisible()
+        ed.save()
+        shell = window.book.blocks[0].shell
+        head_edit = [e for e in window.edits if e[0] == "head"]
+        out = TMP / "cabecera.epub"
+        convert.write_epub(window.book, [(0, "Capítulo 1"), (2, "Capítulo 2")], out)
+        page = epub_file(out, "OEBPS/sec001.xhtml")
+        other = epub_file(out, "OEBPS/sec002.xhtml")
+        again = convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno <i>dos</i>."),
+                                                B("heading", 2, "Capítulo 2"), B("p", 2, "Tres.")], [0, 2])
+        app._replay(again, {"edits": window.edits})
+        bad = app.TextEditor(window, "0", *window.section_bounds(0))
+        bad.toggle_code()
+        bad.code.setPlainText(bad.code.code().replace("</head>", ""))
+        bad.toggle_code()
+        stays = bad.code.isVisible()
+        bad.win.done(0)
+        window.close()
+
+        src = sigil_epub(TMP / "Sigil cabecera.epub")
+        root2, window2 = visible_window()
+        window2.pdf = src
+        window2.show_book(convert.analyze(src))
+        k = window2.book.candidates[2]
+        window2.tree.selection_set(str(k))
+        sigil = app.TextEditor(window2, str(k), *window2.section_bounds(k))
+        sigil.toggle_code()
+        sigil_first = sigil.code.code().split("\n")[0]
+        sigil.toggle_code()
+        untouched = not sigil.dirty()
+        sigil.toggle_code()
+        sigil.code.setPlainText(sigil.code.code().replace("</head>", '<meta name="lnc" content="sí"/></head>'))
+        sigil.save()
+        out2 = TMP / "Sigil cabecera (LNC).epub"
+        convert.write_epub(window2.book, faithful_chapters(window2.book), out2, style=convert.ORIGINAL,
+                           typography=False, contents=False, separator="Imagen del original")
+        with zipfile.ZipFile(src) as a, zipfile.ZipFile(out2) as b:
+            changed = [n for n in a.namelist() if n in b.namelist() and a.read(n) != b.read(n)]
+        chapter = epub_file(out2, "OEBPS/Text/capitulo01.xhtml")
+        window2.close()
+    finally:
+        app.messagebox.showwarning = original
+    assert shown[0].startswith("<?xml") and "<head>" in "".join(shown) and shown[-1] == "</html>", shown
+    assert indented and family == "Segoe UI", (indented, family)
+    assert left and shell and '<meta name="lnc" content="sí"/>' in shell[1], shell
+    assert len(head_edit) == 1 and head_edit[0][1] == 0, head_edit
+    assert '<meta name="lnc" content="sí"/>' in page and "<h1" in page and "Uno <i>dos</i>." in page, page
+    assert 'name="lnc"' not in other and not convert.check_epub(out)
+    assert again.blocks[0].shell == shell
+    assert stays and warned and "Línea" in warned[0], warned
+    assert sigil_first.startswith("<?xml") and untouched
+    assert changed == ["OEBPS/Text/capitulo01.xhtml"], changed
+    assert '<meta name="lnc" content="sí"/>' in chapter and "Las <em>leyendas</em>" in chapter, chapter
+    assert not convert.check_epub(out2)
 
 
 def test_code_completion_suggestions():
@@ -6745,6 +6856,17 @@ def test_code_completion_suggestions():
     assert ed.closing_tag("<img src='a'/>") == "" and ed.closing_tag("texto>") == ""
 
 
+def code_block(ed, n):
+    """Línea n del texto en «Código HTML» (tras la cabecera de la página)."""
+    return ed.code.document().findBlockByNumber(ed.code_parts()[1] + n)
+
+
+def code_body(ed):
+    """Las líneas del texto en «Código HTML», sin cabecera ni pie."""
+    lines, h, f = ed.code_parts()
+    return lines[h:f]
+
+
 def test_editor_code_view_autocompletes():
     """En «Código HTML»: «<i» y Intro eligen la etiqueta, «>» pone su cierre detrás del cursor y «b.sc» + Tab sale
     como <b class="sc"></b>, con el cursor dentro. Lo escrito vuelve a la hoja como cursiva y negrita."""
@@ -6755,7 +6877,7 @@ def test_editor_code_view_autocompletes():
     root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "El gato duerme.")], [0])
     editor.toggle_code()
     code = editor.code
-    block = code.document().findBlockByNumber(1)
+    block = code_block(editor, 1)
     cursor = QTextCursor(block)
     cursor.setPosition(block.position() + block.text().index("</p>"))
     code.setTextCursor(cursor)
@@ -6774,7 +6896,7 @@ def test_editor_code_view_autocompletes():
     QTest.keyClicks(code, " b.sc")
     QTest.keyClick(code, Qt.Key.Key_Tab)
     QTest.keyClicks(code, "fin")
-    line = code.document().findBlockByNumber(1).text()
+    line = code_block(editor, 1).text()
     editor.toggle_code()
     shown = editor.sheet.document().findBlockByNumber(1).text()
     editor.win.done(0)
@@ -6876,14 +6998,14 @@ def test_editor_code_view_new_line_keeps_the_cursor():
     root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos.")], [0])
     editor.toggle_code()
     code = editor.code
-    cursor = QTextCursor(code.document().findBlockByNumber(2))  # la última
+    cursor = QTextCursor(code_block(editor, 2))  # la última
     cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
     code.setTextCursor(cursor)
     code.setFocus()
     QTest.keyClick(code, Qt.Key.Key_Return)
     editor.apply_code_live()  # lo que hace la espera de 600 ms
     editor.follow_cursor()
-    at = code.textCursor().blockNumber(), code.textCursor().positionInBlock()
+    at = code.textCursor().blockNumber() - editor.code_parts()[1], code.textCursor().positionInBlock()
     QTest.keyClicks(code, "<p>Nueva")
     QTest.keyClicks(code, "</p>")
     editor.apply_code_live()
@@ -6891,7 +7013,7 @@ def test_editor_code_view_new_line_keeps_the_cursor():
     QTest.keyClick(code, Qt.Key.Key_Return)
     editor.apply_code_live()
     QTest.keyClick(code, Qt.Key.Key_Backspace)
-    lines = code.toPlainText().split("\n")
+    lines = code_body(editor)
     editor.toggle_code()
     sheet = [editor.sheet.document().findBlockByNumber(n).text() for n in range(4)]
     editor.win.done(0)
@@ -6938,14 +7060,14 @@ def test_editor_changes_of_a_new_paragraph_and_of_japanese():
     japanese = marks(5)
     editor.toggle_code()  # en el código: Intro al final de la línea 2 y una línea nueva
     code = editor.code
-    line = code.document().findBlockByNumber(2)
+    line = code_block(editor, 2)
     c = QTextCursor(line)
     c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
     code.setTextCursor(c)
     c.insertBlock()
     c.insertText("<p>Nueva</p>")
     root.update()
-    code_above = code.document().findBlockByNumber(2)
+    code_above = code_block(editor, 2)
     code_gone = code_above.userData().gone if isinstance(code_above.userData(), ed.Changes) else []
     editor.win.done(0)
     window.close()
@@ -7023,7 +7145,7 @@ def test_editor_shows_changes():
         not sheet.document().findBlockByNumber(2).userData().gone
     bar = hasattr(editor, "diff_frame")
     editor.toggle_code()  # «Código HTML»: lo mismo frente a la línea de antes
-    code = editor.code.document().findBlockByNumber(1)
+    code = code_block(editor, 1)
     code_removed = [g[3] for g in code.userData().gone] if isinstance(code.userData(), ed.Changes) else []
     code_marked = underlined(code, code.text().index("perro"))
     editor.toggle_code()
@@ -13082,18 +13204,19 @@ def test_websheet_beside_the_sheet_follows_both():
             # el tamaño de abajo es el de la hoja y el código; la web lleva el suyo (− y + del panel)
             zoom = ed.web.zoomFactor()
             ed.text_zoom.setValue(150)
-            sizes = (ed.web.zoomFactor() == zoom, ed.code.font().pointSize())
+            sizes = (ed.web.zoomFactor() == zoom, ed.code.font().pointSizeF())  # 9 pt a 150 %
             ed.zoom(25)
             panel = round(ed.web.zoomFactor(), 2)
             # el código abre en la línea del párrafo del cursor, y moverse en él lleva la hoja a ese párrafo
             ed.view_tabs.setCurrentIndex(1)
-            line = ed.code.textCursor().blockNumber()
-            target = next(n for n, x in enumerate(ed.code.toPlainText().splitlines()) if "Segundo" in x)
+            head = ed.code_parts()[1]  # las líneas de la cabecera de la página van antes del texto
+            line = ed.code.textCursor().blockNumber() - head
+            target = next(n for n, x in enumerate(ed.code.code().splitlines()) if "Segundo" in x)
             ed.code.setTextCursor(QTextCursor(ed.code.document().findBlockByNumber(target)))
             ed.code_moved()
             followed = ed.web_index(ed.sheet.textCursor().block())
             # con el código a la vista: lo escrito en él sale al momento en la hoja y la web, que sigue editable
-            ed.code.setPlainText(ed.code.toPlainText().replace("Segundo", "Segundísimo", 1))
+            ed.code.setPlainText(ed.code.code().replace("Segundo", "Segundísimo", 1))
             ed.apply_code_live()
             live = wait_for(lambda: "Segundísimo" in (js(ed.web, text) or ""), 15) and "Segundísimo" in editor_dump(ed)
             editable = ed.web.isEnabled()
@@ -13117,8 +13240,8 @@ def test_websheet_beside_the_sheet_follows_both():
         finally:
             window.close()
     assert band and aligned, ("sin la banda del párrafo en la hoja web", band, aligned)
-    assert sizes == (True, 15) and panel == 1.25, (sizes, panel)
-    assert line == 2 and followed == target, (line, followed, target)
+    assert sizes == (True, 13.5) and panel == 1.25, (sizes, panel)
+    assert line == 2 and followed == target - head, (line, followed, target, head)
     assert marked and clicked, ("la pestaña EPUB no recuadra el párrafo del cursor", marked, clicked)
     assert live and editable and coded_web, (live, editable, coded_web)
     assert left and kept, (left, kept)
@@ -13185,7 +13308,7 @@ def test_websheet_is_default_and_does_what_chromium_cannot():
             # lo cambiado en el código
             ed.view_tabs.setCurrentIndex(1)
             coded = wait_for(lambda: ed.code.isVisible() and not ed.sheet.isVisible() and ed.web.isEnabled(), 15)
-            ed.code.setPlainText(ed.code.toPlainText().replace("Tercero", "Tercerísimo", 1))
+            ed.code.setPlainText(ed.code.code().replace("Tercero", "Tercerísimo", 1))
             ed.view_tabs.setCurrentIndex(0)
             reweb = wait_for(lambda: ed.web.loaded and ed.web.isEnabled() and ed.sheet.isVisible()
                              and not ed.code.isVisible()

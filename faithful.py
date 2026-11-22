@@ -177,6 +177,31 @@ def file_groups(z):
     return [(group, files) for group, files in groups.items() if files]
 
 
+def shell_span(text, root=None, found=None):
+    """(a, b): la cabecera de un XHTML del EPUB es text[:a] y su pie text[b:]. Se corta en los hijos del elemento
+    que envuelve todos sus bloques: así lo de antes solo abre y lo de después solo cierra (un <figure> de en medio
+    queda dentro). None sin bloques."""
+    if root is None:
+        root, found = _tree(text)
+    if not found:
+        return None
+    first, last, node = found[0], found[-1], root
+    while True:
+        inside = lambda c: c.start <= first.start and last.end <= c.end
+        child = next((c for c in node.children if inside(c)), None)
+        if child is None or child in (first, last):
+            break
+        node = child
+    holds = lambda leaf: next((c for c in node.children if c.start <= leaf.start and leaf.end <= c.end), leaf)
+    return holds(first).start, holds(last).end
+
+
+def file_shell(text):
+    """(antes, después) del texto de un XHTML del EPUB: su cabecera y su pie (shell_span)."""
+    span = shell_span(text)
+    return (text[:span[0]], text[span[1]:]) if span else (text, "")
+
+
 def toc_labels(z, items, ncx_id):
     """{archivo: nombre en el índice}: del nav de EPUB 3 o, si no hay, del toc.ncx. El primero de cada archivo."""
     labels = {}
@@ -794,6 +819,7 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
             return f'<p{f" style={chr(34)}{style_}{chr(34)}" if style_ else ""}>{new}</p>'
 
         chapter_src = {title: book.blocks[k].src[0] for k, title in chapters if book.blocks[k].src}
+        shells = {b.shell[0]: b.shell for b in book.blocks if b.shell and b.shell[0] in spans}
         texts = {}  # archivo -> texto nuevo
         for name in file_order:
             if name is None or name in gone:
@@ -821,6 +847,11 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                 out += [text[cursor:n.start], placed.get(n.start, ""), "".join("\n" + p for p in inserts.get(n.start, []))]
                 cursor = n.end
             out.append(text[cursor:])
+            if name in shells:  # cabecera editada en «Código HTML»: en lugar de lo de antes y después de los bloques
+                a, b = shell_span(text, root, found)
+                pre, post = text[:a], text[b:]
+                body = "".join(out)
+                out = [shells[name][1], body[len(pre):len(body) - len(post)], shells[name][2]]
             # enlaces internos del editor (lnc:cap:Título): el archivo del capítulo con ese título, desde este
             new = convert.link_targets("".join(out), lambda title, base=name: _rel(base, chapter_src[title])
                                        if title in chapter_src else "#")
