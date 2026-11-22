@@ -344,6 +344,8 @@ def _spell_server(requests, replies):
 
 # EPUBCheck, el validador oficial de EPUB (W3C, licencia BSD): se descarga una vez, a petición, junto a las preferencias
 EPUBCHECK_VERSION = "5.4.0"
+# Herramientas → «Apoyar el proyecto»: las mismas cuentas que .github/FUNDING.yml
+DONATE = (("GitHub Sponsors", "https://github.com/sponsors/rodriguezrobinj"), ("Ko-fi", "https://ko-fi.com/rodriguezrobinj"))
 EPUBCHECK_URL = (f"https://github.com/w3c/epubcheck/releases/download/v{EPUBCHECK_VERSION}/"
                  f"epubcheck-{EPUBCHECK_VERSION}.zip")
 # Resumen de lo que trae el zip oficial (_epubcheck_digest), sacado de la copia de 5.4.0 descargada de GitHub: el zip
@@ -2421,6 +2423,10 @@ class App:
         tools.addAction("Opciones…  (Ctrl+,)", lambda: self.open_options())
         tools.addAction("Atajos de teclado…", self.show_shortcuts)
         tools.addAction("Registro de la aplicación", self.open_log)
+        tools.addSeparator()
+        support = tools.addMenu("Apoyar el proyecto")
+        for text, url in DONATE:
+            support.addAction(text, lambda url=url: webbrowser.open(url))
         self.file_label = _label("Ningún archivo", "muted")
         self.recent_btn, self.find_btn = _menu_button("Recientes", self.recent_menu), _button("Buscar", self.find)
         top.setLayout(_row(self.open_btn, self.batch_btn, self.recent_btn, _menu_button("Herramientas", tools),

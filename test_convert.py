@@ -9126,6 +9126,24 @@ def test_window_options_are_only_in_options():
     assert not data_combos and link, (data_combos, link)
 
 
+def test_window_support_menu_opens_donation_pages():
+    """Herramientas → «Apoyar el proyecto» abre GitHub Sponsors y Ko-fi en el navegador, sin libro abierto."""
+    import webbrowser
+    from PySide6.QtWidgets import QToolButton
+    root, window = visible_window()
+    tools = next(b.menu() for b in window.root.findChildren(QToolButton) if b.text() == "Herramientas")
+    support = next(a.menu() for a in tools.actions() if a.text() == "Apoyar el proyecto")
+    opened, real = [], webbrowser.open
+    webbrowser.open = opened.append
+    try:
+        for action in support.actions():
+            action.trigger()
+    finally:
+        webbrowser.open = real
+        window.close()
+    assert opened == ["https://github.com/sponsors/rodriguezrobinj", "https://ko-fi.com/rodriguezrobinj"], opened
+
+
 def test_window_options_new_pages_and_effects():
     """Las opciones nuevas hacen lo que dicen: apagar un tipo de aviso lo quita del informe y cambiar su gravedad la
     cambia; el nombre de salida propone «Serie - Volumen N»; quitar una palabra del diccionario la quita del libro;

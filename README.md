@@ -11,7 +11,7 @@
 [![Tests](https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/actions/workflows/tests.yml/badge.svg)](https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/actions/workflows/tests.yml)
 [![Releases](https://img.shields.io/github/v/release/rodriguezrobinj/Light-Novel-Creator-EPUB?label=Release&color=success)](https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases)
 
-[Características](#características-principales) · [Descargar y usar](#descargar-y-usar) · [Perfiles de salida](#perfiles-y-formatos) · [Atajos](#atajos-de-teclado) · [Desarrollo](#ejecutar-y-compilar-desde-el-código) · [Arquitectura](#arquitectura-del-proyecto) · [Licencia](#licencia-y-atribuciones)
+[Características](#características-principales) · [Descargar y usar](#descargar-y-usar) · [Perfiles de salida](#perfiles-y-formatos) · [Atajos](#atajos-de-teclado) · [Desarrollo](#ejecutar-y-compilar-desde-el-código) · [Arquitectura](#arquitectura-del-proyecto) · [Apoyar](#apoyar-el-proyecto) · [Licencia](#licencia-y-atribuciones)
 
 </div>
 
@@ -212,6 +212,17 @@ La aplicación guarda un registro rotativo en `registro.log` (junto a los ajuste
 | [`registro.py`](registro.py) | Sistema de logging rotativo, detector de bloqueos de interfaz y utilidad de auditoría CLI. |
 | [`test_convert.py`](test_convert.py) | Suite completa de pruebas unitarias, de conversión y de interfaz. |
 | [`fonts/`](fonts/) · [`dict/`](dict/) · [`tessdata/`](tessdata/) | Tipografías SIL OFL, diccionario Hunspell `es_ES` + tesauro de sinónimos y modelo OCR `spa` incluidos. |
+
+---
+
+## Apoyar el proyecto
+
+Light Novel Creator EPUB es gratuito y de código abierto. Si te resulta útil, puedes apoyar su desarrollo con una donación:
+
+[![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-Apoyar-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/rodriguezrobinj)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Invitar%20un%20café-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/rodriguezrobinj)
+
+Dentro de la aplicación: **Herramientas › Apoyar el proyecto**.
 
 ---
 
