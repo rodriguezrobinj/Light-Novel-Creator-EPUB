@@ -1800,10 +1800,11 @@ def spell_skip(known=()):
     return {w.lower() for w in known} | HONORIFICS
 
 
-def spell_candidate(word, skip):
-    """¿Se revisa la palabra? Solo en minúscula y de 3 letras o más (con mayúscula suelen ser nombres), fuera
-    de skip (spell_skip) y sin onomatopeyas ("aaah")."""
-    return word[:1].islower() and len(word) >= 3 and word not in skip and not re.search(r"(.)\1\1", word)
+def spell_candidate(word, skip, caps=False):
+    """¿Se revisa la palabra? Solo en minúscula (con caps, también en mayúscula: con ella suelen ser nombres) y de 3
+    letras o más, fuera de skip (spell_skip) y sin onomatopeyas ("aaah")."""
+    return ((word[:1].islower() or caps) and len(word) >= 3 and word not in skip
+            and not re.search(r"(.)\1\1", word))
 
 
 def spell_suggestions(word, good=(), limit=4):
@@ -1830,16 +1831,17 @@ def text_stats(texts):
             "dialog": round(100 * dialog / words) if words else 0}
 
 
-def unknown_words(texts, known=()):
+def unknown_words(texts, known=(), caps=False):
     """Palabras de texts que no están en el diccionario: [(palabra, veces, [sugerencias])], las más repetidas
     primero. Solo en minúscula y de 3 letras o más: con mayúscula suelen ser nombres. No cuentan known (el
     diccionario de la serie), los honoríficos ni las onomatopeyas ("aaah"). Se sugieren palabras correctas
-    del propio libro, primero la que solo cambia en tildes: las de Hunspell tardan ~1 s cada una."""
+    del propio libro, primero la que solo cambia en tildes: las de Hunspell tardan ~1 s cada una. caps: también
+    las que empiezan en mayúscula (Opciones → Ortografía)."""
     words = collections.Counter(w for t in texts for w in spell_words(t))
     skip = spell_skip(known)
     spell, good, bad = _hunspell(), [], []
     for w, n in words.items():
-        if spell_candidate(w, skip):
+        if spell_candidate(w, skip, caps):
             (good if spell.lookup(w) else bad).append(w)
     folded = {_fold(w): w for w in sorted(good, key=lambda w: words[w])}  # la más usada gana
     found = []
@@ -2547,6 +2549,20 @@ TYPOS = (  # (tipo, título, arreglo de la línea, por qué, solución): erratas
      "«Mr.», «Mrs.» y «Ms.» son abreviaturas inglesas: en español, «Sr.», «Sra.» y «Srta.».", "Traducirlo."),
 )
 _dialog_fix = next(rule for kind, _, rule, _, _ in TYPOS if kind == "dialog")  # también en _typography
+# Cada tipo de aviso de quality_report con su título corto y su gravedad: Opciones → Informe de calidad deja
+# apagarlos o cambiarles la gravedad
+QUALITY_KINDS = [
+    ("skipped", "Texto no incluido", "Grave"), ("broken", "Caracteres rotos", "Grave"),
+    ("gap", "Falta un capítulo", "Grave"), ("lower", "Párrafo partido", "Revisar"),
+    ("long", "Párrafo muy largo", "Revisar"), ("number", "Número suelto", "Revisar"),
+    ("repeated", "Línea repetida", "Revisar"), ("duplicate", "Párrafo duplicado", "Revisar"),
+    ("english", "Texto sin traducir", "Revisar"), ("unpaired", "Signo sin pareja", "Revisar"),
+    ("short", "Capítulo muy corto", "Revisar"), ("link", "Enlace o red social", "Menor"),
+    ("echo", "Palabra repetida cerca", "Menor"), ("icon", "Icono sin reconocer", "Menor"),
+    ("honorific", "Honorífico escrito de varias formas", "Menor"), ("glossary", "Nombre distinto al glosario", "Menor"),
+    ("capital", "Minúscula tras un punto", "Menor"), ("end", "Falta el punto final", "Menor"),
+    ("name-variant", "Nombre escrito de dos formas", "Menor"),
+] + [(kind, title, "Menor") for kind, title, _, _, _ in TYPOS]
 
 
 def _beside_icons(fix, line):

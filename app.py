@@ -128,6 +128,10 @@ EDITOR_DEFAULTS = {"editor_undo": UNDO_SCOPES[0], "editor_side": EDITOR_SIDES[0]
                    "editor_changes": False, "editor_nav": False, "editor_dark": False, "editor_spell": True,
                    "editor_resume": True}
 RECENT = 8  # PDF recientes que recuerda el menú
+OUT_NAMES = ["Como el PDF", "Título del libro", "Serie - Volumen N"]  # Opciones → Salida → Nombre del EPUB
+# Lo de «La aplicación» en Opciones que no es del editor: sus valores de fábrica
+APP_DEFAULTS = {"accent": "Azul", "ui_font": "9 pt", "reopen_last": False, "recent_max": RECENT, "out_name": OUT_NAMES[0],
+                "out_folder": "", "spell_caps": False, "quality_off": [], "quality_levels": {}}
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
                "proofreader", "editor", "original_title", "subjects", "date")  # datos del libro en la revisión
 # Los de «Más datos…» (página de título y catálogo): también son datos del libro, como convert.Book
@@ -2748,7 +2752,8 @@ class App:
 
     def apply_theme(self):
         """Pone el tema elegido y vuelve a pintar lo que tiene colores propios (lista y vistas previas)."""
-        self.dark = theme.apply(qtk.app(), self.theme_var.get())
+        self.dark = theme.apply(qtk.app(), self.theme_var.get(), self.settings.get("accent", "Azul"),
+                                theme.UI_SIZES.get(self.settings.get("ui_font"), 9))
         colors = theme.kind_colors(self.dark)
         for tag in KIND_TAG.values():
             self.tree.tag_configure(tag, font=self.fonts[tag], foreground=colors[tag])
@@ -3648,7 +3653,8 @@ class App:
         path = str(Path(path).resolve())
         LOG.info("Abrir %s (%s KB)", path, Path(path).stat().st_size // 1024)
         self.settings["folder"] = str(Path(path).parent)
-        self.settings["recent"] = [path] + [p for p in self.settings.get("recent", []) if p != path][:RECENT - 1]
+        keep = self.settings.get("recent_max", RECENT)
+        self.settings["recent"] = [path] + [p for p in self.settings.get("recent", []) if p != path][:max(1, keep) - 1]
         self.fill_recent()
         self.pdf, self.book = Path(path), None
         self.file_label.setText(self.pdf.name)
@@ -3921,8 +3927,10 @@ class App:
             self.editor_save()
 
     def generate(self):
-        chosen = filedialog.asksaveasfilename(filetypes=[("EPUB", "*.epub")], initialdir=self.pdf.parent,
-                                              initialfile=_epub_name(_out(self.pdf).name, self.kepub_var.get()))
+        folder = self.settings.get("out_folder") or ""
+        chosen = filedialog.asksaveasfilename(filetypes=[("EPUB", "*.epub")],
+                                              initialdir=folder if folder and Path(folder).is_dir() else self.pdf.parent,
+                                              initialfile=_epub_name(self.out_name(), self.kepub_var.get()))
         out = _epub_name(chosen, self.kepub_var.get())  # sin extensión, o .kepub.epub para el Kobo
         if not chosen or not _confirm_name(chosen, out):
             return
@@ -3988,6 +3996,16 @@ class App:
                 self.separator_var.set(self.separator_before)
         self.separator_before = self.separator_var.get()
         self.update_preview()
+
+    def out_name(self):
+        """Nombre que propone «Generar EPUB» (Opciones → Salida): el del PDF, el título o «Serie - Volumen N»."""
+        how = self.settings.get("out_name", OUT_NAMES[0])
+        title, series, volume = (self.title_var.get().strip(), self.series_var.get().strip(),
+                                 self.volume_var.get().strip())
+        name = (title if how == OUT_NAMES[1] else f"{series} - Volumen {volume}" if how == OUT_NAMES[2] and series
+                and volume else "")
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", name).strip(" .")  # lo que Windows no deja en un nombre
+        return name or _out(self.pdf).name
 
     def write_options(self, breaks=()):
         """Opciones de write_epub según la ventana (ver _write_options)."""
@@ -4223,7 +4241,29 @@ class App:
         return {"editor_undo": list(UNDO_SCOPES), "editor_side": list(EDITOR_SIDES),
                 "profile": list(PROFILES), "lang": LANGUAGES, "pdf_size": list(convert.PDF_SIZES),
                 "theme": theme.CHOICES, "device": list(DEVICES), "note_style": list(convert.NOTE_STYLES),
-                "heading_font": convert.HEADING_FONT_CHOICES + [HEADING_OWN], "box_style": list(convert.BOX_STYLES)}
+                "heading_font": convert.HEADING_FONT_CHOICES + [HEADING_OWN], "box_style": list(convert.BOX_STYLES),
+                # lo de la barra de abajo que pide algo más (un archivo, un texto) se queda en ella
+                "style": ([convert.ORIGINAL] if self.book and self.book.origin else []) + list(convert.STYLES),
+                "separator": [c for c in convert.SEPARATOR_CHOICES if c != "Icono propio"],
+                "font": [c for c in FONT_CHOICES if c != "Otra…"], "accent": list(theme.ACCENTS),
+                "ui_font": list(theme.UI_SIZES), "out_name": OUT_NAMES}
+
+    def app_factory(self):
+        """Lo de «La aplicación» como viene de fábrica: para «Restablecer» en Opciones."""
+        return {**EDITOR_DEFAULTS, **copy.deepcopy(APP_DEFAULTS), "theme": "Sistema", "device": list(DEVICES)[0],
+                "dark": False, "echoes": False, "watch": ""}
+
+    @staticmethod
+    def quality_kinds():
+        """[(tipo, título, gravedad)] de cada aviso del informe, para Opciones → Informe de calidad. Los ecos tienen
+        su casilla aparte."""
+        return [k for k in convert.QUALITY_KINDS if k[0] != "echo"] + [
+            ("comment", "Comentario del revisor", "Revisar"), ("toc", "Falta un capítulo del índice", "Revisar"),
+            ("toc-extra", "Capítulo que no está en el índice", "Menor")]
+
+    @staticmethod
+    def quality_levels():
+        return {level: LEVEL_PLURAL[level] for level in convert.LEVELS}
 
     def open_options(self, category=None, scope=None, on_close=None):
         """«Opciones»: en category, o en la última vista."""
@@ -4236,13 +4276,24 @@ class App:
         return {"theme": self.theme_var.get(), "device": self.settings.get("device", self.device_var.get()),
                 "dark": self.settings.get("dark") is True, "echoes": self.echoes_var.get(), "watch": self.watch,
                 "translate": copy.deepcopy(self.settings.get("translate") or {}),
-                **{key: self.settings.get(key, value) for key, value in EDITOR_DEFAULTS.items()}}
+                **{key: self.settings.get(key, value) for key, value in EDITOR_DEFAULTS.items()},
+                **{key: copy.deepcopy(self.settings.get(key, value)) for key, value in APP_DEFAULTS.items()},
+                "words": list(self.words) if self.book else None}  # el diccionario del libro (y su serie)
 
     def accept_options(self, defaults, values):
         """Aceptar en Opciones: «Libros nuevos» y la aplicación a ajustes.json, el libro a su revisión."""
         self.settings["defaults"] = dict(defaults)
         self.settings.update(device=values["device"], dark=values["dark"], echoes=values["echoes"])
         self.settings.update({key: values[key] for key in EDITOR_DEFAULTS})  # el editor abierto los lee al usarlos
+        look = (self.settings.get("accent"), self.settings.get("ui_font"))
+        report = (self.settings.get("quality_off"), self.settings.get("quality_levels"))
+        self.settings.update({key: values[key] for key in APP_DEFAULTS})
+        if values.get("words") is not None and self.book:
+            self.words = list(values["words"])
+        if look != (values["accent"], values["ui_font"]):
+            self.apply_theme()
+        if report != (values["quality_off"], values["quality_levels"]):
+            self.update_quality()
         translation = self.settings.setdefault("translate", {})
         translation.clear()  # el mismo dict: Traducir, si está abierto, lo tiene y ve lo nuevo
         translation.update(values["translate"])
@@ -4678,7 +4729,8 @@ class App:
                                               f"(Herramientas › Opciones › Idioma del libro).")
             return
         texts = [convert._plain(b) for b in self.book.blocks if b.kind == "p"]
-        if self.run(convert.unknown_words, (texts, self.words), self.spelling_dialog):
+        if self.run(convert.unknown_words, (texts, self.words, bool(self.settings.get("spell_caps"))),
+                    self.spelling_dialog):
             self.status.setText("Revisando la ortografía…")
         else:  # el menú no se desactiva como los botones
             self.status.setText("Espera a que termine el trabajo en curso")
@@ -4693,8 +4745,10 @@ class App:
                             "en el diccionario")
         win, column = self.dialog("Ortografía")
         win.resize(980, 600)
-        column.addWidget(_label("Palabras que no están en el diccionario, las más repetidas primero. Las que empiezan "
-                                "en mayúscula no se revisan: suelen ser nombres.", "muted"))
+        column.addWidget(_label("Palabras que no están en el diccionario, las más repetidas primero. "
+                                + ("También las que empiezan en mayúscula (Opciones → Ortografía)."
+                                   if self.settings.get("spell_caps") else
+                                   "Las que empiezan en mayúscula no se revisan: suelen ser nombres."), "muted"))
         panes = QSplitter(Qt.Orientation.Horizontal)
         column.addWidget(panes, 1)
         left = QWidget()
@@ -5605,7 +5659,11 @@ class App:
                 del self.reports[next(iter(self.reports))]
             self.reports[key] = convert.quality_report(self.book, self.echoes_var.get(), self.glossary,
                                                        self.lang_var.get().strip() or "es")
-        return list(self.reports[key]) + self.toc_issues() + self.comment_issues()
+        found = list(self.reports[key]) + self.toc_issues() + self.comment_issues()
+        off, levels = set(self.settings.get("quality_off") or ()), self.settings.get("quality_levels") or {}
+        # Opciones → Informe de calidad: los apagados no salen; los de otra gravedad cuentan como ella en la nota
+        return [dataclasses.replace(i, level=levels[i.kind]) if levels.get(i.kind) in convert.LEVELS else i
+                for i in found if i.kind not in off]
 
     def comment_issues(self):
         """Los comentarios del revisor como avisos «Revisar»: salen en F8, en el informe y al exportarlo. El de un
@@ -12359,4 +12417,8 @@ if __name__ == "__main__":
     root.show()
     if len(sys.argv) > 1:  # PDF arrastrado sobre el .exe o "Abrir con…"
         qtk.after(200, window.open_path, sys.argv[1])
+    elif window.settings.get("reopen_last"):  # Opciones → Inicio
+        last = next((p for p in window.settings.get("recent", []) if isinstance(p, str) and Path(p).is_file()), None)
+        if last:
+            qtk.after(200, window.open_path, last)
     sys.exit(qtk.app().exec())
