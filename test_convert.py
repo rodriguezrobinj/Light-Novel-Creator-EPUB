@@ -6199,7 +6199,8 @@ def test_window_editor_hidden_chapter_title():
 
 def test_window_editor_undo_survives_accept():
     """Lo aceptado en el editor se deshace al reabrirlo: la hoja abre como el libro (sin cambios), Ctrl+Z vuelve a lo
-    de antes de aceptar, Ctrl+Y lo rehace, y aceptar lo deshecho deja el libro como estaba."""
+    de antes de aceptar, Ctrl+Y lo rehace, y aceptar lo deshecho deja el libro como estaba (y al reabrir, por
+    rehacer)."""
     import app
     from PySide6.QtCore import QUrl
     from PySide6.QtGui import QTextCursor
@@ -6221,7 +6222,7 @@ def test_window_editor_undo_survives_accept():
     root.update()
     back = [b.html for b in window.book.blocks]
     editor = app.TextEditor(window, "0", *window.section_bounds(0))
-    editor.sheet.undo()  # el deshacer de la otra vez: vuelve a «Primero:»
+    editor.sheet.redo()  # lo deshecho la otra vez sigue por rehacer: vuelve «Primero:»
     again = editor.sheet.document().findBlockByNumber(1).text()
     # «Ver todos los cambios»: lo aceptado y lo de ahora, frente al principio; «Ir» lleva la hoja al párrafo
     cursor = QTextCursor(editor.sheet.document().findBlockByNumber(2))
@@ -6282,11 +6283,135 @@ def test_window_editor_undo_survives_restart():
     shown = ed.dump(editor.sheet.document())
     editor.sheet.undo()
     undone = ed.dump(editor.sheet.document())
+    editor.sheet.undo()
+    undone_both = ed.dump(editor.sheet.document())
     editor.win.done(0)
     window.close()
     assert shown == "# Capítulo 1\n\nPrimero: Uno.\n\nDos.\n\n<hr/>", shown
-    assert undone == "# Capítulo 1\n\nUno.\n\nDos.", undone
+    assert undone == "# Capítulo 1\n\nPrimero: Uno.\n\nDos.", undone  # cambio a cambio
+    assert undone_both == "# Capítulo 1\n\nUno.\n\nDos.", undone_both
     assert len(json.dumps(saved["editor_history"])) < 300, saved["editor_history"]  # solo lo cambiado
+
+
+def test_window_editor_undo_redo_each_step_after_restart():
+    """Tras aceptar y cerrar la aplicación, el deshacer del editor va cambio a cambio (antes todo lo de una vez en un
+    solo paso), el rehacer llega hasta el último, lo que quedó por rehacer se sigue pudiendo rehacer y «Mostrar
+    cambios» marca lo cambiado otras veces frente al principio."""
+    import app
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos."),
+                                      B("p", 2, "Tres.")], [0])
+
+    def type_at(n, text):
+        cursor = QTextCursor(editor.sheet.document().findBlockByNumber(n))
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        cursor.insertText(text)
+        root.update()
+
+    def restart():  # aceptar, cerrar la aplicación (la revisión en disco) y volver a abrir el editor
+        editor.save()
+        root.update()
+        saved = json.loads(json.dumps(window.review_state()))
+        window.editor_history = {}
+        window.book.blocks, window.book.candidates = list(window.pristine[0]), list(window.pristine[1])
+        window.load_review(saved)
+        return app.TextEditor(window, "0", *window.section_bounds(0))
+
+    def walk(step, can):
+        out = []
+        while can():
+            step()
+            root.update()
+            out.append(ed.dump(editor.sheet.document()).split("\n\n")[1:])
+        return out
+    type_at(1, " a")
+    type_at(2, " b")
+    type_at(3, " c")
+    editor = restart()
+    editor.show_changes_action.setChecked(True)
+    root.update()
+    marked = [b.text() for b in editor.sheet.changed_blocks()]
+    doc = editor.sheet.document()
+    undone = walk(editor.sheet.undo, doc.isUndoAvailable)
+    redone = walk(editor.sheet.redo, doc.isRedoAvailable)
+    editor.sheet.undo()  # se deja uno por rehacer
+    editor = restart()
+    doc = editor.sheet.document()
+    shown = ed.dump(doc).split("\n\n")[1:]
+    redo_after = walk(editor.sheet.redo, doc.isRedoAvailable)
+    editor.win.done(0)
+    window.close()
+    assert marked == ["Uno. a", "Dos. b", "Tres. c"], marked
+    assert undone == [["Uno. a", "Dos. b", "Tres."], ["Uno. a", "Dos.", "Tres."], ["Uno.", "Dos.", "Tres."]], undone
+    assert redone == [["Uno. a", "Dos.", "Tres."], ["Uno. a", "Dos. b", "Tres."], ["Uno. a", "Dos. b", "Tres. c"]], \
+        redone
+    assert shown == ["Uno. a", "Dos. b", "Tres."], shown
+    assert redo_after == [["Uno. a", "Dos. b", "Tres. c"]], redo_after
+
+
+def test_changes_shown_split_words_from_their_punctuation():
+    """«Mostrar cambios»: escribir tras una palabra con punto marca solo lo escrito; con «atención.» de una pieza
+    salía «atención.» tachado y «atención aaa.» puesto."""
+    import editor as ed
+    adds, gone = ed.diff_ops("me llamó la atención.", "me llamó la atención aaa.")
+    after = "me llamó la atención aaa."
+    assert [after[a:a + n] for a, n in adds] == [" aaa"] and not gone, (adds, gone)
+    assert ed.diff_ops("cerca del mío.", "cerca del .")[1] == [(10, "mío")]
+
+
+def test_subtitles_have_their_own_color_in_the_editor():
+    """En la hoja del editor el subtítulo tiene otro color que el capítulo, en los dos temas: en oscuro, con el mismo
+    azul, solo los distinguía el tamaño."""
+    import editor as ed
+    import qtk
+    import theme
+    qtk.app()
+    colors = []
+    for dark in (False, True):
+        sheet = ed.Sheet()
+        sheet.tags = theme.editor_tags(dark)
+        sheet.set_content([(0, "# Capítulo"), (1, "# Subtítulo")], {}, levels={0: "Capítulo", 1: "Subtítulo"})
+        sheet.look.rehighlight()
+        block = sheet.document().firstBlock()
+        found = []
+        while block.isValid():
+            ranges = block.layout().formats()  # la lista viva: su formato muere con ella
+            found.append(ranges[0].format.foreground().color().name())
+            block = block.next()
+        colors.append(found)
+    assert all(chapter != subtitle for chapter, subtitle in colors), colors
+    assert colors[0][0] == theme.editor_tags(False)["heading"]["foreground"], colors
+
+
+def test_editor_file_explorer_lists_separators():
+    """Vista → «Archivos» tiene el grupo «Separadores» con los adornos de escena del libro, aunque vayan dibujados
+    dentro del texto (Separador: «Icono del original»); doble clic los muestra."""
+    import app
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 10), False)
+    pix.clear_with(90)
+    ornament = pix.tobytes("png")
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."),
+                                      B("break", 1, "", image=ornament), B("p", 1, "Dos.")], [0])
+    editor.toggle_files()
+    groups = {editor.files.topLevelItem(n).text(0): editor.files.topLevelItem(n)
+              for n in range(editor.files.topLevelItemCount())}
+    seps = groups.get("Separadores")
+    names = [seps.child(n).text(0) for n in range(seps.childCount())] if seps else []
+    if seps:
+        editor.files_go(seps.child(0))
+    viewer = editor.file_view
+    picture = viewer.findChild(app.QLabel).pixmap().width() if viewer else 0
+    if viewer:
+        viewer.close()
+    editor.toggle_files()
+    editor.win.done(0)
+    window.close()
+    assert "Separadores" in groups, list(groups)
+    assert names == ["separador-1.png"], names
+    assert picture == 40, picture
 
 
 def editor_on(blocks, candidates, dark=False):

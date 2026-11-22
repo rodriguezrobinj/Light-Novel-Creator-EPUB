@@ -6656,7 +6656,7 @@ class App:
         self.comments = [c for c in state.get("comments", []) if isinstance(c, dict)  # el .json se edita a mano
                          and isinstance(c.get("note"), str) and isinstance(c.get("text"), str)]
         history = state.get("editor_history")
-        self.editor_history = dict(history) if isinstance(history, dict) else {}  # history_older valida cada una
+        self.editor_history = dict(history) if isinstance(history, dict) else {}  # history_entry valida cada una
         at = state.get("editor_at")
         self.editor_at = at if isinstance(at, int) and not isinstance(at, bool) else None
         work = state.get("work") if isinstance(state.get("work"), dict) else {}
@@ -8291,8 +8291,8 @@ class Dialog(QDialog):
 WEB_TAB = 2  # «Hoja web» en el panel derecho del editor, tras «Original» y «EPUB»
 
 
-HISTORY_STEPS = 20  # aceptados que el deshacer del editor recuerda por capítulo
-# shortcut: se guardan los últimos 400 aceptados del libro; si alguien necesita más, por capítulo
+HISTORY_STEPS = 100  # pasos de deshacer (y de rehacer) del editor que se guardan por capítulo
+# shortcut: se guardan los últimos 400 capítulos editados del libro; si alguien necesita más, subirlo
 HISTORY_KEPT = 400
 
 
@@ -8322,23 +8322,79 @@ def _history_apply(delta, text):
     return "\n\n".join(x for part in delta for x in (lines[part[0]:part[1]] if isinstance(part, list) else [part]))
 
 
-def history_older(history, text, which=0):
-    """El texto de antes de aceptar (which=0) o el del principio (1) del capítulo que ahora es text; None si no hay."""
+def history_entry(history, text):
+    """(versiones del deshacer del capítulo que ahora es text, de la más vieja a la más nueva; posición de text en
+    ellas; el texto del principio), o None si no hay. Lo de después de text es lo que se puede rehacer."""
     entry = history.get(_history_key(text))
     try:
-        return _history_apply(entry[which], text) if entry else None
-    except (TypeError, IndexError):  # revisión editada a mano
-        return None
+        if isinstance(entry, dict):
+            versions, at = [_history_apply(d, text) for d in entry["v"]], int(entry["at"])
+            return (versions, at, _history_apply(entry["first"], text)) if 0 <= at < len(versions) else None
+        if isinstance(entry, list):  # revisión de antes: [el de antes de aceptar, el del principio], uno por aceptar
+            first, versions = _history_apply(entry[1], text), [text]
+            while isinstance(entry, list) and len(versions) < HISTORY_STEPS:
+                older = _history_apply(entry[0], versions[0])
+                if older in versions:
+                    break
+                versions.insert(0, older)
+                entry = history.get(_history_key(older))
+            return versions, len(versions) - 1, first
+    except (TypeError, IndexError, KeyError, ValueError):  # revisión editada a mano
+        pass
+    return None
 
 
-def history_add(history, before, after):
-    """Aceptado en el editor: el capítulo pasó de before a after."""
-    first = history_older(history, before, 1) or before
-    key = _history_key(after)
+def history_add(history, versions, at, first, loaded=None):
+    """Al aceptar en el editor: el deshacer del capítulo (versions, de la más vieja a la más nueva), el capítulo como
+    queda (versions[at]) y como estaba al principio. loaded: como estaba al abrir, cuya entrada ya no vale."""
+    text = versions[at]
+    key = _history_key(text)
+    if loaded is not None:
+        history.pop(_history_key(loaded), None)
     history.pop(key, None)  # al final: es lo más nuevo
-    history[key] = [_history_delta(after, before), _history_delta(after, first)]
+    if len(versions) > 1 or _history_lines(first) != _history_lines(text):
+        history[key] = {"v": [_history_delta(text, v) for v in versions], "at": at,
+                        "first": _history_delta(text, first)}
     for old in list(history)[:-HISTORY_KEPT]:
         del history[old]
+
+
+def history_firsts(first, versions):
+    """{línea de cada versión: su línea en first, None si es un párrafo nuevo desde entonces}, para «Mostrar
+    cambios» frente al principio (editor.compared). Los párrafos que cambian a la vez se emparejan en orden."""
+    old, out = _history_lines(first), {}
+    for version in versions:
+        new = _history_lines(version)
+        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+            for n in range(j2 - j1):
+                out.setdefault(new[j1 + n], old[i1 + n] if op != "insert" and n < i2 - i1 else None)
+    return out
+
+
+def undo_versions(doc, dumped, limit=HISTORY_STEPS):
+    """([texto de cada paso del deshacer de doc, del más viejo al más nuevo], posición del de ahora): se deshace y
+    rehace entero para leerlos y doc queda como estaba. Los pasos que no cambian el texto no cuentan."""
+    versions, back = [dumped(doc)], 0
+    while back < limit and doc.isUndoAvailable():
+        doc.undo()
+        back += 1
+        versions.insert(0, dumped(doc))
+    for _ in range(back):
+        doc.redo()
+    at, ahead = len(versions) - 1, 0
+    while ahead < limit and doc.isRedoAvailable():
+        doc.redo()
+        ahead += 1
+        versions.append(dumped(doc))
+    for _ in range(ahead):
+        doc.undo()
+    out = []
+    for n, version in enumerate(versions):
+        if out and _history_lines(out[-1]) == _history_lines(version):
+            at -= n <= at  # el de ahora es el igual de antes
+            continue
+        out.append(version)
+    return out, at
 
 
 class TextEditor:
@@ -9290,7 +9346,11 @@ class TextEditor:
 
     def set_show_changes(self, on):
         """Solo se repintan los párrafos cambiados de la hoja a la vista (los de la pantalla primero, por tandas); los
-        otros capítulos, al volver a ellos, y el código, al abrirlo. Repintarlo todo congelaba la ventana segundos."""
+        otros capítulos, al volver a ellos, y el código, al abrirlo. Repintarlo todo congelaba la ventana segundos.
+        Se recuerda (Opciones → Editor → «Mostrar cambios al abrir»): al reabrir el editor seguía apagado."""
+        if self.app.settings.get("editor_changes", False) != bool(on):
+            self.app.settings["editor_changes"] = bool(on)
+            self.app.save_settings()
         color, removed = self.change_colors()
         for key, page in self.pages.items():
             if key == self.current:
@@ -9590,7 +9650,10 @@ class TextEditor:
         if k is None or k not in self.issues or editor.objects_of(block):
             return []
         original = editor.original_of(block)
-        return list(self.issues[k]) if original is not None and editor.block_lines(block) == [original] else []
+        page = self.pages.get(self.current, {})
+        # la línea de un paso de deshacer de otra vez (replay_history) no es la del libro: sus avisos no valen
+        loaded = page.setdefault("loaded", {line for _, line in page.get("lines", ())}) if page else ()
+        return list(self.issues[k]) if original in loaded and editor.block_lines(block) == [original] else []
 
     def block_issue(self, block):
         issues = self.block_issues(block)
@@ -9737,6 +9800,7 @@ class TextEditor:
         self.files.itemActivated.connect(lambda item: self.files_go(item))  # doble clic o Intro (sin la columna)
         self.files_path = os.path.join(tempfile.gettempdir(), f"lnepub-vista-archivos-{os.getpid()}.epub")
         self.file_sections, self.file_view, self.files_written = {}, None, False
+        self.separator_images = {}  # separator_group
         self.files.setVisible(bool(self.app.settings.get("editor_files")))
         self.files_btn.setChecked(not self.files.isHidden())
         if not self.files.isHidden():
@@ -9781,6 +9845,7 @@ class TextEditor:
             with zipfile.ZipFile(path) as z:
                 groups = faithful.file_groups(z)
                 sizes = {info.filename: info.file_size for info in z.infolist()}
+                groups = self.separator_group(z, groups, sizes)
         except Exception:
             _log(traceback.format_exc())
             QTreeWidgetItem(self.files, ["No se pudo leer el EPUB"])
@@ -9794,9 +9859,37 @@ class TextEditor:
                 item = QTreeWidgetItem(group, [path.rsplit("/", 1)[-1], _file_size(sizes.get(path, 0))])
                 item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 item.setForeground(1, QColor(self.colors["muted"]))  # gris: el nombre es lo primero
-                item.setToolTip(0, path)
+                item.setToolTip(0, "Adorno del original, dibujado dentro del texto (Separador: «Icono del original»)"
+                                if path in self.separator_images else path)
                 item.setData(0, Qt.ItemDataRole.UserRole, path)
             group.setExpanded(True)
+
+    def separator_group(self, z, groups, sizes):
+        """groups con «Separadores» tras «Imágenes»: las imágenes del EPUB que son separadores de escena y, si el
+        separador va dibujado dentro del texto (Separador: «Icono del original»), su adorno del original, con una
+        nombre «separador-N.png» que no es del zip (separator_images: show_file lo muestra desde el libro)."""
+        adornos = {}  # clave de la imagen -> datos, en orden de aparición
+        self.separator_images = {}  # nombre -> datos de los adornos que no son archivo del EPUB
+        for b in self.app.book.blocks:
+            if b.kind == "break" and b.image:
+                adornos.setdefault(convert.image_key(b.image), b.image)
+        if not adornos:
+            return groups
+        found, out = [], []
+        for name, paths in groups:
+            if name == "Imágenes":
+                found = [p for p in paths if convert.image_key(z.read(p)) in adornos]
+                paths = [p for p in paths if p not in found]
+            out.append((name, paths))
+        shown = {convert.image_key(z.read(p)) for p in found}
+        for data in (data for key, data in adornos.items() if key not in shown):
+            path = f"separador-{len(self.separator_images) + 1}.{'png' if data[:4] == b'\x89PNG' else 'jpg'}"
+            self.separator_images[path] = data
+            found.append(path)
+            sizes[path] = len(data)
+        at = next((n + 1 for n, (name, _) in enumerate(out) if name == "Imágenes"), len(out))
+        out.insert(at, ("Separadores", found))
+        return [(name, paths) for name, paths in out if paths]
 
     def image_actions(self, win, column, path, k, data):
         """Bajo una ilustración del explorador: su descripción y «Describir…», «Cambiar…» y «Exportar…», como en
@@ -9874,8 +9967,11 @@ class TextEditor:
             old.close()
         k = self.image_block(path)
         try:
-            with zipfile.ZipFile(self.app.book.origin or self.files_path) as z:
-                data = z.read(path)
+            if path in self.separator_images:
+                data = self.separator_images[path]
+            else:
+                with zipfile.ZipFile(self.app.book.origin or self.files_path) as z:
+                    data = z.read(path)
             if k is not None and self.app.book.blocks[k].image:
                 data = self.app.book.blocks[k].image  # la de ahora: cambiada, el EPUB de entrada aún tiene la vieja
         except Exception:
@@ -10206,7 +10302,8 @@ class TextEditor:
             loaded = [line for _, line in (page["lines"] if page else self.section_lines(start, end)[0])]
             now = [line for line in self.sheet.dumped(page["doc"]).split("\n\n") if line.strip()] if page else loaded
             here = "\n\n".join(loaded)
-            old = [line for line in (history_older(history, here, 1) or here).split("\n\n") if line.strip()]
+            entry = history_entry(history, here)
+            old = [line for line in (entry[2] if entry else here).split("\n\n") if line.strip()]
             diffs = []
             for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, now, autojunk=False).get_opcodes():
                 if op == "replace" and i2 - i1 == j2 - j1:  # párrafos seguidos cambiados: uno a uno
@@ -10911,7 +11008,7 @@ class TextEditor:
         changed = {b.blockNumber() for b in self.sheet.changed_blocks()}
         marked, before, n, block = [], [], 0, self.sheet.document().firstBlock()
         for lines in self.sheet.all_lines():
-            original = editor.original_of(block)
+            original = editor.compared(block, self.sheet.look.firsts)
             head = original is not None and len(lines) == 1 and editor.original_group(block)[1] == 0
             for line in lines:
                 before.append(editor.to_code(original) if head else None)
@@ -11529,7 +11626,8 @@ class TextEditor:
             doc, look = self.sheet.set_content(lines, self.pictures(start, end), self.colors["muted"], levels)
             page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
             if start >= 0:
-                self.replay_history(doc, lines)
+                self.replay_history(doc, lines, look)
+            page["mark"] = (doc.availableUndoSteps(), doc.availableRedoSteps())  # sin tocar: keep_history lo salta
             # Tras el historial de otras veces: ese queda en su capítulo, por detrás de lo de hoy en los demás
             doc.undoCommandAdded.connect(lambda key=(start, end): self.note_step(key))
             if self.show_changes_action.isChecked():
@@ -11558,24 +11656,23 @@ class TextEditor:
         if self.web is not None and not self.web_on:  # la hoja web enseña el capítulo nuevo
             self.later("webview", 0, self.refresh_web)
 
-    def replay_history(self, doc, lines):
-        """Lo aceptado antes en este capítulo, en el deshacer de su hoja: al reabrir el editor, Ctrl+Z y Ctrl+Y
-        siguen por lo que se cambió la otra vez. Cada versión es un paso; la hoja acaba como está el libro."""
-        text = "\n\n".join(line for _, line in lines)
-        versions, seen = [], {text}
-        while len(versions) < HISTORY_STEPS:
-            older = history_older(self.app.editor_history, versions[0] if versions else text)
-            if older is None or older in seen:
-                break
-            versions.insert(0, older)
-            seen.add(older)
-        if not versions:
+    def replay_history(self, doc, lines, look):
+        """El deshacer y el rehacer de otras veces en este capítulo, paso a paso, en el de su hoja: al reabrir el
+        editor (o la aplicación) Ctrl+Z y Ctrl+Y siguen donde se dejaron, y «Mostrar cambios» compara con el
+        principio. La hoja acaba como está el libro."""
+        entry = history_entry(self.app.editor_history, "\n\n".join(line for _, line in lines))
+        if entry is None:
             return
+        versions, at, first = entry
+        look.firsts = history_firsts(first, versions)
         doc.setUndoRedoEnabled(False)  # la más vieja es el principio: no se deshace más allá
         self.sheet.set_text(versions[0])
         doc.setUndoRedoEnabled(True)
-        for version in versions[1:] + [text]:
-            self.sheet.set_text(version)
+        ahead = 0  # pasos tras el de ahora: se deshacen y quedan para rehacer
+        for n, version in enumerate(versions[1:], 1):
+            ahead += self.sheet.set_text(version) and n > at
+        for _ in range(ahead):
+            doc.undo()
         self.sheet.moveCursor(QTextCursor.MoveOperation.Start)
 
     def section_lines(self, start, end):
@@ -12654,20 +12751,27 @@ class TextEditor:
             return
         if self.code.isVisible() and not self.take_shell():
             return
+        self.keep_history()
         if self.dirty():
             self.saved_paragraphs = self.changed_count()
             edits, titles, kinds, retype = self.changes()
-            done = [("\n\n".join(line for _, line in page["lines"]), self.sheet.dumped(page["doc"]))
-                    for (start, _), page in self.pages.items() if start >= 0 and self.page_dirty(page)]
             LOG.info("Editor: guarda %d cambios", len(edits))
             self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype,
                                  heads=[(start, shell) for (start, _), shell in self.shells.items()])
-            for before, after in done:  # al reabrir el editor, su deshacer vuelve a lo de antes (replay_history)
-                if _history_lines(after) != _history_lines(before):
-                    history_add(self.app.editor_history, before, after)
         self.win.done(0)
         if then:
             then()
+
+    def keep_history(self):
+        """Al aceptar: el deshacer y el rehacer de cada capítulo tocado van a la revisión (replay_history)."""
+        for (start, _), page in self.pages.items():
+            doc = page["doc"]
+            if start < 0 or page.get("mark") == (doc.availableUndoSteps(), doc.availableRedoSteps()):
+                continue
+            loaded = "\n\n".join(line for _, line in page["lines"])
+            versions, at = undo_versions(doc, self.sheet.dumped)
+            old = history_entry(self.app.editor_history, loaded)
+            history_add(self.app.editor_history, versions, at, old[2] if old else versions[0], loaded)
 
     def new_page(self):
         """Insertar → «Página nueva…» (créditos, nota del traductor): se guarda lo editado, se crea la página tras
