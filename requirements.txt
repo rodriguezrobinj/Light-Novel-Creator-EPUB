@@ -1,7 +1,7 @@
 pymupdf==2.0
 pillow==13.0.0
 pyinstaller==6.22.3
-pyinstaller-hooks-contrib==2026.9
+pyinstaller-hooks-contrib==2026.10
 pyside6-essentials==6.12.0
 pyside6-addons==6.12.0
 pyside6-webengine==6.12.0.140
