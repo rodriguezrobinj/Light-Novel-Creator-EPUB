@@ -6293,6 +6293,101 @@ def test_window_editor_undo_survives_restart():
     assert len(json.dumps(saved["editor_history"])) < 300, saved["editor_history"]  # solo lo cambiado
 
 
+def test_window_editor_shows_deleted_paragraph():
+    """«Mostrar cambios» marca un párrafo quitado entero: tachado delante del que lo seguía, también tras aceptar y
+    reabrir el editor. Antes no quedaba rastro (no hay texto en que marcarlo)."""
+    import app
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Maestro uno."),
+                                      B("p", 1, "No, no es dos."), B("p", 1, "Un tres.")], [0])
+    editor.show_changes_action.setChecked(True)
+    root.update()
+
+    def gone(n):
+        root.update()
+        editor.sheet.look.rehighlight()
+        data = editor.sheet.document().findBlockByNumber(n).userData()
+        return [g[3] for g in data.gone] if isinstance(data, ed.Changes) else []
+    cursor = QTextCursor(editor.sheet.document().findBlockByNumber(2))
+    cursor.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+    cursor.removeSelectedText()
+    root.update()
+    marked = gone(2)
+    editor.save()
+    root.update()
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    root.update()
+    reopened = gone(2)
+    editor.sheet.undo()
+    back = gone(3)
+    editor.win.done(0)
+    window.close()
+    assert marked == ["¶ No, no es dos."], marked
+    assert reopened == ["¶ No, no es dos."], reopened
+    assert back == [], back  # vuelto con Ctrl+Z: ya no está quitado
+
+
+def test_window_editor_original_box_of_paragraph_back_by_undo():
+    """Un párrafo quitado, aceptado y vuelto con Ctrl+Z al reabrir el editor ya no está en el libro: el panel
+    «Original» lo busca en la página por su texto. Antes recuadraba el párrafo de antes."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    texts = ["Capitulo uno", "Maestro Light pasa algo pregunto Mei.", "No no es un problema serio pero me detuve.",
+             "Un excedente de cartas Normales."]
+    root, window = visible_window()
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100 + 30 * i, t, 11, "helv") for i, t in enumerate(texts)])
+    window.pdf = TMP / f"original-{time_ns()}.pdf"
+    doc.save(window.pdf)
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, texts[0])]
+                                  + [convert.Block("p", 1, t) for t in texts[1:]], [0]))
+    window.tree.selection_set("0")
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    cursor = QTextCursor(editor.sheet.document().findBlockByNumber(2))
+    cursor.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+    cursor.removeSelectedText()
+    editor.save()
+    root.update()
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    editor.sheet.undo()
+    editor.sheet.setTextCursor(QTextCursor(editor.sheet.document().findBlockByNumber(2)))
+    root.update()
+    editor.drawn = None
+    editor.draw_source()
+    boxed = window.pdf_doc[0].get_text("text", clip=editor.box).split()[:3] if editor.box else None
+    editor.win.done(0)
+    window.close()
+    assert boxed == ["No", "no", "es"], boxed
+
+
+def test_window_editor_keys_with_focus_on_the_original():
+    """Tras un clic en el panel «Original» (el foco en él), Ctrl+Z, Ctrl+Y y los demás atajos de la hoja siguen
+    yendo a la hoja: antes no hacían nada hasta volver a pulsar en la hoja."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
+    cursor = QTextCursor(editor.sheet.document().findBlockByNumber(1))
+    cursor.insertText("Nuevo ")
+    editor.win.activateWindow()
+    editor.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+    editor.canvas.setFocus()
+    root.update()
+    focus = QApplication.focusWidget()
+    QTest.keyClick(focus, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    undone = editor.sheet.document().findBlockByNumber(1).text()
+    QTest.keyClick(focus, Qt.Key.Key_Y, Qt.KeyboardModifier.ControlModifier)
+    redone = editor.sheet.document().findBlockByNumber(1).text()
+    editor.win.done(0)
+    window.close()
+    assert focus is not None and editor.side.isAncestorOf(focus), focus
+    assert undone == "Uno." and redone == "Nuevo Uno.", (undone, redone)
+
+
 def test_window_editor_undo_redo_each_step_after_restart():
     """Tras aceptar y cerrar la aplicación, el deshacer del editor va cambio a cambio (antes todo lo de una vez en un
     solo paso), el rehacer llega hasta el último, lo que quedó por rehacer se sigue pudiendo rehacer y «Mostrar
