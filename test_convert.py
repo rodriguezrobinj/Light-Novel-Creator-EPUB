@@ -6329,6 +6329,28 @@ def test_paragraph_style_of_titles_whose_row_is_not_chapter_or_subtitle():
     assert all(s in app.STYLES for s in styles)
 
 
+def test_editor_set_text_redoes_only_what_changed():
+    """set_text (código HTML, hoja web) rehace solo los párrafos que cambian: los demás quedan como estaban (antes
+    rehacía la hoja entera, medio segundo en cada tecla). Una lista sigue siendo una sola al cambiar un punto."""
+    import editor
+    sheet = visual_sheet([(1, "Uno."), (2, "<lista decimal>Primero"), (3, "<lista decimal>Segundo"), (4, "Fin.")])
+    doc = sheet.document()
+    first = doc.firstBlock().revision()
+    text = editor.dump(doc)
+    same = sheet.set_text(text)
+    sheet.set_text(text.replace("Segundo", "Segundo bis"))
+    lists = {doc.findBlockByNumber(n).textList() is not None for n in (1, 2)}
+    one = doc.findBlockByNumber(1).textList() == doc.findBlockByNumber(2).textList()
+    kept = doc.firstBlock().revision() == first
+    sheet.set_text(editor.dump(doc).replace("\n\nFin.", ""))  # borrar el último
+    gone = editor.dump(doc)
+    sheet.set_text(gone + "\n\nNuevo.")  # uno nuevo al final
+    assert same is False and lists == {True} and one and kept, (same, lists, one, kept)
+    assert "Segundo bis" in gone and "Fin." not in gone, gone
+    assert editor.dump(doc).endswith("Segundo bis\n\nNuevo."), editor.dump(doc)
+    assert [editor.source_of(doc.findBlockByNumber(n)) for n in range(4)] == [1, 2, 3, 3]
+
+
 def visual_sheet(lines, css=None):
     """Hoja del editor con lines ([(bloque, línea)]); css: faithful.BookStyle de un EPUB o None (la de un PDF)."""
     import qtk
@@ -7124,7 +7146,7 @@ def test_editor_code_view_new_line_keeps_the_cursor():
     code.setTextCursor(cursor)
     code.setFocus()
     QTest.keyClick(code, Qt.Key.Key_Return)
-    editor.apply_code_live()  # lo que hace la espera de 600 ms
+    editor.apply_code_live()  # lo que hace la espera de 30 ms
     editor.follow_cursor()
     at = code.textCursor().blockNumber() - editor.code_parts()[1], code.textCursor().positionInBlock()
     QTest.keyClicks(code, "<p>Nueva")
@@ -13309,6 +13331,27 @@ def test_note_html_takes_the_note_without_its_backlink():
              '<li id="x"><p>anidada</p></li></li><li id="nt10"><p>Otra.</p></li></ol>')
     assert webview.note_html(xhtml, "nt9") == '<p> Una <i>nota</i>.</p><li id="x"><p>anidada</p></li>',         webview.note_html(xhtml, "nt9")
     assert webview.note_html(xhtml, "nt10") == "<p>Otra.</p>" and webview.note_html(xhtml, "zz") == ""
+
+
+def test_websheet_typing_reaches_the_sheet_at_once():
+    """Hoja web: lo escrito pasaba a la hoja de Qt (y con ella al código y al original) solo al pulsar fuera de la
+    web. Ahora llega al momento, con el cursor aún en la web."""
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14 al momento.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            ed = web_editor(window, window.book.candidates[2])
+            js(ed.web, "(function(){var p=document.querySelector('#lnc-sheet p');var r=document.createRange();"
+                       "r.selectNodeContents(p);r.collapse(false);var s=getSelection();s.removeAllRanges();"
+                       "s.addRange(r);document.execCommand('insertText',false,' tecleado');return true;})()")
+            arrived = wait_for(lambda: "tecleado" in ed.sheet.document().toPlainText(), 3)
+            still = ed.web_on
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert arrived and still, (arrived, still)
 
 
 def test_websheet_redo_follows_chromium():

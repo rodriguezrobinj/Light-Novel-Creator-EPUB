@@ -71,7 +71,7 @@ EXPLORER = str(WINDOWS / "explorer.exe")
 POWERSHELL = str(WINDOWS / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
 
 ON, OFF, CUT = "Capítulo", "Subtítulo", "Quitar"  # tipo de cada título de la lista
-WEB_POLL_MS = 200  # cada cuánto se mira la hoja web mientras se escribe en ella: lo escrito va a las otras vistas
+WEB_POLL_MS = 100  # cada cuánto se mira la hoja web mientras se escribe en ella: lo escrito va a las otras vistas
 SEP = "Separador"                                   # título que se escribe como separador de escena
 # Estilo de párrafo de la cinta -> etiqueta en la hoja web
 WEB_TAGS = {"Normal": "p", "Capítulo": "h1", "Subtítulo": "h2", "Título 3": "h3", "Título 4": "h4", "Cita": "blockquote"}
@@ -8204,7 +8204,7 @@ class TextEditor:
         self.code.cursorPositionChanged.connect(lambda: self.code.isVisible()
                                                 and self.later("code", 150, self.code_moved))
         self.code.textChanged.connect(lambda: self.code.isVisible() and self.code.hasFocus()
-                                      and self.later("codelive", 600, self.apply_code_live))
+                                      and self.later("codelive", 30, self.apply_code_live))
         self.applying_code = False  # la hoja cambia por el código: el código no se vuelve a escribir
         self.code.setFont(QFont("Segoe UI", 9))  # la de la ventana, como el visor del explorador de archivos
         self.shells = {}  # (inicio, fin) -> cabecera editada en «Código HTML» sin guardar aún
@@ -10663,9 +10663,13 @@ class TextEditor:
                 self.sheet.setTextCursor(QTextCursor(block))
 
     def web_typed(self, text):
-        """Se escribió en la hoja web: palabras que revisar, el borrador y la pestaña «EPUB»."""
+        """Se escribió en la hoja web: a la hoja de Qt al momento (el código y el original lo siguen sin salir de la
+        web), palabras que revisar, el borrador y la pestaña «EPUB»."""
         if not text or not self.web_on:
             return
+        if not self.web_busy and self.web.loaded and self.web_base is not None:  # recargando, el volcado sería viejo
+            # si al volver ya se salió de la web, su volcado ya pasó y este marcaría la web como al día sin estarlo
+            self.web.call("dump", done=lambda d: self.web_on and not self.web_busy and self.take_web(d))
         self.send_words(text)
         if "draft" not in self.pending:
             self.later("draft", DRAFT_MS, self.write_draft)
@@ -10896,18 +10900,18 @@ class TextEditor:
 
     def flush_web(self, then):
         """Lo escrito en la hoja web pasa a la hoja de Qt (si cambió) y luego then()."""
-        def back(dumped):
-            text = self.web_text(dumped)
-            changed = self.web_base is None or text != self.web_base  # se escribió en la web desde que cargó
-            if text is not None and changed and text != editor.dump(self.sheet.document()):
-                self.sheet.set_text(text)
-                self.web.call("rehome")  # la hoja de Qt ya tiene los párrafos de ahora
-                self.web_home = None
-            if text is not None:
-                self.web_base, self.web_rev = text, self.doc_rev()  # las dos hojas, iguales
-                self.web_lines = [line for lines in self.sheet.all_lines() for line in lines]
-            then()
-        self.web.call("dump", done=back)
+        self.web.call("dump", done=lambda dumped: (self.take_web(dumped), then()))
+
+    def take_web(self, dumped):
+        """lnc.dump() de la hoja web, a la hoja de Qt si se escribió en la web desde que cargó."""
+        text = self.web_text(dumped)
+        changed = self.web_base is None or text != self.web_base
+        if text is not None and changed and self.sheet.set_text(text):
+            self.web.call("rehome")  # la hoja de Qt ya tiene los párrafos de ahora
+            self.web_home = None
+        if text is not None:
+            self.web_base, self.web_rev = text, self.doc_rev()  # las dos hojas, iguales
+            self.web_lines = [line for lines in self.sheet.all_lines() for line in lines]
 
     def web_done(self):
         """La hoja web deja de ser donde se escribe; sigue a la vista si su pestaña lo está."""
