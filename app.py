@@ -825,12 +825,14 @@ KINDLE_MAIL = 50_000_000  # límite de Send to Kindle por correo; la web admite 
 
 # Etiquetas de formato en un título: en la lista (y en el índice del EPUB) el título va sin ellas. Solo estas: un
 # título como «<Interludio>» se queda como está
-TITLE_TAGS = re.compile(r"</?(?:b|i|em|strong|span|sup|sub|small|u|s|br)\b[^>]*>", re.I)
+TITLE_TAGS = re.compile(r"</?(?:b|i|em|strong|span|sup|sub|small|sc|u|s|br|a)\b[^>]*>", re.I)
+# la llamada a una nota (EPUB) no es parte del nombre: «saisen-box❮01❯» con la etiqueta a la vista en la lista
+NOTE_CALL = re.compile(r'<a\b[^>]*noteref[^>]*>.*?</a>', re.I | re.S)
 
 
 def _title_text(text):
     """Título de una fila sin etiquetas de formato («<b>La Tienda</b>» -> «La Tienda»)."""
-    cut = TITLE_TAGS.sub(lambda m: " " if m[0][1:3].lower() == "br" else "", text)  # «Capí<i>tulo</i>» sin espacio
+    cut = TITLE_TAGS.sub(lambda m: " " if m[0][1:3].lower() == "br" else "", NOTE_CALL.sub("", text))  # «Capí<i>tulo</i>» sin espacio
     return " ".join(html.unescape(cut).split()) if "<" in text or "&" in text else text
 
 
@@ -2442,7 +2444,10 @@ class App:
         card = QFrame(objectName="card")
         self.cover_thumb = QLabel()
         self.cover_thumb.setFixedSize(40, 56)
-        self.book_title, self.book_line = _label("", "title"), _label("", "muted")
+        # Recortados con «…»: un título de 2000 letras ensanchaba la ventana a 16 000 px
+        self.book_title, self.book_line = StatusLabel(objectName="title"), StatusLabel(objectName="muted")
+        for label in (self.book_title, self.book_line):
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.data_btn = _button("Editar datos", self.toggle_data)
         # La flecha a la derecha, la misma de «Recientes» y «Herramientas» (el «▾» de texto no se parecía)
         self.data_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
@@ -2452,7 +2457,9 @@ class App:
         text.setSpacing(2)
         text.addWidget(self.book_title)
         text.addWidget(self.book_line)
-        card.setLayout(_row(self.cover_thumb, text, 1, self.data_btn, margins=(10, 8, 10, 8), spacing=10))
+        row = _row(self.cover_thumb, text, self.data_btn, margins=(10, 8, 10, 8), spacing=10)
+        row.setStretchFactor(text, 1)  # el sitio para el título: con un hueco elástico, el recortado quedaba en 0 px
+        card.setLayout(row)
         body.addWidget(card)
         # Con barra de desplazamiento si no cabe: la tarjeta entera subía el alto mínimo de la ventana por encima de la
         # pantalla, y la ventana crecía por debajo de la barra de tareas
@@ -3618,6 +3625,17 @@ class App:
             if win and shiboken6.isValid(win):
                 win.close()
 
+    def raise_tool(self, name):
+        """True si la herramienta name ya está abierta: se trae al frente. Un doble clic abría dos y al abrir otro
+        libro solo se cerraba la última; la otra cambiaba el libro nuevo con datos del anterior."""
+        win = getattr(self, name, None)
+        win = win[0] if isinstance(win, tuple) else win
+        if win and shiboken6.isValid(win) and win.isVisible():
+            win.raise_()
+            win.activateWindow()
+            return True
+        return False
+
     def lock_book(self, path):
         """Candado del libro path para esta ventana, en la carpeta de ajustes (None: suelta el que tenga). False si
         otra ventana lo tiene abierto: las dos guardarían su revisión una encima de la otra."""
@@ -4068,7 +4086,7 @@ class App:
         heading = _label("PDF maquetado." if is_pdf else "La revisión encontró avisos" if problems
                          else "Revisado: sin problemas.", "warn" if problems else "title")
         column.addWidget(heading)
-        text = str(out)
+        text = str(Path(out))  # el diálogo de guardar la da con «/»: en Windows, como en el Explorador
         if is_file:
             size = Path(out).stat().st_size
             text += f"\n{_size_text(size)}"
@@ -4500,6 +4518,8 @@ class App:
             pass  # sin miniatura, la tarjeta muestra el icono
 
     def edit_replacements(self):
+        if self.raise_tool("replacements_window"):
+            return
         win, column = self.dialog("Reemplazos")
         column.addWidget(QLabel("Una regla por línea:  buscar -> reemplazo\nCambia palabras completas en textos y "
                                 "títulos. Con «re:» delante, expresión regular (re:Onii-?chan -> Onii-chan; \\1 en el "
@@ -4553,6 +4573,8 @@ class App:
 
     def edit_glossary(self):
         """Glosario de la serie: los nombres y términos como deben ir. El informe avisa de las formas parecidas."""
+        if self.raise_tool("glossary_window"):
+            return
         win, column = self.dialog("Glosario")
         column.addWidget(QLabel("Un nombre o término por línea, como debe ir escrito («Emilia», «Reinhard»). El informe "
                                 "de calidad avisa\nde las formas parecidas («Emilía», «Reinhart»). Lo que va tras # "
@@ -4764,6 +4786,7 @@ class App:
         self.unknown = {w for w, _, _ in found}
         self.status.setText(f"Ortografía: {convert.counted(len(found), 'palabra que no está', 'palabras que no están')} "
                             "en el diccionario")
+        self.close_tools(["spelling_window"])  # la búsqueda nueva sustituye a la anterior
         win, column = self.dialog("Ortografía")
         win.resize(980, 600)
         column.addWidget(_label("Palabras que no están en el diccionario, las más repetidas primero. "
@@ -5040,6 +5063,7 @@ class App:
         if not self.book:
             return
         choices = choices or ["Antes del primer capítulo", "Al final del libro"]
+        self.close_tools(["page_window"])
         win, column = self.dialog("Página nueva", parent=parent)
         title = QLineEdit("Nota del traductor")
         body = QPlainTextEdit()
@@ -5195,7 +5219,7 @@ class App:
         """Herramientas → «Ilustraciones…»: todas las del libro con su miniatura, para exportarlas (una o todas),
         cambiarlas (una, o las de una carpeta con los nombres de la exportación) viendo antes y después y describirlas
         (el texto que lee un lector de pantalla)."""
-        if not self.book:
+        if not self.book or self.raise_tool("images_window"):
             return
         order = self.image_blocks()
         if not order:
@@ -5528,7 +5552,7 @@ class App:
     def choose_cover(self):
         """Portada: miniaturas de las ilustraciones para elegir con un clic, o la página mostrada del PDF,
         o una imagen de un archivo."""
-        if not self.book:
+        if not self.book or self.raise_tool("cover_window"):
             return
         win, column = self.dialog("Elegir portada")
         grid = self.illustration_grid(lambda k: (self.set_cover(("image", k)), win.close()))
@@ -5558,6 +5582,7 @@ class App:
             messagebox.showinfo("Buscar en internet", f"AniList no encontró «{series}» entre las novelas ligeras.\n\n"
                                 "Prueba a escribir en Serie el nombre en japonés romanizado o en inglés.")
             return
+        self.close_tools(["online_window"])  # la búsqueda nueva sustituye a la anterior
         win, column = self.dialog("Resultados de AniList")
         column.addWidget(QLabel(f"«{series}»: elige la serie"))
         box = QListWidget()
@@ -5807,7 +5832,7 @@ class App:
         los avisos agrupados por tipo y, del elegido, el problema, la solución, el párrafo con lo señalado
         resaltado y el arreglo como un diff. «Arreglar todos» enseña antes la lista para marcar o desmarcar. Al
         elegir un aviso, las vistas previas de la ventana principal van a él."""
-        if not self.book:
+        if not self.book or self.raise_tool("quality_window"):
             return
         win, column = self.dialog("Informe de calidad")
         win.resize(1120, 660)  # cabe en 1366x728 con la barra de tareas
@@ -7833,7 +7858,7 @@ class App:
     def versions(self):
         """Versiones del libro, como los commits de git: guardar, comparar (con lo de ahora, o dos entre sí),
         restaurar, renombrar y borrar."""
-        if not (self.book and self.pdf):
+        if not (self.book and self.pdf) or self.raise_tool("versions_window"):
             return
         win, column = self.dialog("Versiones")
         win.resize(940, 620)
@@ -8283,7 +8308,8 @@ class TextEditor:
             self.side_web.moved.connect(lambda: self.web_shown() and self.show_web_page(self.side_web))
             self.side_web.page().clicked.connect(self.epub_clicked)
             self.side_web.page().picked.connect(self.epub_picked)
-            self.side_web.paged.connect(lambda _: (self.mark_epub(), self.tag_epub()))
+            # al borrarse la página Chromium aún contesta (como en WebSheet._ready): cerrado, nada que marcar
+            self.side_web.paged.connect(lambda _: self.closed or (self.mark_epub(), self.tag_epub()))
         if self.web is not None:
             self.side_tabs.addTab("Hoja web")
             self.web_box = QWidget()
@@ -8325,6 +8351,10 @@ class TextEditor:
         self.split.addWidget(side)
         self.split.setStretchFactor(2, 1)
         self.split.setStretchFactor(3, 1)
+        # Con navegación, archivos y panel derecho la hoja quedaba en 120 px: un párrafo largo partido letra a letra
+        # tardaba 0,16 s por tecla al maquetarse (caos del editor, semilla 23)
+        left.setMinimumWidth(360)
+        self.split.setCollapsible(2, False)
         self.split.splitterMoved.connect(lambda *_: self.later("panel", 80, self.redraw))
         column.addWidget(self.split, 1)
         # Barra de estado como Word: dónde estás y el zoom del texto
@@ -8351,7 +8381,9 @@ class TextEditor:
                           _button("Aceptar", lambda: self.toggle_focus() if self.focused else self.save(), "primary"),
                           _button("Cancelar", lambda: self.toggle_focus() if self.focused else self.cancel()),
                           margins=(12, 8, 12, 0))
-        self.status.setMinimumWidth(260)  # «Página 74 del PDF · párrafo 4 de 63 · 1.806 palabras»
+        # lo más largo que suele decir: con un EPUB, «del original» no cabía en 260 px
+        self.status.setMinimumWidth(self.status.fontMetrics().horizontalAdvance(
+            "Página 13 del original · 573 párrafos · 9.551 palabras") + 8)
         status_row.setStretchFactor(self.status, 1)
         status_row.setStretchFactor(self.note, 1)
         column.addLayout(status_row)
@@ -9760,7 +9792,8 @@ class TextEditor:
         self.sheet.ensureCursorVisible()
         self.hide_bars()
         self.issue_title.setText(f"● {issue.level} · {issue.title}")
-        self.issue_title.setStyleSheet(f"color: {theme.mark_colors(self.app.dark)[issue.level]};")
+        # los de texto, no los del subrayado: el naranja de «Revisar» se leía a 3:1
+        self.issue_title.setStyleSheet(f"color: {theme.level_colors(self.app.dark)[issue.level]};")
         self.issue_text.setText(f"{issue.problem}\nSolución: {issue.solution}")
         self.issue_fix.setEnabled(issue.edit is not None)
         self.issue_frame.show()
@@ -10283,7 +10316,7 @@ class TextEditor:
                     "Para moverla, córtala (Ctrl+X) y pégala donde vaya")
                 menu.addSeparator()
         offset = here.position() - block.position()
-        colors = theme.mark_colors(self.app.dark)
+        colors = theme.level_colors(self.app.dark)  # de texto: el naranja del subrayado se leía a 3:1
         for issue in self.block_issues(block):
             start, end = self.issue_range(block, issue)
             if not start <= offset <= end:  # como Word: lo subrayado donde se pulsa
@@ -10718,7 +10751,7 @@ class TextEditor:
                 menu.addAction("Ignorar", lambda: self.ignore_word(word))
                 menu.addAction("Añadir al diccionario de la serie", lambda: self.add_word(word))
                 menu.addSeparator()
-            colors = theme.mark_colors(self.app.dark)
+            colors = theme.level_colors(self.app.dark)  # de texto: el naranja del subrayado se leía a 3:1
             for ident in info.get("issues", []):
                 issue = self.web_issues.get(ident)
                 if issue is None:
@@ -11018,8 +11051,16 @@ class TextEditor:
             return
         code = editor.to_code(editor.dump(self.sheet.document()))
         lines, h, f = self.code_parts()
-        if code == "\n".join(lines[h:f]):
+        typed = "\n".join(lines[h:f])
+        if code == typed:
             return
+        if typed != self.code_text:  # lo escrito aún no pasó a la hoja (una etiqueta a medias): pisarlo lo perdía,
+            try:                     # con el deshacer del código, y no se podía volver a la hoja
+                pending = editor.to_code(editor.from_code(typed)) != self.code_text
+            except ValueError:
+                pending = True
+            if pending:
+                return
         line = self.code.textCursor().blockNumber()
         self.code.blockSignals(True)
         self.code.setPlainText("\n".join(lines[:h] + ([code] if code else []) + lines[f:]))  # la cabecera, como está

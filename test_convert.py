@@ -160,6 +160,29 @@ def test_series_and_volume_from_file_name():
         assert convert._series_volume(stem, meta) == expected, (stem, convert._series_volume(stem, meta))
 
 
+def test_analyze_unreadable_files_say_why_in_spanish():
+    """Un PDF vacío, un texto renombrado y un zip que no es EPUB dicen la causa en español, sin el inglés de MuPDF o
+    zipfile («Failed to open file… as type pdf»)."""
+    import zipfile
+    folder = TMP / "ilegibles"
+    folder.mkdir(exist_ok=True)
+    (folder / "vacio.pdf").write_bytes(b"")
+    (folder / "texto.pdf").write_text("no soy un pdf", encoding="utf-8")
+    (folder / "texto.epub").write_text("no soy un zip", encoding="utf-8")
+    with zipfile.ZipFile(folder / "zip.epub", "w") as z:
+        z.writestr("hola.txt", "hola")
+    said = {}
+    for name in ("vacio.pdf", "texto.pdf", "texto.epub", "zip.epub"):
+        try:
+            convert.analyze(str(folder / name))
+        except convert.BookError as e:
+            said[name] = str(e)
+    assert said == {"vacio.pdf": "No se pudo abrir el PDF: el archivo está vacío.",
+                    "texto.pdf": "No se pudo abrir el PDF: no es un PDF o está dañado.",
+                    "texto.epub": "No se pudo abrir el EPUB: no es un EPUB o está dañado.",
+                    "zip.epub": "El EPUB está dañado: no se puede leer su lista de archivos."}, said
+
+
 def test_analyze_titles_volume_after_series():
     """Si el título del PDF no dice el volumen, el título del libro pasa a "Serie - Volumen N"."""
     path = TMP / "Mi Serie - Volumen 03 [WP].pdf"
@@ -6271,6 +6294,28 @@ def editor_on(blocks, candidates, dark=False):
     return root, window, app.TextEditor(window, "0", *window.section_bounds(0))
 
 
+def test_paragraph_style_of_titles_whose_row_is_not_chapter_or_subtitle():
+    """Un título cuya fila es «Quitar», «Separador» o «Índice» (la «Sinopsis» de un EPUB) sale en la cinta como
+    título: con su tipo de fila, «Página siguiente» daba «Algo falló» (list.index: x not in list)."""
+    from PySide6.QtGui import QTextCursor
+
+    import app
+    import editor
+    import qtk
+    qtk.app()
+    sheet = editor.Sheet()
+    sheet.set_content([(0, "# Sinopsis"), (1, "# Contenido"), (2, "# Parte"), (3, "# Prólogo"), (4, "Texto.")], {},
+                      levels={0: app.CUT, 1: app.INDEX, 2: app.SEP, 3: app.OFF})
+    styles = []
+    block = sheet.document().firstBlock()
+    while block.isValid():
+        sheet.setTextCursor(QTextCursor(block))
+        styles.append(sheet.paragraph_style())
+        block = block.next()
+    assert styles == ["Capítulo", "Capítulo", "Capítulo", "Subtítulo", "Normal"], styles
+    assert all(s in app.STYLES for s in styles)
+
+
 def visual_sheet(lines, css=None):
     """Hoja del editor con lines ([(bloque, línea)]); css: faithful.BookStyle de un EPUB o None (la de un PDF)."""
     import qtk
@@ -6989,6 +7034,23 @@ def test_drawn_separators_are_icons_by_default():
     assert app._write_options({"separator": "Original del PDF"})["separator"] == "Icono del original"
 
 
+def test_editor_sheet_keeps_its_width_with_every_panel_open():
+    """Navegación, archivos y el panel derecho abiertos en una ventana estrecha: la hoja no baja de 360 px ni se
+    pliega con el divisor. En 120 px un párrafo largo se maquetaba letra a letra: 0,16 s por tecla (semilla 23)."""
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno " * 1500)], [0])
+    editor.toggle_nav()
+    editor.toggle_files()
+    editor.win.resize(800, 700)
+    editor.split.moveSplitter(0, 3)  # arrastrar el divisor de la hoja hasta el borde
+    root.update()
+    width = editor.split.widget(2).width()
+    window.settings["editor_nav"] = window.settings["editor_files"] = False
+    editor.win.done(0)
+    window.close()
+    assert width >= 360, width
+
+
 def test_editor_code_view_new_line_keeps_the_cursor():
     """«Código HTML» en vivo: Intro al final de una línea deja el cursor en la línea nueva aunque el código pase a la
     hoja (antes saltaba a la de arriba, lo escrito iba allí y el retroceso pegaba esa línea a la anterior); escribir
@@ -7023,6 +7085,35 @@ def test_editor_code_view_new_line_keeps_the_cursor():
     assert at == (3, 0), at
     assert lines == ["<h1>Capítulo 1</h1>", "<p>Uno.</p>", "<p>Dos.</p>", "<p>Nueva</p>"], lines
     assert sheet == ["Capítulo 1", "Uno.", "Dos.", "Nueva"], sheet
+
+
+def test_editor_code_view_keeps_a_half_written_tag_when_the_sheet_changes():
+    """«Código HTML» con una etiqueta a medio escribir (aún no pasa a la hoja): si la hoja cambia por otro lado (la
+    hoja web, deshacer de todo el libro), el código no se pisa. Antes refresh_code lo reescribía: se perdía lo
+    escrito y el deshacer del código, y el usuario no podía volver a la hoja (caos del editor, semilla 4)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 1, "Dos.")], [0])
+    editor.toggle_code()
+    code = editor.code
+    cursor = QTextCursor(code_block(editor, 1))
+    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    code.setTextCursor(cursor)
+    code.setFocus()
+    QTest.keyClick(code, Qt.Key.Key_Backspace)  # «<p>Uno.</p» : sin cerrar, no pasa a la hoja
+    editor.apply_code_live()
+    typed = code_body(editor)
+    cursor = QTextCursor(editor.sheet.document().lastBlock())  # la hoja cambia por otro lado
+    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    cursor.insertText(" Más.")
+    editor.refresh_code()  # lo que hace la espera de 100 ms
+    kept, undo = code_body(editor), code.document().isUndoAvailable()
+    editor.win.done(0)
+    window.close()
+    assert typed[1] == "<p>Uno.</p", typed
+    assert kept == typed and undo, (kept, undo)
 
 
 def test_editor_changes_of_a_new_paragraph_and_of_japanese():
@@ -7881,8 +7972,10 @@ def test_text_editor_ribbon_fits_the_screen():
     level, undo, tip = editor.ribbon_level, editor.undo_btn.toolButtonStyle(), editor.undo_btn.toolTip()
     editor.win.done(0)
     window.close()
-    # sin ◀ ▶ junto al capítulo, en los últimos niveles lo más ancho ya es la cinta, no la fila de las pestañas
-    assert widths == sorted(widths, reverse=True) and widths[0] > widths[1] > widths[-1], widths
+    # sin ◀ ▶ junto al capítulo, en los últimos niveles lo más ancho ya es la cinta, no la fila de las pestañas. Con
+    # la Segoe UI de verdad (Qt la encuentra sin pantalla tras registrar la fuente de un EPUB) los últimos niveles
+    # miden igual: solo se pide que ninguno ensanche y que el último estreche
+    assert widths == sorted(widths, reverse=True) and widths[0] > widths[-1], widths
     assert widths[0] <= 1366, widths  # repartida en pestañas cabe con el nombre de cada botón
     assert level == next((n for n, w in enumerate(widths) if w <= room), len(widths) - 1), (level, widths, room)
     from PySide6.QtCore import Qt
@@ -10324,7 +10417,8 @@ def test_editor_new_page_after_this_chapter():
 
 def test_window_titles_without_format_tags():
     """Un título en negrita (subtítulo hecho en el editor) sale en la lista sin «<b>», también el guardado así en una
-    revisión de antes, y no llega al índice del EPUB; un título «<Interludio>» se queda como está."""
+    revisión de antes, y no llega al índice del EPUB; un título «<Interludio>» se queda como está. Un título con un
+    enlace o la llamada a una nota de un EPUB (un párrafo unido al título) sale sin «<a href=…>» ni «❮01❯»."""
     import app
 
     B = convert.Block
@@ -10338,6 +10432,9 @@ def test_window_titles_without_format_tags():
     saved = window.tree.set("2", "title")
     chapters, _, _ = app._plan(window.book, {"2": [app.ON, "<i>Otro</i>", ""]})
     window.close()
+    linked = app._title_text('Templo<a href="notas.xhtml#nt1" id="rf1" epub:type="noteref"><sup>❮01❯</sup></a> y '
+                             '<a href="https://ejemplo.com">web</a> <sc>Rey</sc>')
+    assert linked == "Templo y web Rey", linked
     assert shown == ["Capítulo 1", "La Tienda & más", "<Interludio>"], shown
     assert saved == "Guardado" and chapters == [(2, "Otro")], (saved, chapters)
 
@@ -11049,6 +11146,26 @@ def test_window_starts_maximized():
     assert maximized
 
 
+def test_window_long_book_title_does_not_widen_the_window():
+    """Un título de 2000 letras (o con HTML y emoji) en los datos del libro: la tarjeta lo recorta con «…» y lo da
+    entero al pasar el ratón. Antes la ventana crecía a 16 000 px de ancho (saboteador)."""
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", JPEG, [convert.Block("heading", 1, "Capítulo 1"),
+                                                      convert.Block("p", 1, "Uno.")], [0]))
+    root.update()
+    base = window.root.minimumSizeHint().width()
+    long = "<b>Título</b> & 📚 " + "x" * 2000
+    window.title_var.set(long)
+    window.author_var.set("Autor " * 300)
+    window.update_header()
+    root.update()
+    hint, tip = window.root.minimumSizeHint().width(), window.book_title.toolTip()
+    shown = window.book_title.width()  # recortado, pero a la vista: con el hueco elástico quedaba en 0 px
+    window.close()
+    assert hint <= base, (hint, base)
+    assert tip == long and shown > 300, (tip, shown)
+
+
 def test_window_dialogs_fit_the_screen():
     """Con el zoom de Windows a 125 % en 1366x768 quedan 1093x582: el informe de calidad (1060x600) salía
     más alto que la pantalla, con sus botones fuera. Cada diálogo se encoge y se coloca dentro."""
@@ -11073,8 +11190,8 @@ def test_window_dialogs_fit_the_screen():
 
 
 def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
-    """Ortografía, «Añadir página», Versiones, el informe de calidad, Ilustraciones y la portada se cierran al abrir
-    otro PDF (si no, cambiarían el libro nuevo: «Borrar» de Versiones escribía las del libro anterior en el nuevo);
+    """Ortografía, «Añadir página», Versiones, el informe de calidad, Ilustraciones, la portada, Reemplazos y Glosario
+    abren una sola ventana aunque se pidan dos veces, y se cierran al abrir otro PDF (si no, cambiarían el libro nuevo: «Borrar» de Versiones escribía las del libro anterior en el nuevo);
     con un trabajo en curso, «Ortografía…» lo dice en vez de no hacer nada."""
     import time
 
@@ -11088,13 +11205,16 @@ def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
     window.spelling()
     busy = window.status.text()
     window.done = None
-    window.spelling_dialog([("dijó", 1, ["dijo"])])
-    window.add_page()
     window.pdf = pdf  # Versiones pide un PDF
-    window.versions()
-    window.quality()
-    window.images_dialog()
-    window.choose_cover()
+    for _ in range(2):  # un doble clic abría dos, y al abrir otro libro solo se cerraba la última (caos semilla 7)
+        window.spelling_dialog([("dijó", 1, ["dijo"])])
+        window.add_page()
+        window.versions()
+        window.quality()
+        window.images_dialog()
+        window.choose_cover()
+        window.edit_replacements()
+        window.edit_glossary()
     root.update()
     opened = len(root.dialogs())
     window.open_path(str(pdf))
@@ -11106,7 +11226,7 @@ def test_window_tools_close_when_another_pdf_opens_and_spelling_waits():
         time.sleep(0.05)
     window.close()
     assert busy == "Espera a que termine el trabajo en curso", busy
-    assert (opened, left) == (6, 0), (opened, left)
+    assert (opened, left) == (8, 0), (opened, left)
 
 
 def test_window_refuses_a_book_open_in_another_window():
@@ -13287,6 +13407,42 @@ def test_websheet_marks_spelling_issues_changes_and_menu():
     assert "Comentario…" in paragraph and "Volver al original" in paragraph, paragraph
 
 
+def test_websheet_closed_while_loading_does_not_paint_marks():
+    """Cerrar el editor mientras la hoja web carga (Cancelar deprisa, caos semilla 7): la carga que acaba después
+    no pinta marcas con las acciones del editor ya borradas («Algo falló» de libshiboken)."""
+    import shiboken6
+
+    import convert
+    errors = []
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+        root, window = visible_window()
+        hook = sys.excepthook  # el de la ventana (on_error), que se pone al crearla
+        sys.excepthook = lambda *exc: errors.append(repr(exc[1]))
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = window.book.candidates[2]
+            window.tree.selection_set(str(k))
+            ed = web_editor(window, k)
+            closed = []
+
+            def close_now(ok):
+                # recién cargada, con SHEET_JS aún por contestar: al borrarse la página, Chromium contesta igual
+                if not closed:
+                    closed.append(ok)
+                    ed.win.done(0)
+                    shiboken6.delete(ed.win)
+            ed.web.loadFinished.connect(close_now)
+            ed.load_web(active=True)
+            wait_for(lambda: closed, 15)
+            wait_for(lambda: errors, 1)
+        finally:
+            sys.excepthook = hook
+            window.close()
+    assert closed and errors == [], (closed, errors)
+
+
 def test_websheet_find_read_sync_draft_and_cancel():
     """El resto del editor en la hoja web: el panel del original sigue al párrafo del cursor aunque se haya escrito
     uno nuevo antes, y un clic en el original lleva el cursor de la web a ese párrafo; leer en voz alta va párrafo a
@@ -14144,6 +14300,29 @@ def test_faithful_epub_unchanged_is_identical_and_changes_are_patched():
     assert ("<dc:contributor id=\"trl2\">Neo</dc:contributor>" in opf and "<dc:publisher>EHJR</dc:publisher>" in opf
             and "Sigil version" in opf and "Hecho a mano." in opf and "AddLu" not in opf), opf
     assert opf.count("<dc:identifier") == 1 and "urn:uuid:019f0f81" in opf, opf
+    assert not convert.check_epub(out), convert.check_epub(out)
+
+
+def test_faithful_epub_title_joined_with_its_first_paragraph_stays_in_its_chapter():
+    """Retroceso al principio del primer párrafo lo une al título (como Word). Ese título ya no es el elemento de
+    antes: iba al final del archivo anterior (la página de título), y con él el ancla de la nota: «enlace roto» en
+    las notas (caos del editor, semilla 23). Ahora va al principio de su capítulo."""
+    src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+    out = TMP / "Sigil - Volumen 14 (LNC).epub"
+    book = convert.analyze(src)
+    chapters = faithful_chapters(book)
+    n, start = next((n, k) for n, (k, t) in enumerate(chapters) if t.startswith("Capítulo 1"))
+    end = book.candidates[book.candidates.index(start) + 1]
+    lines = convert.section_text(book, start, end).split("\n\n")
+    lines[0:2] = [lines[0] + lines[1][lines[1].index(">") + 1:]]  # el título y el primer párrafo, en uno
+    mapping = convert.edit_section(book, start, end, "\n\n".join(lines))
+    # como la lista de la ventana: el título escrito sigue siendo el capítulo
+    chapters = [(start, t) if j == n else (mapping[k], t) for j, (k, t) in enumerate(chapters)]
+    convert.write_epub(book, chapters, out, typography=False, style=convert.ORIGINAL, contents=False)
+    with zipfile.ZipFile(out) as z:
+        title, chapter = (z.read(f"OEBPS/Text/{n}.xhtml").decode() for n in ("titulo", "capitulo01"))
+    assert "leyendas" not in title, title
+    assert chapter.index('id="rf1"') < chapter.index("Segundo párrafo"), chapter
     assert not convert.check_epub(out), convert.check_epub(out)
 
 
@@ -16072,6 +16251,9 @@ def _run_tests(part, parts):
                 print("FAIL", name)
                 traceback.print_exc()
                 sys.stdout.flush()
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance():  # lo copiado en la hoja (su QMimeData) cerraba el proceso al salir: «código 3221225477»
+        QApplication.clipboard().clear()
     return failed
 
 

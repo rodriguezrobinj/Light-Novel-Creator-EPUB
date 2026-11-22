@@ -163,6 +163,7 @@ window.lncFind = function (t, nth) {
 """
 MARK_JS = FIND_JS + """
 (function (t, color, nth, img) {
+  if (!document.body) return false;  // a medio cargar: la marca llega con la página
   if (window.lncMarked) { window.lncMarked.style.outline = ''; window.lncMarked = null; }
   var b = null;
   if (img >= 0) {  // una ilustración: la n.º img del capítulo
@@ -182,6 +183,7 @@ MARK_JS = FIND_JS + """
 # una vez: items [[n.º, letras, n.º de los que también las tienen]]. Así lo escrito se pone al momento (PATCH_JS)
 TAG_JS = """
 (function (items) {
+  if (!document.body) return false;  // a medio cargar
   var sel = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, div, td';
   var leaves = Array.prototype.filter.call(document.body.querySelectorAll(sel), function (e) { return !e.querySelector(sel); });
   var letters = leaves.map(function (e) { return e.textContent.toLowerCase().replace(/[^\\p{L}]+/gu, ''); });
@@ -479,6 +481,9 @@ if AVAILABLE:
                 self.loads += 1
 
         def _ready(self):
+            # al borrarse la página Chromium contesta igual a SHEET_JS: el editor ya cerrado no tiene a quién pintar
+            if self.closing:
+                return
             self.loads += 1
             if self.dark:
                 self.set_dark(True)

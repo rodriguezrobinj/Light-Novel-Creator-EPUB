@@ -364,12 +364,13 @@ def read_epub(path, progress=None):
     try:
         z = zipfile.ZipFile(path)
     except (OSError, zipfile.BadZipFile) as e:
-        raise convert.BookError(f"No se pudo abrir el EPUB: {e}") from e
+        # el texto de zipfile va en inglés («File is not a zip file»): al usuario, la causa en español
+        raise convert.BookError("No se pudo abrir el EPUB: no es un EPUB o está dañado.") from e
     with z:
         try:
             opf_path, opf, items, order, ncx_id = package(z)
         except (KeyError, StopIteration, ET.ParseError, AttributeError) as e:
-            raise convert.BookError(f"El EPUB está dañado: no se puede leer su lista de archivos ({e}).") from e
+            raise convert.BookError("El EPUB está dañado: no se puede leer su lista de archivos.") from e
         names = set(z.namelist())
         labels = toc_labels(z, items, ncx_id)
         ornaments, generic = _repeated(z, items, order, names)
@@ -703,9 +704,21 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                 if found:
                     spans[name] = (root, found)
         first = next(iter(spans), None)
-        per_file, file_order, current = {}, [], None
+        # Bloque nuevo (sin elemento) al principio de una sección: va a su archivo, no al de la anterior. Unir el
+        # título con su primer párrafo lo mandaba al final del prólogo, y con él el ancla de la nota
+        cuts, ahead, coming = set(book.candidates) | {k for k, _ in chapters}, {}, None
+        for k in range(len(book.blocks) - 1, -1, -1):
+            src_ = book.blocks[k].src
+            coming = src_[0] if src_ and src_[0] in spans else coming
+            ahead[k] = coming
+            coming = None if k in cuts else coming
+        per_file, file_order, current, fresh = {}, [], None, True
         for k, b in enumerate(book.blocks):
-            name = b.src[0] if b.src and b.src[0] in spans else (current or first)
+            fresh = fresh or k in cuts
+            if b.src and b.src[0] in spans:
+                name, fresh = b.src[0], False
+            else:
+                name = (ahead[k] if fresh else None) or current or first
             current = name
             if name not in per_file:
                 per_file[name] = []
