@@ -421,7 +421,7 @@ def from_code(code):
 SUB_LINE = " "
 MARKUP_TOKEN = re.compile(r"<!--.*?-->|<\?.*?\?>|<![^>]*>|</?[A-Za-z][^<>]*>|[^<]+|<", re.S)
 VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
-INDENT = "  "
+INDENT = " " * 6  # un nivel de sangría: unos 20 px (con dos espacios apenas se veía)
 
 
 def _tag_kind(token):
@@ -944,10 +944,33 @@ class CodeEdit(QTextEdit):
                 under.fillRect(QRectF(0, box.top(), self.viewport().width(), box.height()), tint)
             under.end()
         super().paintEvent(event)
+        self.paint_guides()
         if self.look.changes and self.look.removed:
             painter = QPainter(self.viewport())
             paint_removed(self, painter, self.look.removed)
             painter.end()
+
+    def paint_guides(self):
+        """Una raya fina por nivel de sangría a la izquierda de cada línea, como las guías de VS Code: se ve qué
+        etiqueta va dentro de cuál."""
+        step = self.fontMetrics().horizontalAdvance(INDENT)
+        if step <= 0:
+            return
+        painter = QPainter(self.viewport())
+        painter.setPen(QColor(self.look.colors["guide"]))
+        left = self.document().documentMargin() - self.horizontalScrollBar().value()
+        dy, height = self.verticalScrollBar().value(), self.viewport().height()
+        block = self.cursorForPosition(QPoint(0, 0)).block()
+        layout = self.document().documentLayout()
+        while block.isValid():
+            box = layout.blockBoundingRect(block).translated(0, -dy)
+            if box.top() > height:
+                break
+            for level in range(round(block.blockFormat().leftMargin() / step)):
+                x = round(left + level * step + step / 4)
+                painter.drawLine(x, round(box.top()), x, round(box.bottom()))
+            block = block.next()
+        painter.end()
 
     def setPlainText(self, text):
         # Sin colores mientras se carga y se espacia: cada paso volvía a colorear el documento entero (8 s al abrir
