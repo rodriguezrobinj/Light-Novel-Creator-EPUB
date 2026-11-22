@@ -2560,7 +2560,8 @@ class Sheet(QTextEdit):
             return "Cita"
         if tag in ("h3", "h4", "h5", "h6") and f.property(HEADING):
             return "Título 3" if tag == "h3" else "Título 4"
-        return self.heading_level() or "Normal"
+        level = self.heading_level()  # el tipo de su fila: también «Quitar», «Separador» o «Índice», que son títulos
+        return "Subtítulo" if level == "Subtítulo" else "Capítulo" if level else "Normal"
 
     def set_paragraph_style(self, name):
         """Cambia el estilo del párrafo del cursor: Normal, Capítulo y Subtítulo como siempre (su fila); Título 3 y 4

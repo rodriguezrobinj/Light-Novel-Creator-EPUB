@@ -3131,7 +3131,10 @@ def analyze(pdf_path, progress=None):
     try:
         doc = open_pdf(pdf_path)
     except Exception as e:
-        raise BookError(f"No se pudo abrir el {kind}: {e}") from e
+        # el texto de MuPDF va en inglés («Failed to open file… as type pdf»): al usuario, la causa en español
+        empty = os.path.isfile(pdf_path) and os.path.getsize(pdf_path) == 0
+        raise BookError(f"No se pudo abrir el {kind}: " + ("el archivo está vacío." if empty
+                                                          else "no es un PDF o está dañado.")) from e
     with doc:
         if doc.needs_pass:
             raise BookError(f"El {kind} está protegido con contraseña.")
