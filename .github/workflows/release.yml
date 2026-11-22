@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Manual: construye el zip y lo deja como artefacto, sin publicar nada
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m PyInstaller --noconfirm "PDF a EPUB.spec"
+      - name: Comprobar Chromium en el .exe
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $r = Join-Path $env:RUNNER_TEMP "chromium.txt"
+          $p = Start-Process "dist\Light Novel Creator\PDF a EPUB.exe" -ArgumentList "--comprobar-chromium", "`"$r`"" -PassThru -Wait
+          $out = Get-Content $r -Encoding utf8 -ErrorAction SilentlyContinue
+          "codigo=$($p.ExitCode) $out"
+          if (-not ("$out" -match '^ok')) { exit 1 }
+      - name: Armar el zip portable
+        shell: pwsh
+        run: |
+          $dir = "portable-zip\LightNovelCreator"
+          New-Item -ItemType Directory -Force "$dir\datos" | Out-Null
+          Copy-Item "dist\Light Novel Creator\*" $dir -Recurse
+          Copy-Item portable\LEEME.txt, LICENSE $dir
+          # 7-Zip y no Compress-Archive: este pierde la carpeta vacía datos/, y sin ella la app escribe en %APPDATA%
+          Push-Location portable-zip; 7z a -tzip ..\LightNovelCreator-portable.zip LightNovelCreator | Out-Null; Pop-Location
+          7z l LightNovelCreator-portable.zip | Select-String "datos|LEEME|LICENSE|PDF a EPUB.exe"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: LightNovelCreator-portable
+          path: LightNovelCreator-portable.zip
+      - name: Publicar la pre-release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" LightNovelCreator-portable.zip --title "${{ github.ref_name }} — versión de prueba" --prerelease --generate-notes --verify-tag

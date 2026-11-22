@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build
+    groups:
+      # Los tres paquetes de PySide6 tienen que ir en la misma versión
+      pyside6:
+        patterns: ["pyside6*"]
+      pyinstaller:
+        patterns: ["pyinstaller*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build

@@ -1,0 +1,15 @@
+name: Sugerencia
+description: Una idea para mejorar el programa.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problema
+    attributes:
+      label: Qué te cuesta hoy
+      description: El problema que quieres resolver, no solo la solución.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Cómo lo harías
