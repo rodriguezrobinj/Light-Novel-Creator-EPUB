@@ -11538,6 +11538,35 @@ def test_window_quality_report_fits_a_laptop_screen():
     assert not scrolled, scrolled
 
 
+def test_window_quality_report_without_issues_says_so():
+    """Sin avisos, el informe no enseña una lista y un detalle vacíos: dice en el medio que todo está en orden y
+    esconde las barras de tipos y la franja de capítulos. Con avisos pero un filtro sin ninguno, dice eso."""
+    B = convert.Block
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"),
+                                                     *[B("p", 1, f"Ella abrió la puerta {n} y salió a la calle.")
+                                                       for n in range(10)]], [0]))
+    window.quality()
+    root.update()
+    parts = root.dialogs()[-1].parts
+    clean = (parts["empty"].isVisible(), parts["table"].isVisible(), parts["bars"].isVisible(),
+             parts["strip"].isVisible(), parts["empty_title"].text())
+    window.close()
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Que haces?")], [0]))
+    window.quality()
+    root.update()
+    parts = root.dialogs()[-1].parts
+    found = (parts["empty"].isVisible(), parts["table"].isVisible())
+    parts["chips"]["Graves"].click()
+    root.update()
+    filtered = (parts["empty"].isVisible(), parts["empty_title"].text())
+    window.close()
+    assert clean == (True, False, False, False, "Todo en orden"), clean
+    assert found == (False, True), found
+    assert filtered == (True, "Ningún aviso con este filtro"), filtered
+
+
 def test_window_quality_dialog_score_and_export():
     """El informe dice la nota del libro y «Exportar…» guarda el .html con los avisos no ignorados."""
     import app

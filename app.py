@@ -6053,7 +6053,8 @@ class App:
         head.addLayout(_row(filters, clear_filter, 1))
         kinds_box = QVBoxLayout()
         kinds_box.setSpacing(2)
-        kinds_box.addWidget(_label("Tipos más frecuentes · clic para ver solo ese", "muted"))
+        kinds_label = _label("Tipos más frecuentes · clic para ver solo ese", "muted")
+        kinds_box.addWidget(kinds_label)
         kinds_box.addWidget(bars)
         kinds_box.addStretch(1)
         actions = QVBoxLayout()
@@ -6066,10 +6067,27 @@ class App:
         middle = _row(kinds_box, actions, spacing=theme.SPACE["section"])
         middle.setStretch(0, 1)
         column.addLayout(middle)
-        column.addLayout(_row(_label("Capítulos", "muted"), strip, spacing=theme.SPACE["pad"]))
-        # --- lista y detalle
+        strip_label = _label("Capítulos", "muted")
+        column.addLayout(_row(strip_label, strip, spacing=theme.SPACE["pad"]))
+        # --- lista y detalle; sin nada que enseñar, en su lugar un aviso en el medio (vacíos parecían rotos)
+        body = QStackedWidget()
+        column.addWidget(body, 1)
         panes = QSplitter(Qt.Orientation.Horizontal)
-        column.addWidget(panes, 1)
+        body.addWidget(panes)
+        empty = QWidget()
+        empty_column = QVBoxLayout(empty)
+        empty_column.addStretch(1)
+        empty_icon = _label(theme.ICONS["ok"])
+        empty_icon.setStyleSheet(f"font-size: 40pt; color: {theme.colors(self.dark)['ok']};")
+        empty_title = _label("", "big")
+        empty_hint = _label("", "muted")
+        empty_hint.setWordWrap(True)
+        empty_hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        for widget in (empty_icon, empty_title):
+            empty_column.addWidget(widget, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_column.addWidget(empty_hint)  # a lo ancho: centrada en el layout, la línea ajustada salía cortada
+        empty_column.addStretch(1)
+        body.addWidget(empty)
         # El aviso primero y sin columna de gravedad: la dice el color, y el grupo la nombra (antes cada fila
         # repetía «● Menor» y el grupo ponía «N avisos» bajo «Dónde»: parecía otra fila más)
         table = qtk.RowList(("title", "where", "page"), {"title": "Aviso", "where": "Dónde", "page": "Pág."},
@@ -6189,6 +6207,19 @@ class App:
             filters.setText(("Solo " + " · ".join(notes)) if notes else "")
             clear_filter.setVisible(bool(notes))
             state["report"] = shown
+            clean = not reported and show.get() != "Ignorados"
+            for widget in (strip_label, strip):  # sin avisos, cuadros grises sobran
+                widget.setVisible(not clean)
+            kinds_label.setVisible(bool(base))
+            bars.setVisible(bool(base))
+            body.setCurrentWidget(panes if shown else empty)
+            empty_icon.setVisible(clean)
+            empty_title.setText("Todo en orden" if clean else "Ningún aviso con este filtro")
+            empty_hint.setText(
+                ("El informe no encontró nada sospechoso en el libro: ni restos del PDF, ni puntuación rara, ni "
+                 "párrafos cortados." + (f" Hay {convert.counted(len(ignored), 'aviso ignorado', 'avisos ignorados')}"
+                                         ": míralos en «Ignorados»." if ignored else ""))
+                if clean else "Elige «Todos» o quita el filtro para ver los demás avisos.")
             ignore_btn.setText("No ignorar" if show.get() == "Ignorados" else "Ignorar")
             win.setWindowTitle(f"Informe de calidad · {convert.counted(len(reported), 'aviso')}")
             table.delete(*table.get_children())
@@ -6338,6 +6369,7 @@ class App:
                      "fix": fix_btn, "all": all_btn, "ignore": ignore_btn, "show": show, "fill": fill,
                      "echoes": options_btn, "place": place, "edit": edit_btn, "ring": ring, "chips": chips,
                      "bars": bars, "strip": strip, "filters": filters, "clear": clear_filter,
+                     "empty": empty, "empty_title": empty_title,
                      "rows": lambda: [iid for kind in state["groups"] for iid in state["groups"][kind]],
                      "state": state}
         self.quality_window = win
