@@ -16412,6 +16412,212 @@ def test_style_guide_tokens_icons_and_no_loose_colors():
         assert not loose, (name, loose)
 
 
+def _fake_lt(answer):
+    """Servidor LanguageTool falso en un hilo: answer(campos del POST) -> (código, cabeceras, JSON). Devuelve
+    (dirección, posts recibidos, servidor); server.shutdown() lo para."""
+    import http.server
+    import threading
+    import urllib.parse
+
+    posts = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"[]")
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"])).decode("utf-8")
+            fields = {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
+            posts.append(fields)
+            code, headers, reply = answer(fields)
+            self.send_response(code)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(json.dumps(reply).encode("utf-8"))
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_address[1]}", posts, server
+
+
+def _lt_match(text, wrong, replacement, category="GRAMMAR", rule="AGREEMENT"):
+    """Un fallo como los de LanguageTool 6.6, con su posición en UTF-16 (Java) dentro de text."""
+    offset = len(text[:text.index(wrong)].encode("utf-16-le")) // 2
+    return {"message": f"Mal: {wrong}", "offset": offset, "length": len(wrong.encode("utf-16-le")) // 2,
+            "replacements": [{"value": replacement}], "rule": {"id": rule, "category": {"id": category}}}
+
+
+def test_grammar_check_maps_matches_to_their_paragraph():
+    """Los párrafos van juntos en una petición; cada fallo vuelve a su párrafo en sus letras, también tras un emoji
+    (Java cuenta en UTF-16); el que cruza dos párrafos se descarta; las reglas apagadas y la clave van en el POST;
+    un 429 se reintenta."""
+    import grammar
+
+    texts = ["Hola 😀 ellos fue.", "Me dijo que habia que irse."]
+    joined = "\n\n".join(texts)
+    calls = []
+
+    def answer(fields):
+        calls.append(1)
+        if len(calls) == 1:
+            return 429, {"Retry-After": "0"}, {}
+        cross = {"message": "x", "offset": len(texts[0].encode("utf-16-le")) // 2 - 2, "length": 6,  # «.», ¶ y «Me»
+                 "replacements": [], "rule": {"id": "X", "category": {"id": "GRAMMAR"}}}
+        return 200, {}, {"matches": [_lt_match(fields["text"], "fue", "fueron"),
+                                     _lt_match(fields["text"], "habia", "había", "TYPOS"), cross]}
+
+    base, posts, server = _fake_lt(answer)
+    try:
+        found = grammar.check(texts, base, "es", "yo", "clave")
+    finally:
+        server.shutdown()
+    assert [texts[0][a:a + n] for a, n, *_ in found[0]] == ["fue"], found
+    assert [texts[1][a:a + n] for a, n, *_ in found[1]] == ["habia"], found
+    assert found[0][0][2:] == ["Mal: fue", ["fueron"], "AGREEMENT", "GRAMMAR"], found
+    assert len(posts) == 2 and posts[1]["text"] == joined and posts[1]["language"] == "es", posts
+    assert "MORFOLOGIK_RULE_ES" in posts[1]["disabledRules"], posts[1]
+    assert posts[1]["username"] == "yo" and posts[1]["apiKey"] == "clave", posts[1]
+    assert grammar.batches(["a" * 10] * 5, 25) == [(0, 2), (2, 4), (4, 5)]
+
+
+def test_grammar_check_refused_key_says_so():
+    import grammar
+
+    base, _, server = _fake_lt(lambda fields: (401, {}, {}))
+    try:
+        grammar.check(["Hola."], base, "es")
+        message = ""
+    except grammar.GrammarError as e:
+        message = str(e)
+    finally:
+        server.shutdown()
+    assert "clave" in message, message
+
+
+def test_grammar_issues_fix_only_when_safe():
+    """El arreglo cambia solo el fragmento si está una vez y sin etiquetas dentro; si no, el aviso es a mano. Las
+    sugerencias de puntuación son «Estilo y puntuación» (Menor). Un párrafo editado ya no tiene sus avisos."""
+    import grammar
+
+    blocks = [convert.Block("p", 3, "Ellos fue a la casa."), convert.Block("p", 4, "el señor y el <i>niño</i> el"),
+              convert.Block("p", 5, "Es <i>tu</i> casa hoy."),convert.Block("p", 6, "Lo siento pero no.")]
+    texts = [convert._plain(b).strip() for b in blocks]
+    found = {grammar.key(texts[0]): [[6, 3, "Concordancia.", ["fueron"], "AGREEMENT", "GRAMMAR"]],
+             grammar.key(texts[1]): [[0, 2, "Tilde.", ["él"], "EL_TILDE", "GRAMMAR"]],
+             grammar.key(texts[2]): [[3, 7, "Tilde.", ["tú casa"], "TU", "GRAMMAR"]],
+             grammar.key(texts[3]): [[9, 5, "Coma.", [", pero", " pero,"], "COMMA_PERO", "PUNCTUATION"]]}
+    issues = grammar.issues(blocks, found)
+    assert [(i.kind, i.level, i.block) for i in issues] == [
+        ("grammar", "Revisar", 0), ("grammar", "Revisar", 1), ("grammar", "Revisar", 2),
+        ("grammar-style", "Menor", 3)], issues
+    first = issues[0]
+    assert first.edit == (0, 1, "Ellos fueron a la casa.") and first.title == "Gramática: «fue»", first
+    assert convert._issue_span(first, blocks) == (6, 9), convert._issue_span(first, blocks)
+    assert issues[1].edit is None and "Editar texto" in issues[1].solution, issues[1]  # «el» está tres veces
+    assert issues[2].edit is None, issues[2]  # cruza la cursiva
+    assert issues[3].edit == (3, 4, "Lo siento, pero no.") and "« pero,»" in issues[3].solution, issues[3]
+    edited = [convert.Block("p", 3, "Ellos fueron a la casa.")] + blocks[1:]
+    assert [i.block for i in grammar.issues(edited, found) if i.kind == "grammar"] == [1, 2]
+
+
+def test_grammar_review_saves_each_batch_and_resumes():
+    """review manda solo lo que la caché no tiene y la guarda lote a lote: si el segundo lote falla, el primero ya
+    está guardado y no se vuelve a mandar. Una caché de otras reglas u otro idioma no vale."""
+    import grammar
+
+    texts = ["a" * 30, "b" * 30, "c" * 30]
+    fail = [False]
+
+    def answer(fields):
+        if fail[0] and fields["text"].startswith("b"):
+            return 401, {}, {}
+        return 200, {}, {"matches": [_lt_match(fields["text"], fields["text"][:2], "x")]}
+
+    base, posts, server = _fake_lt(answer)
+    path = TMP / "libro.lnepub.gramatica.json"
+    try:
+        fail[0] = True
+        try:
+            grammar.review(path, base, texts, "es", limit=40)
+        except grammar.GrammarError:
+            pass
+        kept = grammar.load(path, "es")
+        fail[0] = False
+        done = grammar.review(path, base, texts, "es", limit=40)
+        again = grammar.review(path, base, texts, "es", limit=40)
+    finally:
+        server.shutdown()
+    assert list(kept) == [grammar.key(texts[0])], kept
+    assert done == (2, 2) and again == (0, 0), (done, again)
+    assert [p["text"][0] for p in posts] == ["a", "b", "b", "c"], [p["text"][:3] for p in posts]
+    assert len(grammar.load(path, "es")) == 3 and grammar.load(path, "en") == {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["rules"] = "otra"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert grammar.load(path, "es") == {}
+
+
+def test_grammar_server_start_problems_stop_waiting():
+    """Con un Java viejo, el servidor muere al arrancar: se dice que hace falta Java 17 sin esperar el minuto."""
+    import time
+
+    import grammar
+
+    log = TMP / "languagetool.log"
+    log.write_text("Exception in thread \"main\" java.lang.UnsupportedClassVersionError: org/languagetool/server",
+                   encoding="utf-8")
+    started = time.monotonic()
+    try:
+        grammar.ready("http://127.0.0.1:9", 60, str(log))
+        message = ""
+    except grammar.GrammarError as e:
+        message = str(e)
+    assert "Java 17" in message and time.monotonic() - started < 10, message
+
+
+def test_grammar_download_is_checked_and_replaced_whole():
+    """La descarga se compara con el SHA256 oficial antes de descomprimirla y reemplaza la carpeta entera."""
+    import hashlib
+    import io
+
+    import grammar
+
+    inside = f"LanguageTool-{grammar.LT_VERSION}/"
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as z:
+        z.writestr(inside + "languagetool-server.jar", b"jar")
+        z.writestr(inside + "libs/otra.jar", b"lib")
+    base = TMP / "lt-descarga"
+    (base / inside).mkdir(parents=True, exist_ok=True)
+    (base / inside / "languagetool-server.jar").write_bytes(b"a medias")
+
+    class Reply(io.BytesIO):
+        headers = {"Content-Length": str(len(data.getvalue()))}
+
+    saved = grammar.urllib.request.urlopen, grammar.LT_SHA256
+    grammar.urllib.request.urlopen = lambda url, timeout: Reply(data.getvalue())
+    try:
+        try:
+            grammar.download(base)
+            refused = ""
+        except grammar.GrammarError as e:
+            refused = str(e)
+        kept = (base / inside / "languagetool-server.jar").read_bytes()
+        grammar.LT_SHA256 = hashlib.sha256(data.getvalue()).hexdigest()
+        home = grammar.download(base)
+    finally:
+        grammar.urllib.request.urlopen, grammar.LT_SHA256 = saved
+    assert "no coincide" in refused and kept == b"a medias", (refused, kept)
+    assert (Path(home) / "languagetool-server.jar").read_bytes() == b"jar" and (Path(home) / "libs/otra.jar").is_file()
+    assert sorted(p.name for p in base.iterdir()) == [inside.rstrip("/")], list(base.iterdir())
+
+
 def _run_tests(part, parts):
     """Ejecuta las pruebas part, part+parts, part+2·parts… en este proceso. Devuelve cuántas fallaron."""
     global TMP
