@@ -86,6 +86,11 @@ CLICK_JS = """
   if (window.lncClick) return true;
   window.lncClick = true;
   document.addEventListener('click', function (e) {
+    var own = e.target.closest && e.target.closest('[data-lnc]');  // sellado (convert._stamp): su línea, sin adivinar
+    if (own) {
+      console.log('lnc-line ' + own.getAttribute('data-lnc'));
+      return;
+    }
     var pic = e.target.closest && e.target.closest('img, svg');  // una ilustración: su número, como en MARK_JS
     if (pic) {
       console.log('lnc-pick ' + Array.prototype.indexOf.call(document.body.querySelectorAll('img, svg'), pic));
@@ -162,11 +167,13 @@ window.lncFind = function (t, nth) {
 };
 """
 MARK_JS = FIND_JS + """
-(function (t, color, nth, img) {
+(function (t, color, nth, img, line) {
   if (!document.body) return false;  // a medio cargar: la marca llega con la página
   if (window.lncMarked) { window.lncMarked.style.outline = ''; window.lncMarked = null; }
   var b = null;
-  if (img >= 0) {  // una ilustración: la n.º img del capítulo
+  if (document.querySelector('[data-lnc]')) {  // sellado: el elemento de la línea, o ninguno (línea vacía, descartada)
+    b = line >= 0 ? document.querySelector('[data-lnc="' + line + '"]') : null;
+  } else if (img >= 0) {  // una ilustración: la n.º img del capítulo
     var pics = document.body.querySelectorAll('img, svg');
     b = pics[Math.min(img, pics.length - 1)] || null;
   } else if (t !== null) {
@@ -177,10 +184,10 @@ MARK_JS = FIND_JS + """
   window.lncMarked = b;
   b.scrollIntoView({block: 'center'});
   return true;
-})(%s, %s, %s, %s)
+})(%s, %s, %s, %s, %s)
 """
 # Cada párrafo de la vista del EPUB con el n.º de su párrafo en la hoja (data-lnc-b), buscado como en FIND_JS pero de
-# una vez: items [[n.º, letras, n.º de los que también las tienen]]. Así lo escrito se pone al momento (PATCH_JS)
+# una vez: items [[n.º, letras, n.º de los que también las tienen, línea sellada o -1]]. Así lo escrito se pone al momento (PATCH_JS)
 TAG_JS = """
 (function (items) {
   if (!document.body) return false;  // a medio cargar
@@ -190,6 +197,11 @@ TAG_JS = """
   var bare = leaves.map(function (e) { return !!e.textContent.trim() && !e.querySelector('img, svg'); });
   document.querySelectorAll('[data-lnc-b]').forEach(function (e) { e.removeAttribute('data-lnc-b'); });
   items.forEach(function (it) {
+    if (it[3] >= 0) {  // sellado (convert._stamp): el de su línea
+      var own = document.querySelector('[data-lnc="' + it[3] + '"]');
+      if (own && !own.hasAttribute('data-lnc-b')) own.setAttribute('data-lnc-b', it[0]);
+      return;
+    }
     var t = it[1], seen = -1, last = null;
     for (var i = 0; i < leaves.length && seen < it[2]; i++)
       if (t ? letters[i].indexOf(t) >= 0 : !letters[i] && bare[i]) { seen++; last = leaves[i]; }
@@ -247,9 +259,12 @@ if AVAILABLE:
         clicked = Signal(str)  # texto del párrafo pulsado (CLICK_JS)
         note = Signal(str)  # href de la llamada a nota pulsada (NOTE_JS)
         picked = Signal(int)  # número de la ilustración pulsada (CLICK_JS)
+        lined = Signal(int)  # línea (data-lnc) del elemento pulsado, en una vista sellada (CLICK_JS)
 
         def javaScriptConsoleMessage(self, level, message, line, source):
-            if message.startswith("lnc-pick "):
+            if message.startswith("lnc-line "):
+                self.lined.emit(int(message.split()[1]))
+            elif message.startswith("lnc-pick "):
                 self.picked.emit(int(message.split()[1]))
             elif message.startswith("lnc-note "):
                 self.note.emit(message[len("lnc-note "):])
@@ -374,10 +389,12 @@ if AVAILABLE:
             self.page().runJavaScript(PATCH_JS % (int(n), json.dumps(html)), 0,
                                       lambda ok: ok is False and missing and missing())
 
-        def mark(self, text, color, nth=0, image=-1):
+        def mark(self, text, color, nth=0, image=-1, line=-1):
             """Recuadra el párrafo n.º nth cuyas letras (minúsculas, sin lo demás) contienen text ("": el n.º nth sin
-            letras) y lo trae a la vista; con image, la ilustración n.º image. text None quita el recuadro."""
-            self.page().runJavaScript(MARK_JS % (json.dumps(text), json.dumps(color), int(nth), int(image)), 0)
+            letras) y lo trae a la vista; con image, la ilustración n.º image. text None quita el recuadro. En una
+            vista sellada (convert._stamp) solo cuenta line, la línea del capítulo: -1 quita el recuadro."""
+            self.page().runJavaScript(MARK_JS % (json.dumps(text), json.dumps(color), int(nth), int(image),
+                                                 int(line)), 0)
 
         def _loaded(self, ok):
             if not ok:

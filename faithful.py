@@ -665,10 +665,10 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                    font="", reading=False, kepub=False, hyphenate=False, alts=None, progress=None, fit=None,
                    whole_words=False, css_extra="", synopsis=False, title_image=None, logo="", endnotes=False,
                    note_style="1", heading_font="", box_style="Sencillo", horizontal=True, preview=False,
-                   separator_icon=""):
+                   separator_icon="", stamp=False):
     """Escribe el libro leído por read_epub copiando su EPUB original (book.origin) y parcheando solo lo que cambió:
     un XHTML sin cambios sale con los mismos bytes. Mismas opciones que convert.write_epub; style, font y separator
-    con ORIGINAL (o vacíos) dejan el aspecto del original."""
+    con ORIGINAL (o vacíos) dejan el aspecto del original. stamp: como en write_epub, cada elemento con data-lnc."""
     rules = convert._rules(replacements)
     separator = convert.separator_choice(separator)  # «Original del PDF» de antes: el adorno como icono
     hyphenate = hyphenate and not whole_words and lang.split("-")[0].lower() == "es"
@@ -786,8 +786,9 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                     if preview:  # en la vista previa, sola en su página: ni texto ni otra ilustración al lado. Dentro
                         # de <section> o <figure> MuPDF no hace caso de page-break-before: un bloque vacío que salta
                         # después; la página en blanco que deja al empezar un archivo no se enseña (App.preview_epub)
-                        return (f'<div style="page-break-after: always"></div>'
-                                f'<div style="page-break-after: always">{raw}</div>')
+                        # (sellada, la pestaña EPUB del editor: sin el vacío, que se llevaba el sello)
+                        return (("" if stamp else '<div style="page-break-after: always"></div>')
+                                + f'<div style="page-break-after: always">{raw}</div>')
                     return raw
                 return "".join(f'<div style="text-align: center; page-break-before: always; page-break-after: always">'
                                f'{picture(part, base, alt or "")}</div>'
@@ -846,6 +847,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                     continue  # título sintético: solo es el nombre de la sección
                 own = bool(b.src) and b.src[0] == name and b.src[3] in starts and b.src[3] > last_pos
                 piece = render(k, b, name, notes, own)
+                if stamp:
+                    piece = convert._stamp(piece, k)
                 if own:
                     placed[b.src[3]] = piece
                     last = last_pos = b.src[3]
