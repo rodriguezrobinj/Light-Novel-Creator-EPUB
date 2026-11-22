@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -45,7 +46,9 @@ def download(base, progress=None):
     base.mkdir(parents=True, exist_ok=True)
     part, digest = base / "realesrgan.zip.part", hashlib.sha256()
     try:
-        with urllib.request.urlopen(ESR_URL, timeout=60) as reply, open(part, "wb") as f:
+        # Con el nombre de Python (Python-urllib), languagetool.org responde 403: la descarga fallaba al momento
+        request = urllib.request.Request(ESR_URL, headers={"User-Agent": "LightNovelCreator"})
+        with urllib.request.urlopen(request, timeout=60) as reply, open(part, "wb") as f:
             total, got = int(reply.headers.get("Content-Length") or 0), 0
             while chunk := reply.read(1 << 20):
                 f.write(chunk)
@@ -53,6 +56,9 @@ def download(base, progress=None):
                 got += len(chunk)
                 if progress and total:
                     progress(got, total)
+    except urllib.error.HTTPError as e:  # el servidor respondió: no es la conexión
+        part.unlink(missing_ok=True)
+        raise UpscaleError(f"El servidor de Real-ESRGAN no dejó descargarlo (error {e.code}). Vuelve a probar más tarde.") from e
     except OSError as e:
         part.unlink(missing_ok=True)
         raise UpscaleError("No se pudo descargar Real-ESRGAN: comprueba la conexión a internet.") from e
