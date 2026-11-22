@@ -8761,6 +8761,14 @@ def test_window_options_app_pages():
     live = window.dark
     dialog.parts["cancel"]()
     back = window.dark
+    import qtk
+    import theme
+    dialog = window.open_options("Apariencia")  # el acento y la letra también se ven al elegirlos
+    dialog.parts["put"]("accent", "Verde")
+    dialog.parts["put"]("ui_font", "11 pt")
+    live_look = (theme.colors(False)["acc"], qtk.app().font().pointSize())
+    dialog.parts["cancel"]()
+    back_look = (theme.colors(False)["acc"], qtk.app().font().pointSize())
     folder = TMP / f"vigilada-{time_ns()}"
     folder.mkdir()
     window.ask_folder = lambda: str(folder)
@@ -8783,10 +8791,10 @@ def test_window_options_app_pages():
     root, again = visible_window(settings)
     reopened = (again.device_var.get(), again.dark_var.get(), again.echoes_var.get())
     again.close()
-    import qtk
-    import theme
     theme.apply(qtk.app(), "Claro")  # las demás pruebas, en claro
     assert live and not back and watching == str(folder) and echoes, (live, back, watching, echoes)
+    assert live_look == (theme.ACCENTS["Verde"][False]["acc"], 11), live_look
+    assert back_look == (theme.LIGHT["acc"], 9), back_look
     assert "ya no existe" in lost_text, lost_text
     assert reopened == ("Tablet", True, True), reopened
 
@@ -10260,6 +10268,27 @@ def test_window_shortcuts_table():
     assert "F9" in keys and "Intro" in keys and "Panel de navegación" in texts, keys
 
 
+def test_window_shortcuts_keys_not_squashed():
+    """«Atajos de teclado…»: cada tecla con su alto entero (en un layout anidado quedaban aplastadas, «RePág» sin la
+    g) y sin un hueco vacío al bajar del todo; «,» y «.» más grandes que las letras, que apenas se veían."""
+    from PySide6.QtWidgets import QLabel, QScrollArea
+
+    root, window = visible_window()
+    window.show_shortcuts()
+    root.update()
+    win = window.shortcuts_window
+    keys = [label for label in win.findChildren(QLabel) if label.objectName() == "key"]
+    squashed = [k.text() for k in keys if k.height() < k.minimumSizeHint().height()]
+    inner = win.findChild(QScrollArea).widget()
+    gap = inner.height() - max(k.mapTo(inner, k.rect().bottomLeft()).y() for k in keys)
+    comma = next(k for k in keys if k.text() == ",")
+    sizes = (comma.font().pointSizeF(), next(k for k in keys if k.text() == "Ctrl").font().pointSizeF())
+    window.close()
+    assert not squashed, squashed
+    assert gap < 40, gap
+    assert sizes[0] > sizes[1], sizes
+
+
 def test_editor_new_page_after_this_chapter():
     """Insertar → «Página nueva…» en el editor: guarda lo escrito, pone la página tras el capítulo abierto (o al
     final), abre el editor en ella y Ctrl+Z en la ventana la quita."""
@@ -11263,6 +11292,32 @@ def test_quality_score_and_export():
         "Grave;7;Aviso <b>;Problema;Solución;Tom & <Jerry>", raw[:200]
     assert "Nota 86/100" in page and "Tom &amp; &lt;Jerry&gt;" in page and "Libro &amp; Co" in page, page[:400]
     assert "<Jerry>" not in page
+
+
+def test_window_quality_report_fits_a_laptop_screen():
+    """En 1366x768 (728 px libres) el informe cabe: el detalle se desplaza (entero pedía 752 px de alto) con los
+    botones siempre a la vista, y cada grupo de la lista es un encabezado en negrita de lado a lado, sin la columna
+    de gravedad que repetía «● Menor» en cada fila."""
+    from PySide6.QtWidgets import QScrollArea
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella abrió la puerta y dijo que"), B("p", 2, "nadie vendría."),
+              B("p", 2, "12"), B("p", 3, "Texto. " * 60), B("p", 3, "13")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.quality()
+    root.update()
+    win = root.dialogs()[-1]
+    parts = win.parts
+    table = parts["table"]
+    group = table.rows[table.get_children()[0]]
+    found = (win.minimumSizeHint().height(), table.columns, group.isFirstColumnSpanned(), group.font(0).bold())
+    scrolled = [name for name in ("fix", "all", "edit", "ignore")
+                if isinstance(parts[name].parentWidget().parentWidget(), QScrollArea)]
+    window.close()
+    assert found[0] <= 450, found  # sin pantalla la letra es menor: antes pedía 579 aquí y 752 en Windows
+    assert found[1:] == (["title", "where", "page"], True, True), found
+    assert not scrolled, scrolled
 
 
 def test_window_quality_dialog_score_and_export():

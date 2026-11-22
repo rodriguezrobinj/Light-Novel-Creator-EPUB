@@ -504,7 +504,9 @@ class RowList(QTreeWidget):
         item.setData(0, TAGS, tags)
         if not any(t in self.looks for t in tags + tuple(old)):
             return  # sin aspecto antes ni ahora: poner letra y color a cada celda era la mitad de llenar «Traducir…»
-        font, color = next((self.looks[t] for t in tags if t in self.looks), (None, None))
+        # Como Tk, las etiquetas se suman: la letra de una y el color de otra (el grupo del informe: negrita y color)
+        looks = [self.looks[t] for t in tags if t in self.looks]
+        font, color = next((f for f, _ in looks if f), None), next((c for _, c in looks if c), None)
         for n in range(len(self.columns)):
             item.setFont(n, font or self.font())
             item.setData(n, Qt.ItemDataRole.ForegroundRole, QColor(color) if color else None)
