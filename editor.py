@@ -2,6 +2,7 @@
 convert.section_text (un párrafo por línea con <i>/<b>, "# " delante de un título, las ilustraciones y los
 separadores del PDF como [Ilustración N] / [Separador N]), que es lo que guarda convert.edit_section."""
 import base64
+import bisect
 import collections
 import difflib
 import hashlib
@@ -1498,26 +1499,55 @@ def compared(block, firsts=None):
     return firsts.get(original, original) if firsts and original is not None else original
 
 
+def _same(line):
+    """Línea comparable: sin el número de las marcas («[Separador 7]»), que cambia con otros capítulos."""
+    return convert.TOKEN.sub(r"[\1]", line.strip())
+
+
+def removed_text(line):
+    """Cómo se enseña tachado lo quitado entero: el texto, o «[Ilustración]» y «[Separador]» sin su número."""
+    return _same(line) if convert.TOKEN.fullmatch(line.strip()) else plain_line(line)
+
+
 def deleted_paragraphs(doc, baseline, firsts=None):
-    """{n.º del párrafo que sigue: [líneas de baseline que ya no tiene ningún párrafo]}, -1 si iban al final: los
-    párrafos quitados enteros, que «Mostrar cambios» no marcaba (no queda texto en que marcarlos)."""
-    where = {}
+    """{n.º de párrafo: ([quitados delante], [quitados detrás], [unidos a él])} frente a baseline: los párrafos,
+    ilustraciones y separadores quitados enteros, que «Mostrar cambios» no marcaba (no queda texto en que
+    marcarlos). Van en el párrafo de texto que seguía (o tras el último). Uno unido al de antes (Retroceso al
+    principio o Supr al final) no se quitó: su texto sigue al final de ese, y se marca solo la unión. Se alinea en
+    orden: todos los separadores son «[Separador]», y uno quitado no se veía si quedaba otro."""
+    blocks, keys, markable = [], [], []
     block = doc.firstBlock()
     while block.isValid():
         line = compared(block, firsts)
-        if line is not None:
-            where.setdefault(line, block.blockNumber())
+        keys.append(_same(line) if line is not None else ("nuevo", len(blocks)))  # uno nuevo no casa con nada
+        if block.text().strip() and not objects_of(block):
+            markable.append(block.blockNumber())
+        blocks.append(block)
         block = block.next()
-    out, pending = {}, []
-    for line in baseline:
-        if line in where:
-            if pending:
-                out.setdefault(where[line], []).extend(pending)
-                pending = []
-        elif line.strip() and not convert.TOKEN.fullmatch(line.strip()):  # ilustración o separador: no es texto
-            pending.append(line)
-    if pending:
-        out[-1] = pending
+    out = {}
+
+    def put(n, slot, lines):
+        out.setdefault(n, ([], [], []))[slot].extend(lines)
+    ops = difflib.SequenceMatcher(None, [_same(line) for line in baseline], keys, autojunk=False).get_opcodes()
+    for op, i1, i2, j1, j2 in ops:
+        pending = [line for line in baseline[i1:i2] if line.strip()] if op in ("delete", "replace") else []
+        before = blocks[j1 - 1] if j1 else None
+        if before is not None and pending and before.blockNumber() in markable:
+            rest, joined = before.text().rstrip(), []
+            while pending and not convert.TOKEN.fullmatch(pending[-1].strip()):
+                text = plain_line(pending[-1]).strip()
+                if not text or not rest.endswith(text) or len(rest) == len(text):
+                    break
+                joined.insert(0, pending.pop())
+                rest = rest[:-len(text)].rstrip()
+            if joined:
+                put(before.blockNumber(), 2, joined)
+        if pending and markable:
+            n = bisect.bisect_left(markable, blocks[j1].blockNumber()) if j1 < len(blocks) else len(markable)
+            if n < len(markable):
+                put(markable[n], 0, pending)
+            else:
+                put(markable[-1], 1, pending)
     return out
 
 
@@ -1855,7 +1885,7 @@ class Look(QSyntaxHighlighter):
         self.painting = False  # repintando: el documento avisa de un cambio que no lo es (Sheet.forget)
         self.firsts = {}  # compared: lo aceptado otras veces se sigue viendo como cambio al reabrir
         # Párrafos quitados enteros (deleted_paragraphs): baseline, las líneas con que se compara (las cargadas o,
-        # con historial, las del principio); deleted, {n.º del párrafo de después (-1: al final): [líneas]}
+        # con historial, las del principio); deleted, lo que devuelve deleted_paragraphs
         self.baseline, self.deleted, self.deleted_due = [], {}, False
         document.contentsChange.connect(self.deleted_later)
         watch_groups(self, original_group)
@@ -1885,7 +1915,7 @@ class Look(QSyntaxHighlighter):
             self.rehighlight()
             return
         doc = self.document()  # y los párrafos con quitados delante, los de antes y los de ahora
-        anchors = [doc.lastBlock() if n < 0 else doc.findBlockByNumber(n) for n in old.keys() | self.deleted.keys()]
+        anchors = [doc.findBlockByNumber(n) for n in old.keys() | self.deleted.keys()]
         self.jobs["changes"] += 1
         self._repaint("changes", self.jobs["changes"], list(blocks) + [b for b in anchors if b.isValid()])
 
@@ -1904,7 +1934,7 @@ class Look(QSyntaxHighlighter):
         old, self.deleted = self.deleted, self.deleted_now()
         doc = self.document()
         for n in {n for n in old.keys() | self.deleted.keys() if old.get(n) != self.deleted.get(n)}:
-            block = doc.lastBlock() if n < 0 else doc.findBlockByNumber(n)
+            block = doc.findBlockByNumber(n)
             if block.isValid():
                 self.rehighlightBlock(block)
 
@@ -1988,18 +2018,24 @@ class Look(QSyntaxHighlighter):
                 c = stop
         original = compared(block, self.firsts)
         changed = self.changes and text.strip() and not objects_of(block) and block_lines(block) != [original]
-        # párrafos quitados enteros: tachados delante de este, o tras el último si iban al final
-        before = self.deleted.get(block.blockNumber(), []) if self.changes and text.strip() else []
-        after = self.deleted.get(-1, []) if self.changes and text.strip() and not block.next().isValid() else []
-        if (changed or before or after) and not objects_of(block):
+        # quitados enteros (deleted_paragraphs): tachados delante de este o, tras el último, detrás; los unidos a
+        # este se comparan con él, y solo se marca la unión
+        before, after, joined = (self.deleted.get(block.blockNumber(), ((), (), ())) if self.changes and text.strip()
+                                 else ((), (), ()))
+        if (changed or before or after or joined) and not objects_of(block):
             group, n = original_group(block)
-            adds, gone = group_changes(None if original is None else plain_line(original),
-                                       [b.text() if b != block else text for b in group], n) if changed else ([], [])
+            base = None if original is None else "\n".join([plain_line(original)] + [plain_line(x) for x in joined])
+            adds, gone = group_changes(base, [b.text() if b != block else text for b in group], n) if changed \
+                else ([], [])
+            for line in joined:  # el salto de párrafo quitado, tachado donde empieza el unido
+                at_join = text.rfind(plain_line(line).strip())
+                if at_join > 0:
+                    gone.append((at_join, "¶"))
             if before:
-                lost = "¶ " + " ¶ ".join(plain_line(line) for line in before)
+                lost = "¶ " + " ¶ ".join(removed_text(line) for line in before)
                 gone = ([(0, f"{lost} {gone[0][1]}")] + gone[1:]) if gone and gone[0][0] == 0 else [(0, lost)] + gone
             if after:
-                gone = gone + [(len(text), "¶ " + " ¶ ".join(plain_line(line) for line in after))]
+                gone = gone + [(len(text), "¶ " + " ¶ ".join(removed_text(line) for line in after))]
             mark_changes(self, text, (adds, gone), at, QColor(self.changes))
         elif isinstance(block.userData(), Changes):
             block.userData().gone = []
