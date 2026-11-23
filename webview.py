@@ -43,6 +43,13 @@ def prepare():
     _prepared = True
 
 
+def _alive(view, fn):
+    """La respuesta de Chromium para view, si view sigue: llega tarde, a veces con el editor ya cerrado y la vista
+    borrada («Internal C++ object (EpubView) already deleted»)."""
+    import shiboken6
+    return lambda result: fn(result) if shiboken6.isValid(view) else None
+
+
 def available():
     """¿Se puede usar Chromium? LNC_SIN_CHROMIUM=1 lo apaga (las pruebas de la vista de MuPDF, que es síncrona)."""
     import os
@@ -413,7 +420,7 @@ if AVAILABLE:
                       "(document.head||document.documentElement).appendChild(s);"
                       "return Math.max(1,Math.ceil(document.documentElement.scrollHeight/window.innerHeight));})()"
                       % json.dumps(css))
-            self.page().runJavaScript(script, 0, self._paged)
+            self.page().runJavaScript(script, 0, _alive(self, self._paged))
 
         def _paged(self, pages):
             self.loads += 1
@@ -428,7 +435,7 @@ if AVAILABLE:
         def go(self, n):
             self.page_ = max(0, min(n, self.pages - 1))
             self.page().runJavaScript(f"document.scrollingElement.scrollTop = {self.page_} * window.innerHeight;", 0,
-                                      lambda _: self.unveil())
+                                      _alive(self, lambda _: self.unveil()))
 
         def step(self, delta):
             """Una pantalla más abajo (o más arriba) de donde se está, como la barra de fuera."""
@@ -441,7 +448,7 @@ if AVAILABLE:
                       "r.setStart(n,i);r.setEnd(n,i+Math.min(t.length,n.data.length-i));var b=r.getBoundingClientRect();"
                       "return Math.floor((b.top+document.scrollingElement.scrollTop)/window.innerHeight);}}return 0;})"
                       "(%s)" % json.dumps(text))
-            self.page().runJavaScript(script, 0, lambda n: done(int(n or 0)))
+            self.page().runJavaScript(script, 0, _alive(self, lambda n: done(int(n or 0))))
 
         def evaluate(self, script, done):
             """JavaScript en la página; done(resultado). Para las pruebas: estilos calculados, páginas."""
@@ -493,7 +500,7 @@ if AVAILABLE:
             import websheet
             if ok:
                 self.page().runJavaScript(SCROLL_JS, 0)
-                self.page().runJavaScript(websheet.SHEET_JS, 0, lambda _: self._ready())
+                self.page().runJavaScript(websheet.SHEET_JS, 0, _alive(self, lambda _: self._ready()))
             else:
                 self.loads += 1
 

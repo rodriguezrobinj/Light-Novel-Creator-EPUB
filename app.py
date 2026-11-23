@@ -8291,6 +8291,7 @@ class Dialog(QDialog):
 WEB_TAB = 2  # «Hoja web» en el panel derecho del editor, tras «Original» y «EPUB»
 
 
+PAGE_PIXELS = 40_000_000  # lo más grande que dibuja el panel del editor: ~160 MB en RGBA
 HISTORY_STEPS = 100  # pasos de deshacer (y de rehacer) del editor que se guardan por capítulo
 # shortcut: se guardan los últimos 400 capítulos editados del libro; si alguien necesita más, subirlo
 HISTORY_KEPT = 400
@@ -8302,8 +8303,14 @@ def _history_lines(text):
 
 def _history_key(text):
     """Clave del texto de un capítulo en editor_history: sin el número de sus marcas («[Separador 7]»), que cambia
-    al añadir o quitar párrafos en otro capítulo, y corta, para guardarla en la revisión."""
-    plain = "\n\n".join(convert.TOKEN.sub(r"[\1]", line) for line in _history_lines(text))
+    al añadir o quitar párrafos en otro capítulo, y corta, para guardarla en la revisión. Un «* * *» escrito y una
+    [Imagen x.jpg] nueva son, al aceptar, un separador y una ilustración del libro (convert.edit_section): la hoja
+    los vuelve a abrir como [Separador N] e [Ilustración N], y su deshacer no se encontraba."""
+    def same(line):
+        if convert.PICTURE.fullmatch(line):
+            return "[Ilustración]"
+        return "[Separador]" if convert.SCENE_BREAK.fullmatch(line) else convert.TOKEN.sub(r"[\1]", line)
+    plain = "\n\n".join(same(line) for line in _history_lines(text))
     return hashlib.sha1(plain.encode("utf-8")).hexdigest()[:20]
 
 
@@ -8388,12 +8395,12 @@ def undo_versions(doc, dumped, limit=HISTORY_STEPS):
         versions.append(dumped(doc))
     for _ in range(ahead):
         doc.undo()
-    out = []
+    out, now = [], at
     for n, version in enumerate(versions):
-        if out and _history_lines(out[-1]) == _history_lines(version):
-            at -= n <= at  # el de ahora es el igual de antes
-            continue
-        out.append(version)
+        if not out or _history_lines(out[-1]) != _history_lines(version):
+            out.append(version)
+        if n == now:  # contado con su índice de antes de quitar los iguales: restando a la vez, se salía de la lista
+            at = len(out) - 1
     return out, at
 
 
@@ -8487,6 +8494,7 @@ class TextEditor:
         # Pestaña «Hoja web» del panel derecho: el capítulo en Chromium, editable, con el aspecto del libro. web_on: el
         # cursor está en ella (la cinta y lo escrito van a ella); si no, enseña lo de la hoja de la izquierda
         self.web, self.web_on, self.web_state = None, False, {}
+        self.leaving = None  # [acciones de la cinta] pulsadas tras un clic en la hoja, antes de que llegue lo de la web
         # ¿cambios sin volcar en la hoja web?, qué hacer al cargarla, y el párrafo de su cursor (su sitio en la de Qt)
         self.web_dirty, self.web_then, self.web_home = False, None, None
         self.web_busy, self.web_queue = False, []  # on_sheet en curso y lo pulsado mientras tanto
@@ -10750,6 +10758,11 @@ class TextEditor:
     def do(self, name, *args):
         """Una acción de la cinta en la hoja a la vista: la de Qt o la web (WEB_ACTIONS); lo que la web aún no hace
         se dice en la barra de abajo."""
+        if self.leaving is not None:
+            # recién pulsada la hoja, aún llega lo de la web: a Chromium, un Ctrl+Z no llegaba a la hoja o volvía tarde
+            # y deshacía fuera de orden
+            self.leaving.append((name, args))
+            return None
         if self.code.isVisible() and name in ("undo", "redo") and not self.web_on:  # el deshacer del código
             return getattr(self.code, name)()
         if name in ("undo", "redo") and not self.web_on and self.book_wide():
@@ -10864,6 +10877,7 @@ class TextEditor:
             self.load_web(active=True)
             return
         self.web_on, self.web_home, self.web_dirty = True, None, False
+        self.leaving = None  # lo de la última salida, ya hecho o perdido con la web
         if self.reading is not None:  # la voz iba por párrafos de la otra hoja
             self.stop_reading()
         self.web_poll.start(WEB_POLL_MS)
@@ -10903,12 +10917,20 @@ class TextEditor:
             self.activate_web()
         elif self.web_on and any(new is w or w.isAncestorOf(new) for w in (self.sheet, self.code)):
             pos = self.sheet.textCursor().position()
+            if self.leaving is None:
+                self.leaving = []
 
             def back():
                 self.web_done()
                 cursor = self.sheet.textCursor()
                 cursor.setPosition(min(pos, self.sheet.document().characterCount() - 1))
                 self.sheet.setTextCursor(cursor)
+                waiting, self.leaving = self.leaving or [], None
+                for name, args in waiting:  # en la hoja, donde ya está el cursor, y en su orden
+                    self.do(name, *args)
+                now = QApplication.focusWidget()
+                if now is not None and (now is self.web or self.web.isAncestorOf(now)):  # volvió a la web mientras
+                    self.activate_web()
             self.flush_web(back)
 
     def load_web(self, active=True):
@@ -10941,7 +10963,7 @@ class TextEditor:
         """La hoja web cargó: sus marcas, el cursor en el párrafo del de la hoja y lo que esperaba (buscar)."""
         self.web.call("dump", done=lambda d: setattr(self, "web_base", self.web_text(d)))  # sin tocar: la base
         self.web.call("here", self.web_index(self.sheet.textCursor().block()), not self.web_on, self.here_color())
-        if self.web_on:
+        if self.web_on and self.leaving is None:  # tras un clic en la hoja de Qt, el cursor se queda allí
             self.web.setFocus()
         self.web_marks()
         self.web.call("goHome", self.web_index(self.sheet.textCursor().block()))
@@ -11234,7 +11256,8 @@ class TextEditor:
                 self.web.call("select", i, a, z, j, done=lambda _: self.web_settled())
             self.web.call("texts", done=got)
         self.web_then = place
-        self.load_web()
+        # con el clic ya en la hoja (o saliendo de la web), se recarga sin darle el cursor
+        self.load_web(active=self.web_on and self.leaving is None)
 
     def flush_web(self, then):
         """Lo escrito en la hoja web pasa a la hoja de Qt (si cambió) y luego then()."""
@@ -11416,8 +11439,25 @@ class TextEditor:
             if pending:
                 return
         line = self.code.textCursor().blockNumber()
+        # Solo el texto, como un paso más del deshacer: con setPlainText se perdía, y con la cabecera rota a medio
+        # escribir ya no se podía deshacer ni volver a la hoja («Arréglalo para volver a la hoja»)
+        doc = self.code.document()
+        cursor = QTextCursor(doc)
+        pretty = "\n".join(editor.pretty_line(x) for x in code.split("\n")) if code else ""
+        if f > h:
+            last = doc.findBlockByNumber(f - 1)
+            cursor.setPosition(doc.findBlockByNumber(h).position())
+            cursor.setPosition(last.position() + last.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+            if not pretty and last.next().isValid():  # sin texto: también su salto de línea
+                cursor.setPosition(last.next().position(), QTextCursor.MoveMode.KeepAnchor)
+        elif doc.findBlockByNumber(h).isValid():
+            cursor.setPosition(doc.findBlockByNumber(h).position())
+            pretty += "\n" if pretty else ""
+        else:
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            pretty = ("\n" if pretty and doc.characterCount() > 1 else "") + pretty
         self.code.blockSignals(True)
-        self.code.setPlainText("\n".join(lines[:h] + ([code] if code else []) + lines[f:]))  # la cabecera, como está
+        cursor.insertText(pretty)
         self.code.blockSignals(False)
         self.code_text = code
         block = self.code.document().findBlockByNumber(min(line, self.code.blockCount() - 1))
@@ -11651,7 +11691,7 @@ class TextEditor:
             doc, look = self.sheet.set_content(lines, self.pictures(start, end), self.colors["muted"], levels)
             page = self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
             if start >= 0:
-                self.replay_history(doc, lines, look)
+                self.replay_history(doc, lines, look, levels)
             page["mark"] = (doc.availableUndoSteps(), doc.availableRedoSteps())  # sin tocar: keep_history lo salta
             # Tras el historial de otras veces: ese queda en su capítulo, por detrás de lo de hoy en los demás
             doc.undoCommandAdded.connect(lambda key=(start, end): self.note_step(key))
@@ -11681,7 +11721,7 @@ class TextEditor:
         if self.web is not None and not self.web_on:  # la hoja web enseña el capítulo nuevo
             self.later("webview", 0, self.refresh_web)
 
-    def replay_history(self, doc, lines, look):
+    def replay_history(self, doc, lines, look, levels=None):
         """El deshacer y el rehacer de otras veces en este capítulo, paso a paso, en el de su hoja: al reabrir el
         editor (o la aplicación) Ctrl+Z y Ctrl+Y siguen donde se dejaron, y «Mostrar cambios» compara con el
         principio. La hoja acaba como está el libro."""
@@ -11695,7 +11735,8 @@ class TextEditor:
         doc.setUndoRedoEnabled(True)
         ahead = 0  # pasos tras el de ahora: se deshacen y quedan para rehacer
         for n, version in enumerate(versions[1:], 1):
-            ahead += self.sheet.set_text(version) and n > at
+            # la del libro, con los bloques de la carga: por versiones, un párrafo heredaba el de otro
+            ahead += self.sheet.set_text(version, *((lines, levels) if n == at else ())) and n > at
         for _ in range(ahead):
             doc.undo()
         self.sheet.moveCursor(QTextCursor.MoveOperation.Start)
@@ -12513,7 +12554,10 @@ class TextEditor:
         párrafo sigue en la siguiente (self.more), esa va debajo con su trozo recuadrado."""
         page = self.app.pdf_doc[index]
         self.page, self.shown = index, ("page", index + 1)
-        zoom = self.page_zoom = self.panel_width() / page.rect.width * self.pdf_zoom
+        zoom = self.panel_width() / page.rect.width * self.pdf_zoom
+        # MuPDF no hace imágenes enormes («Overly large image»): una página muy alta y estrecha, o el panel muy
+        # ancho con el zoom al máximo, daba «Algo falló»; se dibuja a lo más PAGE_PIXELS
+        zoom = self.page_zoom = min(zoom, (PAGE_PIXELS / max(1.0, page.rect.width * page.rect.height)) ** 0.5)
         matrix = pymupdf.Matrix(zoom, zoom)
 
         def mark(box, top=0):
