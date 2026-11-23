@@ -6329,6 +6329,55 @@ def test_window_editor_shows_deleted_paragraph():
     assert back == [], back  # vuelto con Ctrl+Z: ya no está quitado
 
 
+def test_window_editor_shows_deleted_pictures_and_joined_paragraphs():
+    """«Mostrar cambios» marca también una ilustración o un separador quitados («¶ [Ilustración]»). Dos párrafos
+    unidos (Retroceso al principio del segundo) no salen como el segundo quitado y su texto puesto: solo la unión
+    («¶»), sin nada en verde."""
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), False)
+    pix.clear_with(90)
+    png = pix.tobytes("png")
+    B = convert.Block
+
+    def marks(blocks, action):
+        root, window, editor = editor_on(blocks, [0])
+        editor.show_changes_action.setChecked(True)
+        root.update()
+        doc = editor.sheet.document()
+        action(doc)
+        root.update()
+        root.update()
+        editor.sheet.look.rehighlight()
+        out, block = [], doc.firstBlock()
+        while block.isValid():
+            data = block.userData()
+            green = any(r.format.background().style() != Qt.BrushStyle.NoBrush for r in block.layout().formats())
+            out.append((block.text(), [g[3] for g in data.gone] if isinstance(data, ed.Changes) else [], green))
+            block = block.next()
+        editor.win.done(0)
+        window.close()
+        return out
+
+    def remove(n):
+        def run(doc):
+            cursor = QTextCursor(doc.findBlockByNumber(n))
+            cursor.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        return run
+    from PySide6.QtCore import Qt
+    book = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("image", 1, image=png), B("p", 1, "Dos."),
+            B("break", 1, "", image=png), B("p", 1, "Tres."), B("break", 1, "", image=png), B("p", 1, "Cuatro.")]
+    picture = marks(book, remove(2))  # el otro separador sigue: con los dos «[Separador]», no se veía
+    separator = marks(book, remove(4))
+    text = [B("heading", 1, "Capítulo 1"), B("p", 1, "Maestro uno."), B("p", 1, "No, no es dos."), B("p", 1, "Tres.")]
+    joined = marks(text, lambda doc: QTextCursor(doc.findBlockByNumber(2)).deletePreviousChar())
+    assert picture[2][:2] == ("Dos.", ["¶ [Ilustración]"]), picture
+    assert separator[4][:2] == ("Tres.", ["¶ [Separador]"]), separator
+    assert joined[1] == ("Maestro uno.No, no es dos.", ["¶"], False), joined
+    assert joined[2] == ("Tres.", [], False), joined
+
+
 def test_window_editor_original_box_of_paragraph_back_by_undo():
     """Un párrafo quitado, aceptado y vuelto con Ctrl+Z al reabrir el editor ya no está en el libro: el panel
     «Original» lo busca en la página por su texto. Antes recuadraba el párrafo de antes."""
