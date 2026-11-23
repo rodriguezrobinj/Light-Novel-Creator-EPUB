@@ -1397,8 +1397,11 @@ TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor d
 PICTURE = re.compile(r"\[(Imagen) ([0-9a-f]{16}\.jpg)\]")
 INLINE = re.compile(r"&lt;(/?)(i|b|sup|sc)&gt;")
 # Etiquetas en línea de un EPUB de entrada que el editor muestra como texto (faithful): al guardar vuelven a serlo
-RAW_TAG = re.compile(r'&lt;(/?)(ruby|rb|rt|rp|rtc|span|br|small|sub|abbr|cite|code|q|s|u|mark|big|tt|del|ins|em|'
-                     r'strong|img|wbr|i|b|sup|kbd|samp|var|dfn|bdi|bdo|time|data)((?:\s+[\w:.-]+="[^"<>]*")*)\s*(/?)&gt;')
+# Etiquetas de dentro del párrafo que una línea del editor conserva al guardar; otro «<…>» es texto («<Habilidad>»)
+RAW_TAG_NAMES = ("ruby", "rb", "rt", "rp", "rtc", "span", "br", "small", "sub", "abbr", "cite", "code", "q", "s", "u",
+                 "mark", "big", "tt", "del", "ins", "em", "strong", "img", "wbr", "i", "b", "sup", "kbd", "samp", "var",
+                 "dfn", "bdi", "bdo", "time", "data")
+RAW_TAG = re.compile(r'&lt;(/?)(' + "|".join(RAW_TAG_NAMES) + r')((?:\s+[\w:.-]+="[^"<>]*")*)\s*(/?)&gt;')
 HEADING_TAGS = {f"h{n}" for n in range(1, 7)}
 # Etiqueta de apertura de un párrafo al principio de una línea del editor (Block.opening)
 OPENING = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>')

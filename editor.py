@@ -72,6 +72,9 @@ VOID_CHAR = "⁠"  # unión de palabras: ni se ve ni separa; lleva una etiqueta 
 LINE_BREAK = " "  # salto de línea dentro del párrafo: <br/> (Mayús+Intro)
 TAG = re.compile(r'<(/?)([A-Za-z][\w:.-]*)((?:\s+[^\s=<>/"]+(?:\s*=\s*"[^"<>]*")?)*)\s*(/?)>')
 VOID_TAGS = convert.VOID_ELEMENTS  # los de MDN: sin cierre
+# Las que convert._inline conserva al guardar: otro «<…>» es texto («<Habilidad adquirida>» de una ventana de estado);
+# como etiqueta se comía su texto en la hoja
+KEPT_TAGS = set(convert.RAW_TAG_NAMES) | {"i", "b", "sup", "sc", "a"}
 SIZES = (0.7, 0.8, 1.0, 1.2, 1.5, 2.0, 2.4)  # tamaños relativos de Qt: FontSizeAdjustment de -2 a 4
 HEADING_SIZES = {"h1": "1.5em", "h2": "1.3em", "h3": "1.15em", "h4": "1.05em"}
 CSS = None  # hoja del EPUB de entrada (faithful.BookStyle): sus clases y fuentes se ven en la hoja; None con un PDF
@@ -225,6 +228,8 @@ def parse_inline(text):
         raw, name = m[0], m[2].lower()
         if convert.ICON.fullmatch(raw):
             items.append(("icon", raw, tuple(stack)))
+        elif m[2] not in KEPT_TAGS:
+            add_text(raw)
         elif m[1]:
             at = next((n for n in range(len(stack) - 1, -1, -1) if _name(stack[n]) == name), None)
             if at is None:
@@ -2508,23 +2513,27 @@ class Sheet(QTextEdit):
         sc, mixed = QFont.Capitalization.SmallCaps, QFont.Capitalization.MixedCase
         self._toggle(lambda f: f.fontCapitalization() == sc, lambda f, on: f.setFontCapitalization(sc if on else mixed))
 
-    def set_text(self, text):
+    def set_text(self, text, sources=None, levels=None):
         """Pone text (como dump) en la hoja, en un solo deshacer: lo que vuelve de la vista de código. Un párrafo
         igual que uno de antes sigue siendo de su bloque (su página) y, si es el cargado, recuerda su línea.
-        False: la hoja ya tenía ese texto."""
+        sources: [(bloque, línea)] de text y levels sus títulos, como al cargar: la hoja entera queda de esos bloques
+        (replay_history acaba en el texto del libro; versión a versión, un párrafo heredaba el bloque de otro y el
+        panel enseñaba otro párrafo). False: la hoja ya tenía ese texto."""
         doc = self.document()
         lines = [line for line in text.split("\n\n") if line.strip()]
         old = self.all_lines()
         if lines == [line for group in old for line in group]:
             return False
+        if sources is not None and [line.strip() for _, line in sources if line.strip()] != [x.strip() for x in lines]:
+            sources = None  # no es ese texto
         # Solo los párrafos entre el primero y el último que cambian: rehacer la hoja entera tardaba medio
-        # segundo en un capítulo largo, y la hoja web y el código la ponen al día en cada tecla
+        # segundo en un capítulo largo, y la hoja web y el código la ponen al día en cada tecla. Con sources, entera
         n, a, i = len(old), 0, 0
-        while a < n and lines[i:i + len(old[a])] == old[a]:
+        while sources is None and a < n and lines[i:i + len(old[a])] == old[a]:
             i += len(old[a])
             a += 1
         b, j = n, len(lines)
-        while b > a and j - len(old[b - 1]) >= i and lines[j - len(old[b - 1]):j] == old[b - 1]:
+        while sources is None and b > a and j - len(old[b - 1]) >= i and lines[j - len(old[b - 1]):j] == old[b - 1]:
             j -= len(old[b - 1])
             b -= 1
 
@@ -2559,6 +2568,9 @@ class Sheet(QTextEdit):
                 k = before[i1 + n][0] if same else last
                 pairs.append((k, lines[j1 + n]))
                 last = k if k is not None else last
+        if sources is not None:
+            pairs = [(k, line) for (k, _), line in zip([x for x in sources if x[1].strip()], lines)]
+            levels = dict(levels or {})
         # y las de lo aceptado otras veces (replay_history): al deshacer hasta ellas se comparan con el principio
         loaded = {line for _, line in self.origins.get(doc, [])} | set(self.look.firsts)
         cursor = QTextCursor(doc)

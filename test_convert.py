@@ -6495,6 +6495,200 @@ def test_window_editor_undo_redo_each_step_after_restart():
     assert redo_after == [["Uno. a", "Dos. b", "Tres. c"]], redo_after
 
 
+def test_window_editor_accept_with_steps_that_change_nothing():
+    """Aceptar con pasos del deshacer que no cambian el texto (insertar una imagen deja varios) antes y después de uno
+    que sí: daba «Algo falló» (IndexError en history_add, la posición de ahora salía de la lista) y no se cerraba."""
+    import editor as ed
+    from PySide6.QtGui import QTextBlockFormat, QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos.")], [0])
+    doc = editor.sheet.document()
+
+    def nothing():  # un paso del deshacer que no cambia lo que se guarda: una propiedad que no se vuelca
+        f = QTextBlockFormat()
+        f.setProperty(QTextBlockFormat.Property.UserProperty + 90, doc.availableUndoSteps())
+        QTextCursor(doc.findBlockByNumber(2)).mergeBlockFormat(f)
+    nothing()
+    nothing()
+    cursor = QTextCursor(doc.findBlockByNumber(1))
+    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    cursor.insertText(" a")
+    nothing()
+    root.update()
+    errors = []
+    try:
+        editor.save()
+    except IndexError as e:
+        errors.append(e)
+    root.update()
+    saved = window.book.blocks[1].html
+    editor = window.text_editor or __import__("app").TextEditor(window, "0", *window.section_bounds(0))
+    editor.sheet.undo()
+    root.update()
+    undone = ed.dump(editor.sheet.document()).split("\n\n")[1:]
+    editor.win.done(0)
+    window.close()
+    assert not errors, errors
+    assert saved == "Uno. a", saved
+    assert undone == ["Uno.", "Dos."], undone
+
+
+def test_window_editor_undo_after_accepting_a_scene_break_or_picture():
+    """Tras poner un separador de escena o una imagen nueva y aceptar, al reabrir el editor Ctrl+Z los quita: la hoja
+    los enseña como [Separador N] e [Ilustración N], no como se escribieron («* * *», [Imagen x.jpg]), y el deshacer
+    guardado no se encontraba (Deshacer apagado)."""
+    import app
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 20, 30), False)
+    pix.clear_with(90)
+    out = {}
+    for kind in ("separador", "imagen"):
+        root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos.")], [0])
+        editor.sheet.setTextCursor(QTextCursor(editor.sheet.document().findBlockByNumber(1)))
+        editor.sheet.insert_break() if kind == "separador" else editor.sheet.insert_picture(pix.tobytes("jpg"))
+        root.update()
+        editor.save()
+        root.update()
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        doc = editor.sheet.document()
+        shown = convert.TOKEN.sub(r"[\1]", ed.dump(doc)).split("\n\n")[1:]
+        can_undo = doc.isUndoAvailable()
+        editor.sheet.undo()
+        root.update()
+        out[kind] = (shown, can_undo, ed.dump(doc).split("\n\n")[1:])
+        editor.win.done(0)
+        window.close()
+    mark = {"separador": "[Separador]", "imagen": "[Ilustración]"}
+    for kind, (shown, can_undo, undone) in out.items():
+        assert shown == ["Uno.", mark[kind], "Dos."], (kind, shown)
+        assert can_undo, kind
+        assert undone == ["Uno.", "Dos."], (kind, undone)
+
+
+def test_window_editor_reopened_paragraphs_keep_their_blocks():
+    """Al reabrir el editor con el deshacer de otra vez, la hoja se rehace versión a versión y un párrafo heredaba el
+    bloque del libro de otro: el panel «Original» enseñaba la página de otro párrafo. Cada uno, el suyo."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos."),
+                                      B("p", 3, "Tres.")], [0])
+    doc = editor.sheet.document()
+    cursor = QTextCursor(doc.findBlockByNumber(1))
+    cursor.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+    cursor.removeSelectedText()  # «Uno.» fuera
+    cursor = QTextCursor(doc.lastBlock())
+    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    cursor.insertBlock()
+    cursor.insertText("Nuevo.")
+    root.update()
+    editor.save()
+    root.update()
+    blocks = [b.html for b in window.book.blocks]
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    doc = editor.sheet.document()
+    sources, block = {}, doc.firstBlock()
+    while block.isValid():
+        sources[block.text()] = editor.sheet.current_source(block)
+        block = block.next()
+    undo = doc.isUndoAvailable()
+    editor.win.done(0)
+    window.close()
+    assert undo
+    assert {text: blocks[k] for text, k in sources.items() if k is not None} == {
+        "Capítulo 1": "Capítulo 1", "Dos.": "Dos.", "Tres.": "Tres.", "Nuevo.": "Nuevo."}, (sources, blocks)
+
+
+def test_window_editor_code_undo_survives_a_sheet_change():
+    """Con «Código HTML» a la vista y su cabecera rota a medio escribir, un cambio de la hoja por otro lado (una
+    imagen, la hoja web) rehacía el código con setPlainText: se perdía su deshacer, y ni deshaciendo todo se podía
+    volver a la hoja («Arréglalo para volver a la hoja»). Ahora es un paso más: Ctrl+Z arregla la cabecera."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    src = sigil_epub(TMP / "Sigil - Volumen 14 cabecera rota.epub")
+    root, window = visible_window()
+    warned = []
+    original = app.messagebox.showwarning, app.messagebox.showerror
+    app.messagebox.showwarning = app.messagebox.showerror = lambda title, message, **kw: warned.append(message)
+    try:
+        window.pdf = src
+        window.show_book(convert.analyze(src))
+        k = window.book.candidates[2]
+        window.tree.selection_set(str(k))
+        ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+        ed.toggle_code()
+        cursor = QTextCursor(ed.code.document().findBlockByNumber(1))
+        cursor.insertText("<roto ")  # la cabecera, a medio escribir
+        root.update()
+        cursor = QTextCursor(ed.sheet.document().lastBlock())  # la hoja cambia por otro lado
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        cursor.insertText(" añadido")
+        wait_for(lambda: "añadido" in ed.code.code(), 3)
+        refreshed = "añadido" in ed.code.code()
+        n = 0
+        while ed.code.document().isUndoAvailable() and n < 50:
+            ed.code.undo()
+            n += 1
+        root.update()
+        header_fixed = "<roto" not in ed.code.code()
+        ed.toggle_code()
+        left = not ed.code.isVisible()
+        ed.win.done(0)
+    finally:
+        app.messagebox.showwarning, app.messagebox.showerror = original
+        window.close()
+    assert refreshed
+    assert header_fixed and left, (header_fixed, left, warned)
+
+
+def test_window_editor_panel_draws_a_very_tall_page():
+    """Una página muy alta y estrecha (o el panel muy ancho) con el zoom al máximo: MuPDF no hacía la imagen
+    («Overly large image») y salía «Algo falló». Se dibuja más pequeña."""
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")], [0])
+    tall = pymupdf.open()
+    tall.new_page(width=20, height=30000)
+    window.pdf_doc = tall
+    editor.pdf_zoom = 3.0
+    try:
+        editor.show_page(0)
+        drawn = editor.page_zoom
+    finally:
+        editor.win.done(0)
+        window.close()
+    assert 0 < drawn <= (__import__("app").PAGE_PIXELS / (20 * 30000)) ** 0.5, drawn  # sin tope, ~60
+
+
+def test_window_editor_keeps_angle_bracket_text():
+    """«<Habilidad adquirida>» (ventanas de estado) es texto: se guardaba bien, pero al reabrir el editor la hoja lo
+    tomaba por una etiqueta y no lo enseñaba (quedaba «Uno. »); editado otra vez, se perdía."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("p", 2, "Dos.")], [0])
+    cursor = QTextCursor(editor.sheet.document().findBlockByNumber(1))
+    cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    cursor.insertText(" <Habilidad adquirida> <HP 100/100>")
+    root.update()
+    editor.save()
+    root.update()
+    saved = window.book.blocks[1].html
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    shown = editor.sheet.document().findBlockByNumber(1).text()
+    cursor = QTextCursor(editor.sheet.document().findBlockByNumber(1))
+    cursor.insertText("¡")  # editado otra vez: el párrafo se vuelve a escribir desde la hoja
+    root.update()
+    editor.save()
+    root.update()
+    again = window.book.blocks[1].html
+    window.close()
+    assert saved == "Uno. &lt;Habilidad adquirida&gt; &lt;HP 100/100&gt;", saved
+    assert shown == "Uno. <Habilidad adquirida> <HP 100/100>", shown
+    assert again == "¡Uno. &lt;Habilidad adquirida&gt; &lt;HP 100/100&gt;", again
+
+
 def test_changes_shown_split_words_from_their_punctuation():
     """«Mostrar cambios»: escribir tras una palabra con punto marca solo lo escrito; con «atención.» de una pieza
     salía «atención.» tachado y «atención aaa.» puesto."""
@@ -13668,6 +13862,80 @@ def test_websheet_typing_reaches_the_sheet_at_once():
         finally:
             window.close()
     assert arrived and still, (arrived, still)
+
+
+def test_epub_view_late_answer_after_closing():
+    """La respuesta de Chromium a la vista EPUB llegaba con el editor ya cerrado: «Algo falló» (Internal C++ object
+    (EpubView) already deleted, en _paged). Con la vista borrada, no se hace nada."""
+    with with_chromium():
+        import shiboken6
+
+        import webview
+        root, window = visible_window()
+        try:
+            view = webview.EpubView()
+            paged, unveil = webview._alive(view, view._paged), webview._alive(view, lambda _: view.unveil())
+            shiboken6.delete(view)
+            paged(3)
+            unveil(None)
+        finally:
+            window.close()
+
+
+def test_websheet_undo_right_after_clicking_the_sheet():
+    """Clic de la hoja web a la de Qt y Ctrl+Z al momento: mientras llegaba lo de la web, el Ctrl+Z iba a Chromium
+    (y lo deshecho allí no llegaba a la hoja: no hacía nada) o volvía tarde y deshacía fuera de orden. Ahora espera y
+    se hace en la hoja."""
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14 clic y deshacer.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            ed = web_editor(window, window.book.candidates[2])
+            js(ed.web, "(function(){var p=document.querySelector('#lnc-sheet p');var r=document.createRange();"
+                       "r.selectNodeContents(p);r.collapse(false);var s=getSelection();s.removeAllRanges();"
+                       "s.addRange(r);document.execCommand('insertText',false,' escrito');return true;})()")
+            wait_for(lambda: "escrito" in ed.sheet.document().toPlainText(), 3)
+            ed.on_focus(ed.web, ed.sheet.viewport())  # el clic en la hoja de Qt
+            ed.do("undo")  # antes de que llegue lo de la web
+            wait_for(lambda: not ed.web_on, 5)
+            wait_for(lambda: "escrito" not in ed.sheet.document().toPlainText(), 3)
+            text, on = ed.sheet.document().toPlainText(), ed.web_on
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert not on
+    assert "escrito" not in text, text
+
+
+def test_websheet_click_on_sheet_during_a_ribbon_action():
+    """Desde la hoja web, una acción que se hace en la hoja de Qt (Separador) y un clic en la hoja al momento: al
+    volver a cargar la web le daba el cursor otra vez (web_on y el foco), y los Ctrl+Z siguientes iban a la web. El
+    cursor se queda en la hoja y Ctrl+Z deshace allí."""
+    from PySide6.QtWidgets import QApplication
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14 separador y clic.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            ed = web_editor(window, window.book.candidates[2])
+            ed.do("insert_break")  # por on_sheet: la web vuelve a cargarse al acabar
+            ed.sheet.setFocus()
+            ed.on_focus(ed.web, ed.sheet.viewport())
+            wait_for(lambda: "* * *" in ed.sheet.document().toPlainText() and not ed.web_on and not ed.web_busy, 8)
+            wait_for(lambda: False, 1.5)  # lo que llegue tarde de la web
+            now = QApplication.focusWidget()
+            on, focus_web = ed.web_on, now is not None and (now is ed.web or ed.web.isAncestorOf(now))
+            ed.do("undo")
+            wait_for(lambda: "* * *" not in ed.sheet.document().toPlainText(), 3)
+            undone = "* * *" not in ed.sheet.document().toPlainText()
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert not on and not focus_web, (on, focus_web)
+    assert undone
 
 
 def test_websheet_redo_follows_chromium():
