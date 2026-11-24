@@ -360,9 +360,21 @@ CODE_CLASSES = {"center": '<p class="center">', "right": '<p class="right">', "f
     for kind in convert.BOX_KINDS for side in ("", "center", "right")} | {
     "table": '<p class="tabla">', "table-head": '<p class="tabla cabecera">'}
 CODE_LINE = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>(.*)</\1>', re.S)
-CODE_TOKEN = re.compile(r"<!--\s*(\[[^\]]+\])\s*-->")
+CODE_TOKEN = re.compile(r"<!--\s*(\[[^\]]+\])\s*-->")  # como las escribía antes (y la hoja web): se siguen leyendo
+# Ilustraciones, imágenes nuevas y separadores en el código, como etiquetas: <img> y <hr> (antes un comentario, que
+# parecía texto). Su archivo no es el del EPUB: el nombre lleva el número del bloque, para volver a su marca
+CODE_OBJECT = re.compile(r'<img\s+src="(?:ilustracion-(\d+)\.jpg|([0-9a-f]{16}\.jpg))"[^<>]*?/?>'
+                         r'|<hr\s+class="separador"\s+id="separador-(\d+)"\s*/?>')
 # etiqueta empezada y sin su «>»; también «<» o «</» solos al final, la primera letra de «<hr>»
 HALF_TAG = re.compile(r"</?(?:[A-Za-z][\w:.-]*(?:\s[^<>]*)?)?(?=<|$)")
+
+
+def code_object(token):
+    """[Ilustración N], [Imagen nombre] o [Separador N] -> su etiqueta en «Código HTML» (CODE_OBJECT)."""
+    m = convert.TOKEN.fullmatch(token) or convert.PICTURE.fullmatch(token)
+    if m[1] == "Separador":
+        return f'<hr class="separador" id="separador-{m[2]}"/>'
+    return f'<img src="{"ilustracion-" + m[2] + ".jpg" if m[1] == "Ilustración" else m[2]}" alt=""/>'
 
 
 def to_code(text):
@@ -371,7 +383,7 @@ def to_code(text):
     for line in (line for line in text.split("\n\n") if line.strip()):
         bare = line.strip()
         if convert.TOKEN.fullmatch(bare) or convert.PICTURE.fullmatch(bare):
-            out.append(f"<!-- {bare} -->")
+            out.append(code_object(bare))
             continue
         if convert.RULE_LINE.fullmatch(bare):  # una raya <hr>: tal cual
             out.append(bare)
@@ -399,6 +411,10 @@ def from_code(code):
         token = CODE_TOKEN.fullmatch(line)
         if token:
             lines.append(token[1])
+            continue
+        if thing := CODE_OBJECT.fullmatch(line):
+            lines.append(f"[Ilustración {thing[1]}]" if thing[1] else f"[Imagen {thing[2]}]" if thing[2]
+                         else f"[Separador {thing[3]}]")
             continue
         if convert.RULE_LINE.fullmatch(line):  # «<hr>» solo en su línea: la raya de HTML, tal cual
             lines.append(re.sub(r"\s*/?>$", "/>", line))  # con su barra, como en XHTML, y sus atributos
@@ -526,7 +542,8 @@ def _content_line(line):
     """¿Una línea del texto del capítulo? (las de to_code: un párrafo o título con algo dentro, una marca, una raya
     o texto suelto). Un ancla vacía o un <div> sin nada de la cabecera de un EPUB no lo es."""
     m = CODE_LINE.fullmatch(line)
-    return bool(m and m[3].strip() or CODE_TOKEN.fullmatch(line) or convert.RULE_LINE.fullmatch(line)
+    return bool(m and m[3].strip() or CODE_TOKEN.fullmatch(line) or CODE_OBJECT.fullmatch(line)
+                or convert.RULE_LINE.fullmatch(line)
                 or (line and not line.startswith("<")))
 
 
@@ -1705,19 +1722,25 @@ class Changes(QTextBlockUserData):
     def __init__(self, original=None):
         super().__init__()
         self.original, self.gone = original, []
+        # quitados enteros en su propia línea, encima del párrafo (make_room), y con qué deleted_paragraphs
+        # se pintó (Look.update_deleted)
+        self.above, self.deleted = [], None
 
 
 GAP = 3  # píxeles a cada lado de lo quitado
 
 
-def mark_changes(look, text, changes, at, color):
+def mark_changes(look, text, changes, at, color, above=""):
     """Desde highlightBlock de look: changes (group_changes) con lo puesto subrayado del color dado y, para cada trozo
     quitado, un hueco: espaciado tras la letra anterior (o tras la primera, que se pinta después de lo quitado: no
-    hay letra antes). Uno largo se acorta con «…» (lo entero sale en un globo). paint_removed lo pinta."""
+    hay letra antes). Uno largo se acorta con «…» (lo entero sale en un globo). paint_removed lo pinta. above: los
+    párrafos, ilustraciones o separadores quitados enteros antes de este, en su propia línea encima (make_room)."""
     block = look.currentBlock()
     data = block.userData() if isinstance(block.userData(), Changes) else Changes()
-    data.gone = []
+    data.gone, data.above = [], []
     adds, gone = changes
+    if above and not make_room(look, block, text, at, above, {max(pos - 1, 0) for pos, _ in gone}, data):
+        gone = [(0, f"¶ {above} {gone[0][1]}")] + gone[1:] if gone and gone[0][0] == 0 else [(0, f"¶ {above}")] + gone
     for start, size in adds:  # fondo verde, como GitHub; por tramos del mismo formato: letra a letra tardaba segundos
         c, end = at(start), at(start + size)
         while c < end:
@@ -1749,6 +1772,48 @@ def mark_changes(look, text, changes, at, color):
     look.setCurrentBlockUserData(data)
 
 
+def make_room(look, block, text, at, above, taken, data):
+    """Hueco de una línea encima del párrafo para lo quitado entero (above): una letra de la primera línea, mejor un
+    espacio (no se ve), con la fuente más grande sube la línea; su espaciado le devuelve su ancho. Delante del
+    párrafo parecía quitado de él. taken: letras con hueco de lo quitado dentro del párrafo. False si no hay letra."""
+    space = next((i for i, ch in enumerate(text[:200]) if ch == " " and i not in taken), None)
+    c = space if space is not None else 0 if 0 not in taken else None
+    if c is None:
+        return False
+    cursor = QTextCursor(block)
+    cursor.setPosition(block.position() + at(c) + 1)  # su formato es el de la letra c
+    f, shown = QTextCharFormat(look.format(at(c))), QTextCharFormat(cursor.charFormat())
+    shown.merge(f)
+    font = shown.font().resolve(look.document().defaultFont())
+    metrics = QFontMetrics(font)
+    big = QFont(font)
+    # la letra grande también baja: cuanto menos crece, menos se separa la línea de debajo
+    grow = (metrics.ascent() + QFontMetrics(label_font(font)).height() + GAP) / max(metrics.ascent(), 1)
+    if font.pointSizeF() > 0:
+        big.setPointSizeF(font.pointSizeF() * grow)
+    else:
+        big.setPixelSize(round(font.pixelSize() * grow))
+    f.setFont(big)
+    f.setFontLetterSpacingType(QFont.SpacingType.AbsoluteSpacing)
+    f.setFontLetterSpacing(metrics.horizontalAdvance(text[c]) - QFontMetrics(big).horizontalAdvance(text[c]))
+    ink = f.foreground().color() if f.hasProperty(QTextFormat.Property.ForegroundBrush) else None
+    if space is None:  # una letra: invisible en grande, paint_removed la pinta en su tamaño
+        f.setForeground(QColor(0, 0, 0, 0))
+    look.setFormat(at(c), 1, f)
+    data.above.append((at(c), text[c], space is None, above, font, ink))
+    return True
+
+
+def label_font(font):
+    """Letra de lo quitado entero en su línea (make_room): algo menor que la del párrafo."""
+    small = QFont(font)
+    if font.pointSizeF() > 0:
+        small.setPointSizeF(font.pointSizeF() * 0.85)
+    else:
+        small.setPixelSize(max(1, round(font.pixelSize() * 0.85)))
+    return small
+
+
 def _x(line, pos):
     x = line.cursorToX(pos)
     return x[0] if isinstance(x, tuple) else x
@@ -1766,6 +1831,33 @@ def paint_removed(edit, painter, color):
     block = edit.cursorForPosition(QPoint(0, 0)).block()
     while block.isValid() and doc_layout.blockBoundingRect(block).top() - dy <= bottom:
         data = block.userData()
+        if isinstance(data, Changes) and data.above:
+            layout = block.layout()
+            origin = layout.position()
+            for c, glyph, hidden, old, font, color_of in data.above:
+                line = layout.lineForTextPosition(c)
+                metrics = QFontMetrics(font)
+                room = line.ascent() - metrics.ascent() if line.isValid() else 0
+                if room < QFontMetrics(label_font(font)).height() / 2:
+                    continue
+                top = origin.y() + line.y() - dy
+                left = origin.x() + line.x() - dx
+                strike = label_font(font)
+                strike.setStrikeOut(True)
+                small = QFontMetrics(strike)
+                short = small.elidedText(old, Qt.TextElideMode.ElideMiddle, int(line.width() - 4 * GAP))
+                box = QRectF(left + GAP, top + (room - small.height()) / 2,
+                             small.horizontalAdvance(short) + 2 * GAP, small.height())
+                painter.fillRect(box, QColor(color))
+                painter.setFont(strike)
+                painter.setPen(ink)
+                painter.drawText(box.adjusted(GAP, 0, 0, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                 short)
+                boxes.append((box, old))
+                if hidden:  # la letra que abrió el hueco, en su tamaño y en su sitio
+                    painter.setFont(font)
+                    painter.setPen(color_of or ink)
+                    painter.drawText(QPointF(origin.x() + _x(line, c) - dx, top + line.ascent()), glyph)
         if isinstance(data, Changes) and data.gone:
             layout = block.layout()
             origin = layout.position()
@@ -1934,14 +2026,18 @@ class Look(QSyntaxHighlighter):
             QTimer.singleShot(0, self, self.update_deleted)
 
     def update_deleted(self):
-        """Repinta los párrafos cuyos quitados de delante cambiaron (borrar uno solo repinta el de al lado)."""
+        """Repinta los párrafos cuyos quitados de delante cambiaron (borrar uno solo repinta el de al lado). Se mira lo
+        que cada uno tiene pintado (Changes.deleted), no su número: al volver una ilustración con Ctrl+Z los números
+        se corren y el párrafo de al lado seguía con ella tachada."""
         self.deleted_due = False
-        old, self.deleted = self.deleted, self.deleted_now()
-        doc = self.document()
-        for n in {n for n in old.keys() | self.deleted.keys() if old.get(n) != self.deleted.get(n)}:
-            block = doc.findBlockByNumber(n)
-            if block.isValid():
+        self.deleted = self.deleted_now()
+        block = self.document().firstBlock()
+        while block.isValid():
+            data = block.userData()
+            painted = data.deleted if isinstance(data, Changes) else None
+            if painted != self.deleted.get(block.blockNumber()) and (painted or block.text().strip()):
                 self.rehighlightBlock(block)
+            block = block.next()
 
     def set_tags(self, tags):
         """Colores de theme.editor_tags del tema actual."""
@@ -2036,14 +2132,14 @@ class Look(QSyntaxHighlighter):
                 at_join = text.rfind(plain_line(line).strip())
                 if at_join > 0:
                     gone.append((at_join, "¶"))
-            if before:
-                lost = "¶ " + " ¶ ".join(removed_text(line) for line in before)
-                gone = ([(0, f"{lost} {gone[0][1]}")] + gone[1:]) if gone and gone[0][0] == 0 else [(0, lost)] + gone
             if after:
                 gone = gone + [(len(text), "¶ " + " ¶ ".join(removed_text(line) for line in after))]
-            mark_changes(self, text, (adds, gone), at, QColor(self.changes))
+            mark_changes(self, text, (adds, gone), at, QColor(self.changes),
+                         " ¶ ".join(removed_text(line) for line in before))
         elif isinstance(block.userData(), Changes):
-            block.userData().gone = []
+            block.userData().gone, block.userData().above = [], []
+        if isinstance(block.userData(), Changes):
+            block.userData().deleted = self.deleted.get(block.blockNumber()) if self.changes and text.strip() else None
 
 
 class _Filter(QObject):

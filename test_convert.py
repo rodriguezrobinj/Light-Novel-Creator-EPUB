@@ -6294,11 +6294,11 @@ def test_window_editor_undo_survives_restart():
 
 
 def test_window_editor_shows_deleted_paragraph():
-    """«Mostrar cambios» marca un párrafo quitado entero: tachado delante del que lo seguía, también tras aceptar y
-    reabrir el editor. Antes no quedaba rastro (no hay texto en que marcarlo)."""
+    """«Mostrar cambios» marca un párrafo quitado entero: tachado en su propia línea encima del que lo seguía (no
+    dentro de él, como si fuera suyo), también tras aceptar y reabrir el editor. Antes no quedaba rastro."""
     import app
     import editor as ed
-    from PySide6.QtGui import QTextCursor
+    from PySide6.QtGui import QFontMetrics, QTextCursor
     B = convert.Block
     root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Maestro uno."),
                                       B("p", 1, "No, no es dos."), B("p", 1, "Un tres.")], [0])
@@ -6309,12 +6309,18 @@ def test_window_editor_shows_deleted_paragraph():
         root.update()
         editor.sheet.look.rehighlight()
         data = editor.sheet.document().findBlockByNumber(n).userData()
-        return [g[3] for g in data.gone] if isinstance(data, ed.Changes) else []
+        return ["¶ " + a[3] for a in data.above] + [g[3] for g in data.gone] if isinstance(data, ed.Changes) else []
     cursor = QTextCursor(editor.sheet.document().findBlockByNumber(2))
     cursor.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
     cursor.removeSelectedText()
     root.update()
     marked = gone(2)
+    editor.sheet.viewport().grab()  # pinta: ahí se mide el tachado
+    block = editor.sheet.document().findBlockByNumber(2)
+    line = block.layout().lineAt(0)
+    box = editor.sheet.removed_boxes[0][0].translated(0, editor.sheet.verticalScrollBar().value())
+    text_top = block.layout().position().y() + line.y() + line.ascent() - QFontMetrics(editor.sheet.font()).ascent()
+    own_line = box.bottom() <= text_top + 1
     editor.save()
     root.update()
     editor = app.TextEditor(window, "0", *window.section_bounds(0))
@@ -6325,6 +6331,7 @@ def test_window_editor_shows_deleted_paragraph():
     editor.win.done(0)
     window.close()
     assert marked == ["¶ No, no es dos."], marked
+    assert own_line, (box, text_top)
     assert reopened == ["¶ No, no es dos."], reopened
     assert back == [], back  # vuelto con Ctrl+Z: ya no está quitado
 
@@ -6353,7 +6360,8 @@ def test_window_editor_shows_deleted_pictures_and_joined_paragraphs():
         while block.isValid():
             data = block.userData()
             green = any(r.format.background().style() != Qt.BrushStyle.NoBrush for r in block.layout().formats())
-            out.append((block.text(), [g[3] for g in data.gone] if isinstance(data, ed.Changes) else [], green))
+            out.append((block.text(), ["¶ " + a[3] for a in data.above] + [g[3] for g in data.gone]
+                        if isinstance(data, ed.Changes) else [], green))
             block = block.next()
         editor.win.done(0)
         window.close()
@@ -6376,6 +6384,87 @@ def test_window_editor_shows_deleted_pictures_and_joined_paragraphs():
     assert separator[4][:2] == ("Tres.", ["¶ [Separador]"]), separator
     assert joined[1] == ("Maestro uno.No, no es dos.", ["¶"], False), joined
     assert joined[2] == ("Tres.", [], False), joined
+
+
+def test_window_editor_deleted_picture_back_by_undo():
+    """Una ilustración quitada con Supr o Retroceso y vuelta con Ctrl+Z deja de salir tachada en el párrafo de al
+    lado (los números de párrafo se corrían y se repintaba otro). Quitada, aceptada y vuelta con Ctrl+Z al reabrir
+    el editor, es otra vez su imagen (antes, el texto «[Ilustración N]»: su bloque ya no estaba en el libro); el
+    separador igual. «Código HTML» la enseña como <img>."""
+    import app
+    import editor as ed
+    from PySide6.QtCore import Qt, QUrl
+    from PySide6.QtGui import QTextCursor, QTextDocument
+    from PySide6.QtTest import QTest
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), False)
+    pix.clear_with(90)
+    png = pix.tobytes("png")
+    B = convert.Block
+    book = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("image", 1, image=png), B("p", 1, "Dos."),
+            B("break", 1, "* * *"), B("p", 1, "Tres.")]
+
+    def marks(doc):
+        out, block = [], doc.firstBlock()
+        while block.isValid():
+            data = block.userData()
+            if isinstance(data, ed.Changes) and (data.gone or data.above):
+                out.append(block.text())
+            block = block.next()
+        return out
+    stale = []
+    for key, n in ((Qt.Key.Key_Delete, 1), (Qt.Key.Key_Backspace, 3)):  # Supr al final de «Uno.», Retroceso dos veces
+        root, window, editor = editor_on(book, [0])
+        editor.show_changes_action.setChecked(True)
+        root.update()
+        sheet, doc = editor.sheet, editor.sheet.document()
+        cursor = QTextCursor(doc.findBlockByNumber(n))
+        if n == 1:
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        sheet.setTextCursor(cursor)
+        QTest.keyClick(sheet, key)
+        if n == 3:
+            QTest.keyClick(sheet, key)
+        root.update()
+        for _ in range(2):  # Retroceso dos veces: dos pasos
+            QTest.keyClick(sheet, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+            root.update()
+            root.update()
+        stale.append((ed.dump(doc) == convert.section_text(window.book, 0, 6), marks(doc)))
+        editor.win.done(0)
+        window.close()
+    reopened = {}
+    for n in (2, 4):  # la ilustración, el separador
+        root, window, editor = editor_on(book, [0])
+        doc = editor.sheet.document()
+        cursor = QTextCursor(doc.findBlockByNumber(n))
+        cursor.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        editor.save()
+        root.update()
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        editor.show_changes_action.setChecked(True)
+        doc = editor.sheet.document()
+        editor.sheet.undo()
+        root.update()
+        root.update()
+        block = doc.findBlockByNumber(n)
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.MoveOperation.NextCharacter)
+        name = cursor.charFormat().toImageFormat().name()
+        image = doc.resource(QTextDocument.ResourceType.ImageResource, QUrl(name))
+        shown = (ed.objects_of(block), image.width() if image is not None else 0, marks(doc), ed.to_code(ed.dump(doc)))
+        editor.save()
+        root.update()
+        reopened[n] = (*shown, [b.kind for b in window.book.blocks])
+        window.close()
+    assert stale == [(True, []), (True, [])], stale
+    objects, width, marked, code, kinds = reopened[2]
+    assert objects and objects[0].startswith("Imagen") and width == 40 and marked == [], reopened[2]
+    assert '<img src="' in code and "<!--" not in code, code
+    assert kinds == ["heading", "p", "image", "p", "break", "p"], kinds
+    objects, width, marked, code, kinds = reopened[4]  # vuelve como «Insertar → Separador»: «* * *»
+    assert "<p>* * *</p>" in code and marked == [], reopened[4]
+    assert kinds == ["heading", "p", "image", "p", "break", "p"], kinds
 
 
 def test_window_editor_original_box_of_paragraph_back_by_undo():
@@ -6943,14 +7032,16 @@ def test_editor_ribbon_writes_clean_html():
 
 def test_editor_code_view_round_trip_and_errors():
     """Vista de código: cada párrafo como su elemento (las alineaciones de la app con sus clases, las ilustraciones
-    como comentario) y de vuelta igual; una etiqueta sin cerrar se avisa. Volver a la hoja con un cambio lo pone
+    como <img>, los separadores como <hr>; el comentario de antes también se lee) y de vuelta igual; una etiqueta sin cerrar se avisa. Volver a la hoja con un cambio lo pone
     en ese párrafo, que sigue siendo del mismo bloque; los demás no cambian."""
     import editor
     text = "\n\n".join(['<h1 class="lucida">Capítulo <i>1</i>', "# Título de PDF", "<center>Carta",
                         "<lista decimal>Uno", "[Ilustración 7]", '<p class="no-indent">A & B <ruby>橘<rt>x</rt></ruby>',
-                        "Texto con [Nota: aclaración] y <sc>Rango</sc>."])
+                        "Texto con [Nota: aclaración] y <sc>Rango</sc>.", "[Separador 9]",
+                        "[Imagen 0123456789abcdef.jpg]"])
     code = editor.to_code(text)
     back = editor.from_code(code)
+    old_style = editor.from_code("<!-- [Ilustración 7] -->\n<!-- [Separador 9] -->")
     errors = []
     for bad in ("<p>Mal <i>cerrado</p>", '<p class="x">Sin cierre'):
         try:
@@ -6960,7 +7051,9 @@ def test_editor_code_view_round_trip_and_errors():
     sheet = visual_sheet([(10, "Primero."), (11, "Segundo."), (12, "Tercero.")])
     sheet.set_text(editor.from_code(editor.to_code(editor.dump(sheet.document())).replace("Segundo", "Segundo editado")))
     sources = [editor.source_of(sheet.document().findBlockByNumber(n)) for n in range(3)]
-    assert "<!-- [Ilustración 7] -->" in code and '<p class="center">Carta</p>' in code, code
+    assert '<img src="ilustracion-7.jpg" alt=""/>' in code and '<p class="center">Carta</p>' in code, code
+    assert '<hr class="separador" id="separador-9"/>' in code and "<!--" not in code, code
+    assert old_style == "[Ilustración 7]\n\n[Separador 9]", old_style
     assert '<li class="lista-decimal">Uno</li>' in code and '<span class="nota">aclaración</span>' in code, code
     assert 'A &amp; B <ruby>' in code and "<h1>Título de PDF</h1>" in code, code
     assert back == text, back

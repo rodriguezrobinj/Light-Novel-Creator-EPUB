@@ -12848,7 +12848,26 @@ class TextEditor:
             loaded = "\n\n".join(line for _, line in page["lines"])
             versions, at = undo_versions(doc, self.sheet.dumped)
             old = history_entry(self.app.editor_history, loaded)
-            history_add(self.app.editor_history, versions, at, old[2] if old else versions[0], loaded)
+            keep = self.kept_objects(versions[at])
+            versions = [keep(v) for v in versions]
+            history_add(self.app.editor_history, versions, at, keep(old[2] if old else versions[0]), loaded)
+
+    def kept_objects(self, final):
+        """Para el historial: las ilustraciones y separadores que este guardar quita del libro (no están en final)
+        pasan a su imagen guardada ([Imagen nombre]) o a su texto. Con su número, al reabrir y deshacer su bloque ya
+        no estaba: salían como el texto «[Ilustración N]» y, aceptados así, como un párrafo con ese texto."""
+        blocks, stays = self.app.book.blocks, set(_history_lines(final))
+
+        def line(x):
+            m = convert.TOKEN.fullmatch(x)
+            if not m or x in stays or not 0 <= int(m[2]) < len(blocks):
+                return x
+            block = blocks[int(m[2])]
+            if block.image:  # shortcut: un separador dibujado vuelve como ilustración; si molesta, una marca propia
+                return f"[Imagen {self.sheet.store_picture(block.image)}]"
+            text = html.unescape(convert.TAGS.sub("", block.html)).strip()
+            return text if text and convert.SCENE_BREAK.fullmatch(text) else "* * *"
+        return lambda text: "\n\n".join(line(x) for x in _history_lines(text))
 
     def new_page(self):
         """Insertar → «Página nueva…» (créditos, nota del traductor): se guarda lo editado, se crea la página tras
