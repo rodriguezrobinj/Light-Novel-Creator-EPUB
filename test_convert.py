@@ -6386,6 +6386,46 @@ def test_window_code_view_with_changes_shown_no_error():
     assert not errors, errors
 
 
+def test_window_editor_title_format_reaches_the_epub():
+    """Cursiva o versalitas puestas en el título de un capítulo en el editor llegan al <h1> del EPUB, siguen al
+    reabrir el editor y vuelven con la revisión. La fila y el índice, sin formato. Antes se perdían al aceptar: la
+    fila solo guarda texto."""
+    import app
+    import editor as ed
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+    B = convert.Block
+    book = [B("heading", 1, "Capítulo 1: El viaje"), B("p", 1, "Uno."), B("heading", 2, "Capítulo 2: La vuelta"),
+            B("p", 2, "Dos.")]
+    root, window, editor = editor_on([convert.replace(b) for b in book], [0, 2])
+    doc = editor.sheet.document()
+    c = QTextCursor(doc.findBlockByNumber(0))
+    c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    c.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, 5)
+    italic = QTextCharFormat()
+    italic.setFontItalic(True)
+    c.mergeCharFormat(italic)
+    root.update()
+    editor.save()
+    root.update()
+    saved, row, edits = window.book.blocks[0].html, window.tree.set("0", "title"), [list(e) for e in window.edits]
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    again = ed.dump(editor.sheet.document()).split("\n\n")[0]
+    editor.win.done(0)
+    window.close()
+    replayed = convert.Book("Libro", "", b"", [convert.replace(b) for b in book], [0, 2])
+    app._replay(replayed, {"edits": edits})
+    out = TMP / "titulo con formato.epub"
+    convert.write_epub(replayed, [(0, "Capítulo 1: El viaje"), (2, "Capítulo 2: La vuelta")], out)
+    first = epub_file(out, "OEBPS/sec001.xhtml")
+    nav = epub_file(out, "OEBPS/nav.xhtml")
+    assert saved == "Capítulo 1: El <i>viaje</i>" and row == "Capítulo 1: El viaje", (saved, row)
+    assert again == "# Capítulo 1: El <i>viaje</i>", again
+    assert ["title", 0, "Capítulo 1: El <i>viaje</i>"] in edits, edits
+    assert replayed.blocks[0].html == saved, replayed.blocks[0]
+    assert "<i>viaje</i>" in first and "<i>" not in nav, (first, nav)
+    assert not convert.check_epub(out), convert.check_epub(out)
+
+
 def test_window_editor_undo_after_reopen_goes_to_the_change():
     """Tras aceptar y reabrir el editor, Ctrl+Z deshace el último cambio con el cursor en su párrafo, y en pocos
     pasos. Antes el historial repuesto rehacía la hoja entera en un paso: el cursor saltaba al final del capítulo
