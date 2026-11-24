@@ -979,7 +979,8 @@ def test_links_and_centered_paragraphs_reach_the_epub():
     assert htmls == [('Ver <a href="https://example.com/?a=1&amp;b=2">la <i>web</i></a> ahora.', ""),
                      ("Fin de la carta.", "center"),
                      ('&lt;a href="javascript:alert(1)"&gt;no&lt;/a&gt;', "")], htmls
-    assert again == lines, again
+    # el enlace javascript: quedó como texto, y así vuelve (escapado: no se toma por enlace al reabrir)
+    assert again == lines[:2] + ['&lt;a href="javascript:alert(1)">no&lt;/a>'], again
     assert 'href="https://example.com/?a=1&amp;b=2"' in text and 'class="center"' in text, text
     assert not problems, problems
 
@@ -3791,6 +3792,12 @@ def test_indexed_jpeg2000_illustration_is_not_noise():
     # La ventana lo abre con lo que el proceso de trabajo ya buscó: sin recorrer el PDF, igual de bien
     with convert.open_pdf(path, fixed) as again:
         assert again[1].get_pixmap().pixel(50, 50) == preview and again.jpx == fixed == [xref], (fixed, xref)
+    # Como lo abre la ventana (en memoria): igual de bien, y el archivo se puede mover o borrar con el libro abierto
+    moved = TMP / "jpx-paleta-movido.pdf"
+    with convert.open_pdf(path, fixed, memory=True) as held:
+        path.replace(moved)
+        assert held[1].get_pixmap().pixel(50, 50) == preview and held.jpx == [xref], held.jpx
+    moved.replace(path)
     picture = next(b.image for b in convert.analyze(path).blocks if b.kind == "image")
     pix = pymupdf.Pixmap(picture)
     middle = pix.pixel(pix.width // 2, pix.height // 2)[:3]
@@ -4510,6 +4517,43 @@ def test_section_text_keeps_note_of_a_title():
     convert.edit_section(book, 0, 2, text)
     assert text == "# Capítulo [Nota: una nota] 1\n\nUno.", text
     assert book.blocks[0].page == 3 and 'class="nota"' in book.blocks[0].html, book.blocks[0]
+
+
+def test_window_editor_tags_typed_as_text_stay_text():
+    """«<b>hola</b>», «<i>», «<center>» o un «# » al principio, escritos como texto, siguen siendo texto (el «# » no
+    hace un capítulo nuevo): en el libro, al reabrir, en
+    «Código HTML» y en un párrafo del libro que ya los traía como texto. Antes la línea del editor los tomaba por
+    etiquetas: salía negrita o se perdían. «<Habilidad>» y «&lt;» de texto, igual que antes."""
+    import app
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno &lt;b&gt;x&lt;/b&gt; y &amp;lt; z."),
+                                      B("p", 1, "Dos."), B("p", 1, "Tres.")], [0])
+    doc = editor.sheet.document()
+    shown = doc.findBlockByNumber(1).text()
+    QTextCursor(doc.findBlockByNumber(3)).insertText("# ")
+    c = QTextCursor(doc.findBlockByNumber(2))
+    c.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+    c.insertText("<center><b>hola</b> <i> <Habilidad> a<b ")
+    root.update()
+    dumped = ed.dump(doc)
+    back = ed.from_code(ed.to_code(dumped))
+    editor.save()
+    root.update()
+    saved = [b.html for b in window.book.blocks[1:]]
+    aligns = [b.align for b in window.book.blocks[1:]]
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    again = [editor.sheet.document().findBlockByNumber(n).text() for n in (1, 2, 3)]
+    kinds = [b.kind for b in window.book.blocks]
+    editor.win.done(0)
+    window.close()
+    assert shown == "Uno <b>x</b> y &lt; z.", shown
+    assert back == dumped, (back, dumped)
+    assert saved == ["Uno &lt;b&gt;x&lt;/b&gt; y &amp;lt; z.",
+                     "&lt;center&gt;&lt;b&gt;hola&lt;/b&gt; &lt;i&gt; &lt;Habilidad&gt; a&lt;b Dos.", "# Tres."], saved
+    assert aligns == ["", "", ""] and kinds == ["heading", "p", "p", "p"], (aligns, kinds)
+    assert again == ["Uno <b>x</b> y &lt; z.", "<center><b>hola</b> <i> <Habilidad> a<b Dos.", "# Tres."], again
 
 
 def test_edit_section_uncentered_paragraph_stays_uncentered():
@@ -5325,6 +5369,37 @@ def test_editor_table_and_chapter_link_reach_the_epub():
     assert "<td>Nivel</td><td>5</td>" in first and 'href="sec002.xhtml"' in first, first
     assert not convert.check_epub(out), convert.check_epub(out)
     assert '<a href="capitulo02.xhtml">Tercero</a>' in chapter1, chapter1
+
+
+def test_faithful_index_drops_links_to_removed_anchors():
+    """Un párrafo borrado en el editor se lleva su marca de página (<span epub:type="pagebreak" id="pg9">): su
+    entrada de la lista de páginas del nav se quita, y la de un subtítulo borrado también (y su lista, vacía). Antes quedaban como
+    enlaces rotos (check_epub, Eminence 7: 26). Las demás entradas siguen."""
+    src = sigil_epub(TMP / "Sigil paginas.epub")
+    with zipfile.ZipFile(src) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    nav = files["OEBPS/Text/nav.xhtml"].decode()
+    nav = nav.replace("</body>", '<nav epub:type="page-list" hidden=""><ol><li><a href="capitulo02.xhtml#pg9">9</a>'
+                                 '</li><li><a href="capitulo01.xhtml#encabezado">1</a></li></ol></nav>\n</body>')
+    files["OEBPS/Text/nav.xhtml"] = nav.encode()
+    with zipfile.ZipFile(src, "w") as z:
+        for n, data in files.items():
+            z.writestr(n, data, compress_type=zipfile.ZIP_STORED if n == "mimetype" else zipfile.ZIP_DEFLATED)
+    book = convert.analyze(src)
+    k = next(n for n, b in enumerate(book.blocks) if "Quinto" in b.html)
+    convert.edit_section(book, k, k + 1, "")
+    h = next(n for n, b in enumerate(book.blocks) if b.kind == "heading" and "Parte uno" in b.html)
+    convert.edit_section(book, h, h + 1, "")
+    out = TMP / "Sigil paginas (LNC).epub"
+    chapters = [(c, book.blocks[c].title) for c in book.candidates if book.blocks[c].kind == "heading"]
+    convert.write_epub(book, chapters, out, style=convert.ORIGINAL, typography=False, contents=False,
+                       separator="Imagen del original")
+    written = epub_file(out, "OEBPS/Text/nav.xhtml")
+    problems = [p for p in convert.check_epub(out) if "enlace roto" in p]
+    assert not problems, problems
+    assert not re.search(r"<ol>\s*</ol>", written), written  # sin entradas, sin su lista
+    assert "#pg9" not in written and "#p1" not in written, written
+    assert 'href="capitulo01.xhtml#encabezado">1<' in written and 'href="capitulo02.xhtml">Capítulo 2' in written, written
 
 
 def test_editor_sheet_links_center_levels_case_and_search():
@@ -6653,6 +6728,65 @@ def test_window_editor_contents_lines_removed_are_explained():
         window.close()
     assert heads == ["heading", "p", "heading", "p"], heads
     assert told and "solo se renombran" in told[0], told
+
+
+def test_window_editor_contents_rename_reaches_the_chapter_page():
+    """Un título renombrado en «Contenido» sale así en la hoja de su capítulo (ya abierta o no), como un paso de
+    deshacer de esa hoja; y uno renombrado en su capítulo sale así en «Contenido». Gana el último nombre escrito.
+    Antes el capítulo seguía con el nombre viejo hasta aceptar. Lo cargado no cambia: el historial sigue al reabrir."""
+    import app
+    import editor as ed
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("heading", 1, "Capítulo 2"),
+                                      B("p", 1, "Dos.")], [0, 2])
+
+    def retitle(n, text):
+        c = QTextCursor(editor.sheet.document().findBlockByNumber(n))
+        c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        c.insertText(text)
+        root.update()
+
+    def lines():
+        return ed.dump(editor.sheet.document()).split("\n\n")
+
+    retitle(0, "Capítulo 1: el viaje")  # en su capítulo
+    editor.open_section(-1, -1)
+    root.update()
+    toc = lines()
+    retitle(1, "Capítulo 2: la vuelta")  # en «Contenido»
+    retitle(0, "Capítulo 1: la ida")
+    editor.open_section(*window.section_bounds(2))
+    root.update()
+    second, second_undo = lines(), editor.sheet.document().isUndoAvailable()
+    editor.sheet.undo()
+    root.update()
+    undone = lines()
+    editor.sheet.redo()
+    editor.open_section(*window.section_bounds(0))
+    root.update()
+    first = lines()
+    c = QTextCursor(editor.sheet.document().findBlockByNumber(0))  # con cursiva: el título de la fila va sin ella
+    c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    c.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor, 3)
+    italic = QTextCharFormat()
+    italic.setFontItalic(True)
+    c.mergeCharFormat(italic)
+    root.update()
+    editor.save()
+    root.update()
+    titles = [window.tree.set("0", "title"), window.tree.set("2", "title")]
+    editor = app.TextEditor(window, "2", *window.section_bounds(2))
+    root.update()
+    again, again_undo = ed.dump(editor.sheet.document()).split("\n\n"), editor.sheet.document().isUndoAvailable()
+    editor.win.done(0)
+    window.close()
+    assert toc[0] == "# Capítulo 1: el viaje", toc
+    assert second[0] == "# Capítulo 2: la vuelta" and second_undo, second
+    assert undone[0] == "# Capítulo 2", undone
+    assert first[0] == "# Capítulo 1: la ida", first
+    assert titles == ["Capítulo 1: la ida", "Capítulo 2: la vuelta"], titles
+    assert again[0] == "# Capítulo 2: la vuelta" and again_undo, again
 
 
 def test_window_editor_backspace_and_delete_next_to_a_picture():
