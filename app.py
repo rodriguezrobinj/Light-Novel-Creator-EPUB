@@ -1158,8 +1158,8 @@ def _migrate_review(state, book):
                 start, end = int(edit[0]), int(edit[1])
                 if any(start < s + n and end > s for s, n in where):
                     raise LookupError
-                edits.append([new(start, where), new(end, where), edit[2]])
-                convert.edit_section(work, start, end, str(edit[2]), _images())
+                edits.append([new(start, where), new(end, where), *edit[2:4]])
+                convert.edit_section(work, start, end, str(edit[2]), _images(), exact=len(edit) > 3)
         where = spans()
         rows = {}
         for item, row in state["rows"].items():
@@ -1196,7 +1196,7 @@ def _migrate_dropped(state, book):
             elif edit[0] == "move" or int(edit[0]) <= max(marks):
                 raise LookupError  # mover, o reescribir antes de ellos (cambia dónde quedan): ya no se puede contar
             else:
-                edits.append([new(int(edit[0])), new(int(edit[1])), edit[2]])
+                edits.append([new(int(edit[0])), new(int(edit[1])), *edit[2:4]])
         rows = {str(new(int(item))): row for item, row in state["rows"].items() if int(item) not in marks}
         at = state.get("editor_at")
         at = new(at) if isinstance(at, int) and at not in marks else None
@@ -1647,8 +1647,9 @@ def _replay(book, state):
                 break
         except (TypeError, ValueError, IndexError):
             break  # el .json se puede editar a mano
-        convert.edit_section(book, start, end, text, _images())
-        done.append([start, end, text])
+        exact = len(edit) > 3  # de ahora: «<center>» escrito; una vieja reconoce el centrado sin él
+        convert.edit_section(book, start, end, text, _images(), exact=exact)
+        done.append([start, end, text, *edit[3:4]])
     return done
 
 
@@ -4742,8 +4743,9 @@ class App:
             convert.set_shell(self.book, k, shell)
             self.edits.append(["head", k, *shell])
         for n, edit in enumerate(edits):
-            mapping = convert.edit_section(self.book, *edit, _images())
-            self.edits.append(list(edit))
+            # de ahora: un párrafo que deja de estar centrado no vuelve a estarlo (EXACT, en la revisión también)
+            mapping = convert.edit_section(self.book, *edit[:3], _images(), exact=True)
+            self.edits.append([*edit[:3], EXACT])
             rows = {str(mapping[int(k)]): v for k, v in rows.items() if int(k) in mapping}
             if kinds and kinds[n]:  # títulos escritos en el editor: con el tipo elegido en la cinta
                 count = sum(1 for line in edit[2].splitlines() if line.strip())
@@ -8292,6 +8294,7 @@ WEB_TAB = 2  # «Hoja web» en el panel derecho del editor, tras «Original» y 
 
 
 PAGE_PIXELS = 40_000_000  # lo más grande que dibuja el panel del editor: ~160 MB en RGBA
+EXACT = "exacto"  # cuarto valor de una edición de la revisión: escrita con «<center>» (convert.edit_section exact)
 HISTORY_STEPS = 100  # pasos de deshacer (y de rehacer) del editor que se guardan por capítulo
 # shortcut: se guardan los últimos 400 capítulos editados del libro; si alguien necesita más, subirlo
 HISTORY_KEPT = 400
@@ -11953,7 +11956,7 @@ class TextEditor:
         draft = copy.copy(book)  # el libro con este capítulo como está en la hoja; el de la ventana no se toca
         draft.blocks, draft.candidates = list(book.blocks), list(book.candidates)
         try:
-            convert.edit_section(draft, start, end, text, editor.IMAGES)
+            convert.edit_section(draft, start, end, text, editor.IMAGES, exact=True)
             stop = end + len(draft.blocks) - len(book.blocks)
             # Con un EPUB, también el archivo de sus notas (notas.xhtml): sin él, la vista previa quitaba el enlace de
             # cada llamada y la nota emergente no salía
@@ -12484,8 +12487,9 @@ class TextEditor:
 
     def source_block(self):
         """Bloque del libro del párrafo del cursor (o de su ilustración); sin ninguno, el título de la sección."""
-        k = self.sheet.current_source()
-        return k if k is not None and k < len(self.app.book.blocks) else int(self.item)
+        k, blocks = self.sheet.current_source(), self.app.book.blocks
+        # la fila del editor, dentro del libro: tras Aceptar con todo quitado, el libro puede tener menos bloques
+        return k if k is not None and k < len(blocks) else min(int(self.item), len(blocks) - 1)
 
     def source_key(self):
         """(bloque del cursor, bloques unidos a su párrafo en la misma página, PDF): lo que dibuja el panel. Los
@@ -12838,6 +12842,7 @@ class TextEditor:
         de atrás adelante para edit_section, y {fila: título} de los títulos solo renombrados (conservan su
         tipo y su ✓)."""
         edits, titles, kinds, retype = [], {}, {}, {}
+        self.toc_ignored = False  # líneas añadidas o quitadas en «Contenido»: no tocan el libro (save lo dice)
         for (start, _), page in self.pages.items():
             old = [line for _, line in page["lines"]]
             source = [k for k, _ in page["lines"]]  # bloque de cada línea cargada (en «Contenido», salteados)
@@ -12858,6 +12863,7 @@ class TextEditor:
                     if pairs[j1][1] in (ON, OFF):
                         retype[k] = pairs[j1][1]
                 elif start < 0:  # en «Contenido» solo se renombra: añadir o quitar líneas no toca el libro
+                    self.toc_ignored = True
                     continue
                 else:
                     # una ilustración movida (cortar y pegar) cae en otro tramo que el suyo, y una copiada sale dos
@@ -12894,13 +12900,20 @@ class TextEditor:
         if self.code.isVisible() and not self.take_shell():
             return
         self.keep_history()
+        self.dirty_toc = False
         if self.dirty():
             self.saved_paragraphs = self.changed_count()
             edits, titles, kinds, retype = self.changes()
             LOG.info("Editor: guarda %d cambios", len(edits))
+            self.dirty_toc = self.toc_ignored
             self.app.apply_edits(edits, self.item, titles, follow=True, kinds=kinds, retype=retype,
                                  heads=[(start, shell) for (start, _), shell in self.shells.items()])
         self.win.done(0)
+        if self.dirty_toc:  # se veía como quitado o añadido y se descartaba sin decir nada; tras cerrar el editor: con
+            # el aviso abierto en medio de Aceptar, sus temporizadores corrían con el libro ya cambiado
+            messagebox.showinfo("Contenido", "En «Contenido» solo se renombran los capítulos: las líneas añadidas o "
+                                "quitadas allí no cambian el libro. Para quitar un capítulo, cambia el tipo de su fila "
+                                "en la lista.")
         if then:
             then()
 

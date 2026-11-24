@@ -1493,8 +1493,8 @@ def _line(b, k):
         prefix = ALIGN_PREFIX.get(b.align, "")
         text = NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>")
         return prefix + html.unescape(text)
-    if b.kind == "heading":
-        return "# " + html.unescape(b.html)
+    if b.kind == "heading":  # su nota, como en un párrafo: salía como <span class="nota"> y se rehacía al guardar
+        return "# " + html.unescape(NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>"))
     if is_rule(b):
         return "<hr/>"
     return f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]"
@@ -1540,11 +1540,12 @@ def _inline(text):
     return ICON_MARK.sub(r"<\1>", out).replace("<sc>", SC_OPEN).replace("</sc>", SC_CLOSE)
 
 
-def edit_section(book, start, end, text, folder=None):
+def edit_section(book, start, end, text, folder=None, exact=False):
     """Cambia los bloques start..end-1 por el texto editado (formato de section_text). Las marcas
     recuperan su ilustración o separador; "# Título" crea un título; una línea de solo símbolos
     ("* * *") crea un separador; "[Imagen nombre]", una ilustración nueva con ese archivo de folder. Ajusta book.candidates y devuelve {índice viejo: índice nuevo} de los
-    bloques que siguen en el libro (los párrafos se sustituyen: no están)."""
+    bloques que siguen en el libro (los párrafos se sustituyen: no están). exact: el texto es de ahora (el editor
+    escribe «<center>»); sin él, una revisión vieja: un párrafo centrado sin «<center>» sigue siendo el mismo."""
     old = book.blocks
     page = old[start - 1].page if start else 1
     # Un párrafo o título sin cambios sigue igual (página, recuadro, centrado); lo cambiado o nuevo toma
@@ -1555,7 +1556,7 @@ def edit_section(book, start, end, text, folder=None):
     for k in range(start, end):
         if old[k].kind in ("p", "heading"):
             line = _line(old[k], k).strip()
-            for key in dict.fromkeys((line, line.removeprefix(CENTER))):  # edición de antes de <center>
+            for key in dict.fromkeys((line, line if exact else line.removeprefix(CENTER))):  # vieja: sin <center>
                 same.setdefault(key, []).append(old[k])
     lines = [line for line in (line.strip() for line in text.splitlines()) if line]
     # Párrafo cambiado en su sitio, uno por uno (errata, traducción): sigue siendo el mismo del PDF y conserva
@@ -3143,6 +3144,8 @@ def analyze(pdf_path, progress=None):
     with doc:
         if doc.needs_pass:
             raise BookError(f"El {kind} está protegido con contraseña.")
+        if not doc.page_count:  # cortado (descarga a medias): MuPDF lo repara sin páginas; no es un escaneado
+            raise BookError(f"No se pudo abrir el {kind}: está dañado o incompleto (¿una descarga a medias?).")
         n = doc.page_count
         pages, page_infos = [], []  # page_infos: get_image_info de cada página, para no pedirlo dos veces
         for i, page in enumerate(doc):
