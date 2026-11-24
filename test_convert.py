@@ -6386,6 +6386,39 @@ def test_window_code_view_with_changes_shown_no_error():
     assert not errors, errors
 
 
+def test_window_editor_undo_after_reopen_goes_to_the_change():
+    """Tras aceptar y reabrir el editor, Ctrl+Z deshace el último cambio con el cursor en su párrafo, y en pocos
+    pasos. Antes el historial repuesto rehacía la hoja entera en un paso: el cursor saltaba al final del capítulo
+    (en el .exe, la página 111 por un cambio de la 13); con un cambio lejos del cursor, no se veía nada."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1")] + [B("p", 1, f"Párrafo {n}.") for n in range(60)]
+    root, window, editor = editor_on(blocks, [0])
+    doc = editor.sheet.document()
+    QTextCursor(doc.findBlockByNumber(3)).insertText("hola ")
+    root.update()
+    QTextCursor(doc.findBlockByNumber(5)).insertText("adiós ")
+    root.update()
+    editor.save()
+    root.update()
+    editor = app.TextEditor(window, "0", *window.section_bounds(0))
+    root.update()
+    doc = editor.sheet.document()
+    steps = doc.availableUndoSteps()
+    at = []
+    for _ in range(2):
+        editor.sheet.undo()
+        root.update()
+        cursor = editor.sheet.textCursor()
+        at.append((cursor.blockNumber(), cursor.block().text()))
+    editor.win.done(0)
+    window.close()
+    assert steps < 20, steps
+    assert [n for n, _ in at] == [5, 3], at
+    assert at[0][1] == "Párrafo 4." and at[1][1] == "Párrafo 2.", at
+
+
 def test_window_editor_undo_survives_restart():
     """Lo aceptado en el editor se deshace también tras cerrar la aplicación: el historial va en la revisión. Un
     <hr> escrito vuelve como «<hr/>» (antes «[Separador N]», y el historial ya no casaba con el capítulo)."""

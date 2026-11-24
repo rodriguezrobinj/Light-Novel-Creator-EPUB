@@ -2693,6 +2693,32 @@ class Sheet(QTextEdit):
         sc, mixed = QFont.Capitalization.SmallCaps, QFont.Capitalization.MixedCase
         self._toggle(lambda f: f.fontCapitalization() == sc, lambda f, on: f.setFontCapitalization(sc if on else mixed))
 
+    def undo(self):
+        self._step(super().undo)
+
+    def redo(self):
+        self._step(super().redo)
+
+    def _step(self, run):
+        """Deshacer o rehacer, y el cursor a lo que cambió si quedó fuera: Qt no lo mueve con un paso de set_text
+        (el historial de otras veces, la vista de código), y el primer Ctrl+Z tras reabrir el editor cambiaba
+        un párrafo sin que se viera."""
+        spans, doc = [], self.document()
+
+        def seen(pos, removed, added):
+            spans.append((pos, max(pos, pos + added - 1)))  # sin el salto de párrafo del final
+        doc.contentsChange.connect(seen)
+        try:
+            run()
+        finally:
+            doc.contentsChange.disconnect(seen)
+        at = self.textCursor().position()
+        if spans and not any(a <= at <= b for a, b in spans):
+            cursor = self.textCursor()
+            cursor.setPosition(min(max(b for _, b in spans), doc.characterCount() - 1))
+            self.setTextCursor(cursor)
+            self.ensureCursorVisible()
+
     def set_text(self, text, sources=None, levels=None):
         """Pone text (como dump) en la hoja, en un solo deshacer: lo que vuelve de la vista de código. Un párrafo
         igual que uno de antes sigue siendo de su bloque (su página) y, si es el cargado, recuerda su línea.
@@ -2706,14 +2732,17 @@ class Sheet(QTextEdit):
             return False
         if sources is not None and [line.strip() for _, line in sources if line.strip()] != [x.strip() for x in lines]:
             sources = None  # no es ese texto
+        src = [x for x in sources if x[1].strip()] if sources is not None else None
         # Solo los párrafos entre el primero y el último que cambian: rehacer la hoja entera tardaba medio
-        # segundo en un capítulo largo, y la hoja web y el código la ponen al día en cada tecla. Con sources, entera
+        # segundo en un capítulo largo, y la hoja web y el código la ponen al día en cada tecla. Con sources, los
+        # de fuera solo cambian de bloque si no es el suyo: rehecha entera, el primer Ctrl+Z tras reabrir el editor
+        # llevaba el cursor al final del capítulo
         n, a, i = len(old), 0, 0
-        while sources is None and a < n and lines[i:i + len(old[a])] == old[a]:
+        while a < n and lines[i:i + len(old[a])] == old[a]:
             i += len(old[a])
             a += 1
         b, j = n, len(lines)
-        while sources is None and b > a and j - len(old[b - 1]) >= i and lines[j - len(old[b - 1]):j] == old[b - 1]:
+        while b > a and j - len(old[b - 1]) >= i and lines[j - len(old[b - 1]):j] == old[b - 1]:
             j -= len(old[b - 1])
             b -= 1
 
@@ -2739,7 +2768,7 @@ class Sheet(QTextEdit):
             if block.blockFormat().property(LEVEL):
                 levels[source_of(block)] = block.blockFormat().property(LEVEL)
             end, block = block.position() + block.length() - 1, block.next()
-        lines = lines[i:j]
+        total, lines = len(lines), lines[i:j]
         pairs = []
         for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, [line for _, line in before], lines,
                                                           autojunk=False).get_opcodes():
@@ -2748,8 +2777,8 @@ class Sheet(QTextEdit):
                 k = before[i1 + n][0] if same else last
                 pairs.append((k, lines[j1 + n]))
                 last = k if k is not None else last
-        if sources is not None:
-            pairs = [(k, line) for (k, _), line in zip([x for x in sources if x[1].strip()], lines)]
+        if src is not None:
+            pairs = [(k, line) for (k, _), line in zip(src[i:j], lines)]
             levels = dict(levels or {})
         # y las de lo aceptado otras veces (replay_history): al deshacer hasta ellas se comparan con el principio
         loaded = {line for _, line in self.origins.get(doc, [])} | set(self.look.firsts)
@@ -2769,6 +2798,22 @@ class Sheet(QTextEdit):
                 cursor.setPosition(block.position())
                 cursor.setBlockFormat(f)
             block = block.next()
+        if src is not None:  # los de fuera del tramo, del bloque de sources
+            outside, at = [], 0
+            for g in range(a):
+                outside.append((doc.findBlockByNumber(g), src[at][0]))
+                at += len(old[g])
+            block, at = doc.lastBlock(), total
+            for g in range(n - 1, b - 1, -1):
+                at -= len(old[g])
+                outside.append((block, src[at][0]))
+                block = block.previous()
+            for block, k in outside:
+                f = block.blockFormat()
+                if f.property(SOURCE) != k:
+                    f.clearProperty(SOURCE) if k is None else f.setProperty(SOURCE, k)
+                    cursor.setPosition(block.position())
+                    cursor.setBlockFormat(f)
         cursor.endEditBlock()
         return True
 
