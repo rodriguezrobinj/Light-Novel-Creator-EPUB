@@ -161,8 +161,8 @@ def test_series_and_volume_from_file_name():
 
 
 def test_analyze_unreadable_files_say_why_in_spanish():
-    """Un PDF vacío, un texto renombrado y un zip que no es EPUB dicen la causa en español, sin el inglés de MuPDF o
-    zipfile («Failed to open file… as type pdf»)."""
+    """Un PDF vacío, un texto renombrado, un PDF cortado (descarga a medias, decía «parece escaneado») y un zip que no
+    es EPUB dicen la causa en español, sin el inglés de MuPDF o zipfile («Failed to open file… as type pdf»)."""
     import zipfile
     folder = TMP / "ilegibles"
     folder.mkdir(exist_ok=True)
@@ -171,8 +171,13 @@ def test_analyze_unreadable_files_say_why_in_spanish():
     (folder / "texto.epub").write_text("no soy un zip", encoding="utf-8")
     with zipfile.ZipFile(folder / "zip.epub", "w") as z:
         z.writestr("hola.txt", "hola")
+    whole = pymupdf.open()
+    for n in range(3):
+        add_page(whole, n + 1, [(72, 100, f"Pagina {n} con texto", 11, "helv")])
+    data = whole.tobytes(use_objstms=1, compression_effort=0)  # como uno real: las páginas, al final
+    (folder / "mitad.pdf").write_bytes(data[: len(data) * 3 // 10])
     said = {}
-    for name in ("vacio.pdf", "texto.pdf", "texto.epub", "zip.epub"):
+    for name in ("vacio.pdf", "texto.pdf", "texto.epub", "zip.epub", "mitad.pdf"):
         try:
             convert.analyze(str(folder / name))
         except convert.BookError as e:
@@ -180,7 +185,8 @@ def test_analyze_unreadable_files_say_why_in_spanish():
     assert said == {"vacio.pdf": "No se pudo abrir el PDF: el archivo está vacío.",
                     "texto.pdf": "No se pudo abrir el PDF: no es un PDF o está dañado.",
                     "texto.epub": "No se pudo abrir el EPUB: no es un EPUB o está dañado.",
-                    "zip.epub": "El EPUB está dañado: no se puede leer su lista de archivos."}, said
+                    "zip.epub": "El EPUB está dañado: no se puede leer su lista de archivos.",
+                    "mitad.pdf": "No se pudo abrir el PDF: está dañado o incompleto (¿una descarga a medias?)."}, said
 
 
 def test_analyze_titles_volume_after_series():
@@ -4494,6 +4500,44 @@ def test_edit_section_moves_images_and_adds_titles():
     assert book.candidates == [0, 7], book.candidates
 
 
+def test_section_text_keeps_note_of_a_title():
+    """Un título con nota sale en el editor con «[Nota: …]», como un párrafo (salía el <span class="nota"> tal cual),
+    y guardarlo sin tocar no lo rehace: sigue en su página."""
+    B = convert.Block
+    book = convert.Book("Libro", "", b"", [B("heading", 3, 'Capítulo <span class="nota">una nota</span> 1'),
+                                           B("p", 3, "Uno.")], [0])
+    text = convert.section_text(book, 0, 2)
+    convert.edit_section(book, 0, 2, text)
+    assert text == "# Capítulo [Nota: una nota] 1\n\nUno.", text
+    assert book.blocks[0].page == 3 and 'class="nota"' in book.blocks[0].html, book.blocks[0]
+
+
+def test_edit_section_uncentered_paragraph_stays_uncentered():
+    """Un párrafo centrado que se alinea a la izquierda en el editor se guarda así, también al reabrir el libro
+    (la revisión): volvía centrado, porque casaba con el bloque de antes por su texto sin «<center>» (lo que solo
+    vale para una revisión de antes de «<center>»)."""
+    import app
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Cap"), B("p", 1, "Hola mundo.", align="center"),
+                                      B("p", 1, "Otro.")], [0])
+    from PySide6.QtGui import QTextCursor
+    editor.sheet.setTextCursor(QTextCursor(editor.sheet.document().findBlockByNumber(1)))
+    editor.sheet.set_align(None)
+    editor.save()
+    root.update()
+    saved = window.book.blocks[1].align
+    fresh = convert.Book("Libro", "", b"", [B("heading", 1, "Cap"), B("p", 1, "Hola mundo.", align="center"),
+                                            B("p", 1, "Otro.")], [0])
+    app._replay(fresh, {"edits": window.edits})
+    window.close()
+    assert (saved, fresh.blocks[1].align) == ("", ""), (saved, fresh.blocks[1].align)
+    book = convert.Book("Libro", "", b"", [B("heading", 1, "Cap"), B("p", 4, "Hola mundo.", align="center"),
+                                           B("p", 4, "Otro.")], [0])
+    text = convert.section_text(book, 0, 3)
+    convert.edit_section(book, 0, 3, text.replace("<center>", ""), exact=True)  # del editor de ahora
+    assert book.blocks[1].align == "", book.blocks[1]
+
+
 def test_edit_section_adds_new_pictures():
     """«[Imagen nombre]» del editor (imagen pegada o de un archivo) es una ilustración nueva con ese archivo de la
     carpeta, y sale en el EPUB. Sin el archivo, una descartada en su sitio: los cambios de después cuadran."""
@@ -5906,6 +5950,7 @@ def sheet_with(lines):
 def test_sheet_regex_find_and_replace_with_groups():
     """Con expresión regular, buscar casa el patrón y reemplazar admite grupos; una expresión que casa vacío no
     se queda en un bucle."""
+    from PySide6.QtGui import QTextCursor
     sheet = sheet_with(["Tenía 12 años y <i>3</i> gatos.", "Nada aquí."])
     found = sheet.find_next("[0-9]+", regex=True) and sheet.textCursor().selectedText()
     replaced = sheet.replace_current("([0-9]+)", r"«\1»", regex=True)
@@ -5913,6 +5958,10 @@ def test_sheet_regex_find_and_replace_with_groups():
     empty = sheet.replace_all("x*", "y", regex=True)
     text = sheet.toPlainText()
     plain = sheet.replace_all("[0-9]", "N")  # sin regex, los corchetes son texto
+    # una que puede casar vacío halla lo que no lo es: «a*» en «Nada» no se quedaba en la vacía del principio
+    sheet.moveCursor(QTextCursor.MoveOperation.Start)
+    vowels = sheet.find_next("a*", regex=True) and sheet.textCursor().selectedText()
+    assert vowels == "a", vowels
     assert found == "12" and replaced, (found, replaced)
     assert count == 1 and empty == 0 and plain == 0, (count, empty, plain)
     assert text.startswith("Tenía «12» años y 3 perros."), text
@@ -6574,6 +6623,102 @@ def test_window_editor_drawn_separator_moved_to_another_chapter():
     assert shown and shown[0].startswith("Separador "), shown
     assert kinds == [("heading", False), ("p", False), ("p", False), ("heading", False), ("p", False),
                      ("break", True)], kinds
+
+
+def test_window_editor_contents_lines_removed_are_explained():
+    """En «Contenido» (la lista de capítulos del editor) quitar una línea sale como cambio, pero no quita el capítulo:
+    al aceptar se dice. Antes se descartaba sin decir nada."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("heading", 1, "Capítulo 2"),
+                                      B("p", 1, "Dos.")], [0, 2])
+    told, original = [], app.messagebox.showinfo
+    app.messagebox.showinfo = lambda title, message, **_: told.append(message)
+    try:
+        editor.open_section(-1, -1)
+        root.update()
+        doc = editor.sheet.document()
+        c = QTextCursor(doc.findBlockByNumber(1))
+        c.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        c.movePosition(QTextCursor.MoveOperation.PreviousBlock, QTextCursor.MoveMode.KeepAnchor)
+        c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        c.removeSelectedText()
+        root.update()
+        editor.save()
+        root.update()
+        heads = [b.kind for b in window.book.blocks]
+    finally:
+        app.messagebox.showinfo = original
+        window.close()
+    assert heads == ["heading", "p", "heading", "p"], heads
+    assert told and "solo se renombran" in told[0], told
+
+
+def test_window_editor_backspace_and_delete_next_to_a_picture():
+    """Retroceso al principio del párrafo de tras una ilustración la quita entera (Supr al final del de antes de un
+    separador, igual), en un deshacer. Antes el párrafo se unía a ella: el texto salía centrado con la imagen y
+    «Mostrar cambios» lo tachaba como quitado en el párrafo siguiente. Desde la ilustración hacia el texto, solo se
+    mueve el cursor."""
+    import editor as ed
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), False)
+    pix.clear_with(90)
+    png = pix.tobytes("png")
+    B = convert.Block
+    book = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("image", 1, image=png), B("p", 1, "Dos."),
+            B("break", 1, "", image=png), B("p", 1, "Tres.")]
+    root, window, editor = editor_on(book, [0])
+    editor.show_changes_action.setChecked(True)
+    root.update()
+    sheet, doc = editor.sheet, editor.sheet.document()
+    loaded = ed.dump(doc)
+
+    def key(n, k, end=False):
+        c = QTextCursor(doc.findBlockByNumber(n))
+        if end:
+            c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        sheet.setTextCursor(c)
+        QTest.keyClick(sheet, k)
+        root.update()
+    key(3, Qt.Key.Key_Backspace)  # tras la ilustración
+    after_back = ed.dump(doc)
+    root.update()
+    sheet.look.rehighlight()
+    marks = {}
+    block = doc.firstBlock()
+    while block.isValid():
+        data = block.userData()
+        if isinstance(data, ed.Changes) and (data.above or data.gone):
+            marks[block.text()] = [a[3] for a in data.above] + [g[3] for g in data.gone]
+        block = block.next()
+    sheet.undo()
+    root.update()
+    undone = ed.dump(doc)
+    key(3, Qt.Key.Key_Delete, end=True)  # antes del separador
+    after_delete = ed.dump(doc)
+    sheet.undo()
+    key(2, Qt.Key.Key_Backspace)  # desde la ilustración: al final de «Uno.», sin cambiar nada
+    moved = (ed.dump(doc), sheet.textCursor().block().text(), sheet.textCursor().atBlockEnd())
+    # tras la imagen, Retroceso la borra y queda su párrafo vacío; lo escrito en él es nuevo, no la ilustración
+    # cambiada (se tachaba el texto «[Ilustración 2]» y no se contaba como quitada)
+    key(2, Qt.Key.Key_Backspace, end=True)
+    QTest.keyClicks(sheet, "hola")
+    root.update()
+    root.update()
+    sheet.look.rehighlight()
+    data = doc.findBlockByNumber(2).userData()
+    typed = ([a[3] for a in data.above], [g[3] for g in data.gone]) if isinstance(data, ed.Changes) else None
+    editor.win.done(0)
+    window.close()
+    assert after_back == "# Capítulo 1\n\nUno.\n\nDos.\n\n[Separador 4]\n\nTres.", after_back
+    assert marks == {"Dos.": ["[Ilustración]"]}, marks
+    assert undone == loaded, undone
+    assert after_delete == "# Capítulo 1\n\nUno.\n\n[Ilustración 2]\n\nDos.\n\nTres.", after_delete
+    assert moved == (loaded, "Uno.", True), moved
+    assert typed == (["[Ilustración]"], []), typed
 
 
 def test_window_editor_whole_removals_in_every_view():
@@ -7239,6 +7384,7 @@ def test_editor_code_view_round_trip_and_errors():
     # un <p class="center"> de un EPUB (Block.opening) sigue siéndolo al tocar otra línea del código; era «<center>»
     epub = ['<p class="center">Carta', "Otra."]
     touched = editor.from_code(editor.to_code("\n\n".join(epub)).replace("Otra.", "Otra más."), epub)
+    edited = editor.from_code(editor.to_code("\n\n".join(epub)).replace("Carta", "Carta nueva"), epub)  # él mismo
     errors = []
     for bad in ("<p>Mal <i>cerrado</p>", '<p class="x">Sin cierre'):
         try:
@@ -7252,6 +7398,7 @@ def test_editor_code_view_round_trip_and_errors():
     assert '<hr class="separador" id="separador-9"/>' in code and "<!--" not in code, code
     assert old_style == "[Ilustración 7]\n\n[Separador 9]", old_style
     assert touched == '<p class="center">Carta\n\nOtra más.', touched
+    assert edited == '<p class="center">Carta nueva\n\nOtra.', edited
     assert '<li class="lista-decimal">Uno</li>' in code and '<span class="nota">aclaración</span>' in code, code
     assert 'A &amp; B <ruby>' in code and "<h1>Título de PDF</h1>" in code, code
     assert back == text, back

@@ -409,9 +409,11 @@ def from_code(code, known=()):
     línea de código que es la de una de ellas vuelve a ser esa tal cual. <p class="center"> es tanto el párrafo
     centrado de la app («<center>») como el elemento de un EPUB: al tocar otra línea del código, el del EPUB salía
     cambiado (y perdía su elemento)."""
-    same = {}
+    same, kept = {}, set()  # kept: etiquetas de apertura del libro (EPUB): una línea tocada con una sigue con ella
     for old in known:
         same.setdefault(to_code(old), old)
+        if m := convert.OPENING.match(old):
+            kept.add(m[0])
     lines = []
     for n, raw in enumerate(code.splitlines(), 1):
         line = raw.strip()
@@ -444,7 +446,7 @@ def from_code(code, known=()):
         text = html.unescape(convert.NOTE.sub(r"[Nota: \1]", inner).replace(convert.SC_OPEN, "<sc>")
                              .replace(convert.SC_CLOSE, "</sc>"))
         opening = f"<{tag}{attrs}>"
-        prefix = ("" if opening == "<p>" else "# " if opening == "<h1>" else
+        prefix = (opening if opening in kept else "" if opening == "<p>" else "# " if opening == "<h1>" else
                   convert.ALIGN_PREFIX.get(next((a for a, o in CODE_CLASSES.items() if o == opening), ""), "") or opening)
         lines.append(prefix + text.strip())
     return "\n\n".join(lines)
@@ -1536,6 +1538,9 @@ def compared(block, firsts=None):
     """Línea con que «Mostrar cambios» compara el párrafo: la del principio si se aceptaron cambios otras veces
     (firsts: {línea: la del principio, None si el párrafo es nuevo desde entonces}), si no la cargada."""
     original = original_of(block)
+    if original is not None and (convert.TOKEN.fullmatch(original.strip()) or convert.PICTURE.fullmatch(original.strip())) \
+            and not objects_of(block):
+        return None  # era una ilustración o un separador y ya no la tiene: lo escrito en su sitio es nuevo
     return firsts.get(original, original) if firsts and original is not None else original
 
 
@@ -1561,6 +1566,12 @@ def deleted_paragraphs(doc, baseline, firsts=None):
     block = doc.firstBlock()
     while block.isValid():
         line = compared(block, firsts)
+        parts = [x for x in _lines(block) if x.strip()] if objects_of(block) else []
+        if len(parts) > 1:  # objeto y texto en un párrafo (pegados): cada línea con la suya, como los guarda dump
+            for part in parts[:-1]:
+                keys.append(_same(part))
+                blocks.append(block)
+            line = parts[-1]
         # uno nuevo no casa con nada; uno vaciado tampoco (recuerda su original, pero no se guarda: está quitado)
         empty = not block.text().strip() and bool(line and line.strip())
         keys.append(_same(line) if line is not None and not empty else ("nuevo", len(blocks)))
@@ -3334,7 +3345,12 @@ class Sheet(QTextEdit):
                                   QRegularExpression.PatternOption(0) if case
                                   else QRegularExpression.PatternOption.CaseInsensitiveOption)
         found = self.document().find(expr, cursor, self._flags(backward))
-        return QTextCursor() if found.isNull() or not found.hasSelection() else found
+        while not found.isNull() and not found.hasSelection():  # vacía: la siguiente («a*» en «baaa» halla «aaa»)
+            step = QTextCursor(found)
+            if not step.movePosition(QTextCursor.MoveOperation.Left if backward else QTextCursor.MoveOperation.Right):
+                return QTextCursor()
+            found = self.document().find(expr, step, self._flags(backward))
+        return QTextCursor() if found.isNull() else found
 
     @staticmethod
     def _replacement(term, new, selected, case=False, regex=False):
@@ -3713,6 +3729,8 @@ class Sheet(QTextEdit):
         typed = event.text()
         symbols = {Qt.Key.Key_Minus: lambda: self.insert_symbol("—"), Qt.Key.Key_Period: lambda: self.insert_symbol("…"),
                    Qt.Key.Key_Q: lambda: self.wrap("«", "»")}
+        if not mods and key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and self.object_key(key):
+            return
         if ctrl and alt and key == Qt.Key.Key_K:  # como Word en español: Ctrl+K ya es cursiva
             self.command.emit("link")
         elif ctrl and alt and key in symbols and not (typed and typed.isprintable()):
@@ -3747,6 +3765,39 @@ class Sheet(QTextEdit):
             self.split_here()
         else:
             super().keyPressEvent(event)
+
+    def object_key(self, key):
+        """Retroceso al principio de un párrafo tras una ilustración o un separador (o Supr al final de uno antes de
+        él): quita el objeto entero, un deshacer. Desde el objeto hacia el texto, solo mueve el cursor. Antes el
+        párrafo se unía al objeto: el texto salía centrado con la imagen y «Mostrar cambios» lo tachaba como quitado.
+        True si lo hizo."""
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return False
+        block, back = cursor.block(), key == Qt.Key.Key_Backspace
+        edge = cursor.atBlockStart() if back else cursor.atBlockEnd()
+        other = block.previous() if back else block.next()
+        if not edge or not other.isValid():
+            return False
+
+        def lone(b):  # solo el objeto, sin texto
+            return bool(objects_of(b)) and not b.text().replace("\ufffc", "").strip()
+        if lone(other) and not objects_of(block):
+            gone = QTextCursor(other)
+            gone.beginEditBlock()
+            if back:  # el objeto y el salto de párrafo que lo separa de este
+                gone.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+            else:
+                gone.setPosition(block.position() + block.length() - 1)
+                gone.setPosition(other.position() + other.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+            gone.removeSelectedText()
+            gone.endEditBlock()
+            return True
+        if lone(block) and not objects_of(other):  # del objeto al texto de al lado: se va allí, sin unirlos
+            cursor.setPosition(other.position() + (other.length() - 1 if back else 0))
+            self.setTextCursor(cursor)
+            return True
+        return False
 
     # Portapapeles
     def createMimeDataFromSelection(self):
