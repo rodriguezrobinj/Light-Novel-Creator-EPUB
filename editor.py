@@ -364,17 +364,20 @@ CODE_TOKEN = re.compile(r"<!--\s*(\[[^\]]+\])\s*-->")  # como las escribía ante
 # Ilustraciones, imágenes nuevas y separadores en el código, como etiquetas: <img> y <hr> (antes un comentario, que
 # parecía texto). Su archivo no es el del EPUB: el nombre lleva el número del bloque, para volver a su marca
 CODE_OBJECT = re.compile(r'<img\s+src="(?:ilustracion-(\d+)\.jpg|([0-9a-f]{16}\.jpg))"[^<>]*?/?>'
-                         r'|<hr\s+class="separador"\s+id="separador-(\d+)"\s*/?>')
+                         r'|<hr\s+class="separador"\s+id="separador-(\d+)"\s*/?>'
+                         r'|<img\s+class="separador"\s+src="([0-9a-f]{16}\.jpg)"[^<>]*?/?>')
 # etiqueta empezada y sin su «>»; también «<» o «</» solos al final, la primera letra de «<hr>»
 HALF_TAG = re.compile(r"</?(?:[A-Za-z][\w:.-]*(?:\s[^<>]*)?)?(?=<|$)")
 
 
 def code_object(token):
     """[Ilustración N], [Imagen nombre] o [Separador N] -> su etiqueta en «Código HTML» (CODE_OBJECT)."""
-    m = convert.TOKEN.fullmatch(token) or convert.PICTURE.fullmatch(token)
+    if m := convert.PICTURE.fullmatch(token):
+        return f'<img class="separador" src="{m[2]}" alt="* * *"/>' if m[1] == "Separador" else f'<img src="{m[2]}" alt=""/>'
+    m = convert.TOKEN.fullmatch(token)
     if m[1] == "Separador":
         return f'<hr class="separador" id="separador-{m[2]}"/>'
-    return f'<img src="{"ilustracion-" + m[2] + ".jpg" if m[1] == "Ilustración" else m[2]}" alt=""/>'
+    return f'<img src="ilustracion-{m[2]}.jpg" alt=""/>'
 
 
 def to_code(text):
@@ -400,13 +403,22 @@ def to_code(text):
     return "\n".join(out)
 
 
-def from_code(code):
+def from_code(code, known=()):
     """HTML de la vista de código -> texto para la hoja (como dump). ValueError con la línea que no se entiende o
-    que deja una etiqueta sin cerrar: así no se pierde nada en silencio."""
+    que deja una etiqueta sin cerrar: así no se pierde nada en silencio. known: las líneas de la hoja de ahora; una
+    línea de código que es la de una de ellas vuelve a ser esa tal cual. <p class="center"> es tanto el párrafo
+    centrado de la app («<center>») como el elemento de un EPUB: al tocar otra línea del código, el del EPUB salía
+    cambiado (y perdía su elemento)."""
+    same = {}
+    for old in known:
+        same.setdefault(to_code(old), old)
     lines = []
     for n, raw in enumerate(code.splitlines(), 1):
         line = raw.strip()
         if not line:
+            continue
+        if line in same:
+            lines.append(same[line])
             continue
         token = CODE_TOKEN.fullmatch(line)
         if token:
@@ -414,7 +426,7 @@ def from_code(code):
             continue
         if thing := CODE_OBJECT.fullmatch(line):
             lines.append(f"[Ilustración {thing[1]}]" if thing[1] else f"[Imagen {thing[2]}]" if thing[2]
-                         else f"[Separador {thing[3]}]")
+                         else f"[Separador {thing[3]}]" if thing[3] else f"[Separador {thing[4]}]")
             continue
         if convert.RULE_LINE.fullmatch(line):  # «<hr>» solo en su línea: la raya de HTML, tal cual
             lines.append(re.sub(r"\s*/?>$", "/>", line))  # con su barra, como en XHTML, y sus atributos
@@ -628,12 +640,13 @@ class CodeLook(QSyntaxHighlighter):
         head = group[0].userData()
         before = head.original if isinstance(head, Changes) else None
         texts = [b.text() if b != block else text for b in group]
-        if self.changes and text.strip() and texts != [before]:
+        above, below = block.userData().whole if isinstance(block.userData(), Changes) else ("", "")
+        if self.changes and text.strip() and (texts != [before] or above or below):
             wide = any(ord(c) > 0xFFFF for c in text)
             mark_changes(self, text, group_changes(before, texts, n), lambda i: u16(text, i) if wide else i,
-                         QColor(self.changes))
+                         QColor(self.changes), above, below)
         elif isinstance(block.userData(), Changes):
-            block.userData().gone = []
+            block.userData().gone, block.userData().above, block.userData().below = [], [], ""
 
     def paint_code(self, text):
         # un formato por color y posiciones UTF-16 solo si hace falta: abrir el código de un capítulo largo pinta
@@ -924,15 +937,20 @@ class CodeEdit(QTextEdit):
     def blockCount(self):
         return self.document().blockCount()
 
-    def show_changes(self, color, removed, originals=None):
+    def show_changes(self, color, removed, originals=None, wholes=None):
         """«Mostrar cambios» en el código: lo puesto subrayado (color) y lo quitado tachado (removed) frente a
-        originals, la línea de antes de cada una (None: nueva); sin originals, las que ya tenía."""
+        originals, la línea de antes de cada una (None: nueva); sin originals, las que ya tenía. wholes: (quitado
+        delante, quitado detrás) de cada línea, los párrafos quitados enteros, como en la hoja."""
         if originals is not None:
             block = self.document().firstBlock()
-            for line in originals:
+            for n, line in enumerate(originals):
                 if not block.isValid():
                     break
-                block.setUserData(Changes(line) if line is not None else None)
+                whole = wholes[n] if wholes and n < len(wholes) else ("", "")
+                data = Changes(line) if line is not None or any(whole) else None
+                if data is not None:
+                    data.whole = whole
+                block.setUserData(data)
                 block = block.next()
             self.look.originals = any(line is not None for line in originals)
         self.look.changes, self.look.removed = color, removed
@@ -1194,7 +1212,7 @@ def _symbol(text, color, height=28, width=420):
 def _insert_object(cursor, kind, n, pictures, color):
     """[Ilustración N] / [Separador N] / [Imagen nombre]: su imagen (o el texto del separador, o la marca si falta)
     como objeto."""
-    if kind == "Imagen" and n not in pictures and IMAGES:  # borrador de otra sesión: la imagen está en su archivo
+    if kind in ("Imagen", "Separador") and isinstance(n, str) and n not in pictures and IMAGES:  # borrador de otra sesión: la imagen está en su archivo
         pictures[n] = QImage(str(Path(IMAGES) / n))
     picture = pictures.get(n)
     if not isinstance(picture, QImage) or picture.isNull():
@@ -1528,6 +1546,8 @@ def _same(line):
 
 def removed_text(line):
     """Cómo se enseña tachado lo quitado entero: el texto, o «[Ilustración]» y «[Separador]» sin su número."""
+    if m := convert.PICTURE.fullmatch(line.strip()):
+        return "[Separador]" if m[1] == "Separador" else "[Ilustración]"
     return _same(line) if convert.TOKEN.fullmatch(line.strip()) else plain_line(line)
 
 
@@ -1541,8 +1561,10 @@ def deleted_paragraphs(doc, baseline, firsts=None):
     block = doc.firstBlock()
     while block.isValid():
         line = compared(block, firsts)
-        keys.append(_same(line) if line is not None else ("nuevo", len(blocks)))  # uno nuevo no casa con nada
-        if block.text().strip() and not objects_of(block):
+        # uno nuevo no casa con nada; uno vaciado tampoco (recuerda su original, pero no se guarda: está quitado)
+        empty = not block.text().strip() and bool(line and line.strip())
+        keys.append(_same(line) if line is not None and not empty else ("nuevo", len(blocks)))
+        if block.text().strip():  # también una ilustración: lo quitado justo antes va con ella, no con el texto de tras ella
             markable.append(block.blockNumber())
         blocks.append(block)
         block = block.next()
@@ -1570,6 +1592,8 @@ def deleted_paragraphs(doc, baseline, firsts=None):
                 put(markable[n], 0, pending)
             else:
                 put(markable[-1], 1, pending)
+        elif pending and blocks:  # el capítulo entero quitado: debajo del párrafo vacío que queda
+            put(blocks[0].blockNumber(), 1, pending)
     return out
 
 
@@ -1660,6 +1684,27 @@ def match_case(model, word):
     return word[:1].upper() + word[1:] if model[:1].isupper() else word
 
 
+def format_spans(before, after):
+    """[(inicio, largo)] de las letras de after con otro formato (cursiva, negrita, enlace…) que en before, si las dos
+    líneas dicen lo mismo. Sin esto, poner una palabra en cursiva solo encendía la barra del margen."""
+    def stacks(line):
+        out = []
+        for kind, value, stack in parse_inline(_strip(line)):
+            out += [stack] * (len(value) if kind == "text" else 1)
+        return out
+    a, b = stacks(before), stacks(after)
+    if len(a) != len(b):
+        return []
+    spans, start = [], None
+    for i, (x, y) in enumerate(zip(a + [None], b + [None])):
+        if x != y and start is None:
+            start = i
+        elif x == y and start is not None:
+            spans.append((start, i - start))
+            start = None
+    return spans
+
+
 def plain_line(line):
     """Texto de una línea de section_text como se ve en la hoja: sin su prefijo ni sus marcas de formato."""
     # el icono es un objeto: un carácter; una etiqueta vacía, el invisible que la lleva
@@ -1725,19 +1770,22 @@ class Changes(QTextBlockUserData):
         # quitados enteros en su propia línea, encima del párrafo (make_room), y con qué deleted_paragraphs
         # se pintó (Look.update_deleted)
         self.above, self.deleted = [], None
+        self.whole = ("", "")  # en «Código HTML»: lo quitado entero (como código) delante y detrás de la línea
+        self.below = ""  # quitados enteros tras el último párrafo: debajo de él, en el margen de la hoja
 
 
 GAP = 3  # píxeles a cada lado de lo quitado
 
 
-def mark_changes(look, text, changes, at, color, above=""):
+def mark_changes(look, text, changes, at, color, above="", below=""):
     """Desde highlightBlock de look: changes (group_changes) con lo puesto subrayado del color dado y, para cada trozo
     quitado, un hueco: espaciado tras la letra anterior (o tras la primera, que se pinta después de lo quitado: no
     hay letra antes). Uno largo se acorta con «…» (lo entero sale en un globo). paint_removed lo pinta. above: los
-    párrafos, ilustraciones o separadores quitados enteros antes de este, en su propia línea encima (make_room)."""
+    párrafos, ilustraciones o separadores quitados enteros antes de este, en su propia línea encima (make_room);
+    below: los de tras el último párrafo, debajo de él."""
     block = look.currentBlock()
     data = block.userData() if isinstance(block.userData(), Changes) else Changes()
-    data.gone, data.above = [], []
+    data.gone, data.above, data.below = [], [], below
     adds, gone = changes
     if above and not make_room(look, block, text, at, above, {max(pos - 1, 0) for pos, _ in gone}, data):
         gone = [(0, f"¶ {above} {gone[0][1]}")] + gone[1:] if gone and gone[0][0] == 0 else [(0, f"¶ {above}")] + gone
@@ -1787,8 +1835,10 @@ def make_room(look, block, text, at, above, taken, data):
     font = shown.font().resolve(look.document().defaultFont())
     metrics = QFontMetrics(font)
     big = QFont(font)
-    # la letra grande también baja: cuanto menos crece, menos se separa la línea de debajo
-    grow = (metrics.ascent() + QFontMetrics(label_font(font)).height() + GAP) / max(metrics.ascent(), 1)
+    # la letra grande también baja: cuanto menos crece, menos se separa la línea de debajo. La etiqueta entra en
+    # parte en el espacio entre párrafos (SPACE)
+    room = max(QFontMetrics(label_font(font)).height() + 3 - SPACE, GAP)
+    grow = (metrics.ascent() + room) / max(metrics.ascent(), 1)
     if font.pointSizeF() > 0:
         big.setPointSizeF(font.pointSizeF() * grow)
     else:
@@ -1822,38 +1872,50 @@ def _x(line, pos):
 def paint_removed(edit, painter, color):
     """Lo quitado de cada párrafo a la vista (Changes.gone), tachado del color dado en el hueco que le abrió
     mark_changes. Se mide con el layout de su línea: al final de una línea el hueco sigue a su letra. Deja en
-    edit.removed_boxes [(QRectF, texto entero)] para el globo."""
+    edit.removed_boxes [(QRectF, texto entero)] para el globo. Lo quitado entero (Changes.above, below) va en su
+    propia línea: encima del párrafo, a la izquierda de una ilustración o debajo del último."""
     doc_layout = edit.document().documentLayout()
     dx, dy = edit.horizontalScrollBar().value(), edit.verticalScrollBar().value()
     boxes = edit.removed_boxes = []
     bottom = edit.viewport().height()
     ink = edit.palette().color(QPalette.ColorRole.Text)
+
+    def label(x, y, old, font, width, bottom_at=False):
+        """Lo quitado entero, tachado, en x, y (y es su borde de abajo si bottom_at), de width como mucho."""
+        strike = label_font(font)
+        strike.setStrikeOut(True)
+        small = QFontMetrics(strike)
+        short = small.elidedText(old, Qt.TextElideMode.ElideMiddle, int(max(width, 60) - 2 * GAP))
+        box = QRectF(x, y - small.height() if bottom_at else y, small.horizontalAdvance(short) + 2 * GAP,
+                     small.height())
+        painter.fillRect(box, QColor(color))
+        painter.setFont(strike)
+        painter.setPen(ink)
+        painter.drawText(box.adjusted(GAP, 0, 0, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, short)
+        boxes.append((box, old))
     block = edit.cursorForPosition(QPoint(0, 0)).block()
     while block.isValid() and doc_layout.blockBoundingRect(block).top() - dy <= bottom:
         data = block.userData()
-        if isinstance(data, Changes) and data.above:
+        if isinstance(data, Changes) and (data.above or data.below):
             layout = block.layout()
             origin = layout.position()
+            last = layout.lineAt(layout.lineCount() - 1) if layout.lineCount() else None
+            if data.below and last is not None:
+                label(origin.x() + last.x() - dx + GAP, origin.y() + last.y() + last.height() + 3 - dy, data.below,
+                      data.above[0][4] if data.above else edit.document().defaultFont(), last.width())
             for c, glyph, hidden, old, font, color_of in data.above:
-                line = layout.lineForTextPosition(c)
-                metrics = QFontMetrics(font)
-                room = line.ascent() - metrics.ascent() if line.isValid() else 0
-                if room < QFontMetrics(label_font(font)).height() / 2:
+                line = layout.lineForTextPosition(c or 0)
+                if not line.isValid():
                     continue
                 top = origin.y() + line.y() - dy
                 left = origin.x() + line.x() - dx
-                strike = label_font(font)
-                strike.setStrikeOut(True)
-                small = QFontMetrics(strike)
-                short = small.elidedText(old, Qt.TextElideMode.ElideMiddle, int(line.width() - 4 * GAP))
-                box = QRectF(left + GAP, top + (room - small.height()) / 2,
-                             small.horizontalAdvance(short) + 2 * GAP, small.height())
-                painter.fillRect(box, QColor(color))
-                painter.setFont(strike)
-                painter.setPen(ink)
-                painter.drawText(box.adjusted(GAP, 0, 0, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                                 short)
-                boxes.append((box, old))
+                if c is None:  # una ilustración o un separador: a su izquierda, arriba
+                    label(left + GAP, top + 2, old, font, _x(line, 0) - line.x() - 2 * GAP)
+                    continue
+                room = line.ascent() - QFontMetrics(font).ascent()
+                if room < GAP:
+                    continue
+                label(left + GAP, top + room - 1, old, font, line.width() - 2 * GAP, bottom_at=True)
                 if hidden:  # la letra que abrió el hueco, en su tamaño y en su sitio
                     painter.setFont(font)
                     painter.setPen(color_of or ink)
@@ -2035,7 +2097,7 @@ class Look(QSyntaxHighlighter):
         while block.isValid():
             data = block.userData()
             painted = data.deleted if isinstance(data, Changes) else None
-            if painted != self.deleted.get(block.blockNumber()) and (painted or block.text().strip()):
+            if painted != self.deleted.get(block.blockNumber()):
                 self.rehighlightBlock(block)
             block = block.next()
 
@@ -2121,25 +2183,31 @@ class Look(QSyntaxHighlighter):
         changed = self.changes and text.strip() and not objects_of(block) and block_lines(block) != [original]
         # quitados enteros (deleted_paragraphs): tachados delante de este o, tras el último, detrás; los unidos a
         # este se comparan con él, y solo se marca la unión
-        before, after, joined = (self.deleted.get(block.blockNumber(), ((), (), ())) if self.changes and text.strip()
+        before, after, joined = (self.deleted.get(block.blockNumber(), ((), (), ())) if self.changes
                                  else ((), (), ()))
-        if (changed or before or after or joined) and not objects_of(block):
+        def lost(lines):
+            return " ¶ ".join(removed_text(line) for line in lines)
+        if (before or after) and (objects_of(block) or not text.strip()):  # una ilustración (o nada): a su lado
+            data = block.userData() if isinstance(block.userData(), Changes) else Changes()
+            data.gone, data.below = [], lost(after)
+            data.above = [(None, "", False, lost(before), self.document().defaultFont(), None)] if before else []
+            self.setCurrentBlockUserData(data)
+        elif (changed or before or after or joined) and not objects_of(block):
             group, n = original_group(block)
             base = None if original is None else "\n".join([plain_line(original)] + [plain_line(x) for x in joined])
             adds, gone = group_changes(base, [b.text() if b != block else text for b in group], n) if changed \
                 else ([], [])
+            if changed and not adds and not gone and len(group) == 1 and original is not None and not joined:
+                adds = format_spans(original, block_lines(block)[0])  # mismo texto: lo que cambió de formato
             for line in joined:  # el salto de párrafo quitado, tachado donde empieza el unido
                 at_join = text.rfind(plain_line(line).strip())
                 if at_join > 0:
                     gone.append((at_join, "¶"))
-            if after:
-                gone = gone + [(len(text), "¶ " + " ¶ ".join(removed_text(line) for line in after))]
-            mark_changes(self, text, (adds, gone), at, QColor(self.changes),
-                         " ¶ ".join(removed_text(line) for line in before))
+            mark_changes(self, text, (adds, gone), at, QColor(self.changes), lost(before), lost(after))
         elif isinstance(block.userData(), Changes):
-            block.userData().gone, block.userData().above = [], []
+            block.userData().gone, block.userData().above, block.userData().below = [], [], ""
         if isinstance(block.userData(), Changes):
-            block.userData().deleted = self.deleted.get(block.blockNumber()) if self.changes and text.strip() else None
+            block.userData().deleted = self.deleted.get(block.blockNumber()) if self.changes else None
 
 
 class _Filter(QObject):
@@ -3385,14 +3453,17 @@ class Sheet(QTextEdit):
         return name
 
     def adopt(self, line):
-        """[Ilustración k] de otro capítulo (cortada allí, pegada aquí): su imagen como [Imagen nombre]. Al aceptar,
-        edit_section solo recupera las ilustraciones de su capítulo, y esta se quedaba como un párrafo con ese texto:
-        la ilustración se perdía al moverla de capítulo."""
+        """[Ilustración k] o [Separador k] dibujado de otro capítulo (cortado allí, pegado aquí): su imagen como
+        [Imagen nombre] o [Separador nombre]. Al aceptar, edit_section solo recupera los de su capítulo, y este se
+        quedaba como un párrafo con ese texto."""
         m = convert.TOKEN.fullmatch(line)
-        if not m or m.group(1) != "Ilustración" or not self.foreign:
+        if not m or not self.foreign:
             return line
-        data = self.foreign(int(m.group(2)))
-        return f"[Imagen {self.store_picture(data)}]" if data else line
+        found = self.foreign(int(m.group(2)))
+        if not found:
+            return line
+        kind, data = found
+        return f"[{'Separador' if kind == 'break' else 'Imagen'} {self.store_picture(data)}]"
 
     def insert_picture(self, data):
         """Imagen nueva (JPEG) como párrafo propio tras el del cursor. Se guarda en IMAGES con el nombre de su

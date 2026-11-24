@@ -124,7 +124,13 @@ window.lncClearDiff = function (root) {  // quita las marcas de lo quitado y jun
 
 
 DEL_CSS = (".lnc-del::after { content: attr(data-del); background: %s; text-decoration: line-through; "
-           "margin: 0 0.2em; padding: 0 0.1em; font-style: normal; text-indent: 0; }")  # fondo rojo, como GitHub
+           "margin: 0 0.2em; padding: 0 0.1em; font-style: normal; text-indent: 0; }"  # fondo rojo, como GitHub
+           # párrafos quitados enteros: en su propia línea encima (o debajo) del que los seguía, como en la hoja
+           "[data-lnc-above]::before, [data-lnc-below]::after { display: block; width: fit-content; "
+           "background: %s; text-decoration: line-through; font-size: 0.85em; font-style: normal; font-weight: normal; "
+           "text-indent: 0; text-align: left; padding: 0 0.2em; } "
+           "[data-lnc-above]::before { content: attr(data-lnc-above); margin-bottom: 0.2em; } "
+           "[data-lnc-below]::after { content: attr(data-lnc-below); margin-top: 0.2em; }")
 
 # Funciones de la hoja: estado para la cinta, órdenes de formato, limpieza al pegar y atajos de Word en español
 SHEET_JS = DIFF_JS + r"""
@@ -353,6 +359,7 @@ SHEET_JS = DIFF_JS + r"""
       var m = lnc.marks, d = JSON.parse(data);
       m.spell = new Set(d.spell); m.issues = d.issues; m.show = d.show; m.colors = d.colors;
       m.changed = new Set(d.changed.map(function (i) { return sheet.children[i]; }));
+      m.gone = d.gone || []; m.formats = d.formats || [];
       // el texto de antes de cada párrafo, por su sitio al cargar (null: nuevo), para pintar lo puesto y lo quitado
       m.before = new Map();
       (d.before || []).forEach(function (t, i) { if (sheet.children[i]) m.before.set(sheet.children[i], lncText(t)); });
@@ -368,8 +375,9 @@ SHEET_JS = DIFF_JS + r"""
       }
       lnc.paint();
     },
-    setChanges: function (changed, before) {  // solo «Mostrar cambios» (sincronía en vivo): como setMarks
+    setChanges: function (changed, before, gone, formats) {  // solo «Mostrar cambios» (en vivo): como setMarks
       var m = lnc.marks;
+      m.gone = gone || []; m.formats = formats || [];
       m.changed = new Set(changed.map(function (i) { return sheet.children[i]; }));
       m.before = new Map();
       before.forEach(function (t, i) { if (sheet.children[i]) m.before.set(sheet.children[i], lncText(t)); });
@@ -397,6 +405,13 @@ SHEET_JS = DIFF_JS + r"""
       var m = lnc.marks, spell = new Highlight(), change = new Highlight(), levels = {};
       lnc.found = [];  // [{id, range}] de los avisos pintados: para el clic derecho y F8
       lncClearDiff(sheet);
+      Array.prototype.forEach.call(sheet.querySelectorAll('[data-lnc-above], [data-lnc-below]'), function (b) {
+        b.removeAttribute('data-lnc-above'); b.removeAttribute('data-lnc-below');
+      });
+      if (m.show) (m.gone || []).forEach(function (g) {  // [n.º del de debajo, quitado encima, n.º del de arriba, debajo]
+        if (g[1] && sheet.children[g[0]]) sheet.children[g[0]].setAttribute('data-lnc-above', g[1]);
+        if (g[3] && sheet.children[g[2]]) sheet.children[g[2]].setAttribute('data-lnc-below', g[3]);
+      });
       if (m.show) {  // grupos: un párrafo con su texto de antes y los nuevos que lo siguen (Intro), comparados juntos
         var groups = [], group = null;
         Array.prototype.forEach.call(sheet.children, function (b) {
@@ -407,6 +422,17 @@ SHEET_JS = DIFF_JS + r"""
         });
         groups.forEach(function (g) {
           if (g.els.some(lnc.edited)) lncPaintGroup(g.els, g.before).forEach(function (r) { change.add(r); });
+        });
+        (m.formats || []).forEach(function (f) {  // [n.º de párrafo, desde, cuántas letras]: otro formato, mismo texto
+          var b = sheet.children[f[0]];
+          if (!b) return;
+          var w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), n, from = 0, a = null, z = null;
+          while ((n = w.nextNode())) {
+            if (!a && f[1] < from + n.data.length) a = [n, f[1] - from];
+            if (f[1] + f[2] <= from + n.data.length) { z = [n, f[1] + f[2] - from]; break; }
+            from += n.data.length;
+          }
+          if (a && z) { var r = document.createRange(); r.setStart(a[0], a[1]); r.setEnd(z[0], z[1]); change.add(r); }
         });
       }
       Array.prototype.forEach.call(sheet.children, function (b, i) {
@@ -608,7 +634,7 @@ def web_position(table, pos):
     return next((k for k, at in enumerate(table) if at >= pos), len(table) - 1)
 
 
-def lines_of(dumped):
+def lines_of(dumped, known=()):
     """lnc.dump() (JSON) -> texto para la hoja de Qt (como editor.dump), con las ilustraciones como sus marcas."""
     code = []
     for item in json.loads(dumped):
@@ -621,7 +647,7 @@ def lines_of(dumped):
         inner = clean(item["html"]).strip()
         if inner:
             code.append(f"<{item['tag']}{attrs}>{inner}</{item['tag']}>")
-    return editor.from_code("\n".join(code))
+    return editor.from_code("\n".join(code), known)
 
 
 def text_file(blocks):
