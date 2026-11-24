@@ -1393,8 +1393,9 @@ def replace_text(book, find, new, word=False, blocks=None):
 
 TOKEN = re.compile(r"\[(Ilustración|Separador) (\d+)\]")  # marcas del editor de texto
 # Imagen añadida en el editor: su archivo (hash del contenido) en la carpeta de ilustraciones del programa. Solo el
-# nombre, sin ruta: una revisión ajena no hace abrir otra carpeta ni una ruta de red
-PICTURE = re.compile(r"\[(Imagen) ([0-9a-f]{16}\.jpg)\]")
+# nombre, sin ruta: una revisión ajena no hace abrir otra carpeta ni una ruta de red. «Separador»: un separador
+# dibujado que se quitó y vuelve con deshacer (su bloque ya no estaba en el libro)
+PICTURE = re.compile(r"\[(Imagen|Separador) ([0-9a-f]{16}\.jpg)\]")
 INLINE = re.compile(r"&lt;(/?)(i|b|sup|sc)&gt;")
 # Etiquetas en línea de un EPUB de entrada que el editor muestra como texto (faithful): al guardar vuelven a serlo
 # Etiquetas de dentro del párrafo que una línea del editor conserva al guardar; otro «<…>» es texto («<Habilidad>»)
@@ -1572,8 +1573,9 @@ def edit_section(book, start, end, text, folder=None):
         picture = PICTURE.fullmatch(line)
         if picture:  # sin su archivo, descartada: el bloque sigue ahí y los cambios de después cuadran
             path = Path(folder) / picture[2] if folder else None
-            new.append(Block("image", page, image=path.read_bytes()) if path and path.is_file()
-                       else Block("image", page, keep=False))
+            kind = "break" if picture[1] == "Separador" else "image"
+            new.append(Block(kind, page, image=path.read_bytes()) if path and path.is_file()
+                       else Block(kind, page, keep=False))
             continue
         if m and start <= k < end and k not in kept and old[k].kind == ("image" if m.group(1) == "Ilustración" else "break"):
             kept[k] = start + len(new)

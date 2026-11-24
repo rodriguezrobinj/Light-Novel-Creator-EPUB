@@ -6401,7 +6401,7 @@ def test_window_editor_deleted_picture_back_by_undo():
     png = pix.tobytes("png")
     B = convert.Block
     book = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("image", 1, image=png), B("p", 1, "Dos."),
-            B("break", 1, "* * *"), B("p", 1, "Tres.")]
+            B("break", 1, "", image=png), B("p", 1, "Tres.")]
 
     def marks(doc):
         out, block = [], doc.firstBlock()
@@ -6462,9 +6462,203 @@ def test_window_editor_deleted_picture_back_by_undo():
     assert objects and objects[0].startswith("Imagen") and width == 40 and marked == [], reopened[2]
     assert '<img src="' in code and "<!--" not in code, code
     assert kinds == ["heading", "p", "image", "p", "break", "p"], kinds
-    objects, width, marked, code, kinds = reopened[4]  # vuelve como «Insertar → Separador»: «* * *»
-    assert "<p>* * *</p>" in code and marked == [], reopened[4]
+    objects, width, marked, code, kinds = reopened[4]  # el separador dibujado vuelve como separador
+    assert objects and objects[0].startswith("Separador") and width == 40 and marked == [], reopened[4]
+    assert '<img class="separador" src="' in code, code
     assert kinds == ["heading", "p", "image", "p", "break", "p"], kinds
+
+
+def test_window_editor_moved_or_copied_picture_survives_accept():
+    """Una ilustración movida dentro del capítulo (cortar y pegar) sigue siendo una ilustración al aceptar: se quedaba
+    como un párrafo con el texto «[Ilustración N]» y la imagen se perdía. Al reabrir, deshacer el movimiento la
+    devuelve a su sitio como imagen. Copiada y pegada donde ya está, no se repite."""
+    import app
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtWidgets import QApplication
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), False)
+    pix.clear_with(90)
+    png = pix.tobytes("png")
+    B = convert.Block
+    book = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("image", 1, image=png), B("p", 1, "Dos."),
+            B("p", 1, "Tres.")]
+    out = {}
+    for how in ("mover", "copiar"):
+        root, window, editor = editor_on(book, [0])
+        sheet, doc = editor.sheet, editor.sheet.document()
+        c = QTextCursor(doc.findBlockByNumber(2))
+        c.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(c)
+        sheet.cut() if how == "mover" else sheet.copy()
+        c = QTextCursor(doc.lastBlock())
+        c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        c.insertBlock()
+        sheet.setTextCursor(c)
+        sheet.paste()
+        root.update()
+        editor.save()
+        root.update()
+        kinds = [(b.kind, b.image == png) for b in window.book.blocks]
+        editor = app.TextEditor(window, "0", *window.section_bounds(0))
+        for _ in range(3 if how == "mover" else 0):  # pegar, el Intro de antes y cortar
+            editor.sheet.undo()
+        root.update()
+        doc = editor.sheet.document()
+        out[how] = (kinds, [o for i in range(doc.blockCount()) for o in ed.objects_of(doc.findBlockByNumber(i))])
+        editor.win.done(0)
+        window.close()
+    QApplication.clipboard().clear()  # con la imagen dentro, el Qt de pruebas (offscreen) se cae al salir
+    assert out["mover"][0] == [("heading", False), ("p", False), ("p", False), ("p", False), ("image", True)], out
+    assert out["mover"][1] and out["mover"][1][0].startswith("Imagen"), out
+    # copiada y pegada donde ya está: no se repite (test_window_editor_copies_picture_for_other_programs)
+    assert out["copiar"][0] == [("heading", False), ("p", False), ("image", True), ("p", False), ("p", False)], out
+
+
+def test_window_editor_shows_format_changes():
+    """«Mostrar cambios» marca una palabra puesta en cursiva (el texto sigue igual): antes solo se encendía la barra
+    del margen y no se sabía qué había cambiado."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "El gato negro duerme.")], [0])
+    editor.show_changes_action.setChecked(True)
+    root.update()
+    sheet = editor.sheet
+    block = sheet.document().findBlockByNumber(1)
+    c = QTextCursor(block)
+    c.setPosition(block.position() + 3)
+    c.setPosition(block.position() + 7, QTextCursor.MoveMode.KeepAnchor)
+    sheet.setTextCursor(c)
+    sheet.toggle_italic()
+    root.update()
+    sheet.look.rehighlight()
+    green = sorted({i for r in block.layout().formats() if r.format.background().style() != Qt.BrushStyle.NoBrush
+                    for i in range(r.start, r.start + r.length)})
+    editor.win.done(0)
+    window.close()
+    assert green == [3, 4, 5, 6], green
+
+
+def test_window_editor_drawn_separator_moved_to_another_chapter():
+    """Un separador dibujado cortado en un capítulo y pegado en otro sigue siendo un separador con su imagen al
+    aceptar: se quedaba como un párrafo con el texto «[Separador N]»."""
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtWidgets import QApplication
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), False)
+    pix.clear_with(90)
+    png = pix.tobytes("png")
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("break", 1, "", image=png),
+                                      B("p", 1, "Dos."), B("heading", 1, "Capítulo 2"), B("p", 1, "Tres.")], [0, 4])
+    sheet, doc = editor.sheet, editor.sheet.document()
+    c = QTextCursor(doc.findBlockByNumber(2))
+    c.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+    sheet.setTextCursor(c)
+    sheet.cut()
+    editor.open_section(4, 6)
+    root.update()
+    doc = editor.sheet.document()
+    c = QTextCursor(doc.lastBlock())
+    c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+    c.insertBlock()
+    editor.sheet.setTextCursor(c)
+    editor.sheet.paste()
+    root.update()
+    shown = [o for i in range(doc.blockCount()) for o in ed.objects_of(doc.findBlockByNumber(i))]
+    editor.save()
+    root.update()
+    kinds = [(b.kind, b.image == png) for b in window.book.blocks]
+    window.close()
+    QApplication.clipboard().clear()  # con la imagen dentro, el Qt de pruebas (offscreen) se cae al salir
+    assert shown and shown[0].startswith("Separador "), shown
+    assert kinds == [("heading", False), ("p", False), ("p", False), ("heading", False), ("p", False),
+                     ("break", True)], kinds
+
+
+def test_window_editor_whole_removals_in_every_view():
+    """Lo quitado entero va con lo que lo seguía: delante de una ilustración, con ella (no con el texto de tras
+    ella); tras el último párrafo, debajo de él; el capítulo entero quitado, debajo de lo que queda; un párrafo
+    vaciado (queda su línea vacía), también. «Código HTML» y
+    la hoja web lo enseñan también (antes solo la hoja)."""
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 30), False)
+    pix.clear_with(90)
+    B = convert.Block
+    book = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno dos."), B("p", 1, "Tres cuatro."),
+            B("image", 1, image=pix.tobytes("png")), B("p", 1, "Cinco seis."), B("p", 1, "Siete.")]
+
+    def marks(doc):
+        out, block = {}, doc.firstBlock()
+        while block.isValid():
+            data = block.userData()
+            if isinstance(data, ed.Changes) and (data.above or data.below):
+                out[block.text().replace("￼", "OBJ")] = ([a[3] for a in data.above], data.below)
+            block = block.next()
+        return out
+
+    def run(action, code=False, late=False):
+        root, window, editor = editor_on(book, [0])
+        editor.show_changes_action.setChecked(not late)
+        root.update()
+        doc = editor.sheet.document()
+        action(doc)
+        for _ in range(2):
+            root.update()
+        editor.sheet.look.rehighlight()
+        out = [marks(doc), editor.web_changes()[2]]
+        if code:
+            editor.toggle_code()
+            root.update()
+            editor.show_changes_action.setChecked(True)  # con late, se enciende ya en el código
+            root.update()
+            out.append(marks(editor.code.document()))
+            # vuelto a escribir en el código: deja de estar quitado también allí
+            line = next(b for b in (editor.code.document().findBlockByNumber(i)
+                                    for i in range(editor.code.document().blockCount())) if "<img" in b.text())
+            QTextCursor(line).insertText("<p>Tres cuatro.</p>\n")
+            editor.apply_code_live()
+            root.update()
+            out.append(marks(editor.code.document()))
+        editor.win.done(0)
+        window.close()
+        return out
+
+    def remove(n):
+        def go(doc):
+            c = QTextCursor(doc.findBlockByNumber(n))
+            c.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+            c.removeSelectedText()
+        return go
+
+    def last(doc):
+        c = QTextCursor(doc.lastBlock().previous())
+        c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        c.removeSelectedText()
+
+    def everything(doc):
+        c = QTextCursor(doc)
+        c.select(QTextCursor.SelectionType.Document)
+        c.removeSelectedText()
+    def emptied(doc):  # su texto borrado, la línea vacía queda: está quitado (no se guarda), no sin cambios
+        c = QTextCursor(doc.findBlockByNumber(4))
+        c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        c.removeSelectedText()
+    sheet, web, code, retyped = run(remove(2), code=True)
+    late = run(remove(2), code=True, late=True)[2]
+    empty, _ = run(emptied)
+    end, _ = run(last)
+    gone, _ = run(everything)
+    assert sheet == {"OBJ": (["Tres cuatro."], "")}, sheet
+    assert web == [[2, "Tres cuatro.", 2, ""]], web
+    assert code == {'<img src="ilustracion-3.jpg" alt=""/>': (["<p>Tres cuatro.</p>"], "")}, code
+    assert retyped == {}, retyped
+    assert late == code, late
+    assert empty == {"Siete.": (["Cinco seis."], "")}, empty
+    assert end == {"Cinco seis.": ([], "Siete.")}, end
+    assert gone == {"": ([], "Capítulo 1 ¶ Uno dos. ¶ Tres cuatro. ¶ [Ilustración] ¶ Cinco seis. ¶ Siete.")}, gone
 
 
 def test_window_editor_original_box_of_paragraph_back_by_undo():
@@ -7042,6 +7236,9 @@ def test_editor_code_view_round_trip_and_errors():
     code = editor.to_code(text)
     back = editor.from_code(code)
     old_style = editor.from_code("<!-- [Ilustración 7] -->\n<!-- [Separador 9] -->")
+    # un <p class="center"> de un EPUB (Block.opening) sigue siéndolo al tocar otra línea del código; era «<center>»
+    epub = ['<p class="center">Carta', "Otra."]
+    touched = editor.from_code(editor.to_code("\n\n".join(epub)).replace("Otra.", "Otra más."), epub)
     errors = []
     for bad in ("<p>Mal <i>cerrado</p>", '<p class="x">Sin cierre'):
         try:
@@ -7054,6 +7251,7 @@ def test_editor_code_view_round_trip_and_errors():
     assert '<img src="ilustracion-7.jpg" alt=""/>' in code and '<p class="center">Carta</p>' in code, code
     assert '<hr class="separador" id="separador-9"/>' in code and "<!--" not in code, code
     assert old_style == "[Ilustración 7]\n\n[Separador 9]", old_style
+    assert touched == '<p class="center">Carta\n\nOtra más.', touched
     assert '<li class="lista-decimal">Uno</li>' in code and '<span class="nota">aclaración</span>' in code, code
     assert 'A &amp; B <ruby>' in code and "<h1>Título de PDF</h1>" in code, code
     assert back == text, back
@@ -14425,6 +14623,83 @@ def test_editor_original_panel_finds_epub_paragraph_page():
     assert status.startswith(f"Página {page + 1} del original"), status
     assert picked == k, (picked, k)
     assert stepped == (True, page + 1) and back == page, (stepped, back, page)
+
+
+def test_websheet_shows_removed_paragraphs_and_format_changes():
+    """La hoja web enseña lo quitado entero (en su línea, encima del que lo seguía) y una palabra puesta en cursiva,
+    como la hoja: antes solo marcaba el texto cambiado dentro de un párrafo. Dos párrafos unidos no salen con el
+    texto del segundo como nuevo."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    with with_chromium():
+        root, window = visible_window()
+        doc = pymupdf.open()
+        add_page(doc, 1, [(72, 100, "Pagina", 11, "helv")])
+        window.pdf = TMP / f"web-quitado-{time_ns()}.pdf"
+        doc.save(window.pdf)
+        window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno dos."),
+                                                         B("p", 1, "Tres cuatro."), B("p", 1, "El gato negro."),
+                                                         B("p", 1, "Seis."), B("p", 1, "Siete.")], [0]))
+        window.settings["editor_web"] = True
+        ed = app.TextEditor(window, "0", *window.section_bounds(0))
+        try:
+            assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            ed.show_changes_action.setChecked(True)
+            sheet = ed.sheet
+            c = QTextCursor(sheet.document().findBlockByNumber(1))
+            c.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+            c.removeSelectedText()
+            block = sheet.document().findBlockByNumber(2)
+            c = QTextCursor(block)
+            c.setPosition(block.position() + 3)
+            c.setPosition(block.position() + 7, QTextCursor.MoveMode.KeepAnchor)
+            sheet.setTextCursor(c)
+            sheet.toggle_italic()
+            QTextCursor(sheet.document().findBlockByNumber(4)).deletePreviousChar()  # «Seis.» y «Siete.», unidos
+            above = "(function(){var e=document.querySelector('[data-lnc-above]');return e?e.getAttribute(" \
+                    "'data-lnc-above')+'|'+e.textContent:'';})()"
+            shown = wait_for(lambda: js(ed.web, above) == "Uno dos.|Tres cuatro.")
+            changed = "(function(){var h=CSS.highlights.get('lnc-change');var o=[];if(h)h.forEach(function(r)" \
+                      "{o.push(r.toString());});return o.join('|');})()"
+            italic = wait_for(lambda: "gato" in js(ed.web, changed).split("|"))
+            got = js(ed.web, above), js(ed.web, changed)
+        finally:
+            ed.win.done(0)
+            window.close()
+        assert shown and italic, got
+        assert "Siete." not in got[1].split("|"), got  # unido: su texto no es nuevo (solo la unión, como en la hoja)
+
+
+def test_websheet_pager_keeps_its_pages_when_the_cursor_moves():
+    """Con la pestaña «Hoja web» (o EPUB) a la vista, mover el cursor de la hoja no pone en su paginador «Página n de
+    m» del PDF (el panel «Original», oculto, se dibujaba igual). Al volver a «Original», su página es la del cursor."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    with with_chromium():
+        root, window = visible_window()
+        doc = pymupdf.open()
+        for n in range(3):
+            add_page(doc, n + 1, [(72, 100, f"Pagina {n}", 11, "helv")])
+        window.pdf = TMP / f"paginador-{time_ns()}.pdf"
+        doc.save(window.pdf)
+        window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."),
+                                                         B("p", 3, "Tres.")], [0]))
+        window.settings["editor_web"] = True
+        ed = app.TextEditor(window, "0", *window.section_bounds(0))
+        try:
+            assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            ed.sheet.setTextCursor(QTextCursor(ed.sheet.document().findBlockByNumber(2)))
+            ed.draw_source()
+            web_label = ed.page_label.text()
+            ed.show_side(0)
+            original = ed.page_label.text()
+        finally:
+            ed.win.done(0)
+            window.close()
+        assert "de 3" not in web_label, web_label
+        assert original == "Página 3 de 3", original
 
 
 def test_websheet_navigation_changes_bar_and_close_follow_typing():

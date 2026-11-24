@@ -8307,8 +8307,8 @@ def _history_key(text):
     [Imagen x.jpg] nueva son, al aceptar, un separador y una ilustración del libro (convert.edit_section): la hoja
     los vuelve a abrir como [Separador N] e [Ilustración N], y su deshacer no se encontraba."""
     def same(line):
-        if convert.PICTURE.fullmatch(line):
-            return "[Ilustración]"
+        if m := convert.PICTURE.fullmatch(line):
+            return "[Separador]" if m[1] == "Separador" else "[Ilustración]"
         return "[Separador]" if convert.SCENE_BREAK.fullmatch(line) else convert.TOKEN.sub(r"[\1]", line)
     plain = "\n\n".join(same(line) for line in _history_lines(text))
     return hashlib.sha1(plain.encode("utf-8")).hexdigest()[:20]
@@ -8437,9 +8437,10 @@ class TextEditor:
         sheet.route_undo = True  # Ctrl+Z y Ctrl+Y por do(): con «Todo el libro», también lo de otros capítulos
         sheet.tags, sheet.unknown = theme.editor_tags(app.dark), set(app.unknown)  # y la última ortografía
         sheet.mark_current = True
-        # Una ilustración pegada desde otro capítulo llega con su imagen (Sheet.adopt)
-        sheet.foreign = lambda k: (app.book.blocks[k].image if self.current and not self.current[0] <= k < self.current[1]
-                                   and 0 <= k < len(app.book.blocks) and app.book.blocks[k].kind == "image" else None)
+        # Una ilustración o un separador dibujado pegados desde otro capítulo llegan con su imagen (Sheet.adopt)
+        sheet.foreign = lambda k: (
+            (app.book.blocks[k].kind, app.book.blocks[k].image) if self.current and 0 <= k < len(app.book.blocks)
+            and not self.current[0] <= k < self.current[1] and app.book.blocks[k].image else None)
         self.pages = {}  # (inicio, fin) -> {"doc", "look", "lines"} de cada sección visitada
         # Avisos del informe por bloque, tomados al abrir: la hoja los marca en los párrafos sin cambiar
         self.issues = {}
@@ -9369,6 +9370,7 @@ class TextEditor:
                 page["look"].changes, page["look"].removed, page["stale"] = color if on else None, removed, True
         if self.code.isVisible():
             self.code.show_changes(color if on else None, removed)
+            self.refresh_code_wholes(len(self.code_frame[0]))  # lo quitado entero, también si se enciende ahora
         else:
             self.code.look.changes, self.code.look.removed = color if on else None, removed
         if self.web is not None and self.web.loaded:
@@ -9391,6 +9393,19 @@ class TextEditor:
                 pass  # sin el EPUB de entrada: solo las de la app
         selectors = re.sub(r"\{[^}]*\}", " ", re.sub(r"/\*.*?\*/", "", css, flags=re.S))  # sin valores: «.ttf»
         return sorted(set(re.findall(r"\.([A-Za-z_][\w-]*)", selectors)))
+
+    def code_wholes(self):
+        """(quitado delante, quitado detrás) de cada línea de «Código HTML», como código: los párrafos, ilustraciones
+        y separadores quitados enteros que la hoja marca (Look.deleted). Sin ellos el código no los enseñaba."""
+        out, deleted = [], self.sheet.look.deleted if self.sheet.look.changes else {}
+
+        def code(lines):
+            return "  ".join(editor.to_code(line) for line in lines)
+        for block, lines in zip(self.blocks(), self.sheet.all_lines()):
+            before, after, _ = deleted.get(block.blockNumber(), ((), (), ()))
+            for i in range(len(lines)):
+                out.append((code(before) if i == 0 else "", code(after) if i == len(lines) - 1 else ""))
+        return out
 
     def code_originals(self):
         """Línea de código de antes de cada línea de la vista «Código HTML» (None: párrafo nuevo), en su orden."""
@@ -11043,7 +11058,7 @@ class TextEditor:
         if not dumped:
             return None
         try:
-            return websheet.lines_of(dumped)
+            return websheet.lines_of(dumped, [x for lines in self.sheet.all_lines() for x in lines])
         except ValueError as e:  # no debería pasar: Chromium siempre cierra sus etiquetas
             _log(f"Hoja web: {e}")
             return None
@@ -11054,17 +11069,28 @@ class TextEditor:
         su texto como el de la hoja (notas, saltos)."""
         changed = {b.blockNumber() for b in self.sheet.changed_blocks()}
         marked, before, n, block = [], [], 0, self.sheet.document().firstBlock()
+        deleted, gone, formats = self.sheet.look.deleted if self.sheet.look.changes else {}, [], []
         for lines in self.sheet.all_lines():
             original = editor.compared(block, self.sheet.look.firsts)
             head = original is not None and len(lines) == 1 and editor.original_group(block)[1] == 0
+            above, below, joined = deleted.get(block.blockNumber(), ((), (), ()))
+            if above or below:  # quitados enteros: encima o debajo de este, como en la hoja
+                gone.append([n, " ¶ ".join(map(editor.removed_text, above)),
+                             n + len(lines) - 1, " ¶ ".join(map(editor.removed_text, below))])
             for line in lines:
-                before.append(editor.to_code(original) if head else None)
+                # uno unido (Retroceso o Supr) se compara con los dos de antes, como en la hoja: su texto no es nuevo
+                before.append("".join(editor.to_code(x) for x in [original, *joined]) if head else None)
                 if block.blockNumber() in changed and not (convert.TOKEN.fullmatch(line.strip())
                                                            or convert.PICTURE.fullmatch(line.strip())):
                     marked.append(n)
+                    # mismo texto con otro formato (una palabra en cursiva): sus letras, como en la hoja; solo si
+                    # la línea no lleva saltos ni etiquetas vacías, que en la web no son letras
+                    if head and len(lines) == 1 and editor.plain_line(line) == block.text() == editor.plain_line(
+                            original) and not set(block.text()) & {editor.VOID_CHAR, editor.LINE_BREAK, "\ufffc"}:
+                        formats += [[n, a, size] for a, size in editor.format_spans(original, line)]
                 n += 1
             block = block.next()
-        return marked, before
+        return marked, before, gone, formats
 
     def web_marks(self):
         """Marcas de la hoja web, las mismas que las de la hoja: palabras que no están, avisos del informe (del color
@@ -11074,7 +11100,7 @@ class TextEditor:
         import websheet
         colors = theme.mark_colors(self.app.dark)
         levels = list(convert.LEVELS)
-        marked, before = self.web_changes()
+        marked, before, gone, formats = self.web_changes()
         issues, self.web_issues, n = [], {}, 0
         block = self.sheet.document().firstBlock()
         for lines in self.sheet.all_lines():
@@ -11092,8 +11118,8 @@ class TextEditor:
                 n += 1
             block = block.next()
         data = {"spell": sorted(w.lower() for w in self.unknown - self.ignored_words), "issues": issues,
-                "changed": marked, "show": self.show_changes_action.isChecked(), "before": before,
-                "del_css": websheet.DEL_CSS % theme.css_color(colors["removed"]),
+                "changed": marked, "show": self.show_changes_action.isChecked(), "before": before, "gone": gone, "formats": formats,
+                "del_css": websheet.DEL_CSS % ((theme.css_color(colors["removed"]),) * 2),
                 "colors": {"spell": self.sheet.tags.get("broken", {}).get("foreground", colors["Grave"]),
                            "change": theme.css_color(colors["added"])},
                 "levels": [colors.get(level, colors["Grave"]) for level in levels]}
@@ -11300,7 +11326,8 @@ class TextEditor:
             self.code.show_changes(color if self.show_changes_action.isChecked() else None, removed,
                                    [editor.pretty_line(o) for o in saved[0]]
                                    + [o and editor.pretty_line(o) for o in self.code_originals()]
-                                   + [editor.pretty_line(o) for o in saved[1]])
+                                   + [editor.pretty_line(o) for o in saved[1]],
+                                   [("", "")] * len(saved[0]) + self.code_wholes())
             self.sheet.hide()
             self.code.show()
             block = self.code.document().findBlockByNumber(h + line)
@@ -11315,7 +11342,7 @@ class TextEditor:
         lines, h, f = self.code_parts()
         if "\n".join(lines[h:f]) != self.code_text:
             try:
-                text = editor.from_code("\n".join(lines[h:f]))
+                text = editor.from_code("\n".join(lines[h:f]), [x for xs in self.sheet.all_lines() for x in xs])
             except ValueError as e:
                 self.sync_view()
                 messagebox.showwarning("Código HTML", f"{e}\n\nArréglalo para volver a la hoja.", parent=self.win)
@@ -11406,7 +11433,7 @@ class TextEditor:
         if not self.code.isVisible() or code == self.code_text:
             return
         try:
-            text = editor.from_code(code)
+            text = editor.from_code(code, [x for xs in self.sheet.all_lines() for x in xs])
         except ValueError:
             return
         # code_text es el código de la hoja, sin líneas vacías: con una (Intro sin escribir aún) las líneas ya no
@@ -11420,7 +11447,29 @@ class TextEditor:
                 self.sheet.set_text(text)
             finally:
                 self.applying_code = False
+            self.refresh_code_wholes(h)
         self.sheet.setTextCursor(QTextCursor(self.web_block(line)))
+
+    def refresh_code_wholes(self, h):
+        """Lo quitado entero en «Código HTML», al día tras escribir en él: un párrafo vuelto a escribir dejaba de
+        estar quitado y seguía tachado. h: primera línea del texto (tras la cabecera)."""
+        if not self.code.look.changes:
+            return
+        self.sheet.look.update_deleted()  # al momento: su temporizador llega después
+        wholes, block = iter(self.code_wholes()), self.code.document().findBlockByNumber(h)
+        while block.isValid():
+            if block.text().strip():
+                whole = next(wholes, None)
+                if whole is None:
+                    break
+                data = block.userData()
+                if (data.whole if isinstance(data, editor.Changes) else ("", "")) != whole:
+                    if not isinstance(data, editor.Changes):
+                        data = editor.Changes(None)
+                        block.setUserData(data)
+                    data.whole = whole
+                    self.code.look.rehighlightBlock(block)
+            block = block.next()
 
     def refresh_code(self):
         """La hoja cambió por otro lado (la hoja web) con el código a la vista: el código, al día, en su línea."""
@@ -11884,7 +11933,8 @@ class TextEditor:
         elif web:
             self.draw_web()
         else:
-            self.redraw()
+            self.drawn = None  # el cursor pudo moverse con otra pestaña a la vista: su página de ahora
+            self.draw_source()
             self.update_status()
 
     def draw_web(self, text=None):
@@ -12065,9 +12115,9 @@ class TextEditor:
         """¿El párrafo de la hoja es una ilustración o un separador dibujado (una imagen en el EPUB)?"""
         for name in editor.objects_of(block):
             kind, _, n = name.partition(" ")
-            if kind in ("Ilustración", "Imagen") or (kind == "Separador" and n.isdigit()
-                                                     and int(n) < len(self.app.book.blocks)
-                                                     and self.app.book.blocks[int(n)].image):
+            if kind in ("Ilustración", "Imagen") or (kind == "Separador" and not n.isdigit()) or (
+                    kind == "Separador" and n.isdigit() and int(n) < len(self.app.book.blocks)
+                    and self.app.book.blocks[int(n)].image):
                 return True
         return False
 
@@ -12450,6 +12500,10 @@ class TextEditor:
 
     def draw_source(self):
         """Panel: la ilustración del bloque del cursor, o su página del PDF con el párrafo recuadrado."""
+        if self.scroll.isHidden():  # con la pestaña EPUB u hoja web: su «Página n de m» no es la del PDF
+            self.drawn = None
+            self.update_status()
+            return
         key = self.source_key()
         k, joined = key[:2]
         blocks = self.app.book.blocks
@@ -12789,6 +12843,7 @@ class TextEditor:
             source = [k for k, _ in page["lines"]]  # bloque de cada línea cargada (en «Contenido», salteados)
             pairs = editor.dump_levels(page["doc"], self.sheet.all_lines(page["doc"]))  # [(línea, tipo o None)]
             new = [line for line, _ in pairs]
+            seen = set()  # marcas ya puestas en esta sección: una copiada sale dos veces
             for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
                 k = str(source[i1]) if i1 < len(source) else str(start + i1)
                 if tag == "equal":  # un título igual puede haber cambiado de tipo (capítulo ↔ subtítulo)
@@ -12805,7 +12860,17 @@ class TextEditor:
                 elif start < 0:  # en «Contenido» solo se renombra: añadir o quitar líneas no toca el libro
                     continue
                 else:
-                    edits.append([start + i1, start + i2, "\n\n".join(new[j1:j2])])
+                    # una ilustración movida (cortar y pegar) cae en otro tramo que el suyo, y una copiada sale dos
+                    # veces: edit_section solo recupera una vez las de su tramo, y la otra se quedaba como un párrafo
+                    # con el texto «[Ilustración N]»
+                    moved = []
+                    for line in new[j1:j2]:
+                        m = convert.TOKEN.fullmatch(line.strip())
+                        if m and (not start + i1 <= int(m[2]) < start + i2 or line.strip() in seen):
+                            line = self.object_line(line)
+                        seen.add(line.strip())
+                        moved.append(line)
+                    edits.append([start + i1, start + i2, "\n\n".join(moved)])
                     kinds[start + i1] = [level for line, level in pairs[j1:j2] if editor.is_heading_line(line)]
         edits.sort(reverse=True)
         return edits, titles, [kinds[e[0]] for e in edits], retype
@@ -12853,21 +12918,30 @@ class TextEditor:
             history_add(self.app.editor_history, versions, at, keep(old[2] if old else versions[0]), loaded)
 
     def kept_objects(self, final):
-        """Para el historial: las ilustraciones y separadores que este guardar quita del libro (no están en final)
-        pasan a su imagen guardada ([Imagen nombre]) o a su texto. Con su número, al reabrir y deshacer su bloque ya
-        no estaba: salían como el texto «[Ilustración N]» y, aceptados así, como un párrafo con ese texto."""
-        blocks, stays = self.app.book.blocks, set(_history_lines(final))
+        """Para el historial: las ilustraciones y separadores de cada versión que no casan con los de final (quitados
+        o movidos al guardar) pasan a una línea que no depende de su número (object_line). Con su número, al reabrir
+        y deshacer ese bloque ya no estaba o era otro: salían como el texto «[Ilustración N]»."""
+        fixed = _history_lines(final)
 
-        def line(x):
-            m = convert.TOKEN.fullmatch(x)
-            if not m or x in stays or not 0 <= int(m[2]) < len(blocks):
-                return x
-            block = blocks[int(m[2])]
-            if block.image:  # shortcut: un separador dibujado vuelve como ilustración; si molesta, una marca propia
-                return f"[Imagen {self.sheet.store_picture(block.image)}]"
-            text = html.unescape(convert.TAGS.sub("", block.html)).strip()
-            return text if text and convert.SCENE_BREAK.fullmatch(text) else "* * *"
-        return lambda text: "\n\n".join(line(x) for x in _history_lines(text))
+        def keep(text):
+            lines = _history_lines(text)
+            for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, fixed, lines, autojunk=False).get_opcodes():
+                if op != "equal":
+                    lines[j1:j2] = [self.object_line(x) for x in lines[j1:j2]]
+            return "\n\n".join(lines)
+        return keep
+
+    def object_line(self, line):
+        """[Ilustración N] o [Separador N] como línea que no depende del número de su bloque: su imagen guardada
+        ([Imagen nombre], [Separador nombre]) o el texto del separador. Las demás líneas, igual."""
+        m, blocks = convert.TOKEN.fullmatch(line.strip()), self.app.book.blocks
+        if not m or not 0 <= int(m[2]) < len(blocks):
+            return line
+        block = blocks[int(m[2])]
+        if block.image:
+            return f"[{'Separador' if block.kind == 'break' else 'Imagen'} {self.sheet.store_picture(block.image)}]"
+        text = html.unescape(convert.TAGS.sub("", block.html)).strip()
+        return text if text and convert.SCENE_BREAK.fullmatch(text) else "* * *"
 
     def new_page(self):
         """Insertar → «Página nueva…» (créditos, nota del traductor): se guarda lo editado, se crea la página tras
