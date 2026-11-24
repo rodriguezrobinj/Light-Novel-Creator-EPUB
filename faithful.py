@@ -631,9 +631,11 @@ def _same_format(new, old):
     return new
 
 
-def _cut_tree(text, container, remove, rename):
+def _cut_tree(text, container, remove, rename, missing=lambda href: False):
     """Quita de un índice (nav o toc.ncx) las entradas (li, navPoint) que llevan a un archivo de remove y cambia el
-    nombre de las que llevan a un archivo de rename ({archivo: nombre}). remove(href) y rename(href) resuelven."""
+    nombre de las que llevan a un archivo de rename ({archivo: nombre}). remove(href) y rename(href) resuelven.
+    missing(href): su ancla ya no está (la marca de página de un párrafo borrado en el editor): la entrada se quita,
+    o, si lleva otras dentro, va al archivo; si no, el enlace quedaba roto."""
     root = parse(text, container)
     if root is None:
         return text
@@ -647,6 +649,12 @@ def _cut_tree(text, container, remove, rename):
                 if href and remove(href):
                     edits.append((child.start, child.end, ""))
                     continue
+                if href and "#" in href and missing(href):
+                    if not any(n.tag in ("li", "navpoint") for n in _descendants(child)):
+                        edits.append((child.start, child.end, ""))
+                        continue
+                    opening = text[link.start:link.inner]
+                    edits.append((link.start, link.inner, opening.replace(href, href.partition("#")[0])))
                 name = rename(href) if href and "#" not in href else None
                 label = next((n for n in _descendants(child) if n.tag in ("a", "text")), None) if name else None
                 if label is not None:
@@ -656,7 +664,8 @@ def _cut_tree(text, container, remove, rename):
     walk(root)
     for start, end, new in sorted(edits, reverse=True):
         text = text[:start] + new + text[end:]
-    return text
+    # una lista sin entradas no vale en el nav (la de un subtítulo quitado)
+    return re.sub(r"\s*<ol\b[^>]*>\s*</ol>", "", text) if edits else text
 
 
 @registro.timed
@@ -1006,14 +1015,23 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
         # Índices: sin los archivos quitados y con los títulos renombrados
         retitle = {book.blocks[k].src[0]: title for k, title in chapters
                    if book.blocks[k].src and title != book.blocks[k].title and book.blocks[k].title}
+        def missing(href, base):
+            target, anchor = _resolve(base, href.partition("#")[0]), href.partition("#")[2]
+            if target not in texts or target in gone:  # sin cambios: sus anclas siguen
+                return False
+            if target not in ids:
+                ids[target] = set(re.findall(r"""\sid\s*=\s*["']([^"']+)["']""", texts[target]))
+            return html.unescape(anchor) not in ids[target]
+
+        ids = {}  # archivo -> sus id, ya escrito
         for path in [p for p in (nav_path, items.get(ncx_id, ("",))[0]) if p and p in names]:
-            if gone or retitle:
-                text = texts.get(path) or source(path)
-                text = _cut_tree(text, "body" if path == nav_path else "navMap",
-                                 lambda href, p=path: _resolve(p, href) in gone,
-                                 lambda href, p=path: retitle.get(_resolve(p, href)))
-                if text != source(path):
-                    texts[path] = text
+            text = texts.get(path) or source(path)
+            new = _cut_tree(text, "body" if path == nav_path else "navMap",
+                            lambda href, p=path: _resolve(p, href) in gone,
+                            lambda href, p=path: retitle.get(_resolve(p, href)),
+                            lambda href, p=path: missing(href, p))
+            if new != source(path):
+                texts[path] = new
 
         # OPF: spine, manifiesto, guía y, si cambiaron, los datos del libro
         opf_text = z.read(opf_path).decode("utf-8")

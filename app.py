@@ -3763,7 +3763,7 @@ class App:
         if self.pdf_doc:
             self.pdf_doc.close()
         # vista previa, miniaturas y panel del editor
-        self.pdf_doc = convert.open_pdf(self.pdf, shown["jpx"] if shown else None)
+        self.pdf_doc = convert.open_pdf(self.pdf, shown["jpx"] if shown else None, memory=True)  # el archivo, libre
         if shown:
             self.toc_memo = (self.pdf_doc, shown["toc"])
         self.stack.setCurrentIndex(1)
@@ -8445,6 +8445,8 @@ class TextEditor:
             (app.book.blocks[k].kind, app.book.blocks[k].image) if self.current and 0 <= k < len(app.book.blocks)
             and not self.current[0] <= k < self.current[1] and app.book.blocks[k].image else None)
         self.pages = {}  # (inicio, fin) -> {"doc", "look", "lines"} de cada sección visitada
+        self.renamed = {}  # {bloque: título} renombrado en una hoja: las demás lo toman al abrirse (enter_titles)
+        self.stepping = False  # deshacer de todo el libro abriendo otro capítulo: no se le añade nada
         # Avisos del informe por bloque, tomados al abrir: la hoja los marca en los párrafos sin cambiar
         self.issues = {}
         for issue in app.quality_report():
@@ -11605,7 +11607,11 @@ class TextEditor:
         key = source[n]
         del source[n:]  # los de detrás ya no se podían deshacer
         if key != self.current:
-            self.open_section(*key)
+            self.stepping = True  # un título traído de otra hoja sería un paso nuevo y borraría el rehacer
+            try:
+                self.open_section(*key)
+            finally:
+                self.stepping = False
         (self.sheet.redo if redo else self.sheet.undo)()
         target.append(key)
         self.sync_undo()
@@ -11737,6 +11743,7 @@ class TextEditor:
             return
         if self.reading is not None:
             self.stop_reading()
+        self.leave_titles()
         page = self.pages.get((start, end))
         if page is None:
             lines, levels = self.section_lines(start, end)
@@ -11753,6 +11760,7 @@ class TextEditor:
             self.sheet.use(page["doc"], page["look"])
             if page.pop("stale", False):  # «Mostrar cambios» cambió con otro capítulo a la vista
                 page["look"].show_changes(page["look"].changes, None, self.changes_in_view())
+        self.enter_titles(page)
         self.current = (start, end)
         self.epub_lines = None  # la pestaña EPUB es de otro capítulo hasta que se dibuje este
         if focus is not None:
@@ -11772,6 +11780,48 @@ class TextEditor:
         self.sheet.setFocus()
         if self.web is not None and not self.web_on:  # la hoja web enseña el capítulo nuevo
             self.later("webview", 0, self.refresh_web)
+
+    @staticmethod
+    def heading_texts(doc):
+        """{bloque: título} de los títulos de la hoja doc (el primero, si uno está copiado), con sus etiquetas (<i>):
+        con el texto solo, la cursiva de un título se perdía al aceptar."""
+        out, block = {}, doc.firstBlock()
+        while block.isValid():
+            f = block.blockFormat()  # solo los títulos se vuelcan: volcar todos al abrir un capítulo largo tardaba
+            if f.property(editor.HEADING) or re.match(r"<h\d", f.property(editor.OPENING) or "", re.I):
+                k, lines = editor.source_of(block), editor.block_lines(block)
+                if k is not None and len(lines) == 1 and editor.is_heading_line(lines[0]):
+                    out.setdefault(k, convert.split_prefix(lines[0])[1].strip())
+            block = block.next()
+        return out
+
+    def leave_titles(self):
+        """Los títulos renombrados en la hoja que se deja: los demás capítulos y «Contenido» los toman al abrirse."""
+        page = self.pages.get(self.current) if self.current else None
+        if page and "titles" in page:
+            for k, text in self.heading_texts(page["doc"]).items():
+                if k in page["titles"] and text != page["titles"][k]:
+                    self.renamed[k] = text
+
+    def enter_titles(self, page):
+        """La hoja que se abre toma los títulos renombrados en otra, como un paso de su deshacer: lo cargado no cambia
+        (la clave de su historial) y al aceptar el título va como renombrado. No con su rehacer pendiente (se
+        perdería) ni al deshacer de todo el libro."""
+        doc = page["doc"]
+        now = self.heading_texts(doc) if self.renamed and not self.stepping and not doc.isRedoAvailable() else {}
+        stale = {k for k, text in now.items() if k in self.renamed and text != self.renamed[k]}
+        if stale:  # la hoja ya es la de doc (open_section la puso): _set_block_text escribe en ella
+            cursor, block = QTextCursor(doc), doc.firstBlock()
+            cursor.beginEditBlock()
+            while block.isValid():
+                k = editor.source_of(block)
+                lines = editor.block_lines(block) if k in stale else []
+                if len(lines) == 1 and editor.is_heading_line(lines[0]):
+                    stale.discard(k)  # solo el primero, como heading_texts
+                    self.sheet._set_block_text(block, self.renamed[k])
+                block = block.next()
+            cursor.endEditBlock()
+        page["titles"] = self.heading_texts(doc)
 
     def replay_history(self, doc, lines, look, levels=None):
         """El deshacer y el rehacer de otras veces en este capítulo, paso a paso, en el de su hoja: al reabrir el
@@ -12857,11 +12907,15 @@ class TextEditor:
                         if level in (ON, OFF) and was is not None and level != was:
                             retype[str(source[i1 + n])] = level
                     continue
-                if (tag == "replace" and i2 - i1 == j2 - j1 == 1 and old[i1].startswith("# ")
-                        and new[j1].startswith("# ") and self.app.tree.exists(k)):
-                    titles[k] = new[j1][2:].strip()
-                    if pairs[j1][1] in (ON, OFF):
-                        retype[k] = pairs[j1][1]
+                # en «Contenido», varios títulos seguidos renombrados son un tramo: antes se descartaban como quitados
+                if (tag == "replace" and i2 - i1 == j2 - j1 and (start < 0 or i2 - i1 == 1)
+                        and all(line.startswith("# ") for line in old[i1:i2] + new[j1:j2])
+                        and all(self.app.tree.exists(str(source[i])) for i in range(i1, i2))):
+                    for n in range(i2 - i1):
+                        k = str(source[i1 + n])
+                        titles[k] = new[j1 + n][2:].strip()
+                        if pairs[j1 + n][1] in (ON, OFF):
+                            retype[k] = pairs[j1 + n][1]
                 elif start < 0:  # en «Contenido» solo se renombra: añadir o quitar líneas no toca el libro
                     self.toc_ignored = True
                     continue
@@ -12878,6 +12932,10 @@ class TextEditor:
                         moved.append(line)
                     edits.append([start + i1, start + i2, "\n\n".join(moved)])
                     kinds[start + i1] = [level for line, level in pairs[j1:j2] if editor.is_heading_line(line)]
+        self.leave_titles()
+        for k, title in self.renamed.items():  # en dos hojas con nombres distintos: el último escrito
+            if str(k) in titles:
+                titles[str(k)] = title
         edits.sort(reverse=True)
         return edits, titles, [kinds[e[0]] for e in edits], retype
 

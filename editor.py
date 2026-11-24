@@ -217,10 +217,12 @@ def parse_inline(text):
     vacía tal cual: <a id="x"></a>, <span …/>) o ("icon", <img> de un icono); pila: las etiquetas abiertas, de fuera
     adentro, tal cual. Un cierre sin su apertura queda como texto."""
     items, stack, opened, pos = [], [], [], 0
+    if text.startswith(convert.HASH):  # «# » de texto al principio del párrafo (convert.HASH)
+        text = "#" + text[len(convert.HASH):]
 
     def add_text(piece):
-        if piece:
-            items.append(("text", piece, tuple(stack)))
+        if piece:  # «&lt;b>»: el texto «<b>» (convert.LITERAL_LT)
+            items.append(("text", convert.ESCAPED_LT.sub("<", piece), tuple(stack)))
 
     for m in TAG.finditer(text):
         add_text(text[pos:m.start()])
@@ -257,7 +259,7 @@ def _serialize(seq):
             same += 1
         out += [f"</{_name(t)}>" for t in reversed(opened[same:])] + list(tags[same:])
         opened = list(tags)
-        out.append("<br/>" if kind == "br" else value)
+        out.append("<br/>" if kind == "br" else convert.LITERAL_LT.sub("&lt;", value) if kind == "text" else value)
     out += [f"</{_name(t)}>" for t in reversed(opened)]
     return "".join(out)
 
@@ -443,12 +445,13 @@ def from_code(code, known=()):
         tag, attrs, inner = m[1], m[2] or "", m[3]
         if not convert._balanced(inner):
             raise ValueError(f"Línea {n}: una etiqueta no se cierra o se cierra fuera de orden: {line[:60]}")
-        text = html.unescape(convert.NOTE.sub(r"[Nota: \1]", inner).replace(convert.SC_OPEN, "<sc>")
-                             .replace(convert.SC_CLOSE, "</sc>"))
+        text = convert.line_unescape(convert.NOTE.sub(r"[Nota: \1]", inner).replace(convert.SC_OPEN, "<sc>")
+                                     .replace(convert.SC_CLOSE, "</sc>"))
         opening = f"<{tag}{attrs}>"
         prefix = (opening if opening in kept else "" if opening == "<p>" else "# " if opening == "<h1>" else
                   convert.ALIGN_PREFIX.get(next((a for a, o in CODE_CLASSES.items() if o == opening), ""), "") or opening)
-        lines.append(prefix + text.strip())
+        text = text.strip()
+        lines.append(prefix + (convert.HASH + text[1:] if not prefix and text.startswith("# ") else text))
     return "\n\n".join(lines)
 
 
@@ -1434,7 +1437,9 @@ def _canonical(line):
     if convert.TOKEN.fullmatch(bare):
         return bare
     text = _serialize(parse_inline(_strip(line))).strip()
-    return line[:len(line) - len(_strip(line))] + text if text else ""
+    head = line[:len(line) - len(_strip(line))]
+    text = convert.HASH + text[1:] if not head and text.startswith("# ") else text  # como _lines
+    return head + text if text else ""
 
 
 def _lines(block):
@@ -1454,8 +1459,8 @@ def _lines(block):
     def flush():
         text = _serialize(seq).strip()
         seq.clear()
-        if text:
-            out.append(prefix + text)
+        if text:  # un párrafo que empieza por «# » escrito no es un título
+            out.append(prefix + (convert.HASH + text[1:] if not prefix and text.startswith("# ") else text))
 
     it = block.begin()
     while not it.atEnd():
@@ -3548,7 +3553,7 @@ class Sheet(QTextEdit):
                 heading = bool(block.blockFormat().property(HEADING))
                 body = _strip(lines[0])
                 typed = convert._typography(convert._inline(body), dashes=not heading)
-                new = html.unescape(convert.NOTE.sub(r"[Nota: \1]", typed))
+                new = convert.line_unescape(convert.NOTE.sub(r"[Nota: \1]", typed))
                 if new != body:
                     self._set_block_text(block, new)
                     changed += 1

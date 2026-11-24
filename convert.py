@@ -1403,6 +1403,20 @@ RAW_TAG_NAMES = ("ruby", "rb", "rt", "rp", "rtc", "span", "br", "small", "sub", 
                  "mark", "big", "tt", "del", "ins", "em", "strong", "img", "wbr", "i", "b", "sup", "kbd", "samp", "var",
                  "dfn", "bdi", "bdo", "time", "data")
 RAW_TAG = re.compile(r'&lt;(/?)(' + "|".join(RAW_TAG_NAMES) + r')((?:\s+[\w:.-]+="[^"<>]*")*)\s*(/?)&gt;')
+# «<b>» escrito como texto: en la línea del editor va como «&lt;b>»; sin escapar se tomaba por negrita y se perdía.
+# Solo delante de un nombre que la línea entiende (en línea, de párrafo o un prefijo: <center>); «<Habilidad>» va tal cual
+_LINE_NAMES = sorted(set(RAW_TAG_NAMES) | {"a", "sc", "center", "marco", "derecha", "tabla", "lista", "p", "li",
+                                           "div", "blockquote", "dd", "dt", "pre"} | {f"h{n}" for n in range(1, 7)},
+                     key=len, reverse=True)
+_AHEAD = r"(?=/?(?:" + "|".join(_LINE_NAMES) + r")(?![\w:.-]))"
+LITERAL_LT, ESCAPED_LT = re.compile("<" + _AHEAD), re.compile("&lt;" + _AHEAD)
+HASH = "&#35;"  # «# » escrito al principio de un párrafo: en su línea, así; sin escapar, el párrafo pasaba a título
+
+
+def line_unescape(text):
+    """HTML del libro -> texto de una línea del editor: html.unescape, salvo un «&lt;b>» de texto, que sigue escapado
+    (ESCAPED_LT). shortcut: «&lt;b>» escrito tal cual como texto sale «<b>» (ambiguo; nadie lo escribe)."""
+    return html.unescape(ESCAPED_LT.sub("\x00", text)).replace("\x00", "&lt;")
 HEADING_TAGS = {f"h{n}" for n in range(1, 7)}
 # Etiqueta de apertura de un párrafo al principio de una línea del editor (Block.opening)
 OPENING = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>')
@@ -1488,13 +1502,13 @@ def _line(b, k):
     """Línea de section_text del bloque b, que es el número k del libro."""
     if b.kind in ("p", "heading") and b.opening:
         text = NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>")
-        return b.opening + html.unescape(text)
+        return b.opening + line_unescape(text)
     if b.kind == "p":
         prefix = ALIGN_PREFIX.get(b.align, "")
-        text = NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>")
-        return prefix + html.unescape(text)
+        text = line_unescape(NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>"))
+        return prefix + (HASH + text[1:] if not prefix and text.startswith("# ") else text)
     if b.kind == "heading":  # su nota, como en un párrafo: salía como <span class="nota"> y se rehacía al guardar
-        return "# " + html.unescape(NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>"))
+        return "# " + line_unescape(NOTE.sub(r"[Nota: \1]", b.html).replace(SC_OPEN, "<sc>").replace(SC_CLOSE, "</sc>"))
     if is_rule(b):
         return "<hr/>"
     return f"[{'Ilustración' if b.kind == 'image' else 'Separador'} {k}]"
@@ -1532,12 +1546,14 @@ def _inline(text):
     """Línea escrita por el usuario a XHTML: escapada, salvo <i> y <b>, que se conservan si están bien
     cerradas; si no, se quitan para no romper el EPUB. "[Nota: …]" vuelve a ser la nota al pie, si
     dentro las etiquetas también cierran (si no, cruzarían el límite de la nota)."""
-    out = INLINE.sub(r"<\1\2>", html.escape(BAD_XML.sub("", text), quote=False))  # un control rompe el XML
+    out = html.escape(BAD_XML.sub("", text), quote=False)  # un control rompe el XML
+    out = "#" + out[len("&amp;#35;"):] if out.startswith("&amp;#35;") else out  # «&#35; »: un «# » de texto (HASH)
+    out = INLINE.sub(r"<\1\2>", re.sub("&amp;lt;" + _AHEAD, "\x00", out))  # «&lt;b>»: el texto «<b>», no negrita
     out = RAW_LINK.sub(_raw_link, RAW_TAG.sub(_raw_tag, out))
     out = out if _balanced(out) else TAGS.sub("", out)
     out = LINK_MARK.sub(lambda m: f'<a href="{m[1]}">{m[2]}</a>' if _balanced(m[2]) else m[0], out)
     out = NOTE_MARK.sub(lambda m: f'<span class="nota">{m[1]}</span>' if _balanced(m[1]) else m[0], out)
-    return ICON_MARK.sub(r"<\1>", out).replace("<sc>", SC_OPEN).replace("</sc>", SC_CLOSE)
+    return ICON_MARK.sub(r"<\1>", out).replace("<sc>", SC_OPEN).replace("</sc>", SC_CLOSE).replace("\x00", "&lt;")
 
 
 def edit_section(book, start, end, text, folder=None, exact=False):
@@ -3097,15 +3113,19 @@ def _preview_epub(path):
         return out.getvalue()
 
 
-def open_pdf(path, jpx=None):
+def open_pdf(path, jpx=None, memory=False):
     """Abre el PDF (o EPUB) para leerlo o dibujarlo. Una imagen JPEG 2000 que trae su propia paleta y el PDF
     marca /Indexed salía como ruido al dibujarla más pequeña que su tamaño (Eminence 7, las ilustraciones):
     MuPDF la reduce promediando los índices de la paleta como si fueran colores. Sin el /ColorSpace del PDF
     usa los colores del propio JPEG 2000. Solo en memoria: el archivo no cambia. doc.jpx: los objetos
     arreglados; jpx: esos mismos, ya buscados por otro proceso (buscarlos recorre todo el PDF: 0,23 s en la
-    ventana con los 6347 objetos de Strange Grief 1)."""
+    ventana con los 6347 objetos de Strange Grief 1). memory: leído entero a memoria; abierto del disco, Windows no
+    deja mover ni borrar el archivo mientras la ventana lo enseña."""
     preview = _preview_epub(path) if str(path).lower().endswith(".epub") else None
-    doc = pymupdf.open(stream=preview, filetype="epub") if preview else pymupdf.open(path)
+    if preview:
+        doc = pymupdf.open(stream=preview, filetype="epub")
+    else:
+        doc = pymupdf.open(stream=Path(path).read_bytes(), filetype="pdf") if memory and path else pymupdf.open(path)
     doc.jpx = []
     if doc.is_pdf and not doc.needs_pass:
         for xref in range(1, doc.xref_length()) if jpx is None else jpx:
