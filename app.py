@@ -1146,8 +1146,8 @@ def _migrate_review(state, book):
             where = spans()
             if edit[0] == "image":
                 edits.append(["image", new(int(edit[1]), where), edit[2]])
-            elif edit[0] == "head":
-                edits.append(["head", new(int(edit[1]), where), *edit[2:5]])
+            elif edit[0] in ("head", "title"):
+                edits.append([edit[0], new(int(edit[1]), where), *edit[2:5]])
             elif edit[0] == "move":
                 start, end, dest = int(edit[1]), int(edit[2]), int(edit[3])
                 if any(start < s + n and end > s for s, n in where):
@@ -1191,8 +1191,8 @@ def _migrate_dropped(state, book):
         for edit in state.get("edits", []):
             if edit[0] == "image":
                 edits.append(["image", new(int(edit[1])), edit[2]])
-            elif edit[0] == "head":
-                edits.append(["head", new(int(edit[1])), *edit[2:5]])
+            elif edit[0] in ("head", "title"):
+                edits.append([edit[0], new(int(edit[1])), *edit[2:5]])
             elif edit[0] == "move" or int(edit[0]) <= max(marks):
                 raise LookupError  # mover, o reescribir antes de ellos (cambia dónde quedan): ya no se puede contar
             else:
@@ -1613,7 +1613,8 @@ def _replay(book, state):
     """Vuelve a aplicar al libro recién analizado los cambios de bloques de una revisión, en su orden
     (cada uno cuenta los bloques tal como los dejó el anterior): textos editados [inicio, fin, texto],
     secciones movidas ["move", inicio, fin, destino], ilustraciones cambiadas ["image", bloque, archivo] y
-    cabeceras de capítulo editadas ["head", bloque, archivo, antes, después]. Devuelve los aplicados."""
+    cabeceras de capítulo editadas ["head", bloque, archivo, antes, después] y títulos con formato ["title",
+    bloque, línea sin «# »]. Devuelve los aplicados."""
     done = []
     for edit in state.get("edits", []):
         try:
@@ -1627,6 +1628,13 @@ def _replay(book, state):
                 except ValueError:
                     pass  # la imagen ya no está: se queda la del PDF, y el cambio se recuerda por si vuelve
                 done.append(["image", k, path])
+                continue
+            if edit[0] == "title":
+                k, text = int(edit[1]), str(edit[2])
+                if not (0 <= k < len(book.blocks) and book.blocks[k].kind == "heading"):
+                    break
+                convert.set_title_html(book, k, text)
+                done.append(["title", k, text])
                 continue
             if edit[0] == "head":
                 k, shell = int(edit[1]), [str(part) for part in edit[2:5]]
@@ -4742,6 +4750,14 @@ class App:
         for k, shell in heads:
             convert.set_shell(self.book, k, shell)
             self.edits.append(["head", k, *shell])
+        # el formato de un título renombrado (cursiva, versalitas) va a su bloque: la fila es solo texto. Con los
+        # índices de antes, como las cabeceras
+        for k, title in (titles or {}).items():
+            block = self.book.blocks[int(k)] if int(k) < len(self.book.blocks) else None
+            if (block is not None and block.kind == "heading" and not block.opening
+                    and convert._inline(title) != block.html and ("<" in title or "<" in block.html)):
+                convert.set_title_html(self.book, int(k), title)
+                self.edits.append(["title", int(k), title])
         for n, edit in enumerate(edits):
             # de ahora: un párrafo que deja de estar centrado no vuelve a estarlo (EXACT, en la revisión también)
             mapping = convert.edit_section(self.book, *edit[:3], _images(), exact=True)
@@ -11851,13 +11867,21 @@ class TextEditor:
         if start < 0:
             heads = [i for i in tree.get_children() if book.blocks[int(i)].kind == "heading"
                      and tree.set(i, "inc") in (ON, OFF)]
-            return [(int(i), "# " + tree.set(i, "title")) for i in heads], {int(i): tree.set(i, "inc") for i in heads}
+            return [(int(i), self.head_line(int(i))) for i in heads], {int(i): tree.set(i, "inc") for i in heads}
         # Un título con su etiqueta (EPUB: <h1 class="lucida">) se ve como en el libro; los demás, con el nombre de la fila
-        lines = [(k, "# " + tree.set(str(k), "title") if book.blocks[k].kind == "heading" and tree.exists(str(k))
+        lines = [(k, self.head_line(k) if book.blocks[k].kind == "heading" and tree.exists(str(k))
                   and not book.blocks[k].opening else convert.section_text(book, k, k + 1)) for k in range(start, end)]
         levels = {k: tree.set(str(k), "inc") for k in range(start, end)
                   if book.blocks[k].kind == "heading" and tree.exists(str(k))}
         return lines, levels
+
+    def head_line(self, k):
+        """Línea de un título con fila: el nombre de la fila; con el formato de su bloque si dice lo mismo (cursiva
+        puesta en el editor, que la fila no guarda)."""
+        block, title = self.app.book.blocks[k], self.app.tree.set(str(k), "title")
+        if "<" in block.html and not convert.NOTE.search(block.html) and _title_text(block.html) == title:
+            return "# " + convert.line_unescape(block.html.replace(convert.SC_OPEN, "<sc>").replace(convert.SC_CLOSE, "</sc>"))
+        return "# " + convert.LITERAL_LT.sub("&lt;", title)  # «<b>» escrito en el título es texto
 
     # Borrador: lo cambiado sin aceptar sobrevive a un cierre de la aplicación
     def write_draft(self, current=None):

@@ -1644,6 +1644,14 @@ def edit_section(book, start, end, text, folder=None, exact=False):
     return mapping
 
 
+def set_title_html(book, k, text):
+    """El título k con el formato escrito en el editor (text: su línea sin «# »). Una lista nueva: el deshacer
+    de la ventana guarda la de antes."""
+    blocks = list(book.blocks)
+    blocks[k] = replace(blocks[k], html=_inline(text))
+    book.blocks = blocks
+
+
 class _Shift(collections.abc.Mapping):
     """{índice viejo: nuevo} de edit_section, calculado al pedirlo: hecho entero, «Todos» de la búsqueda (920
     párrafos de Eminence 7) llenaba 920 diccionarios de 8000 bloques y tardaba 0,6 s."""
@@ -3737,9 +3745,10 @@ CHAPTER_NUMBER = re.compile(  # "Capítulo 3: Nombre" -> número y nombre, para 
 
 
 def _chapter_heading(title):
-    """<h1> de un capítulo: si empieza por "Capítulo 3:" o similar, número y nombre en dos líneas."""
+    """<h1> de un capítulo: si empieza por "Capítulo 3:" o similar, número y nombre en dos líneas. Con formato
+    (<i>), solo si cada parte cierra sus etiquetas."""
     m = CHAPTER_NUMBER.fullmatch(title)
-    if not m:
+    if not m or not (_balanced(m.group(1)) and _balanced(m.group(2))):
         return f"<h1>{title}</h1>"
     name = "name long" if len(html.unescape(m.group(2))) > 45 else "name"  # los nombres largos, algo menores
     return f'<h1><span class="num">{m.group(1)}</span> <span class="{name}">{m.group(2)}</span></h1>'
@@ -4347,6 +4356,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     drawn = {}  # número de sección -> (bloque, imagen) de su título dibujado (Witch 1)
     veiled = set()  # números de sección con el título oculto del editor
     firsts = {}  # archivo de cada sección -> su primer bloque: el explorador de archivos del editor abre ese capítulo
+    styled = {}  # número de sección -> HTML de su título con formato (cursiva, versalitas) puesto en el editor
     for k, b in enumerate(book.blocks):
         if k in skip or (b.kind == "image" and not b.keep):  # sección quitada o imagen descartada
             continue
@@ -4357,6 +4367,10 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 drawn[len(sections)] = k, b.image
             if b.kind == "heading" and b.opening == HIDDEN_TITLE:
                 veiled.add(len(sections))
+            # el título de la fila es texto; si dice lo mismo que el bloque, el del bloque, con su formato
+            if (b.kind == "heading" and "<" in b.html and not NOTE.search(b.html)
+                    and " ".join(_plain(b).split()) == " ".join(starts[k].split())):
+                styled[len(sections)] = b.html
         else:
             if not sections:
                 sections.append(["Inicio", False, []])
@@ -4387,7 +4401,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
     for n, (title, is_chapter, blocks) in enumerate(sections, 1):
         name = f"sec{n:03d}.xhtml"
         # quote=False: la limpieza tipográfica ve las comillas («"Hola"» -> «“Hola”»), no &quot;
-        heading = fix(html.escape(title, quote=False))
+        heading = fix(styled[n]) if n in styled else fix(html.escape(title, quote=False))
         parts = [_chapter_heading(heading).replace("<h1", '<h1 id="titulo"', 1)] if is_chapter else []
         if n in veiled:  # en el índice y para los lectores de voz, pero no se ve
             parts = [f'<h1 id="titulo" class="oculto" style="display: none">{heading}</h1>']
