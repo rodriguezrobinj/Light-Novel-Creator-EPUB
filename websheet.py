@@ -130,7 +130,42 @@ DEL_CSS = (".lnc-del::after { content: attr(data-del); background: %s; text-deco
            "background: %s; text-decoration: line-through; font-size: 0.85em; font-style: normal; font-weight: normal; "
            "text-indent: 0; text-align: left; padding: 0 0.2em; } "
            "[data-lnc-above]::before { content: attr(data-lnc-above); margin-bottom: 0.2em; } "
-           "[data-lnc-below]::after { content: attr(data-lnc-below); margin-top: 0.2em; }")
+           "[data-lnc-below]::after { content: attr(data-lnc-below); margin-top: 0.2em; } "
+           # la ilustración o el separador puestos: recuadrados de verde, como en la hoja
+           ".lnc-obj[data-lnc-added] img, .lnc-break[data-lnc-added] { outline: 3px solid %s; outline-offset: 2px; }")
+
+
+def gone_css(pieces, color, dark=False):
+    """Valor de content: del CSS con lo quitado entero (editor.removed_pieces) si lleva ilustraciones o
+    separadores: la fila entera pintada como en la hoja (editor.paint_pieces), en PNG dentro del CSS: con texto
+    y una imagen juntos, el fondo rojo del CSS asomaba alrededor de la imagen. dark: el modo oscuro de la hoja
+    web (webview.SHEET_DARK), con su letra clara. "" sin ellas."""
+    if all(isinstance(p, str) for p in pieces):
+        return ""
+    ink = "#ececec" if dark else "#000000"
+    from PySide6.QtCore import QBuffer, QIODevice, Qt
+    from PySide6.QtGui import QColor, QFont, QImage, QPainter
+    key = (tuple(p if isinstance(p, str) else p[0].cacheKey() for p in pieces), color, ink)
+    if key not in _GONE:
+        font = QFont("Segoe UI")
+        font.setPixelSize(16)  # una imagen no sigue el zoom de la hoja web: letra fija
+        width = 480  # cabe en la columna de la hoja web (una imagen en content no se encoge con ella)
+        row = QImage(width, round(editor.row_height(pieces, font)), QImage.Format.Format_ARGB32_Premultiplied)
+        row.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(row)
+        boxes = editor.paint_pieces(painter, 0, row.height(), pieces, font, width, color, QColor(ink))
+        painter.end()
+        row = row.copy(0, 0, max(1, round(max(box.right() for box, _ in boxes))) if boxes else 1, row.height())
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        row.save(buffer, "PNG")
+        if len(_GONE) > 200:
+            _GONE.clear()
+        _GONE[key] = 'url("data:image/png;base64,%s")' % bytes(buffer.data().toBase64()).decode()
+    return _GONE[key]
+
+
+_GONE = {}  # (piezas, color, tinta) -> su url() de gone_css: se pide en cada cambio con «Mostrar cambios»
 
 # Funciones de la hoja: estado para la cinta, órdenes de formato, limpieza al pegar y atajos de Word en español
 SHEET_JS = DIFF_JS + r"""
@@ -468,13 +503,31 @@ SHEET_JS = DIFF_JS + r"""
       var m = lnc.marks, spell = new Highlight(), change = new Highlight(), levels = {};
       lnc.found = [];  // [{id, range}] de los avisos pintados: para el clic derecho y F8
       lncClearDiff(sheet);
-      Array.prototype.forEach.call(sheet.querySelectorAll('[data-lnc-above], [data-lnc-below]'), function (b) {
-        b.removeAttribute('data-lnc-above'); b.removeAttribute('data-lnc-below');
+      var own = ['data-lnc-above', 'data-lnc-below', 'data-lnc-ga', 'data-lnc-gb', 'data-lnc-added'];
+      Array.prototype.forEach.call(sheet.querySelectorAll(own.map(function (a) { return '[' + a + ']'; }).join(',')),
+        function (b) { own.forEach(function (a) { b.removeAttribute(a); }); });
+      var pictures = '';  // lo quitado con ilustraciones: su content (con las imágenes) en una regla por párrafo
+      // [n.º del de debajo, quitado encima, n.º del de arriba, debajo (, content de encima, de debajo)]
+      if (m.show) (m.gone || []).forEach(function (g, k) {
+        var up = sheet.children[g[0]], down = sheet.children[g[2]];
+        if (g[1] && up) up.setAttribute('data-lnc-above', g[1]);
+        if (g[3] && down) down.setAttribute('data-lnc-below', g[3]);
+        // con los dos atributos: gana a [data-lnc-above]::before sin depender del orden de los <style>. La imagen ya
+        // lleva su fondo: sin el del texto ni el hueco de la línea base (font-size 0)
+        var look = 'background:none;padding:0;font-size:0;line-height:0;';
+        if (g[4] && up) {
+          up.setAttribute('data-lnc-ga', k);
+          pictures += '[data-lnc-above][data-lnc-ga="' + k + '"]::before{content:' + g[4] + ';' + look + 'margin-bottom:4px;}';
+        }
+        if (g[5] && down) {
+          down.setAttribute('data-lnc-gb', k);
+          pictures += '[data-lnc-below][data-lnc-gb="' + k + '"]::after{content:' + g[5] + ';' + look + 'margin-top:4px;}';
+        }
       });
-      if (m.show) (m.gone || []).forEach(function (g) {  // [n.º del de debajo, quitado encima, n.º del de arriba, debajo]
-        if (g[1] && sheet.children[g[0]]) sheet.children[g[0]].setAttribute('data-lnc-above', g[1]);
-        if (g[3] && sheet.children[g[2]]) sheet.children[g[2]].setAttribute('data-lnc-below', g[3]);
-      });
+      if (m.show) m.changed.forEach(function (b) { if (b && b.classList.contains('lnc-obj')) b.setAttribute('data-lnc-added', ''); });
+      var rules = document.getElementById('lnc-gone') || document.head.appendChild(document.createElement('style'));
+      rules.id = 'lnc-gone';
+      rules.textContent = pictures;
       if (m.show) {  // grupos: un párrafo con su texto de antes y los nuevos que lo siguen (Intro), comparados juntos
         var groups = [], group = null;
         Array.prototype.forEach.call(sheet.children, function (b) {
