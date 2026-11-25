@@ -45,7 +45,7 @@ TABLE_ROW = _USER + 17  # fila de tabla («Nivel | 5»): "table" o "table-head" 
 FRAME_KIND = _USER + 16  # párrafo en recuadro: su tipo (convert.BOX_KINDS), "" el de siempre
 BOOK_LOOK = _USER + 15  # párrafo con el aspecto del libro (su etiqueta y su CSS): sin el título azul de la hoja
 LINK_COLOR = "#2a62c8"  # enlaces en la hoja, como en Word; TextEditor pone el azul del tema
-NOTE = re.compile(r"\[Nota: [^\]]*\]")
+NOTE = convert.NOTE_MARK  # la de convert: con «[Arco 2]» dentro se pintaba solo hasta su «]»
 THUMB = 160  # alto de las miniaturas de ilustración en la hoja, en píxeles
 SPACE = 10  # píxeles entre párrafos, como el espaciado de Word (no se guarda)
 FONT_SIZE = 12  # puntos del texto a 100 %
@@ -417,6 +417,7 @@ def from_code(code, known=()):
         if m := convert.OPENING.match(old):
             kept.add(m[0])
     lines = []
+    code = convert.double_quoted(code)  # <span class='nota'> escrito a mano: también es una etiqueta
     for n, raw in enumerate(code.splitlines(), 1):
         line = raw.strip()
         if not line:
@@ -2719,6 +2720,25 @@ class Sheet(QTextEdit):
             self.setTextCursor(cursor)
             self.ensureCursorVisible()
 
+    def _relevel(self, levels):
+        """El tipo de cada título según levels {bloque: tipo}, en el último paso del deshacer: con el texto igual,
+        set_text no rehacía nada y un título que una versión de antes no tenía se quedaba sin su tipo (al aceptar
+        pasaba de Subtítulo a Capítulo)."""
+        cursor, block = None, self.document().firstBlock()
+        while block.isValid():
+            f = block.blockFormat()
+            want = levels.get(source_of(block))
+            if f.property(HEADING) and want and f.property(LEVEL) != want:
+                if cursor is None:
+                    cursor = QTextCursor(self.document())
+                    cursor.joinPreviousEditBlock()
+                f.setProperty(LEVEL, want)
+                cursor.setPosition(block.position())
+                cursor.setBlockFormat(f)
+            block = block.next()
+        if cursor is not None:
+            cursor.endEditBlock()
+
     def set_text(self, text, sources=None, levels=None):
         """Pone text (como dump) en la hoja, en un solo deshacer: lo que vuelve de la vista de código. Un párrafo
         igual que uno de antes sigue siendo de su bloque (su página) y, si es el cargado, recuerda su línea.
@@ -2729,6 +2749,8 @@ class Sheet(QTextEdit):
         lines = [line for line in text.split("\n\n") if line.strip()]
         old = self.all_lines()
         if lines == [line for group in old for line in group]:
+            if levels:  # solo al reabrir (replay_history): recorrer la hoja en cada tecla del código tardaba
+                self._relevel(levels)
             return False
         if sources is not None and [line.strip() for _, line in sources if line.strip()] != [x.strip() for x in lines]:
             sources = None  # no es ese texto
@@ -2755,7 +2777,7 @@ class Sheet(QTextEdit):
         while a > 0 and (a == b or i == j or tied(a - 1)):
             a -= 1
             i -= len(old[a])
-        before, levels, last, block = [], {}, None, doc.findBlockByNumber(a)
+        before, kept, last, block = [], {}, None, doc.findBlockByNumber(a)  # kept: tipo de los títulos de ahora
         for k in range(a - 1, -1, -1):  # el bloque del libro del párrafo de antes: lo heredan los nuevos
             last = source_of(doc.findBlockByNumber(k))
             if last is not None:
@@ -2766,7 +2788,7 @@ class Sheet(QTextEdit):
                 if line.strip():
                     before.append((source_of(block), line))
             if block.blockFormat().property(LEVEL):
-                levels[source_of(block)] = block.blockFormat().property(LEVEL)
+                kept[source_of(block)] = block.blockFormat().property(LEVEL)
             end, block = block.position() + block.length() - 1, block.next()
         total, lines = len(lines), lines[i:j]
         pairs = []
@@ -2779,7 +2801,8 @@ class Sheet(QTextEdit):
                 last = k if k is not None else last
         if src is not None:
             pairs = [(k, line) for (k, _), line in zip(src[i:j], lines)]
-            levels = dict(levels or {})
+        # los de la carga (levels) mandan: un título quitado en una versión de antes volvía sin su tipo
+        levels = {**kept, **(levels or {})} if src is not None else kept
         # y las de lo aceptado otras veces (replay_history): al deshacer hasta ellas se comparan con el principio
         loaded = {line for _, line in self.origins.get(doc, [])} | set(self.look.firsts)
         cursor = QTextCursor(doc)
@@ -3081,8 +3104,10 @@ class Sheet(QTextEdit):
         if objects_of(block) or not block.text().strip():
             QApplication.beep()
             return
+        if block.blockFormat().property(OPENING):  # con su etiqueta: <p class="x"> pasa a <h2 class="x"> y al revés,
+            self.set_paragraph_style(level or "Normal")  # con sus atributos (quitarla perdía la clase del párrafo)
+            return
         cursor.beginEditBlock()
-        self._unopen(block, bool(level))
         f = block.blockFormat()
         if level:
             f.setProperty(HEADING, True)
@@ -3099,15 +3124,12 @@ class Sheet(QTextEdit):
         cursor.endEditBlock()
         self.look.rehighlightBlock(block)
 
-    def _unopen(self, block, heading=None):
-        """Quita la etiqueta del libro del párrafo (<p class="x">, <h2>) si no casa con lo puesto en la cinta: al
-        volcar ganaba ella y el título, la lista o el recuadro se perdían al aceptar. heading: True o False para
-        título o párrafo normal (una <h2> sigue siendo título); None (lista, recuadro): cualquiera."""
+    def _unopen(self, block):
+        """Quita la etiqueta del libro del párrafo (<p class="x">) al ponerlo en una lista o un recuadro: al volcar
+        ganaba ella y la lista o el recuadro se perdían al aceptar. shortcut: su clase se pierde (la línea del editor
+        no lleva las dos cosas y write_epub no escribe la etiqueta en listas ni recuadros); llevarla si se echa de menos."""
         old = block.blockFormat().property(OPENING)
         if not old:
-            return
-        tag = (convert.OPENING.match(old) or [None, ""])[1].lower()
-        if heading is not None and (tag in convert.HEADING_TAGS) == heading:
             return
         self._restyle(block, old, "")  # sus letras, sin el aspecto de su clase
         f = block.blockFormat()
@@ -3802,6 +3824,9 @@ class Sheet(QTextEdit):
         typed = event.text()
         symbols = {Qt.Key.Key_Minus: lambda: self.insert_symbol("—"), Qt.Key.Key_Period: lambda: self.insert_symbol("…"),
                    Qt.Key.Key_Q: lambda: self.wrap("«", "»")}
+        if (typed and typed.isprintable() and not ctrl) or key in (
+                Qt.Key.Key_Backspace, Qt.Key.Key_Delete, Qt.Key.Key_Return, Qt.Key.Key_Enter)                 or event.matches(QKeySequence.StandardKey.Cut) or event.matches(QKeySequence.StandardKey.Paste):
+            self.keep_objects_apart()
         if not mods and key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and self.object_key(key):
             return
         if ctrl and alt and key == Qt.Key.Key_K:  # como Word en español: Ctrl+K ya es cursiva
@@ -3838,6 +3863,35 @@ class Sheet(QTextEdit):
             self.split_here()
         else:
             super().keyPressEvent(event)
+
+    def keep_objects_apart(self):
+        """Una selección que acaba justo antes de una ilustración o un separador (o empieza justo tras él) se queda
+        en el texto: al borrarla, cortarla o escribir encima se iba también el salto de párrafo y el texto se unía al
+        párrafo del objeto (salía centrado con la imagen)."""
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        doc = self.document()
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        first, last = doc.findBlock(start), doc.findBlock(end)
+
+        def lone(b):  # solo el objeto, sin texto
+            return b.isValid() and bool(objects_of(b)) and not b.text().replace("￼", "").strip()
+        if first != last and end == last.position() and lone(last) and not lone(last.previous()):
+            end -= 1  # sin el salto de párrafo de antes del objeto
+        if first != last and start == first.position() + first.length() - 1 and lone(first) and not lone(first.next()):
+            start += 1  # ni el de después
+        if (start, end) == (cursor.selectionStart(), cursor.selectionEnd()):
+            return
+        start, end = min(start, end), max(start, end)  # solo el salto elegido: queda vacía
+        forward = cursor.anchor() <= cursor.position()
+        cursor.setPosition(start if forward else end)
+        cursor.setPosition(end if forward else start, QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(cursor)
+
+    def cut(self):
+        self.keep_objects_apart()
+        super().cut()
 
     def object_key(self, key):
         """Retroceso al principio de un párrafo tras una ilustración o un separador (o Supr al final de uno antes de
@@ -3902,6 +3956,7 @@ class Sheet(QTextEdit):
         """De la hoja: con su formato, sin repetir una ilustración que ya está. De Word, Google Docs o la web
         (HTML): con cursiva, negrita, superíndice, versalitas y enlaces, sin colores ni tamaños. Si no, solo el
         texto."""
+        self.keep_objects_apart()
         raw, objects = False, True
         if source.hasFormat(MIME):
             present = self.objects()

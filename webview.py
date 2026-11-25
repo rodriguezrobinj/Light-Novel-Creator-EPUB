@@ -8,10 +8,11 @@ import json
 import logging
 import mimetypes
 import posixpath
+import time
 import zipfile
 
 try:
-    from PySide6.QtCore import QBuffer, QByteArray, Qt, QUrl, Signal
+    from PySide6.QtCore import QBuffer, QByteArray, Qt, QTimer, QUrl, Signal
     from PySide6.QtWebEngineCore import (QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestJob,
                                          QWebEngineUrlScheme, QWebEngineUrlSchemeHandler)
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -25,6 +26,7 @@ MEDIA = {".xhtml": "application/xhtml+xml", ".html": "text/html", ".htm": "text/
          ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".svg": "image/svg+xml",
          ".ttf": "font/ttf", ".otf": "font/otf", ".woff": "font/woff", ".woff2": "font/woff2"}
 _prepared = False
+RECOVER_S = 5  # segundos tras morir el proceso de Chromium antes de cargar otra página en la hoja web
 LOG = logging.getLogger("chromium")  # registro.log: lo que falla dentro de Chromium
 
 
@@ -335,7 +337,8 @@ if AVAILABLE:
 
         def hold(self):
             """Deja a la vista lo que se ve ahora hasta unveil(): se llama antes de cargar otra página."""
-            if self.isVisible() and self.url().scheme() == SCHEME.decode():
+            # con su proceso muerto no hay qué enseñar: grab() cerraba la aplicación (access violation)
+            if self.isVisible() and self.url().scheme() == SCHEME.decode() and not getattr(self, "dead", False):
                 self.cover.setPixmap(self.grab())
                 self.cover.setGeometry(self.rect())
                 self.cover.show()
@@ -461,12 +464,17 @@ if AVAILABLE:
         las órdenes de la cinta y el volcado van por JavaScript (window.lnc de websheet.SHEET_JS)."""
         ready = Signal()
         menu_at = Signal(object)  # QPoint del clic derecho
+        died = Signal()  # el proceso de Chromium murió (memoria, GPU): lo pendiente ya contestó None
 
         def __init__(self, parent=None):
             super().__init__(parent)
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # aquí sí se escribe
             self.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)  # copiar, pegar
             self.loaded, self.closing = False, False  # closing: el editor se cerró (TextEditor.on_destroy)
+            # respuestas de Chromium por llegar: si su proceso muere no llegan nunca, y Aceptar y Cancelar esperaban
+            # para siempre (el editor no se podía cerrar)
+            self.waiting, self.asked, self.dead = {}, 0, False
+            self.page().renderProcessTerminated.connect(self._died)
 
         def load_sheet(self, files, path, text):
             """Muestra text (la página de websheet.page) como el archivo path, con files (ruta -> bytes) a mano."""
@@ -474,7 +482,7 @@ if AVAILABLE:
             self.hold()
             self.zip.files = dict(files)
             self.zip.files[path] = text.encode("utf-8")
-            self.loaded = False
+            self.loaded, self.dead = False, False  # cargar otra vez arranca otro proceso
             self.setZoomFactor(self.scale)
             self.setUrl(QUrl("epub:///" + path))
 
@@ -523,9 +531,35 @@ if AVAILABLE:
             """window.lnc.name(*args); done(resultado)."""
             import shiboken6
             script = f"window.lnc && window.lnc.{name}({', '.join(json.dumps(a) for a in args)})"
-            # la respuesta puede llegar con la ventana ya cerrada: entonces no se hace nada con ella
-            self.page().runJavaScript(script, 0, lambda result: done and shiboken6.isValid(self) and not self.closing
-                                      and done(result))
+            if self.dead:  # sin proceso no contesta nadie: None al momento, como una página sin lnc
+                if done:
+                    QTimer.singleShot(0, lambda: shiboken6.isValid(self) and not self.closing and done(None))
+                return
+            self.asked += 1
+            key = self.asked
+            if done:
+                self.waiting[key] = done
+
+            def answer(result):  # la respuesta puede llegar con la ventana ya cerrada: entonces no se hace nada
+                late = self.waiting.pop(key, None) if shiboken6.isValid(self) else None
+                if late and not self.closing:
+                    late(result)
+            self.page().runJavaScript(script, 0, answer)
+
+        def recovering(self):
+            """¿Murió su proceso hace poco? Cargar otra página en los primeros segundos cerraba la aplicación entera
+            (access violation en Chromium, en la pantalla de verdad): se espera."""
+            return self.dead and time.monotonic() - self.died_at < RECOVER_S
+
+        def _died(self, status, code):
+            if status == QWebEnginePage.RenderProcessTerminationStatus.NormalTerminationStatus:
+                return
+            self.loaded, self.dead, self.died_at = False, True, time.monotonic()
+            waiting, self.waiting = self.waiting, {}
+            self.died.emit()  # antes de las respuestas: el editor ya sabe que la web no está
+            for done in waiting.values():
+                if not self.closing:
+                    done(None)
 
 
 def note_html(xhtml, note_id):

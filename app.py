@@ -8535,6 +8535,7 @@ class TextEditor:
             self.web_issues = {}  # id -> Issue de los avisos pintados en la hoja web
             self.web.ready.connect(self.web_ready)
             self.web.menu_at.connect(self.web_menu)
+            self.web.died.connect(self.web_died)
             for key, action in (("F7", lambda: self.next_change()), ("F8", lambda: self.next_issue()),
                                 ("Ctrl+F", lambda: self.show_find_bar(False)),
                                 ("Ctrl+H", lambda: self.show_find_bar(True)), ("F9", lambda: self.toggle_nav()),
@@ -10857,9 +10858,22 @@ class TextEditor:
         doc = self.sheet.document()
         return id(doc), doc.revision()
 
+    def web_died(self):
+        """El proceso de Chromium murió (memoria, GPU): se sigue en la hoja, que ya tiene lo escrito en la web hasta su
+        último volcado, y la web se vuelve a cargar. Antes Aceptar y Cancelar esperaban su respuesta para siempre."""
+        LOG.warning("Editor: la hoja web se cerró (Chromium); se sigue en la hoja")
+        if self.web_on:
+            self.web_done()
+            self.sheet.setFocus()
+        self.tell("Chromium se cerró: lo escrito en la hoja web sigue en la hoja")
+        self.later("webview", 1000, self.refresh_web)  # cuando se pueda (WebSheet.recovering)
+
     def refresh_web(self):
         """La hoja web, sin el cursor en ella, enseña lo de la hoja: al cambiar de capítulo o tras escribir."""
         if self.closed or not self.web_tab() or self.web_on:
+            return
+        if self.web.recovering():  # recién muerto Chromium: cargar ya cerraba la aplicación
+            self.later("webview", 1000, self.refresh_web)
             return
         if self.current[0] < 0:
             self.web.show_note("«Contenido» es la lista de capítulos: se edita en la hoja de la izquierda.")
@@ -10975,6 +10989,9 @@ class TextEditor:
     def load_web(self, active=True):
         """Pone en la hoja web el capítulo de la hoja (con lo que lleve escrito). active: se escribe en ella."""
         import websheet
+        if self.web.recovering():  # recién muerto Chromium: cargar ya cerraba la aplicación
+            self.later("webload", 1000, lambda: self.load_web(active))
+            return
         start, end = self.current
         lines = [line for line in editor.dump(self.sheet.document()).split("\n\n") if line.strip()]
         pictures = {}
@@ -11941,20 +11958,34 @@ class TextEditor:
         path = _draft_path(self.app.pdf)
         pages = []
         for (start, end), page in self.pages.items():
-            if start < 0:  # «Contenido» no va al borrador: sus cambios son nombres de la lista
-                continue
-            # una vez: page_dirty la volcaba otra
+            # una vez: page_dirty la volcaba otra. También «Contenido» (los nombres) y el tipo de cada título: con el
+            # texto solo, un renombrado allí o un Capítulo → Subtítulo no se recuperaban
             here = current is not None and (start, end) == self.current
             text = current if here else self.sheet.dumped(page["doc"])
             if self.page_dirty(page, text):
-                pages.append({"start": start, "end": end, "lines": [line for _, line in page["lines"]], "text": text})
+                pages.append({"start": start, "end": end, "lines": [line for _, line in page["lines"]], "text": text,
+                              "levels": {str(k): v for k, v in self.levels_of(page["doc"]).items()}})
+        # las cabeceras editadas en «Código HTML»
+        shells = [[start, end, *shell] for (start, end), shell in self.shells.items()]
         try:
-            if pages:
-                _write_json(path, {"saved": datetime.now().isoformat(timespec="minutes"), "pages": pages})
+            if pages or shells:
+                _write_json(path, {"saved": datetime.now().isoformat(timespec="minutes"), "pages": pages,
+                                   "shells": shells})
             else:
                 path.unlink(missing_ok=True)
         except OSError as e:  # carpeta de solo lectura, OneDrive bloqueándolo
             self.tell(f"No se pudo guardar el borrador: {e.strerror or e}")
+
+    @staticmethod
+    def levels_of(doc):
+        """{bloque: tipo} de los títulos de la hoja doc, como los da dump_levels."""
+        out, block = {}, doc.firstBlock()
+        while block.isValid():
+            f, k = block.blockFormat(), editor.source_of(block)
+            if f.property(editor.HEADING) and k is not None:
+                out[k] = f.property(editor.LEVEL) or ON
+            block = block.next()
+        return out
 
     def drop_draft(self):
         if self.app.pdf:
@@ -11972,11 +12003,12 @@ class TextEditor:
         except (OSError, ValueError):
             return  # sin borrador, o roto: nada que recuperar
         pages = [p for p in draft.get("pages", []) if isinstance(p, dict)] if isinstance(draft, dict) else []
+        shells = [x for x in draft.get("shells", []) if isinstance(x, list) and len(x) == 5]             if isinstance(draft, dict) else []
         try:
             when = datetime.fromisoformat(str(draft.get("saved"))).strftime("del %d/%m a las %H:%M")
         except (AttributeError, ValueError):
             when = "de una sesión anterior"
-        if not pages or not messagebox.askyesno(
+        if not (pages or shells) or not messagebox.askyesno(
                 "Recuperar cambios", f"Hay cambios sin guardar {when}: la aplicación se cerró antes de aceptarlos."
                 "\n\n¿Recuperarlos?", parent=self.win):
             self.drop_draft()
@@ -11988,12 +12020,23 @@ class TextEditor:
             except (KeyError, TypeError, ValueError):
                 lost += 1
                 continue
-            lines, levels = self.section_lines(start, end) if 0 <= start < end <= blocks else ([], {})
+            ok = 0 <= start < end <= blocks or start == end == -1  # -1: «Contenido»
+            lines, levels = self.section_lines(start, end) if ok else ([], {})
             if not lines or [line for _, line in lines] != old:
                 lost += 1
                 continue
-            doc, look = self.sheet.set_draft(lines, text, self.pictures(start, end), self.colors["muted"], levels)
+            saved = p.get("levels") if isinstance(p.get("levels"), dict) else {}
+            wanted = {**levels, **{int(k): v for k, v in saved.items() if str(k).lstrip("-").isdigit() and v in (ON, OFF)}}
+            doc, look = self.sheet.set_draft(lines, text, self.pictures(start, end), self.colors["muted"], wanted)
             self.pages[(start, end)] = {"doc": doc, "look": look, "lines": lines, "levels": levels}
+            # como open_section: con «Deshacer de todo el libro» lo hecho aquí también cuenta
+            doc.undoCommandAdded.connect(lambda key=(start, end): self.note_step(key))
+        bounds = {tuple(s[1:3]) for s in self.sections}
+        for start, end, name, head, foot in shells:
+            if (start, end) in bounds and all(isinstance(x, str) for x in (name, head, foot)):
+                self.shells[(start, end)] = (name, head, foot)
+            else:
+                lost += 1
         self.open_section(*self.current)
         if lost:
             what = "sección no se recuperó" if lost == 1 else "secciones no se recuperaron"

@@ -1420,6 +1420,18 @@ def line_unescape(text):
 HEADING_TAGS = {f"h{n}" for n in range(1, 7)}
 # Etiqueta de apertura de un párrafo al principio de una línea del editor (Block.opening)
 OPENING = re.compile(r'<(p|h[1-6]|li|div|blockquote|dd|dt|pre)((?:\s+[\w:.-]+="[^"<>]*")*)\s*>')
+_SINGLE_QUOTED = re.compile(r"""(\s[\w:.-]+\s*=\s*)'([^'<>]*)'""")
+
+
+def double_quoted(markup):
+    """Los atributos entre comillas simples (<p class='x'>, válidos en XHTML) entre dobles, como los escribe la app:
+    el editor solo entendía las dobles y enseñaba la etiqueta como texto, y write_epub fallaba con ella."""
+    if "'" not in markup:
+        return markup
+    return re.sub(r"<[A-Za-z][^<>]*>", lambda tag: _SINGLE_QUOTED.sub(
+        lambda m: f'{m[1]}"{m[2].replace(chr(34), "&quot;")}"', tag[0]), markup)
+
+
 # Título de capítulo que no se ve (sí en el índice): un capítulo de solo una ilustración con su nombre
 HIDDEN_TITLE = '<h1 class="oculto" style="display: none">'
 RAW_LINK = re.compile(r'&lt;a((?:\s+[\w:.-]+="[^"<>]*")+)\s*&gt;(.*?)&lt;/a&gt;', re.S)  # el par entero
@@ -4489,8 +4501,11 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 if b.align in ("table", "table-head"):  # fila de tabla del editor
                     parts.append(mark() + table_row(body, b.align == "table-head"))
                 elif b.opening and not listed[at] and not framed[at]:  # estilo del editor: justificado, cita, sin sangría
-                    tag = OPENING.match(b.opening)[1]
-                    parts.append(f"{b.opening}{mark()}{body}</{tag}>")
+                    opened = OPENING.match(double_quoted(b.opening))
+                    if opened:
+                        parts.append(f"{opened[0]}{mark()}{body}</{opened[1]}>")
+                    else:  # una etiqueta que no se entiende: el párrafo de siempre (antes, TypeError al generar)
+                        parts.append(f"<{item}{attr}>{mark()}{body}</{item}>")
                 else:
                     parts.append(f"<{item}{attr}>{mark()}{body}</{item}>")
             if stamp:

@@ -2403,7 +2403,7 @@ def test_window_editor_ribbon_style_beats_the_book_tag():
     finally:
         ed.win.done(0)
         window.close()
-    assert found["título"] == "# Uno 1.", found
+    assert found["título"] == '<h2 class="x">Uno 1.', found  # con su clase
     assert found["lista"].startswith("<lista disc>"), found
     assert found["recuadro"].startswith(convert.FRAME), found
     assert undone == '<p class="x">Uno 3.', undone  # un solo deshacer
@@ -2429,6 +2429,84 @@ def test_window_editor_saves_a_title_that_only_changes_its_type():
     finally:
         window.close()
     assert dirty and kind == app.OFF, (dirty, kind)
+
+
+def test_window_editor_selection_up_to_a_picture_keeps_them_apart():
+    """Hoja de Qt: elegir desde un párrafo hasta justo antes de una ilustración (o desde justo tras ella) y escribir,
+    borrar o cortar se llevaba el salto de párrafo: el texto quedaba en el párrafo de la imagen, centrado con ella."""
+    import app
+    import editor
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtTest import QTest
+    blocks = [convert.Block("heading", 1, "Capítulo 1"), convert.Block("p", 1, "Antes de la imagen."),
+              convert.Block("image", 1, image=JPEG, keep=True), convert.Block("p", 1, "Después de la imagen.")]
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    mixed = {}
+    try:
+        for name, before, keys in (("escribir", True, "Z"), ("retroceso", True, Qt.Key.Key_Backspace),
+                                   ("cortar", True, "cut"), ("escribir tras ella", False, "Z")):
+            ed = app.TextEditor(window, "0", *window.section_bounds(0))
+            sheet, doc = ed.sheet, ed.sheet.document()
+            text, picture = doc.findBlockByNumber(1 if before else 3), doc.findBlockByNumber(2)
+            cursor = QTextCursor(doc)
+            if before:  # de «Antes |de la imagen.» hasta el principio de la imagen
+                cursor.setPosition(text.position() + 6)
+                cursor.setPosition(picture.position(), QTextCursor.MoveMode.KeepAnchor)
+            else:  # del final de la imagen hasta «Después |de…»
+                cursor.setPosition(picture.position() + picture.length() - 1)
+                cursor.setPosition(text.position() + 8, QTextCursor.MoveMode.KeepAnchor)
+            sheet.setTextCursor(cursor)
+            sheet.setFocus()
+            if keys == "cut":
+                sheet.cut()
+            elif isinstance(keys, str):
+                QTest.keyClicks(sheet, keys)
+            else:
+                QTest.keyClick(sheet, keys)
+            block, found = doc.firstBlock(), []
+            while block.isValid():
+                if editor.objects_of(block) and block.text().replace("￼", "").strip():
+                    found.append(block.text())
+                block = block.next()
+            mixed[name] = (found, len(editor.dump(doc).split("\n\n")))
+            ed.win.done(0)
+    finally:
+        window.close()
+    assert all(not found and count == 4 for found, count in mixed.values()), mixed
+
+
+def test_window_editor_reopens_a_retyped_subtitle_as_subtitle():
+    """Quitar un subtítulo y volver a escribirlo, aceptar y reabrir el editor: el historial volvía a poner el título
+    sin su tipo (Sheet.set_text pisaba los levels de la carga) y al aceptar otra cosa pasaba a Capítulo."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    blocks = [convert.Block("heading", 1, "Capítulo 1"), convert.Block("p", 1, "Uno."),
+              convert.Block("heading", 1, "Parte dos"), convert.Block("p", 1, "Dos.")]
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 2]))
+    window.tree.set("2", "inc", app.OFF)
+    try:
+        ed = app.TextEditor(window, "2", *window.section_bounds(2))
+        sheet = ed.sheet
+        cursor = QTextCursor(sheet.document())
+        cursor.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()  # sin el título
+        cursor.insertText("Parte dos")
+        cursor.insertBlock()
+        sheet.setTextCursor(QTextCursor(sheet.document().firstBlock()))
+        sheet.set_heading("Subtítulo")  # vuelto a escribir, igual que estaba
+        ed.save()
+        root.update()
+        again = app.TextEditor(window, "2", *window.section_bounds(2))
+        level, dirty = again.sheet.heading_level(), again.dirty()
+        again.win.done(0)
+    finally:
+        window.close()
+    assert (level, dirty) == ("Subtítulo", False), (level, dirty)
 
 
 def test_editor_fast_page_turns_skip_one_chapter_at_a_time():
@@ -7882,6 +7960,65 @@ def test_editor_draft_recovers_after_crash():
     assert saved_text == ["Capítulo 1", "Primer párrafo.", "Nuevo. Segundo párrafo."] and kept_page == 1, saved_text
     assert accept_drops
     assert "Otro texto." not in stale and infos and "el libro cambió" in infos[0], (stale, infos)
+
+
+def test_editor_draft_keeps_types_contents_and_page_header():
+    """El borrador solo guardaba el texto de los capítulos: un Capítulo → Subtítulo, un renombrado en «Contenido» y
+    la cabecera editada en «Código HTML» se perdían si la aplicación se cerraba sin aceptar. Ahora vuelven, y con
+    «Deshacer de todo el libro» lo recuperado se deshace como lo demás."""
+    import app
+    from PySide6.QtGui import QTextCursor
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."), B("heading", 2, "Parte dos"), B("p", 2, "Dos.")]
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 2]))
+    path = app._draft_path(window.pdf)
+    asked = []
+    saved = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda title, message, **kw: asked.append(message) or True
+    try:
+        editor = app.TextEditor(window, "2", *window.section_bounds(2))
+        editor.sheet.setTextCursor(QTextCursor(editor.sheet.document().firstBlock()))
+        editor.sheet.set_heading("Subtítulo")  # solo el tipo
+        editor.show_view(1)  # la cabecera de la página: otro <title>
+        root.update()
+        code = editor.code.toPlainText()
+        cursor = editor.code.document().find("Parte dos</title>")
+        cursor.insertText("Parte 2</title>")
+        editor.show_view(0)
+        root.update()
+        editor.open_section(-1, -1)  # «Contenido»: renombrar el capítulo 1
+        cursor = QTextCursor(editor.sheet.document().firstBlock())
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        cursor.insertText(" bis")
+        editor.write_draft()
+        written = path.exists()
+        draft = path.read_text(encoding="utf-8") if written else ""
+        editor.win.done(0)
+        path.write_text(draft, encoding="utf-8")  # como si la aplicación se hubiera cerrado de golpe
+        window.settings["editor_undo"] = app.UNDO_SCOPES[1]
+        editor = app.TextEditor(window, "2", *window.section_bounds(2))
+        level = editor.sheet.heading_level()
+        shell = editor.shells.get(window.section_bounds(2))
+        toc = editor.sheet.dumped(editor.pages[(-1, -1)]["doc"]) if (-1, -1) in editor.pages else ""
+        editor.sheet.setTextCursor(QTextCursor(editor.sheet.document().lastBlock()))
+        editor.sheet.textCursor().insertText(" más")
+        steps = list(editor.book_undo)
+        editor.save()
+        rows = {window.tree.set(i, "title"): window.tree.set(i, "inc") for i in window.tree.get_children()}
+        head = window.book.blocks[2].shell
+    finally:
+        app.messagebox.askyesno = saved
+        window.close()
+    assert "<title>Parte dos</title>" in code, code[:300]
+    assert written and asked, (written, asked)
+    assert level == "Subtítulo" and shell and "Parte 2" in shell[1], (level, shell)
+    assert "Capítulo 1 bis" in toc, toc
+    assert steps[-1:] == [(2, 4)], steps  # lo escrito en lo recuperado, en «Deshacer de todo el libro»
+    assert rows.get("Parte dos") == app.OFF and "Capítulo 1 bis" in rows, rows
+    assert head and "Parte 2" in head[1], head
 
 
 def test_editor_draft_written_while_spelling_repaints():
@@ -14686,13 +14823,22 @@ def test_websheet_paste_keeps_every_paragraph_and_picture():
             after_text = lines()
             # cortar el separador y pegarlo tras «Segundo párrafo»
             separator = next(x for x in after_text if x.startswith("[Separador"))
-            js(ed.web, "(function(){var o=document.querySelector('#lnc-sheet .lnc-break'); var r=document.createRange();"
-                       "r.selectNode(o); var s=getSelection(); s.removeAllRanges(); s.addRange(r);"
-                       "document.execCommand('delete'); return 1})()")
+            js(ed.web, "(function(){document.querySelector('#lnc-sheet .lnc-break').remove(); return 1})()")  # cortado
             js(ed.web, at_end_of("p:not([class])"))
             js(ed.web, paste(f'<p>PEGA cuatro</p><p class="lnc-obj lnc-break" data-token="{separator}">※</p>'))
             wait_for(lambda: "PEGA cuatro" in ed.sheet.dumped() and not ed.web_busy, 5)
             after_picture = lines()
+            # en medio de un párrafo, con el cursor en su texto (un clic): cada trozo a su lado
+            js(ed.web, "(function(){var s=document.getElementById('lnc-sheet'); s.focus();"
+                       "var p=Array.prototype.find.call(s.children, function(b){return /^Segundo/.test(b.textContent)});"
+                       "var r=document.createRange(); r.setStart(p.firstChild, 7); r.collapse(true);"
+                       "var g=getSelection(); g.removeAllRanges(); g.addRange(r); return 1})()")
+            js(ed.web, paste("<p>MEDIO a</p><p>MEDIO b</p>"))
+            wait_for(lambda: "MEDIO b" in ed.sheet.dumped() and not ed.web_busy, 5)
+            middle = [x for x in lines() if "MEDIO" in x]
+            ed.do("undo")  # Deshacer de la cinta: lo pegado se deshace entero
+            wait_for(lambda: "MEDIO" not in ed.sheet.dumped() and not ed.web_busy, 5)
+            undone = [x for x in lines() if "MEDIO" in x or x.startswith("Segundo")]
             js(ed.web, "(function(){var s=document.getElementById('lnc-sheet');"
                        "s.insertBefore(document.createTextNode('SUELTO'), s.children[1]); return 1})()")
             flushed = []
@@ -14706,7 +14852,40 @@ def test_websheet_paste_keeps_every_paragraph_and_picture():
     assert after_text[first + 1:first + 3] == ["PEGA dos", "PEGA <i>tres</i>"], after_text
     n = next(n for n, x in enumerate(after_picture) if x.endswith("PEGA cuatro"))  # el primero, en su párrafo
     assert after_picture[n + 1] == separator and after_picture.count(separator) == 1, after_picture
+    assert middle == ["SegundoMEDIO a", "MEDIO b párrafo &amp; más."] or middle == ["SegundoMEDIO a",
+                                                                           "MEDIO b párrafo & más."], middle
+    assert undone == ["Segundo párrafo & más."] or undone == ["Segundo párrafo &amp; más."], undone
     assert "SUELTO" in loose, loose
+
+
+def test_websheet_editor_closes_when_chromium_dies():
+    """Si el proceso de Chromium moría (memoria, GPU) con el cursor en la hoja web, Aceptar y Cancelar esperaban su
+    respuesta para siempre: el editor no se podía cerrar. Ahora se sigue en la hoja con lo que ya llegó de la web,
+    se avisa, y Aceptar guarda."""
+    import signal
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14 muere.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            ed = web_editor(window, window.book.candidates[2])
+            js(ed.web, "(function(){var p=document.querySelector('#lnc-sheet p');var r=document.createRange();"
+                       "r.selectNodeContents(p);r.collapse(false);var s=getSelection();s.removeAllRanges();"
+                       "s.addRange(r);document.execCommand('insertText',false,' ANTES');return true;})()")
+            wait_for(lambda: "ANTES" in ed.sheet.dumped(), 3)
+            asked = []
+            ed.web.call("state", done=asked.append)  # una pregunta en vuelo cuando muere
+            os.kill(ed.web.page().renderProcessPid(), signal.SIGTERM)
+            wait_for(lambda: not ed.web_on, 10)
+            note, on = ed.note.text(), ed.web_on
+            ed.save()
+            closed = wait_for(lambda: ed.closed, 5)
+            text = " ".join(b.html for b in window.book.blocks)
+        finally:
+            window.close()
+    assert asked == [None] and not on and "Chromium" in note, (asked, on, note)
+    assert closed and "ANTES" in text, (closed, text[:200])
 
 
 def test_epub_view_late_answer_after_closing():
@@ -15796,6 +15975,43 @@ def test_fixed_layout_illustration_fills_its_original_page():
         page = doc[0].rect
         box = pymupdf.Rect(doc[0].get_image_info()[0]["bbox"])
     assert box.width > 0.9 * page.width and box.height > 0.9 * page.height, (box, page)
+
+
+def test_faithful_single_quoted_attributes_are_tags():
+    """Un EPUB con atributos entre comillas simples (<p class='no-indent'>, válidos en XHTML): el editor enseñaba la
+    etiqueta como texto, la escrita a mano en «Código HTML» tampoco valía y write_epub fallaba (TypeError) con un
+    párrafo así. Ahora se leen como las de comillas dobles; lo no tocado sigue igual en el EPUB."""
+    import editor
+    src = sigil_epub(TMP / "Sigil comillas base.epub")
+    quoted = TMP / "Sigil comillas.epub"
+    with zipfile.ZipFile(src) as zi, zipfile.ZipFile(quoted, "w") as zo:
+        for info in zi.infolist():
+            data = zi.read(info)
+            if info.filename.endswith("capitulo01.xhtml"):
+                data = re.sub(rb'<(p|i|span) class="([^"]*)"', rb"<\1 class='\2'", data)
+            zo.writestr(info, data)
+    book = convert.analyze(quoted)
+    k = next(n for n, b in enumerate(book.blocks) if b.src and b.src[0].endswith("capitulo01.xhtml")
+             and b.opening.startswith("<p class"))
+    end = next(c for c in book.candidates if c > k)
+    lines = convert.section_text(book, k, end).split("\n\n")
+    out = TMP / "Sigil comillas (LNC).epub"
+    convert.write_epub(book, [(c, book.blocks[c].title) for c in book.candidates], out, style=convert.ORIGINAL)
+    with zipfile.ZipFile(quoted) as z:
+        before = z.read("OEBPS/Text/capitulo01.xhtml")
+    with zipfile.ZipFile(out) as z:
+        after = z.read("OEBPS/Text/capitulo01.xhtml")
+    plain = convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"), convert.Block("p", 1, "Hola.")], [0])
+    plain.blocks[1].opening = "<p class='x'>"
+    convert.write_epub(plain, [(0, "Capítulo 1")], TMP / "comillas simples.epub")
+    with zipfile.ZipFile(TMP / "comillas simples.epub") as z:
+        written = "".join(z.read(n).decode("utf-8", "replace") for n in z.namelist() if n.endswith(".xhtml"))
+    assert book.blocks[k].opening == '<p class="no-indent">', book.blocks[k].opening
+    assert not any("class='" in line for line in lines), lines[:3]
+    assert editor.from_code("<p><span class='nota'>hola</span></p>") == "[Nota: hola]"
+    assert after == before  # sin tocar nada, el archivo sale igual
+    assert re.search(r'<p class="x">(<span[^>]*></span>)?Hola\.</p>', written), written[-300:]
+    assert editor.NOTE.search("Texto [Nota: del arco [Arco 2] aquí] fin")[0].endswith("aquí]")
 
 
 def test_faithful_preview_of_a_section_is_light():

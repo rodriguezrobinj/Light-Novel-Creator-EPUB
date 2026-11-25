@@ -136,7 +136,7 @@ def _normal(inner):
     """html de un bloque: <em>/<strong> como <i>/<b>, que el editor y las herramientas entienden."""
     inner = re.sub(r"<(/?)em\b[^>]*>", r"<\1i>", inner)
     inner = re.sub(r"<(/?)strong\b[^>]*>", r"<\1b>", inner)
-    return " ".join(inner.split())  # una línea: el editor trabaja con un párrafo por línea
+    return convert.double_quoted(" ".join(inner.split()))  # una línea: el editor trabaja con un párrafo por línea
 
 
 def _plain(inner):
@@ -556,7 +556,7 @@ OPENING_TAG = re.compile(r"<([\w:.-]+)")
 
 def _start_tag(tag):
     """Etiqueta de apertura en una línea y sin espacios de sobra: así se compara la del editor con la del original."""
-    return " ".join(tag.split())
+    return convert.double_quoted(" ".join(tag.split()))  # <p class='x'> como <p class="x">
 
 
 def flattened(book):
