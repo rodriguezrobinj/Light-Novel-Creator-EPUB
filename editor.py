@@ -3081,7 +3081,9 @@ class Sheet(QTextEdit):
         if objects_of(block) or not block.text().strip():
             QApplication.beep()
             return
-        f = cursor.blockFormat()
+        cursor.beginEditBlock()
+        self._unopen(block, bool(level))
+        f = block.blockFormat()
         if level:
             f.setProperty(HEADING, True)
             f.setProperty(LEVEL, level)
@@ -3094,7 +3096,24 @@ class Sheet(QTextEdit):
             f.clearProperty(LEVEL)
         f.setTopMargin(SPACE * 2 if level else 0)
         cursor.setBlockFormat(f)
+        cursor.endEditBlock()
         self.look.rehighlightBlock(block)
+
+    def _unopen(self, block, heading=None):
+        """Quita la etiqueta del libro del párrafo (<p class="x">, <h2>) si no casa con lo puesto en la cinta: al
+        volcar ganaba ella y el título, la lista o el recuadro se perdían al aceptar. heading: True o False para
+        título o párrafo normal (una <h2> sigue siendo título); None (lista, recuadro): cualquiera."""
+        old = block.blockFormat().property(OPENING)
+        if not old:
+            return
+        tag = (convert.OPENING.match(old) or [None, ""])[1].lower()
+        if heading is not None and (tag in convert.HEADING_TAGS) == heading:
+            return
+        self._restyle(block, old, "")  # sus letras, sin el aspecto de su clase
+        f = block.blockFormat()
+        f.clearProperty(OPENING)
+        f.clearProperty(BOOK_LOOK)
+        QTextCursor(block).setBlockFormat(f)
 
     def toggle_heading(self):
         self.set_heading(None if self.heading_level() else "Capítulo")
@@ -3168,6 +3187,8 @@ class Sheet(QTextEdit):
         edit.beginEditBlock()
         group = None
         for block in blocks:
+            if style:
+                self._unopen(block)
             f = block.blockFormat()
             f.setObjectIndex(-1)
             if style:
@@ -3233,6 +3254,8 @@ class Sheet(QTextEdit):
         edit = QTextCursor(doc)
         edit.beginEditBlock()
         for n, block in enumerate(blocks):
+            if on:
+                self._unopen(block)
             f = block.blockFormat()
             if on:
                 f.clearProperty(HEADING)

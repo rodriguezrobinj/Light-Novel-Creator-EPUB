@@ -39,7 +39,7 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QEventLoop, QLockFile, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QLockFile, QMimeData, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QImage, QKeyEvent, QKeySequence, QPainter,
                            QPainterPath,
                            QPalette, QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
@@ -10800,7 +10800,10 @@ class TextEditor:
             self.leaving.append((name, args))
             return None
         if self.code.isVisible() and name in ("undo", "redo") and not self.web_on:  # el deshacer del código
-            return getattr(self.code, name)()
+            done = getattr(self.code, name)()
+            # con el foco en el botón, textChanged no lo pasaba a la hoja: lo deshecho seguía en ella
+            self.later("codelive", 30, self.apply_code_live)
+            return done
         if name in ("undo", "redo") and not self.web_on and self.book_wide():
             return self.book_step(name == "redo")
         if not self.web_on:
@@ -11049,6 +11052,8 @@ class TextEditor:
         self.sync_undo()  # también Rehacer: antes solo Deshacer seguía a la web
         if self.web_state.get("wants") in ("undo", "redo"):  # Ctrl+Z o Ctrl+Y sin nada que hacer en Chromium
             self.web_undo(self.web_state["wants"] == "redo")
+        if self.web_state.get("wants") == "paste":  # varios párrafos o una ilustración: los pega la hoja de Qt
+            self.web.call("takePasted", done=self.web_paste)
         if isinstance(self.reading, int) and self.web_state.get("i", -1) != self.reading:
             self.stop_reading()  # un clic o una tecla en otro párrafo: la voz se calla, como en la hoja
         home = self.web_state.get("home", -1)
@@ -11057,6 +11062,34 @@ class TextEditor:
             block = self.web_block(home)
             if block.isValid() and block != self.sheet.textCursor().block():
                 self.sheet.setTextCursor(QTextCursor(block))
+
+    def web_paste(self, data):
+        """Lo pegado en la hoja web con varios párrafos o ilustraciones ([{html} o {token}]): Chromium lo dejaba
+        suelto fuera de los párrafos, o lo quitaba, y se perdía al volcar. Se pega en la hoja de Qt como allí (una
+        ilustración que ya está no se repite) y la web vuelve con el resultado."""
+        try:
+            items = json.loads(data or "[]")
+        except ValueError:
+            return
+        lines = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("token"):
+                lines.append(str(item["token"]))
+                continue
+            inner = str(item.get("html", ""))
+            try:
+                line = editor.from_code(f"<p>{inner}</p>").strip()
+            except ValueError:  # una etiqueta de fuera partida entre párrafos: su texto solo
+                line = html.unescape(re.sub(r"<[^>]*>", "", inner)).strip().replace("<", "&lt;")
+            if line:
+                lines.append(line)
+        if not lines:
+            return
+        mime = QMimeData()
+        mime.setData(editor.MIME, "\n\n".join(lines).encode("utf-8"))
+        self.on_sheet(lambda: self.sheet.insertFromMimeData(mime))
 
     def web_typed(self, text):
         """Se escribió en la hoja web: a la hoja de Qt al momento (el código y el original lo siguen sin salir de la
@@ -11498,16 +11531,10 @@ class TextEditor:
             return
         code = editor.to_code(editor.dump(self.sheet.document()))
         lines, h, f = self.code_parts()
-        typed = "\n".join(lines[h:f])
-        if code == typed:
+        if code == "\n".join(lines[h:f]):
             return
-        if typed != self.code_text:  # lo escrito aún no pasó a la hoja (una etiqueta a medias): pisarlo lo perdía,
-            try:                     # con el deshacer del código, y no se podía volver a la hoja
-                pending = editor.to_code(editor.from_code(typed)) != self.code_text
-            except ValueError:
-                pending = True
-            if pending:
-                return
+        if self.code_pending():  # lo escrito aún no pasó a la hoja (una etiqueta a medias): pisarlo lo perdía, con
+            return               # el deshacer del código, y no se podía volver a la hoja
         line = self.code.textCursor().blockNumber()
         # Solo el texto, como un paso más del deshacer: con setPlainText se perdía, y con la cabecera rota a medio
         # escribir ya no se podía deshacer ni volver a la hoja («Arréglalo para volver a la hoja»)
@@ -11533,6 +11560,19 @@ class TextEditor:
         block = self.code.document().findBlockByNumber(min(line, self.code.blockCount() - 1))
         self.code.setTextCursor(QTextCursor(block))
         self.code.mark_line()
+
+    def code_pending(self):
+        """¿Tiene el código algo que aún no pasó a la hoja (una etiqueta a medias, lo de hace menos de 30 ms)?"""
+        if not self.code.isVisible():
+            return False
+        lines, h, f = self.code_parts()
+        typed = "\n".join(lines[h:f])
+        if typed == self.code_text:
+            return False
+        try:
+            return editor.to_code(editor.from_code(typed)) != self.code_text
+        except ValueError:
+            return True
 
     def code_moved(self):
         """El cursor del código cambió de línea: la hoja (oculta) va a ese párrafo."""
@@ -11751,6 +11791,12 @@ class TextEditor:
 
     def open_section(self, start, end, focus=None):
         """Muestra el capítulo start..end en la hoja (el ya editado si se visitó) y lo dice en la cinta."""
+        if self.code.isVisible() and self.current and (start, end) != self.current:
+            # el código es del capítulo de ahora: lo escrito pasa a él y se vuelve a la hoja (si no, la tecla
+            # siguiente lo volcaba sobre el otro); con un error se avisa y se sigue aquí para arreglarlo
+            self.toggle_code()
+            if self.code.isVisible():
+                return
         if getattr(self, "web_on", False) and self.current and (start, end) != self.current:
             # con la hoja web: lo escrito pasa a su capítulo, se abre el otro y se sigue escribiendo en la web;
             # «Contenido» (la lista de capítulos) solo en la hoja
@@ -12894,7 +12940,20 @@ class TextEditor:
         def lines(text):
             return [line.strip() for line in text.splitlines() if line.strip()]
         text = self.sheet.dumped(page["doc"]) if text is None else text
-        return lines(text) != lines("\n\n".join(line for _, line in page["lines"]))
+        return lines(text) != lines("\n\n".join(line for _, line in page["lines"])) or self.retyped(page)
+
+    @staticmethod
+    def retyped(page):
+        """¿Algún título de la sección cambió de tipo (Capítulo ↔ Subtítulo)? Con el texto igual no contaba: Aceptar
+        no lo guardaba."""
+        block = page["doc"].firstBlock()
+        while block.isValid():
+            f = block.blockFormat()
+            was = page["levels"].get(editor.source_of(block))
+            if f.property(editor.HEADING) and was in (ON, OFF) and (f.property(editor.LEVEL) or ON) != was:
+                return True
+            block = block.next()
+        return False
 
     def sync_web(self):
         """Pregunta a la hoja web si tiene cambios ahora mismo (como mucho 1 s): cerrar la ventana no espera al
@@ -12909,7 +12968,7 @@ class TextEditor:
     def dirty(self):
         """¿Hay algo sin guardar? También lo escrito en la hoja web y aún no volcado (según su último sondeo)."""
         return ((self.web_on and self.web_dirty) or bool(self.shells) or (self.code.isVisible() and self.shell_changed())
-                or any(self.page_dirty(page) for page in self.pages.values()))
+                or self.code_pending() or any(self.page_dirty(page) for page in self.pages.values()))
 
     def changes(self):
         """Lo que cambió en las secciones visitadas, línea a línea frente a lo cargado: [[inicio, fin, texto]]
@@ -12979,8 +13038,10 @@ class TextEditor:
         if getattr(self, "web_on", False):  # lo escrito en la hoja web, primero a la hoja
             self.flush_web(lambda: (self.web_done(), self.save(then)))
             return
-        if self.code.isVisible() and not self.take_shell():
-            return
+        if self.code.isVisible():  # el código, a la hoja como al volver a ella (lo recién escrito, lo deshecho)
+            self.toggle_code()
+            if self.code.isVisible():  # con un error: avisado, sigue abierto para arreglarlo
+                return
         self.keep_history()
         self.dirty_toc = False
         if self.dirty():
