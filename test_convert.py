@@ -6823,6 +6823,164 @@ def test_window_editor_shows_deleted_pictures_and_joined_paragraphs():
     assert joined[2] == ("Tres.", [], False), joined
 
 
+def test_window_editor_paints_deleted_pictures_as_images():
+    """«Mostrar cambios» pinta la ilustración o el separador quitados con su imagen (marcada en rojo) encima del
+    párrafo que los seguía, no el texto «[Ilustración]»: el hueco tiene su alto."""
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 120, 90), False)
+    pix.clear_with(90)
+    B = convert.Block
+    out = {}
+    for n, kind in ((2, "imagen"), (4, "separador")):
+        root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."),
+                                          B("image", 1, image=pix.tobytes("png")), B("p", 1, "Dos."),
+                                          B("break", 1, "", image=pix.tobytes("png")), B("p", 1, "Tres.")], [0])
+        editor.show_changes_action.setChecked(True)
+        root.update()
+        doc = editor.sheet.document()
+        cursor = QTextCursor(doc.findBlockByNumber(n))
+        cursor.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        root.update()
+        root.update()
+        editor.sheet.look.rehighlight()
+        editor.sheet.viewport().grab()  # pinta: ahí se miden los recuadros
+        block = doc.findBlockByNumber(n)
+        pieces = block.userData().pieces[0] if isinstance(block.userData(), ed.Changes) else []
+        boxes = [box for box, _ in editor.sheet.removed_boxes]
+        out[kind] = (block.text(), [type(p).__name__ for p in pieces], [round(b.height()) for b in boxes])
+        editor.win.done(0)
+        window.close()
+    assert out["imagen"][:2] == ("Dos.", ["tuple"]), out
+    assert out["imagen"][2][0] >= 50, out  # la imagen, no una línea de texto
+    assert out["separador"][:2] == ("Tres.", ["tuple"]), out
+
+
+def test_window_editor_deleted_pictures_fit_their_place():
+    """La ilustración quitada se ve entera en su sitio: tras un párrafo largo quitado con ella (el texto se acorta,
+    no la deja fuera); al final del capítulo, dentro de la hoja; junto a un separador, en su alto; y en «Código
+    HTML», la del final encima de la línea que sigue, no sobre el pie."""
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 120, 90), False)
+    pix.clear_with(90)
+    png = pix.tobytes("png")
+    B = convert.Block
+    long = " ".join(f"palabra{n}" for n in range(80))
+
+    def run(blocks, first, last, code=False):
+        root, window, editor = editor_on(blocks, [0])
+        editor.win.resize(1000, 800)
+        editor.show_changes_action.setChecked(True)
+        root.update()
+        doc = editor.sheet.document()
+        c = QTextCursor(doc.findBlockByNumber(first))
+        c.setPosition(doc.findBlockByNumber(last).position() + doc.findBlockByNumber(last).length() - 1,
+                      QTextCursor.MoveMode.KeepAnchor)
+        if last + 1 < doc.blockCount():
+            c.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+        else:
+            c.setPosition(doc.findBlockByNumber(first - 1).position() + doc.findBlockByNumber(first - 1).length() - 1)
+            c.setPosition(doc.findBlockByNumber(last).position() + doc.findBlockByNumber(last).length() - 1,
+                          QTextCursor.MoveMode.KeepAnchor)
+        c.removeSelectedText()
+        for _ in range(2):
+            root.update()
+        editor.sheet.look.rehighlight()
+        editor.sheet.verticalScrollBar().setValue(editor.sheet.verticalScrollBar().maximum())
+        editor.sheet.viewport().grab()
+        dy = editor.sheet.verticalScrollBar().value()
+        out = {"boxes": [(b.translated(0, dy), old) for b, old in editor.sheet.removed_boxes],
+               "height": editor.sheet.document().documentLayout().documentSize().height()}
+        if code:
+            editor.toggle_code()
+            root.update()
+            cdoc = editor.code.document()
+
+            def marked():
+                return [(cdoc.findBlockByNumber(i).text().strip(), [type(p).__name__ for p in d.pieces[0]], d.below)
+                        for i in range(cdoc.blockCount())
+                        if isinstance(d := cdoc.findBlockByNumber(i).userData(), ed.Changes) and (d.above or d.below)]
+            out["code"] = marked()
+            # una línea vacía entre el último párrafo y el pie (Intro al final): lo quitado sigue a la vista
+            last_p = next(cdoc.findBlockByNumber(i) for i in reversed(range(cdoc.blockCount()))
+                          if cdoc.findBlockByNumber(i).text().strip().startswith("<p>"))
+            c = QTextCursor(last_p)
+            c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+            c.insertBlock()
+            editor.code.look.rehighlight()
+            out["blank"] = marked()
+        editor.win.done(0)
+        window.close()
+        return out
+    head = [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno.")]
+    together = run(head + [B("p", 1, long), B("image", 1, image=png), B("p", 1, "Dos.")], 2, 3)
+    end = run(head + [B("p", 1, "Dos."), B("image", 1, image=png)], 3, 3, code=True)
+    beside = run(head + [B("image", 1, image=png), B("break", 1, "* * *"), B("p", 1, "Dos.")], 2, 2)
+    img = ed.QImage(40, 30, ed.QImage.Format.Format_ARGB32)
+    size = ed.thumb_size(img)
+    cached = ed.deleted_look(img, size, "#66f85149") is ed.deleted_look(img, size, "#66f85149")
+    pictures = [box for box, old in together["boxes"] if old == "[Ilustración]"]
+    assert pictures and pictures[0].height() >= 50, together  # el párrafo largo no la dejó fuera
+    assert any(old != "[Ilustración]" and "…" in old or old == long for _, old in together["boxes"]), together
+    last = [box for box, old in end["boxes"] if old == "[Ilustración]"]
+    assert last and last[0].bottom() <= end["height"], end  # dentro de la hoja, no cortada
+    assert end["code"] and end["code"][-1][1] == ["tuple"] and end["code"][-1][0].startswith("</"), end["code"]
+    assert all(below == "" for _, _, below in end["code"]), end["code"]  # ninguna sobre las líneas del pie
+    assert end["blank"] == end["code"], end["blank"]
+    sep = [box for box, old in beside["boxes"] if old == "[Ilustración]"]
+    assert sep and sep[0].height() <= 30, beside  # al lado del separador (28 px): en su alto, no encima de otros
+    assert cached
+
+
+def test_window_editor_marks_added_pictures_and_deleted_ones_in_code():
+    """«Mostrar cambios»: la ilustración puesta sale recuadrada de verde en la hoja; la quitada, en «Código HTML»,
+    con su imagen (no su <img> tachado); y si la hoja no la llegó a cargar (un borrador sin ella), con la imagen
+    del libro."""
+    import editor as ed
+    from PySide6.QtGui import QTextCursor
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 120, 90), False)
+    pix.clear_with(90)
+    B = convert.Block
+    root, window, editor = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."),
+                                      B("image", 1, image=pix.tobytes("png")), B("p", 1, "Dos."), B("p", 1, "Tres.")],
+                                     [0])
+    editor.show_changes_action.setChecked(True)
+    root.update()
+    sheet = editor.sheet
+    doc = sheet.document()
+    c = QTextCursor(doc.findBlockByNumber(2))
+    c.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+    c.removeSelectedText()
+    sheet.setTextCursor(QTextCursor(doc.lastBlock()))
+    sheet.insert_picture(pix.tobytes("jpg"))
+    for _ in range(3):
+        root.update()
+    sheet.look.rehighlight()
+    editor.refresh_marks()  # las barritas de los cambiados: con su temporizador llegan después
+    added = next(b for b in sheet.bars if ed.objects_of(b))
+    box = ed.object_boxes(added)[0].translated(0, -sheet.verticalScrollBar().value())
+    shot = sheet.viewport().grab().toImage()
+    edge = shot.pixelColor(round(box.center().x()), round(box.top()) - 2)
+    green = sheet.bar_color
+    editor.toggle_code()
+    root.update()
+    code = editor.code.document()
+    pieces = [code.findBlockByNumber(i).userData().pieces[0] for i in range(code.blockCount())
+              if isinstance(code.findBlockByNumber(i).userData(), ed.Changes)
+              and code.findBlockByNumber(i).userData().pieces[0]]
+    # sin el recurso (no se cargó): la de sheet.pictures, que queda como recurso
+    fallback = ed.object_image(doc, "Sin cargar") is None and ed.object_image(doc, 2) is not None
+    sheet.pictures[77] = sheet.pictures[2]
+    loaded = ed.object_image(doc, 77)
+    editor.win.done(0)
+    window.close()
+    assert abs(edge.green() - green.green()) < 40 and edge.red() < 120, (edge.name(), green.name())
+    assert pieces and type(pieces[0][0]).__name__ == "tuple" and "<img" in pieces[0][0][1], pieces
+    assert fallback and loaded is not None and loaded.width() > 0, (fallback, loaded)
+
+
 def test_window_editor_deleted_picture_back_by_undo():
     """Una ilustración quitada con Supr o Retroceso y vuelta con Ctrl+Z deja de salir tachada en el párrafo de al
     lado (los números de párrafo se corrían y se repintaba otro). Quitada, aceptada y vuelta con Ctrl+Z al reabrir
@@ -15506,6 +15664,53 @@ def test_websheet_shows_removed_paragraphs_and_format_changes():
             window.close()
         assert shown and italic, got
         assert "Siete." not in got[1].split("|"), got  # unido: su texto no es nuevo (solo la unión, como en la hoja)
+
+
+def test_websheet_shows_deleted_and_added_pictures_as_images():
+    """La hoja web enseña la ilustración quitada con su imagen (en el CSS de lo quitado), no «[Ilustración]», y
+    recuadra de verde la puesta, como la hoja."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    B = convert.Block
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 80), False)
+    pix.clear_with(90)
+    with with_chromium():
+        root, window = visible_window()
+        doc = pymupdf.open()
+        add_page(doc, 1, [(72, 100, "Pagina", 11, "helv")])
+        window.pdf = TMP / f"web-ilustracion-{time_ns()}.pdf"
+        doc.save(window.pdf)
+        window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Uno."),
+                                                         B("image", 1, image=pix.tobytes("png")), B("p", 1, "Dos."),
+                                                         B("p", 1, "Tres.")], [0]))
+        window.settings["editor_web"] = True
+        ed = app.TextEditor(window, "0", *window.section_bounds(0))
+        try:
+            assert wait_for(lambda: ed.web.loaded), "la hoja web no cargó"
+            ed.show_changes_action.setChecked(True)
+            sheet = ed.sheet
+            c = QTextCursor(sheet.document().findBlockByNumber(1))  # «Uno.» y la ilustración: texto e imagen
+            c.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+            c.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+            c.removeSelectedText()
+            sheet.setTextCursor(QTextCursor(sheet.document().lastBlock()))
+            sheet.insert_picture(pix.tobytes("jpg"))
+            # la regla de la imagen gana a la del texto sin depender del orden de los <style>
+            probe = "(function(){var r=document.getElementById('lnc-gone');return (r&&r.textContent.indexOf(" \
+                    "'[data-lnc-above][data-lnc-ga=')>=0&&r.textContent.indexOf('data:image/png')>=0?'quitada':'')" \
+                    "+'|'+document.querySelectorAll('.lnc-obj[data-lnc-added]').length;})()"
+            shown = wait_for(lambda: js(ed.web, probe) == "quitada|1")
+            got = js(ed.web, probe)
+            # en el modo oscuro de la hoja web, la fila quitada se vuelve a pintar con letra clara
+            rule = "document.getElementById('lnc-gone').textContent"
+            light = js(ed.web, rule)
+            ed.dark_box.setChecked(True)
+            redrawn = wait_for(lambda: js(ed.web, rule) not in ("", light))
+        finally:
+            ed.win.done(0)
+            window.close()
+        assert shown, got
+        assert redrawn, "la fila quitada no cambió de letra con el modo oscuro"
 
 
 def test_websheet_pager_keeps_its_pages_when_the_cursor_moves():
