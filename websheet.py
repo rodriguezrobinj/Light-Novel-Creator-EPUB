@@ -158,7 +158,28 @@ SHEET_JS = DIFF_JS + r"""
     picked = o && o.parentNode === sheet ? o : null;
     if (picked) { lnc.hereAt = index(picked); lnc.placeHere(false); }
   }, true);
-  sheet.addEventListener('keydown', function () { picked = null; }, true);
+  // Retroceso o Supr junto a una ilustración o un separador (o con él elegido): Chromium lo quitaba y además unía los
+  // párrafos de alrededor (o borraba una letra del de abajo y lo dejaba); la hoja de Qt quita solo el objeto (el
+  // sondeo recoge wants: «objeto atrás|delante N»)
+  function objectKey(e, was) {
+    if (e.ctrlKey || e.altKey || e.metaKey || (e.keyCode !== 8 && e.keyCode !== 46)) return;
+    var s = getSelection(), back = e.keyCode === 8, obj = null;
+    if (was) obj = was;
+    else if (s.rangeCount) {
+      var r = s.getRangeAt(0), b = block(r.startContainer);
+      if (!r.collapsed && r.startContainer === sheet && r.endContainer === sheet && r.endOffset - r.startOffset === 1)
+        obj = sheet.childNodes[r.startOffset];  // el objeto solo, elegido entero
+      else if (b && b.classList.contains('lnc-obj') && block(r.endContainer) === b) obj = b;
+      else if (r.collapsed && b) {
+        var at = offset(b, r.startContainer, r.startOffset), near = back ? b.previousElementSibling : b.nextElementSibling;
+        if ((back ? at === 0 : at === b.textContent.length) && near && near.classList.contains('lnc-obj')) obj = near;
+      }
+    }
+    if (!obj || obj.nodeType !== 1 || !obj.classList.contains('lnc-obj') || obj.parentNode !== sheet) return;
+    e.preventDefault();
+    lnc.wanted = 'objeto ' + (back ? 'atrás ' : 'delante ') + index(obj);
+  }
+  sheet.addEventListener('keydown', function (e) { var was = picked; picked = null; objectKey(e, was); }, true);
   function index(b) { return Array.prototype.indexOf.call(sheet.children, b); }
   function offset(b, node, at) {  // posición de (node, at) en el texto de b
     var r = document.createRange(); r.setStart(b, 0); r.setEnd(node, at); return r.toString().length;
@@ -195,7 +216,29 @@ SHEET_JS = DIFF_JS + r"""
     Array.prototype.forEach.call(sheet.querySelectorAll('[id]'), function (el) {
       if (seen[el.id]) el.removeAttribute('id'); else seen[el.id] = true;
     });
+    wrapLoose();
   });
+  // Texto o letra suelta entre los párrafos (Chromium la deja al borrar o pegar): a su propio párrafo al momento, para
+  // que cada hijo de la hoja sea un párrafo (los índices casan con la hoja de Qt) y nada quede fuera del volcado
+  function wrapLoose() {
+    var run = [], sel = getSelection(), node = sel.anchorNode, at = sel.anchorOffset;
+    function blank(n) { return n.nodeType === 3 && !n.data.trim(); }  // el salto de línea entre párrafos
+    function flush() {
+      while (run.length && blank(run[0])) run.shift();
+      while (run.length && blank(run[run.length - 1])) run.pop();
+      if (run.length) {
+        var p = document.createElement('p');
+        sheet.insertBefore(p, run[0]);
+        run.forEach(function (n) { p.appendChild(n); });
+      }
+      run = [];
+    }
+    Array.prototype.slice.call(sheet.childNodes).forEach(function (n) {
+      if (n.nodeType === 3 || (n.nodeType === 1 && INLINE.test(n.tagName))) run.push(n); else flush();
+    });
+    flush();
+    if (node && node.isConnected && (sel.anchorNode !== node || sel.anchorOffset !== at)) sel.collapse(node, at);
+  }
   var INLINE = /^(a|abbr|b|br|cite|code|em|font|i|img|kbd|mark|q|rp|rt|ruby|s|samp|small|span|strike|strong|sub|sup|u|var)$/i;
   function escaped(text) { return text.replace(/[<&>]/g, function (m) { return {'<':'&lt;','&':'&amp;','>':'&gt;'}[m]; }); }
   sheet.addEventListener('paste', function (e) {

@@ -8539,6 +8539,8 @@ class TextEditor:
             for key, action in (("F7", lambda: self.next_change()), ("F8", lambda: self.next_issue()),
                                 ("Ctrl+F", lambda: self.show_find_bar(False)),
                                 ("Ctrl+H", lambda: self.show_find_bar(True)), ("F9", lambda: self.toggle_nav()),
+                                # Chromium se quedaba con Esc: el editor no se cerraba (en la hoja pregunta y cierra)
+                                ("Escape", lambda: self.win.reject()),
                                 # los de la hoja (Sheet.keyPressEvent) que Chromium no tiene
                                 ("Ctrl+T", lambda: self.do("toggle_heading")), ("Ctrl+J", lambda: self.do("join_next")),
                                 ("Ctrl+D", lambda: self.do("toggle_right")),
@@ -10872,11 +10874,11 @@ class TextEditor:
         """La hoja web, sin el cursor en ella, enseña lo de la hoja: al cambiar de capítulo o tras escribir."""
         if self.closed or not self.web_tab() or self.web_on:
             return
-        if self.web.recovering():  # recién muerto Chromium: cargar ya cerraba la aplicación
-            self.later("webview", 1000, self.refresh_web)
-            return
         if self.current[0] < 0:
             self.web.show_note("«Contenido» es la lista de capítulos: se edita en la hoja de la izquierda.")
+            return
+        if self.web.recovering():  # recién muerto Chromium: cargar al momento cerraba la aplicación
+            self.later("webview", 1000, self.refresh_web)
             return
         if self.web.loaded and self.web_section == self.current and self.web_rev == self.doc_rev():
             return
@@ -11071,6 +11073,10 @@ class TextEditor:
             self.web_undo(self.web_state["wants"] == "redo")
         if self.web_state.get("wants") == "paste":  # varios párrafos o una ilustración: los pega la hoja de Qt
             self.web.call("takePasted", done=self.web_paste)
+        wants = str(self.web_state.get("wants") or "").split()
+        if len(wants) == 3 and wants[0] == "objeto" and wants[2].isdigit():  # Retroceso o Supr junto a un objeto
+            n, back = int(wants[2]), wants[1] == "atrás"
+            self.on_sheet(lambda: self.sheet.drop_object(self.web_block(n), back))
         if isinstance(self.reading, int) and self.web_state.get("i", -1) != self.reading:
             self.stop_reading()  # un clic o una tecla en otro párrafo: la voz se calla, como en la hoja
         home = self.web_state.get("home", -1)

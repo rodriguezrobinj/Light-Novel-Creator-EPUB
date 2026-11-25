@@ -3126,8 +3126,8 @@ class Sheet(QTextEdit):
 
     def _unopen(self, block):
         """Quita la etiqueta del libro del párrafo (<p class="x">) al ponerlo en una lista o un recuadro: al volcar
-        ganaba ella y la lista o el recuadro se perdían al aceptar. shortcut: su clase se pierde (la línea del editor
-        no lleva las dos cosas y write_epub no escribe la etiqueta en listas ni recuadros); llevarla si se echa de menos."""
+        ganaba ella y la lista o el recuadro se perdían al aceptar. En un EPUB de entrada el elemento conserva su clase
+        (faithful usa la etiqueta del original); en la hoja se ve sin ella, y la de la cinta (sin sangría) no hace falta."""
         old = block.blockFormat().property(OPENING)
         if not old:
             return
@@ -3893,6 +3893,28 @@ class Sheet(QTextEdit):
         self.keep_objects_apart()
         super().cut()
 
+    def drop_object(self, block, back=True):
+        """Quita la ilustración o el separador del párrafo block (solo él, sin unir los de alrededor), un deshacer; el
+        cursor queda donde estaba la tecla: al principio del de después (Retroceso) o al final del de antes (Supr).
+        También desde la hoja web, que unía los párrafos."""
+        if not block.isValid() or not objects_of(block) or block.text().replace("￼", "").strip():
+            return
+        before, after = block.previous(), block.next()
+        gone = QTextCursor(block)
+        gone.beginEditBlock()
+        if after.isValid():  # el objeto y el salto de párrafo que lo separa del de después
+            gone.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+        elif before.isValid():  # el último: con el salto de antes
+            gone.setPosition(before.position() + before.length() - 1)
+            gone.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+        gone.removeSelectedText()
+        gone.endEditBlock()
+        if back or not before.isValid():
+            gone.setPosition(gone.block().position())
+        else:
+            gone.setPosition(before.position() + before.length() - 1)
+        self.setTextCursor(gone)
+
     def object_key(self, key):
         """Retroceso al principio de un párrafo tras una ilustración o un separador (o Supr al final de uno antes de
         él): quita el objeto entero, un deshacer. Desde el objeto hacia el texto, solo mueve el cursor. Antes el
@@ -3910,15 +3932,7 @@ class Sheet(QTextEdit):
         def lone(b):  # solo el objeto, sin texto
             return bool(objects_of(b)) and not b.text().replace("\ufffc", "").strip()
         if lone(other) and not objects_of(block):
-            gone = QTextCursor(other)
-            gone.beginEditBlock()
-            if back:  # el objeto y el salto de párrafo que lo separa de este
-                gone.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
-            else:
-                gone.setPosition(block.position() + block.length() - 1)
-                gone.setPosition(other.position() + other.length() - 1, QTextCursor.MoveMode.KeepAnchor)
-            gone.removeSelectedText()
-            gone.endEditBlock()
+            self.drop_object(other, back)
             return True
         if lone(block) and not objects_of(other):  # del objeto al texto de al lado: se va allí, sin unirlos
             cursor.setPosition(other.position() + (other.length() - 1 if back else 0))
