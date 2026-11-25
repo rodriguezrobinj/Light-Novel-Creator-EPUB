@@ -2285,6 +2285,152 @@ def test_editor_undo_buttons_work_in_code_view():
     assert sheet
 
 
+def code_editor_on(chapters=2):
+    """Editor en «Código HTML» del capítulo 1 de un libro de chapters capítulos (Uno 0.…, Dos 0.…)."""
+    import app
+    names = ["Uno", "Dos", "Tres"][:chapters]
+    blocks, heads = [], []
+    for n, name in enumerate(names):
+        heads.append(len(blocks))
+        blocks += [convert.Block("heading", n + 1, f"Capítulo {n + 1}")] + [
+            convert.Block("p", n + 1, f"{name} {k}.") for k in range(3)]
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, heads))
+    ed = app.TextEditor(window, "0", *window.section_bounds(0))
+    ed.show_view(1)
+    root.update()
+    return root, window, ed
+
+
+def type_in_code(ed, text):
+    """Escribe text en el código antes del último «</p>», con el foco en él (como el usuario)."""
+    from PySide6.QtGui import QTextDocument
+    doc = ed.code.document()
+    cursor = doc.find("</p>", doc.characterCount(), QTextDocument.FindFlag.FindBackward)
+    cursor.setPosition(cursor.selectionStart())
+    ed.code.setTextCursor(cursor)
+    ed.code.setFocus()
+    ed.code.insertPlainText(text)
+
+
+def test_window_editor_code_view_stays_with_its_chapter():
+    """Con «Código HTML» abierto, cambiar de capítulo dejaba el código del de antes: la tecla siguiente lo volcaba
+    sobre el capítulo nuevo. Ahora lo escrito pasa a su capítulo y se vuelve a la hoja del otro."""
+    root, window, ed = code_editor_on()
+    try:
+        type_in_code(ed, " X")
+        ed.open_section(*window.section_bounds(4))
+        root.update()
+        code_open = ed.code.isVisible()
+        second = ed.sheet.dumped()
+        ed.save()
+        text = [b.html for b in window.book.blocks]
+    finally:
+        window.close()
+    assert not code_open
+    assert "Uno" not in second and "Dos 2." in second, second
+    assert "Uno 2. X" in text and "Dos 2." in text, text
+
+
+def test_window_editor_accept_takes_what_the_code_view_has():
+    """Aceptar en «Código HTML» guardaba solo la cabecera: lo escrito hacía menos de 30 ms se perdía, una etiqueta
+    sin cerrar se descartaba sin aviso (y cerrar no preguntaba) y lo deshecho con el botón de la cinta seguía en la
+    hoja. Ahora Aceptar vuelca el código como al volver a la hoja, y uno roto se avisa sin cerrar."""
+    import app
+    warned = []
+    original = app.messagebox.showwarning
+    app.messagebox.showwarning = lambda title, message, **kw: warned.append(message)
+    try:
+        root, window, ed = code_editor_on()
+        try:
+            type_in_code(ed, " PRONTO")
+            ed.save()  # sin dejar correr el temporizador del código
+            quick = [b.html for b in window.book.blocks]
+        finally:
+            window.close()
+        root, window, ed = code_editor_on()
+        try:
+            type_in_code(ed, " ROTO <i>sin cerrar")
+            root.update()
+            broken_dirty = ed.dirty()
+            ed.save()
+            root.update()
+            broken = (ed.closed, list(warned), [b.html for b in window.book.blocks])
+        finally:
+            ed.closed or ed.win.done(0)
+            window.close()
+        root, window, ed = code_editor_on()
+        try:
+            type_in_code(ed, " MAS")
+            wait_for(lambda: "MAS" in ed.sheet.dumped(), 2)
+            ed.undo_btn.setFocus()
+            ed.do("undo")
+            ed.save()
+            undone = [b.html for b in window.book.blocks]
+        finally:
+            window.close()
+    finally:
+        app.messagebox.showwarning = original
+    assert "Uno 2. PRONTO" in quick, quick
+    assert broken_dirty
+    assert not broken[0] and broken[1] and not any("ROTO" in h for h in broken[2]), broken
+    assert not any("MAS" in h for h in undone), undone
+
+
+def test_window_editor_ribbon_style_beats_the_book_tag():
+    """Un párrafo con su etiqueta del libro (EPUB, o PDF tras quitarle la sangría): Título, lista o recuadro de la
+    cinta se veían en la hoja, pero al volcar ganaba <p class="x"> y se perdían al aceptar."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    blocks = [convert.Block("heading", 1, "Capítulo 1")] + [convert.Block("p", 1, f"Uno {n}.") for n in range(4)]
+    for b in blocks[1:]:
+        b.opening = '<p class="x">'
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    ed = app.TextEditor(window, "0", *window.section_bounds(0))
+    try:
+        sheet, found = ed.sheet, {}
+        for n, (name, action) in enumerate((("título", lambda: sheet.set_heading("Subtítulo")),
+                                            ("lista", lambda: sheet.set_list("disc")),
+                                            ("recuadro", lambda: sheet.set_frame(""))), 2):
+            sheet.setTextCursor(QTextCursor(sheet.document().findBlockByNumber(n)))
+            action()
+            found[name] = sheet.dumped().split("\n\n")[n]
+        sheet.undo()
+        undone = sheet.dumped().split("\n\n")[4]
+    finally:
+        ed.win.done(0)
+        window.close()
+    assert found["título"] == "# Uno 1.", found
+    assert found["lista"].startswith("<lista disc>"), found
+    assert found["recuadro"].startswith(convert.FRAME), found
+    assert undone == '<p class="x">Uno 3.', undone  # un solo deshacer
+
+
+def test_window_editor_saves_a_title_that_only_changes_its_type():
+    """Pasar un título de Capítulo a Subtítulo con la cinta, sin tocar nada más, no contaba como cambio: Aceptar
+    no hacía nada, Cancelar no preguntaba y la fila seguía como Capítulo."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    blocks = [convert.Block("heading", 1, "Capítulo 1"), convert.Block("p", 1, "Uno."),
+              convert.Block("heading", 1, "Parte dos"), convert.Block("p", 1, "Dos.")]
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 2]))
+    ed = app.TextEditor(window, "2", *window.section_bounds(2))
+    try:
+        ed.sheet.setTextCursor(QTextCursor(ed.sheet.document().firstBlock()))
+        ed.style.activated.emit(app.STYLES.index("Subtítulo"))
+        dirty = ed.dirty()
+        ed.save()
+        kind = window.tree.set("2", "inc")
+    finally:
+        window.close()
+    assert dirty and kind == app.OFF, (dirty, kind)
+
+
 def test_editor_fast_page_turns_skip_one_chapter_at_a_time():
     """Pestaña EPUB del editor: ‹ › al final de un capítulo pasan al siguiente, pero la barra sigue siendo la del
     capítulo de antes (al final) hasta que Chromium carga el nuevo: pulsando rápido, cada clic saltaba otro capítulo.
@@ -14507,6 +14653,60 @@ def test_websheet_typing_reaches_the_sheet_at_once():
         finally:
             window.close()
     assert arrived and still, (arrived, still)
+
+
+def test_websheet_paste_keeps_every_paragraph_and_picture():
+    """Hoja web: pegar varios párrafos dejaba el segundo y los demás sueltos fuera de los párrafos (Chromium) y el
+    volcado solo lee párrafos: se perdían al aceptar; una ilustración pegada se quitaba. Ahora se pegan en la hoja
+    de Qt, cada uno en su párrafo y la ilustración en el suyo, y el texto suelto que quede también se vuelca."""
+    def at_end_of(css):
+        return ("(function(){var s=document.getElementById('lnc-sheet'); s.focus();"
+                f"var p=Array.prototype.find.call(s.children, function(b){{return b.matches('{css}')}});"
+                "var r=document.createRange(); r.setStart(p, p.childNodes.length); r.collapse(true);"
+                "var sel=getSelection(); sel.removeAllRanges(); sel.addRange(r); return 1})()")
+
+    def paste(html_text):
+        return ("(function(){var dt=new DataTransfer(); dt.setData('text/html', " + json.dumps(html_text) + ");"
+                "dt.setData('text/plain', 'x'); document.getElementById('lnc-sheet').dispatchEvent("
+                "new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true})); return 1})()")
+
+    def lines():
+        return [x for x in ed.sheet.dumped().split("\n\n") if x.strip()]
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14 pegar.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = next(c for c in window.book.candidates if window.book.blocks[c].title.startswith("Capítulo 1"))
+            ed = web_editor(window, k)
+            js(ed.web, at_end_of("p.no-indent"))
+            js(ed.web, paste("<p>PEGA uno</p><p>PEGA dos</p><div>PEGA <i>tres</i></div>"))
+            wait_for(lambda: "PEGA dos" in ed.sheet.dumped() and not ed.web_busy, 5)
+            after_text = lines()
+            # cortar el separador y pegarlo tras «Segundo párrafo»
+            separator = next(x for x in after_text if x.startswith("[Separador"))
+            js(ed.web, "(function(){var o=document.querySelector('#lnc-sheet .lnc-break'); var r=document.createRange();"
+                       "r.selectNode(o); var s=getSelection(); s.removeAllRanges(); s.addRange(r);"
+                       "document.execCommand('delete'); return 1})()")
+            js(ed.web, at_end_of("p:not([class])"))
+            js(ed.web, paste(f'<p>PEGA cuatro</p><p class="lnc-obj lnc-break" data-token="{separator}">※</p>'))
+            wait_for(lambda: "PEGA cuatro" in ed.sheet.dumped() and not ed.web_busy, 5)
+            after_picture = lines()
+            js(ed.web, "(function(){var s=document.getElementById('lnc-sheet');"
+                       "s.insertBefore(document.createTextNode('SUELTO'), s.children[1]); return 1})()")
+            flushed = []
+            ed.flush_web(lambda: flushed.append(1))
+            wait_for(lambda: flushed, 5)
+            loose = lines()
+            ed.win.done(0)
+        finally:
+            window.close()
+    first = next(n for n, x in enumerate(after_text) if "PEGA uno" in x)
+    assert after_text[first + 1:first + 3] == ["PEGA dos", "PEGA <i>tres</i>"], after_text
+    n = next(n for n, x in enumerate(after_picture) if x.endswith("PEGA cuatro"))  # el primero, en su párrafo
+    assert after_picture[n + 1] == separator and after_picture.count(separator) == 1, after_picture
+    assert "SUELTO" in loose, loose
 
 
 def test_epub_view_late_answer_after_closing():
