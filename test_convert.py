@@ -18738,8 +18738,9 @@ def _run_parallel(parts):
             temp.mkdir()
             log = open(temp.with_suffix(".log"), "w+", encoding="utf-8", errors="replace")
             env = {**os.environ, "TEMP": str(temp), "TMP": str(temp), "TMPDIR": str(temp), "PYTHONIOENCODING": "utf-8"}
-            proc = subprocess.Popen([sys.executable, __file__, "--parte", f"{part}/{parts}"], stdout=log,
-                                    stderr=subprocess.STDOUT, env=env)
+            # -X faulthandler: si el proceso se cae (código 3221225477) deja la pila de Python en su salida
+            proc = subprocess.Popen([sys.executable, "-X", "faulthandler", __file__, "--parte", f"{part}/{parts}"],
+                                    stdout=log, stderr=subprocess.STDOUT, env=env)
             runs.append((proc, log))
         ok = failed = 0
         tests = [name for name in globals() if name.startswith("test_")]
@@ -18753,10 +18754,12 @@ def _run_parallel(parts):
             ok_here = sum(line.startswith("ok ") for line in lines)
             failed_here = sum(line.startswith("FAIL ") for line in lines)
             ok, failed = ok + ok_here, failed + failed_here
-            missing = len(tests[part::parts]) - ok_here - failed_here
-            if missing > 0 or (code and not failed_here):
+            done = {line.split()[1] for line in lines if line.startswith(("ok ", "FAIL ")) and len(line.split()) > 1}
+            undone = [name for name in tests[part::parts] if name not in done]
+            if undone or (code and not failed_here):
                 failed += 1  # se cayó (con o sin un FAIL antes): las que quedaban no pasan por buenas
-                print(f"FAIL la parte {part + 1} de {parts} terminó con el código {code} y {missing} pruebas sin hacer")
+                print(f"FAIL la parte {part + 1} de {parts} terminó con el código {code} y {len(undone)} pruebas sin "
+                      f"hacer" + (f", desde {undone[0]}" if undone else ""))
     print(f"\n{ok} correctas, {failed} con FAIL en {time.time() - start:.0f} s ({parts} procesos)")
     return 1 if failed else 0
 
