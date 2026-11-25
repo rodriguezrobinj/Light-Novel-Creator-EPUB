@@ -13,6 +13,7 @@ import zipfile
 
 try:
     from PySide6.QtCore import QBuffer, QByteArray, Qt, QTimer, QUrl, Signal
+    from PySide6.QtGui import QPixmap
     from PySide6.QtWebEngineCore import (QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestJob,
                                          QWebEngineUrlScheme, QWebEngineUrlSchemeHandler)
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -502,6 +503,17 @@ if AVAILABLE:
             """Un aviso en lugar del capítulo (lo que no se edita aquí)."""
             import html
             self.loaded = False
+            if self.dead:  # setHtml con el proceso muerto cerraba la aplicación (Chromium, 0x80000003): encima, en Qt
+                self.cover.setPixmap(QPixmap())
+                self.cover.setText(text)
+                self.cover.setWordWrap(True)
+                self.cover.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                self.cover.setAutoFillBackground(True)  # el fondo y la letra del tema (claro u oscuro)
+                self.cover.setStyleSheet("font: 14px; padding: 24px")
+                self.cover.setGeometry(self.rect())
+                self.cover.show()
+                self.cover.raise_()
+                return
             self.setHtml(f"<p style='font:14px sans-serif;color:#777;margin:24px'>{html.escape(text)}</p>")
 
         def _loaded(self, ok):

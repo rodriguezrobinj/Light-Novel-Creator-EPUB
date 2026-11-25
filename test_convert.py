@@ -5953,11 +5953,17 @@ def test_text_editor_contents_page_renames_titles():
     cursor = editor.sheet.textCursor()
     cursor.movePosition(cursor.MoveOperation.End)
     cursor.insertText(chr(10) + "Una línea suelta")
-    editor.save()
+    told, saved = [], app.messagebox.showinfo
+    app.messagebox.showinfo = lambda title, message, **kw: told.append(message)
+    try:
+        editor.save()
+    finally:
+        app.messagebox.showinfo = saved
     title = window.tree.set(first, "title")
     blocks_after = [(b.kind, b.html) for b in window.book.blocks]
     window.close()
     assert listed == "Contenido" and "Contenido" in ribbon, (listed, ribbon)
+    assert len(told) == 1 and "solo se renombran" in told[0], told  # la línea suelta no toca el libro: se dice
     assert lines[:2] == ["# Capitulo 1: Inicio", "# Capitulo 2: Final"], lines
     assert title == "Capítulo 1: El inicio", title
     assert blocks_after == blocks_before  # solo el nombre de la fila
@@ -14858,6 +14864,87 @@ def test_websheet_paste_keeps_every_paragraph_and_picture():
     assert "SUELTO" in loose, loose
 
 
+def test_websheet_delete_keys_next_to_a_separator_keep_paragraphs_apart():
+    """Hoja web: Retroceso al principio del párrafo de después de un separador (o Supr al final del de antes, o con el
+    separador elegido) lo quitaba y además unía los dos párrafos de alrededor; con él elegido, Supr borraba una letra
+    del de abajo. Ahora se quita solo el objeto, como en la hoja de Qt. El texto que Chromium deje suelto entre los
+    párrafos pasa a su propio párrafo."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    find = ("var s=document.getElementById('lnc-sheet'); var o=s.querySelector('.lnc-break');")
+    places = {"retroceso": "var p=o.nextElementSibling; var r=document.createRange(); r.setStart(p.firstChild, 0);",
+              "supr": "var p=o.previousElementSibling, n=p.lastChild; var r=document.createRange();"
+                      "r.setStart(n, n.nodeType===3 ? n.data.length : n.childNodes.length);",
+              "elegido": "var r=document.createRange(); r.selectNode(o);"}
+    found = {}
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14 borrar.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            k = next(c for c in window.book.candidates if window.book.blocks[c].title.startswith("Capítulo 1"))
+            for name, place in places.items():
+                ed = web_editor(window, k)
+                js(ed.web, "(function(){" + find + place + "s.focus(); var g=getSelection(); g.removeAllRanges();"
+                           "g.addRange(r); return 1})()")
+                ed.web.setFocus()
+                QTest.keyClick(ed.web.focusProxy() or ed.web,
+                               Qt.Key.Key_Delete if name != "retroceso" else Qt.Key.Key_Backspace)
+                wait_for(lambda: "[Separador" not in ed.sheet.dumped() and not ed.web_busy, 5)
+                wait_for(lambda: ed.web.loaded, 5)
+                lines = [x for x in ed.sheet.dumped().split("\n\n") if x.strip()]
+                found[name] = [x for x in lines if x.startswith(("Segundo", "—", "…", "[Separador"))]
+                ed.do("undo")  # un deshacer lo devuelve
+                wait_for(lambda: "[Separador" in ed.sheet.dumped() and not ed.web_busy, 5)
+                found[name + " deshecho"] = "[Separador" in ed.sheet.dumped()
+                ed.win.done(0)
+            ed = web_editor(window, k)
+            js(ed.web, "(function(){var s=document.getElementById('lnc-sheet');"
+                       "s.insertBefore(document.createTextNode('SUELTO'), s.children[2]);"
+                       "s.dispatchEvent(new Event('input')); return 1})()")
+            wrapped = js(ed.web, "(function(){var s=document.getElementById('lnc-sheet'); return "
+                                 "Array.prototype.some.call(s.childNodes, function(n){return n.nodeType===3 && "
+                                 "n.data.trim()}) ? 'suelto' : s.children[2].tagName.toLowerCase() + ':' + "
+                                 "s.children[2].textContent})()")
+            ed.win.done(0)
+        finally:
+            window.close()
+    for name in places:
+        assert found[name] == ["Segundo párrafo & más.", "—…", "— ¡...!"] and found[name + " deshecho"], (name, found)
+    assert wrapped == "p:SUELTO", wrapped
+
+
+def test_websheet_escape_closes_the_editor():
+    """Con el cursor en la hoja web, Esc no hacía nada (Chromium se quedaba con la tecla): en la hoja pregunta si se
+    descarta lo cambiado y cierra. Ahora igual desde la web."""
+    import app
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    asked = []
+    saved = app.messagebox.askyesno
+    app.messagebox.askyesno = lambda title, message, **kw: asked.append(title) or True
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14 esc.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            ed = web_editor(window, window.book.candidates[2])
+            js(ed.web, "(function(){var p=document.querySelector('#lnc-sheet p');var r=document.createRange();"
+                       "r.selectNodeContents(p);r.collapse(false);var s=getSelection();s.removeAllRanges();"
+                       "s.addRange(r);document.execCommand('insertText',false,' cambio');return true;})()")
+            wait_for(lambda: "cambio" in ed.sheet.dumped(), 3)
+            ed.web.setFocus()
+            QTest.keyClick(ed.web.focusProxy() or ed.web, Qt.Key.Key_Escape)
+            closed = wait_for(lambda: ed.closed, 5)
+            text = " ".join(b.html for b in window.book.blocks)
+        finally:
+            app.messagebox.askyesno = saved
+            window.close()
+    assert closed and asked == ["Descartar cambios"] and "cambio" not in text, (closed, asked)
+
+
 def test_websheet_editor_closes_when_chromium_dies():
     """Si el proceso de Chromium moría (memoria, GPU) con el cursor en la hoja web, Aceptar y Cancelar esperaban su
     respuesta para siempre: el editor no se podía cerrar. Ahora se sigue en la hoja con lo que ya llegó de la web,
@@ -14879,12 +14966,19 @@ def test_websheet_editor_closes_when_chromium_dies():
             os.kill(ed.web.page().renderProcessPid(), signal.SIGTERM)
             wait_for(lambda: not ed.web_on, 10)
             note, on = ed.note.text(), ed.web_on
+            # «Contenido» con el proceso muerto: setHtml cerraba la aplicación; el aviso va encima, en Qt
+            ed.open_section(-1, -1)
+            wait_for(lambda: ed.web.cover.isVisible(), 3)
+            covered = ed.web.cover.isVisible() and "Contenido" in ed.web.cover.text()
+            ed.open_section(*window.section_bounds(window.book.candidates[2]))
+            back = wait_for(lambda: ed.web.loaded and not ed.web.cover.isVisible(), 20)  # tras la espera, vuelve
             ed.save()
             closed = wait_for(lambda: ed.closed, 5)
             text = " ".join(b.html for b in window.book.blocks)
         finally:
             window.close()
     assert asked == [None] and not on and "Chromium" in note, (asked, on, note)
+    assert covered and back, (covered, back)
     assert closed and "ANTES" in text, (closed, text[:200])
 
 
@@ -16012,6 +16106,85 @@ def test_faithful_single_quoted_attributes_are_tags():
     assert after == before  # sin tocar nada, el archivo sale igual
     assert re.search(r'<p class="x">(<span[^>]*></span>)?Hola\.</p>', written), written[-300:]
     assert editor.NOTE.search("Texto [Nota: del arco [Arco 2] aquí] fin")[0].endswith("aquí]")
+
+
+def test_faithful_ribbon_list_frame_and_center_reach_the_epub():
+    """EPUB de entrada: lista, recuadro o centrado puestos con la cinta en un párrafo que ya estaba se veían en el
+    editor, pero el EPUB salía con el elemento de siempre (<p>): se perdían. Ahora la lista es una sola <ul> con sus
+    <li> (conservan la clase del párrafo), y el recuadro y el centrado van en su style."""
+    import app
+    from PySide6.QtGui import QTextCursor
+    src = sigil_epub(TMP / "Sigil cinta.epub")
+    root, window = visible_window()
+    window.pdf = src
+    window.show_book(convert.analyze(src))
+    k = next(c for c in window.book.candidates if window.book.blocks[c].title.startswith("Capítulo 1"))
+    try:
+        ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+        sheet, doc = ed.sheet, ed.sheet.document()
+
+        def at(text):
+            block = doc.firstBlock()
+            while not block.text().startswith(text):
+                block = block.next()
+            return block
+        cursor = QTextCursor(at("Las leyendas"))
+        cursor.setPosition(at("Segundo").position(), QTextCursor.MoveMode.KeepAnchor)
+        sheet.setTextCursor(cursor)
+        sheet.set_list("decimal")
+        sheet.setTextCursor(QTextCursor(at("— ¡")))
+        sheet.set_frame("")
+        sheet.setTextCursor(QTextCursor(at("Tercero")))
+        sheet.set_align("center")
+        ed.save()
+        out = TMP / "Sigil cinta (LNC).epub"
+        convert.write_epub(window.book, [(c, window.book.blocks[c].title) for c in window.book.candidates], out,
+                           style=convert.ORIGINAL)
+    finally:
+        window.close()
+    with zipfile.ZipFile(out) as z:
+        body = z.read("OEBPS/Text/capitulo01.xhtml").decode()
+    with zipfile.ZipFile(src) as z:
+        before = z.read("OEBPS/Text/capitulo01.xhtml").decode()
+    lists = re.findall(r'<ol class="lista" style="list-style-type: decimal">(.*?)</ol>', body, re.S)
+    assert len(lists) == 1 and lists[0].count("<li") == 2 and '<li class="no-indent">' in lists[0], body
+    assert "lnc-lista" not in body
+    assert re.search(r'<p style="[^"]*border[^"]*">— ¡', body), body
+    assert re.search(r'<p style="text-align: center; text-indent: 0">Tercero', body), body
+    assert "<h3>Subparte</h3>" in body and "<h3>Subparte</h3>" in before  # lo no tocado, igual
+
+
+def test_faithful_keeps_the_apps_svg_separator_icon():
+    """Un EPUB hecho por la app con «Icono propio» lleva cada separador como <p class="brk"><svg …></svg></p>: al
+    abrirlo no era un bloque (un dibujo sin imagen que leer) y al guardarlo otra vez el separador salía vacío. Ahora
+    es un separador: se conserva tal cual y otra opción de separador lo cambia entero."""
+    svg = ('<p class="brk"><svg class="brk-icono" width="0.74em" height="1.3em" role="img" aria-label="* * *" '
+           'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 73 128"><path fill="currentColor" d="M31 0L35 4.5Z"/>'
+           '</svg></p>')
+    src = sigil_epub(TMP / "Sigil icono base.epub")
+    iconed = TMP / "Sigil icono.epub"
+    with zipfile.ZipFile(src) as zi, zipfile.ZipFile(iconed, "w") as zo:
+        for info in zi.infolist():
+            data = zi.read(info)
+            if info.filename.endswith("capitulo01.xhtml"):
+                data = data.replace('<p class="text align-center"><b>※ ・ ※ ・ ※</b></p>'.encode(), svg.encode())
+                assert svg.encode() in data
+            zo.writestr(info, data)
+    book = convert.analyze(iconed)
+    breaks = [b for b in book.blocks if b.kind == "break" and b.src and b.src[0].endswith("capitulo01.xhtml")]
+    chapters = [(c, book.blocks[c].title) for c in book.candidates]
+    same, star = TMP / "Sigil icono (igual).epub", TMP / "Sigil icono (estrellas).epub"
+    convert.write_epub(book, chapters, same, style=convert.ORIGINAL)
+    convert.write_epub(book, chapters, star, style=convert.ORIGINAL, separator="✦ ✦ ✦")
+    with zipfile.ZipFile(iconed) as z:
+        before = z.read("OEBPS/Text/capitulo01.xhtml")
+    with zipfile.ZipFile(same) as z:
+        kept = z.read("OEBPS/Text/capitulo01.xhtml")
+    with zipfile.ZipFile(star) as z:
+        changed = z.read("OEBPS/Text/capitulo01.xhtml").decode()
+    assert len(breaks) == 1 and not convert.is_rule(breaks[0]), breaks
+    assert kept == before
+    assert "✦ ✦ ✦" in changed and "brk-icono" not in changed and '<p class="brk"><p' not in changed, changed
 
 
 def test_faithful_preview_of_a_section_is_light():
@@ -18569,6 +18742,7 @@ def _run_parallel(parts):
                                     stderr=subprocess.STDOUT, env=env)
             runs.append((proc, log))
         ok = failed = 0
+        tests = [name for name in globals() if name.startswith("test_")]
         for part, (proc, log) in enumerate(runs):
             code = proc.wait()
             log.seek(0)
@@ -18576,12 +18750,13 @@ def _run_parallel(parts):
             log.close()
             print(output, end="")
             lines = output.splitlines()
-            ok += sum(line.startswith("ok ") for line in lines)
+            ok_here = sum(line.startswith("ok ") for line in lines)
             failed_here = sum(line.startswith("FAIL ") for line in lines)
-            failed += failed_here
-            if code and not failed_here:
-                failed += 1  # se cayó sin decir qué prueba: que no pase por buena
-                print(f"FAIL la parte {part + 1} de {parts} terminó con el código {code}")
+            ok, failed = ok + ok_here, failed + failed_here
+            missing = len(tests[part::parts]) - ok_here - failed_here
+            if missing > 0 or (code and not failed_here):
+                failed += 1  # se cayó (con o sin un FAIL antes): las que quedaban no pasan por buenas
+                print(f"FAIL la parte {part + 1} de {parts} terminó con el código {code} y {missing} pruebas sin hacer")
     print(f"\n{ok} correctas, {failed} con FAIL en {time.time() - start:.0f} s ({parts} procesos)")
     return 1 if failed else 0
 

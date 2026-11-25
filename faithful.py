@@ -104,6 +104,10 @@ def leaves(node):
             out.append(("break", child))
         elif child.tag in IMAGES and not child.has_text():
             out.append(("image", child))
+        elif child.tag in TEXT_LEAVES and not child.has_text() and _drawn(child):
+            # <p class="brk"><svg …/></p>, el icono de separador que escribe la app: sin imagen que leer no era bloque
+            # y al guardar el EPUB otra vez se quitaba (el separador salía vacío)
+            out.append(("break", child))
         elif child.tag in TEXT_LEAVES or (child.tag not in INLINE_TAGS and not child.blocky()) or (
                 child.tag in INLINE_TAGS and child.has_text()):
             if child.has_text():
@@ -113,6 +117,12 @@ def leaves(node):
         else:
             out += leaves(child)
     return out
+
+
+def _drawn(node):
+    """¿Solo lleva dibujos SVG en línea (sin imagen enlazada dentro)?"""
+    found = node.images()
+    return bool(found) and all(n.tag == "svg" and not any(c.tag == "image" for c in _descendants(n)) for n in found)
 
 
 def _descendants(node):
@@ -405,7 +415,8 @@ def read_epub(path, progress=None):
                     elif ref in names:
                         found.append(convert.Block("image", page, image=z.read(ref), tag=node.tag, src=spot, ref=ref))
                 elif what == "break":
-                    found.append(convert.Block("break", page, "", tag="hr", src=spot, orig=""))
+                    # tag: «hr» es una raya (convert.is_rule); un párrafo con un icono es un separador de escena
+                    found.append(convert.Block("break", page, "", tag=node.tag, src=spot, orig=""))
                 else:
                     html_ = _normal(inner)
                     plain = _plain(inner)
@@ -614,6 +625,21 @@ def _swap_text(fragment, text):
     return "".join(pieces) if done else html.escape(text, quote=False)
 
 
+# Cada elemento de lista del editor va en su propia lista, con una marca de su estilo tras el cierre: las seguidas del
+# mismo estilo se juntan en una (la numeración sigue) y las marcas que quedan se quitan
+LIST_JOIN = re.compile(r'</(ul|ol)><!--lnc-lista ([\w-]+)-->\s*<\1 class="lista" style="list-style-type: \2">')
+LIST_MARK = re.compile(r"<!--lnc-lista [\w-]+-->")
+
+
+def _with_css(tag, css):
+    """Etiqueta de apertura con css añadido al final de su style (lo pone la cinta: gana a lo que ya tenía)."""
+    m = re.search(r'\sstyle\s*=\s*"([^"]*)"', tag)
+    if m:
+        old = m[1].strip().rstrip(";")
+        return tag[:m.start(1)] + (old + "; " if old else "") + css + tag[m.end(1):]
+    return _set_attr(tag, "style", css)
+
+
 def _set_attr(tag, name, value):
     """Etiqueta de apertura con el atributo name cambiado (o añadido)."""
     value = html.escape(value)
@@ -817,7 +843,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                 name, i0, i1, o0, o1 = b.src
                 start = text[o0:text.index(">", o0) + 1]  # etiqueta de apertura del original
                 retag = b.opening and _start_tag(b.opening) != _start_tag(start)  # estilo cambiado en el editor
-                if own and new == b.orig and not retag:
+                shaped = b.kind == "p" and bool(b.align)  # lista, recuadro o alineación puestos con la cinta
+                if own and new == b.orig and not retag and not shaped:
                     return text[o0:o1]
                 opening, closing = (b.opening if retag else start), text[i1:o1]
                 if retag:  # otra etiqueta (p -> h3): también el cierre
@@ -826,6 +853,9 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                     opening = re.sub(r"\sid\s*=\s*\"[^\"]*\"", "", opening)
                 if b.kind == "heading" and k in titles and titles[k] != b.title and re.search(r"\stitle=", opening):
                     opening = _set_attr(opening, "title", titles[k])
+                if shaped:  # antes se escribía el elemento de siempre: la lista o el recuadro no llegaban al EPUB
+                    opening, closing, before, after = shape(b, opening, closing)
+                    return before + opening + text[o0 + len(start):i0] + new + closing + after
                 return opening + text[o0 + len(start):i0] + new + closing
             if b.align in ("table", "table-head"):  # fila de tabla del editor
                 return convert.table_row(new, b.align == "table-head")
@@ -834,12 +864,27 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
             if b.kind == "heading":
                 tag = b.tag if b.tag in HEADINGS else ("h1" if k in titles else "h2")
                 return f"<{tag}>{new}</{tag}>"
-            style_ = {"center": "text-align: center; text-indent: 0", "right": "text-align: right; text-indent: 0"}.get(
-                b.align.partition(":")[0].removeprefix("frame-"), "")
+            opening, closing, before, after = shape(b, "<p>", "</p>")
+            return before + opening + new + closing + after
+
+        def shape(b, opening, closing):
+            """(apertura, cierre, antes, después) del párrafo b con lo puesto en la cinta (b.align): centrado, a la
+            derecha o recuadro en su style; un elemento de lista pasa a <li> dentro de su <ul>/<ol> (las listas seguidas
+            iguales se juntan luego, LIST_JOIN)."""
+            side = b.align.partition(":")[0]
+            if side.startswith("list-"):
+                kind = side[5:]
+                tag = "ul" if kind in convert.LIST_STYLES[:3] else "ol"
+                opening = re.sub(r"^<[\w:.-]+", "<li", opening)
+                closing = re.sub(r"</[\w:.-]+>\s*$", "</li>", closing)
+                return (opening, closing, f'<{tag} class="lista" style="list-style-type: {kind}">',
+                        f"</{tag}><!--lnc-lista {kind}-->")
+            css = {"center": "text-align: center; text-indent: 0", "right": "text-align: right; text-indent: 0"}.get(
+                side.removeprefix("frame-"), "")
             if b.align.startswith("frame"):  # recuadro: el de siempre o el de su tipo (convert.BOX_INLINE)
-                style_ = (style_ + "; " if style_ else "") + convert.BOX_INLINE.get(
+                css = (css + "; " if css else "") + convert.BOX_INLINE.get(
                     convert.box_kind(b.align), "border: 1px solid #777777; padding: 0.4em 0.8em")
-            return f'<p{f" style={chr(34)}{style_}{chr(34)}" if style_ else ""}>{new}</p>'
+            return (_with_css(opening, css) if css else opening), closing, "", ""
 
         chapter_src = {title: book.blocks[k].src[0] for k, title in chapters if book.blocks[k].src}
         shells = {b.shell[0]: b.shell for b in book.blocks if b.shell and b.shell[0] in spans}
@@ -886,6 +931,7 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                                  for n, body, _ in notes)
                 cut = new.rfind("</body>")
                 new = new[:cut] + asides + "\n" + new[cut:]
+            new = LIST_MARK.sub("", LIST_JOIN.sub("", new))
             if new != text:
                 texts[name] = new
 
