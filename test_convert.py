@@ -4019,7 +4019,17 @@ def test_indexed_jpeg2000_illustration_is_not_noise():
     # Como lo abre la ventana (en memoria): igual de bien, y el archivo se puede mover o borrar con el libro abierto
     moved = TMP / "jpx-paleta-movido.pdf"
     with convert.open_pdf(path, fixed, memory=True) as held:
-        path.replace(moved)
+        # el antivirus mira un momento el PDF recién guardado (con la suite en paralelo, WinError 32): se reintenta.
+        # Si lo retuviera la app, seguiría fallando
+        import time
+        for wait in range(20):
+            try:
+                path.replace(moved)
+                break
+            except PermissionError:
+                if wait == 19:
+                    raise
+                time.sleep(0.1)
         assert held[1].get_pixmap().pixel(50, 50) == preview and held.jpx == [xref], held.jpx
     moved.replace(path)
     picture = next(b.image for b in convert.analyze(path).blocks if b.kind == "image")
@@ -18730,6 +18740,8 @@ def _run_parallel(parts):
     import subprocess
     import time
 
+    # la salida de las partes, a un archivo en cp1252: una letra que no cabe («❮») tiraba el lanzador y el resultado
+    sys.stdout.reconfigure(errors="replace")
     start = time.time()
     with tempfile.TemporaryDirectory(prefix="lnepub-test-", ignore_cleanup_errors=True) as root:
         runs = []
@@ -18758,8 +18770,10 @@ def _run_parallel(parts):
             undone = [name for name in tests[part::parts] if name not in done]
             if undone or (code and not failed_here):
                 failed += 1  # se cayó (con o sin un FAIL antes): las que quedaban no pasan por buenas
-                print(f"FAIL la parte {part + 1} de {parts} terminó con el código {code} y {len(undone)} pruebas sin "
-                      f"hacer" + (f", desde {undone[0]}" if undone else ""))
+                # todas hechas y aun así un código: se cayó al cerrar (orden de destrucción de Qt/WebEngine), no en una prueba
+                print(f"FAIL la parte {part + 1} de {parts} terminó con el código {code} " +
+                      (f"y {len(undone)} pruebas sin hacer, desde {undone[0]}" if undone else
+                       "al salir del proceso, con todas sus pruebas hechas"))
     print(f"\n{ok} correctas, {failed} con FAIL en {time.time() - start:.0f} s ({parts} procesos)")
     return 1 if failed else 0
 
