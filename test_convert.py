@@ -1921,6 +1921,40 @@ def test_log_notes_window_freezes_with_where_it_was():
     assert len(seen) == 1 and "no respondió" in seen[0] and "test_log_notes_window_freezes" in seen[0], seen
 
 
+def test_freeze_watcher_never_collects_garbage_in_its_thread():
+    """registro.Freezes toma la pila de la ventana desde su propio hilo: si al tomarla saltaba ahí el recolector de
+    ciclos, destruía objetos de Qt fuera de su hilo y el proceso caía (CI, código 3221225477, en sitios al azar).
+    Ahí no recoge nunca."""
+    import gc
+    import threading
+    import time
+    import registro
+    where = []
+
+    def note(phase, info):
+        if phase == "start":
+            where.append(threading.current_thread().name)
+    freezes = registro.Freezes(limit=0.1)
+    time.sleep(0.1)  # su hilo ya arrancado (el arranque de un hilo es de threading, una vez): se mira lo que muestrea
+    old = gc.get_threshold()
+    gc.callbacks.append(note)
+    gc.set_threshold(1)  # cada objeto nuevo puede hacer recoger: el peor caso
+    try:
+        junk, stuck_until = [], time_ns() + 1_500_000_000
+        while time_ns() < stuck_until:  # la ventana «ocupada», sin latir, haciendo basura con ciclos
+            item = []
+            item.append(item)
+            junk.append(item)
+            del junk[:-50]
+        taken = len(freezes.samples)
+    finally:
+        gc.callbacks.remove(note)
+        gc.set_threshold(*old)
+        freezes.last = float("inf")  # deja de tomar muestras para el resto de pruebas de este proceso
+    assert taken, "el vigilante no tomó muestras"
+    assert "congelada" not in where, where.count("congelada")
+
+
 def test_log_freezes_skip_windows_dialogs_and_say_after_what():
     """Un «Guardar como» de Windows no deja latir a la ventana: dentro de registro.waiting() no es una congelación
     (salía una por cada EPUB guardado). La que sí lo es dice tras qué acción pasó y la pila más vista contando las
