@@ -135,11 +135,13 @@ DEL_CSS = (".lnc-del::after { content: attr(data-del); background: %s; text-deco
            ".lnc-obj[data-lnc-added] img, .lnc-break[data-lnc-added] { outline: 3px solid %s; outline-offset: 2px; }")
 
 
-def gone_css(pieces, color, dark=False):
+def gone_css(pieces, color, dark=False, image_of=None):
     """Valor de content: del CSS con lo quitado entero (editor.removed_pieces) si lleva ilustraciones o
     separadores: la fila entera pintada como en la hoja (editor.paint_pieces), en PNG dentro del CSS: con texto
     y una imagen juntos, el fondo rojo del CSS asomaba alrededor de la imagen. dark: el modo oscuro de la hoja
-    web (webview.SHEET_DARK), con su letra clara. "" sin ellas."""
+    web (webview.SHEET_DARK), con su letra clara. image_of(número): la imagen de cada una. "" sin ellas."""
+    pieces = [p if isinstance(p, str) else (image, p[1]) if (image := image_of and image_of(p[0])) is not None
+              else p[1] for p in pieces]
     if all(isinstance(p, str) for p in pieces):
         return ""
     ink = "#ececec" if dark else "#000000"
@@ -153,7 +155,8 @@ def gone_css(pieces, color, dark=False):
         row = QImage(width, round(editor.row_height(pieces, font)), QImage.Format.Format_ARGB32_Premultiplied)
         row.fill(Qt.GlobalColor.transparent)
         painter = QPainter(row)
-        boxes = editor.paint_pieces(painter, 0, row.height(), pieces, font, width, color, QColor(ink))
+        boxes = editor.paint_pieces(painter, 0, row.height(), pieces, font, width, color, QColor(ink),
+                                    image_of=lambda image: image)  # ya son imágenes
         painter.end()
         row = row.copy(0, 0, max(1, round(max(box.right() for box, _ in boxes))) if boxes else 1, row.height())
         buffer = QBuffer()

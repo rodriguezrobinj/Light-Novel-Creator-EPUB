@@ -11160,8 +11160,9 @@ class TextEditor:
                 gone.append([n, " ¶ ".join(map(editor.removed_text, above)),
                              n + len(lines) - 1, " ¶ ".join(map(editor.removed_text, below))])
                 # con ilustraciones o separadores: su imagen, en el CSS (attr() solo da texto)
-                pictures = [websheet.gone_css(editor.removed_pieces(self.sheet.document(), side), removed, self.side_dark)
-                            for side in (above, below)]
+                doc = self.sheet.document()
+                pictures = [websheet.gone_css(editor.removed_pieces(side), removed, self.side_dark,
+                                              lambda n: editor.object_image(doc, n)) for side in (above, below)]
                 if any(pictures):
                     gone[-1] += pictures
             for line in lines:

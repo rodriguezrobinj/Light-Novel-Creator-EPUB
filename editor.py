@@ -661,7 +661,7 @@ class CodeLook(QSyntaxHighlighter):
             wide = any(ord(c) > 0xFFFF for c in text)
             mark_changes(self, text, group_changes(before, texts, n), lambda i: u16(text, i) if wide else i,
                          QColor(self.changes), above, below,
-                         (code_pieces(above, self.images), code_pieces(below, self.images)))
+                         (code_pieces(above), code_pieces(below)))
         elif isinstance(block.userData(), Changes):
             block.userData().gone, block.userData().above, block.userData().below = [], [], ""
             block.userData().pieces = ([], [])
@@ -1828,16 +1828,16 @@ def object_image(doc, n):
     return picture
 
 
-def removed_pieces(doc, lines, text=None):
+def removed_pieces(lines, text=None):
     """Lo quitado entero por piezas: texto (text de la línea, removed_text si no se da, unido con « ¶ ») o, en vez
-    de «[Ilustración]» o «[Separador]», (su imagen, ese texto) si la hay (object_image)."""
+    de «[Ilustración]» o «[Separador]», (su número, ese texto). La imagen se busca al pintar (paint_pieces): leída
+    al colorear y guardada en el párrafo, el proceso caía al azar (CI, 3221225477)."""
     text = text or removed_text
     out = []
     for line in lines:
         m = convert.TOKEN.fullmatch(line.strip()) or convert.PICTURE.fullmatch(line.strip())
-        image = object_image(doc, m[2]) if m else None
-        if image is not None:
-            out.append((image, text(line)))
+        if m:
+            out.append((m[2], text(line)))
         elif out and isinstance(out[-1], str):
             out[-1] += " ¶ " + text(line)
         else:
@@ -1845,17 +1845,14 @@ def removed_pieces(doc, lines, text=None):
     return out
 
 
-def code_pieces(code, image):
+def code_pieces(code):
     """Como removed_pieces con lo quitado entero de «Código HTML» (code_wholes: código unido con «  »): cada <img>
-    o <hr> de una ilustración o separador, (su imagen, su código) si image(n) la da."""
+    o <hr> de una ilustración o separador, (su número, su código)."""
     out, at = [], 0
     for m in CODE_OBJECT.finditer(code):
-        found = image(next(g for g in m.groups() if g)) if image else None
-        if found is None:
-            continue
         if code[at:m.start()].strip():
             out.append(code[at:m.start()].strip())
-        out.append((found, m[0]))
+        out.append((next(g for g in m.groups() if g), m[0]))
         at = m.end()
     if out and code[at:].strip():
         out.append(code[at:].strip())
@@ -1868,10 +1865,12 @@ def thumb_size(image, width=420, tall=DELETED_THUMB):
     return QSizeF(image.width() * scale, image.height() * scale)
 
 
-def paint_pieces(painter, x, bottom, pieces, font, width, color, ink, tall=DELETED_THUMB):
+def paint_pieces(painter, x, bottom, pieces, font, width, color, ink, tall=DELETED_THUMB, image_of=None):
     """Lo quitado entero (removed_pieces) en fila desde x con su borde de abajo en bottom, de width y tall como
-    mucho: el texto tachado sobre fondo color y las ilustraciones con su imagen (deleted_look). Devuelve
-    [(QRectF, texto entero)] para el globo."""
+    mucho: el texto tachado sobre fondo color y las ilustraciones con su imagen (image_of(número), deleted_look);
+    sin imagen, su texto. Devuelve [(QRectF, texto entero)] para el globo."""
+    pieces = [p if isinstance(p, str) else (image, p[1]) if (image := image_of and image_of(p[0])) is not None
+              else p[1] for p in pieces]
     strike = label_font(font)
     strike.setStrikeOut(True)
     small = QFontMetrics(strike)
@@ -1952,9 +1951,10 @@ def object_boxes(block):
 
 
 def row_height(pieces, font, tall=DELETED_THUMB):
-    """Alto de la línea de lo quitado entero: el de su letra o el de la ilustración más alta."""
-    return max([QFontMetrics(label_font(font)).height()] +
-               [thumb_size(p[0], 420, tall).height() for p in pieces if not isinstance(p, str)])
+    """Alto de la línea de lo quitado entero: el de su letra o, con una ilustración, tall (sin leer su imagen al
+    colorear: ver removed_pieces)."""
+    text = QFontMetrics(label_font(font)).height()
+    return max(text, tall) if any(not isinstance(p, str) for p in pieces) else text
 
 
 def mark_changes(look, text, changes, at, color, above="", below="", pieces=([], [])):
@@ -2080,7 +2080,9 @@ def paint_removed(edit, painter, color):
     def label(x, y, pieces, font, width, bottom_at=False, tall=DELETED_THUMB):
         """Lo quitado entero en x, y (y es su borde de abajo si bottom_at), de width y tall como mucho."""
         bottom = y if bottom_at else y + row_height(pieces, font, tall)
-        boxes.extend(paint_pieces(painter, x, bottom, pieces, font, width, color, ink, tall))
+        boxes.extend(paint_pieces(painter, x, bottom, pieces, font, width, color, ink, tall, image_of))
+    # las imágenes, de la hoja: la suya o, en «Código HTML», la de la hoja (CodeLook.images)
+    image_of = getattr(edit.look, "images", None) or (lambda n: object_image(edit.document(), n))
     block = edit.cursorForPosition(QPoint(0, 0)).block()
     while block.isValid() and doc_layout.blockBoundingRect(block).top() - dy <= bottom:
         data = block.userData()
@@ -2388,7 +2390,7 @@ class Look(QSyntaxHighlighter):
                                  else ((), (), ()))
         def lost(lines):
             return " ¶ ".join(removed_text(line) for line in lines)
-        pieces = (removed_pieces(self.document(), before), removed_pieces(self.document(), after))
+        pieces = (removed_pieces(before), removed_pieces(after))
         if (before or after) and (objects_of(block) or not text.strip()):  # una ilustración (o nada): a su lado
             data = block.userData() if isinstance(block.userData(), Changes) else Changes()
             data.gone, data.below, data.pieces = [], lost(after), pieces
