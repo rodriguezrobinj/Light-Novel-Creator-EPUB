@@ -18939,6 +18939,22 @@ def _run_tests(part, parts):
     return failed
 
 
+PART_LIMIT = 900  # s que puede tardar la suite en paralelo (unos 300 en local, 60 en CI): más es una parte colgada
+
+
+def _quiet_crashes():
+    """Un proceso hijo que aborta (Qt, Chromium) se cierra y deja su código: Windows lo dejaba esperando a su
+    ventana de error, sin cerrar, y la suite esperaba con él (CI colgada 10 minutos)."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)  # sin ventanas de error críticos ni de fallo
+    try:
+        ctypes.cdll.ucrtbase._set_abort_behavior(0, 0x1 | 0x2)  # abort(): sin mensaje ni informe a Windows
+    except (OSError, AttributeError):
+        pass
+
+
 def _run_parallel(parts):
     """Reparte la suite en parts procesos, cada uno con su propia carpeta temporal (TEMP): dos pruebas a la vez no
     ven los archivos de la otra. Muestra la salida de cada parte al acabar. Devuelve el código de salida."""
@@ -18961,8 +18977,15 @@ def _run_parallel(parts):
             runs.append((proc, log))
         ok = failed = 0
         tests = [name for name in globals() if name.startswith("test_")]
+        deadline = start + PART_LIMIT
         for part, (proc, log) in enumerate(runs):
-            code = proc.wait()
+            try:
+                code = proc.wait(timeout=max(1.0, deadline - time.time()))
+            except subprocess.TimeoutExpired:  # colgada: se para y cuenta como caída, con lo que llegó a escribir
+                proc.kill()
+                code = proc.wait()
+                log.seek(0, os.SEEK_END)
+                log.write(f"\nparte parada: seguía al cabo de {PART_LIMIT} s\n")
             log.seek(0)
             output = log.read()
             log.close()
@@ -18989,6 +19012,7 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if "--parte" in args:
         part, parts = map(int, args[args.index("--parte") + 1].split("/"))
+        _quiet_crashes()
         sys.exit(1 if _run_tests(part, parts) else 0)
     parts = int(args[args.index("--paralelo") + 1]) if "--paralelo" in args else min(4, os.cpu_count() or 1)
     if parts > 1:
