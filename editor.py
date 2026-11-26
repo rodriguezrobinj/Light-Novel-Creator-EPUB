@@ -1895,7 +1895,7 @@ def paint_pieces(painter, x, bottom, pieces, font, width, color, ink, tall=DELET
         else:
             size = thumb_size(piece[0], end - x, tall)
             box = QRectF(QPointF(x, bottom - size.height()), size)
-            painter.drawImage(box, deleted_look(piece[0], size, color))
+            painter.fillRect(box, QColor(color))  # experimento: sin miniatura
             out.append((box, piece[1]))
         x = box.right() + GAP
     return out
