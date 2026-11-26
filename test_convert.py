@@ -18813,10 +18813,30 @@ if __name__ == "__main__":
     # Por defecto, un proceso por núcleo (hasta 4): de una en una la suite tardaba unos 2 minutos.
     # --paralelo 1 la ejecuta aquí, de una en una; --parte k/n es lo que ejecuta cada proceso hijo.
     args = sys.argv[1:]
-    if "--parte" in args:
+    if "--parte" in args and "--hasta" not in args:
         part, parts = map(int, args[args.index("--parte") + 1].split("/"))
         _quiet_crashes()
         sys.exit(1 if _run_tests(part, parts) else 0)
+    if "--hasta" in args:  # experimento: solo las primeras N de la parte
+        part, parts = map(int, args[args.index("--parte") + 1].split("/"))
+        limit = int(args[args.index("--hasta") + 1])
+        keep = [n for n in globals() if n.startswith("test_")][part::parts][:limit]
+        for n in [n for n in list(globals()) if n.startswith("test_") and n not in keep]:
+            del globals()[n]
+        _quiet_crashes()
+        sys.exit(1 if _run_tests(0, 1) else 0)
+    if os.environ.get("CI"):  # experimento: 4 veces la parte 2, hasta la caída de CI
+        import subprocess
+        procs = [subprocess.Popen([sys.executable, "-X", "faulthandler", __file__, "--parte", "1/4", "--hasta", "45"])
+                 for _ in range(4)]
+        codes = []
+        for proc in procs:
+            try:
+                codes.append(proc.wait(timeout=300))
+            except subprocess.TimeoutExpired:
+                proc.kill(); codes.append("colgada")
+        print("EXPERIMENTO códigos:", codes, flush=True)
+        sys.exit(0 if all(c == 0 for c in codes) else 1)
     parts = int(args[args.index("--paralelo") + 1]) if "--paralelo" in args else min(4, os.cpu_count() or 1)
     if parts > 1:
         sys.exit(_run_parallel(parts))
