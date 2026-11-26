@@ -62,6 +62,7 @@ import registro
 import report
 import theme
 import translate
+import updater
 import upscale
 from qtk import filedialog, messagebox
 
@@ -132,7 +133,8 @@ EDITOR_DEFAULTS = {"editor_undo": UNDO_SCOPES[0], "editor_side": EDITOR_SIDES[0]
 RECENT = 8  # PDF recientes que recuerda el menú
 OUT_NAMES = ["Como el PDF", "Título del libro", "Serie - Volumen N"]  # Opciones → Salida → Nombre del EPUB
 # Lo de «La aplicación» en Opciones que no es del editor: sus valores de fábrica
-APP_DEFAULTS = {"accent": "Azul", "ui_font": "9 pt", "reopen_last": False, "recent_max": RECENT, "out_name": OUT_NAMES[0],
+APP_DEFAULTS = {"accent": "Azul", "ui_font": "9 pt", "reopen_last": False, "recent_max": RECENT, "check_updates": True,
+                "out_name": OUT_NAMES[0],
                 "out_folder": "", "spell_caps": False, "quality_off": [], "quality_levels": {},
                 "grammar": {"engine": "local", "url": "", "user": "", "key": ""}}  # key: cifrada (translate.protect)
 BOOK_FIELDS = ("title", "author", "series", "volume", "publisher", "translator", "description", "illustrator",
@@ -2149,6 +2151,9 @@ class StatusLabel(QLabel):
         super().setText(text)
         self.setToolTip(text)
 
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setPen(self.palette().color(self.foregroundRole()))
@@ -2446,18 +2451,22 @@ class App:
         self.book_actions.append(tools.addSeparator())
         tools.addAction("Panel de serie…", self.series_panel)
         tools.addAction("Volumen recopilatorio…", self.omnibus)
-        tools.addAction("Vigilar una carpeta…", lambda: self.open_options("Carpeta vigilada"))
+        tools.addAction("Vigilar una carpeta…", self.watch_folder)
         tools.addSeparator()
-        tools.addAction("Opciones…  (Ctrl+,)", lambda: self.open_options())
+        self.options_action = tools.addAction("Opciones…  (Ctrl+,)", lambda: self.open_options())
+        self.book_actions.append(self.options_action)
         tools.addAction("Atajos de teclado…", self.show_shortcuts)
         tools.addAction("Registro de la aplicación", self.open_log)
+        tools.addAction("Buscar actualizaciones…", self.check_updates)
         tools.addSeparator()
         support = tools.addMenu("Apoyar el proyecto")
         for text, url in DONATE:
             support.addAction(text, lambda url=url: webbrowser.open(url))
         self.file_label = _label("Ningún archivo", "muted")
-        self.recent_btn, self.find_btn = _menu_button("Recientes", self.recent_menu), _button("Buscar", self.find)
-        top.setLayout(_row(self.open_btn, self.batch_btn, self.recent_btn, _menu_button("Herramientas", tools),
+        self.recent_btn = _menu_button("Recientes", self.recent_menu)
+        self.tools_btn = _menu_button("Herramientas", tools)
+        self.find_btn = _button("Buscar", self.find)
+        top.setLayout(_row(self.open_btn, self.batch_btn, self.recent_btn, self.tools_btn,
                            self.file_label, 1, self.find_btn, margins=(10, 8, 10, 8)))
         outer.addWidget(top)
         QShortcut(QKeySequence("Ctrl+F"), root, self.find)
@@ -2714,6 +2723,7 @@ class App:
         column.addWidget(_label("Recientes", "title"))
         self.recent_list = QListWidget()
         self.recent_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)  # tarjetas altas
+        self.recent_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.recent_list.itemClicked.connect(lambda item: item.data(Qt.ItemDataRole.UserRole)
                                              and self.open_path(item.data(Qt.ItemDataRole.UserRole)))
         self.recent_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2824,6 +2834,11 @@ class App:
         if self.book is None:  # las tarjetas de recientes llevan colores del tema
             self.fill_recent()
         self.data_btn.setIcon(_fold_icon(self.dark, not self.data_panel.isHidden()))
+        # QToolButton#menu en Fusion es ~3 px más alto que QPushButton: igualarlo al alto de «Abrir» y «Convertir»
+        bar_h = max(self.open_btn.sizeHint().height(), self.batch_btn.sizeHint().height())
+        if bar_h > 0:
+            for btn in (self.recent_btn, self.tools_btn):
+                btn.setFixedHeight(bar_h)
 
     def show_panes(self):
         mode = self.tabs.currentIndex()  # 0 PDF, 1 EPUB, 2 los dos
@@ -2845,6 +2860,7 @@ class App:
         self.gen_btn.setEnabled(False)
         self.pdf_btn.setEnabled(False)
         self.done, self.busy, self.partial = done, busy, list(partial)
+        self.progress.setRange(0, 0)  # barra animada mientras arranca el proceso o en tareas sin porcentaje
         self.update_chrome()  # sin libro, la barra de abajo aparece para el progreso
         # Los datos van en un archivo: por la tubería del proceso nuevo, la ventana esperaba a que arrancara
         # para leerlos (unos 3 s con un libro con ilustraciones). Así start() vuelve enseguida.
@@ -2940,7 +2956,7 @@ class App:
         latest, self.latest = self.latest, None
         if latest:
             done, total = latest
-            self.progress.setMaximum(total)
+            self.progress.setRange(0, total)
             self.progress.setValue(done)
             self.status.setText(f"{self.busy} {done * 100 // total} %")
 
@@ -2962,8 +2978,11 @@ class App:
             self.gen_btn.setEnabled(True)
             self.pdf_btn.setEnabled(True)
         if event[0] == "done":
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
             done(event[1])
         elif event[0] == "cancel":
+            self.progress.setRange(0, 100)
             self.progress.setValue(0)
             if not self.book:  # análisis cancelado: el libro de antes ya se cerró, se vuelve al inicio
                 self.pdf = None
@@ -2972,6 +2991,7 @@ class App:
                 self.update_header()
             self.status.setText("Cancelado")
         else:
+            self.progress.setRange(0, 100)
             self.progress.setValue(0)
             self.status.setText("Error")
             messagebox.showerror("Error", f"{event[1]}\n\nEl detalle queda en {SETTINGS.parent / 'errores.log'}")
@@ -3526,17 +3546,23 @@ class App:
             qtk.after(1000, self.add_thumbs, job, start, titles, images)
             return
         end, until = min(start + THUMBS_PER_TICK, self.pdf_doc.page_count), time.perf_counter() + THUMBS_TICK_S
-        for n in range(start, end):
-            if n > start and time.perf_counter() > until:  # el resto, en la tanda siguiente
-                end = n
-                break
-            page = self.pdf_doc[n]
-            zoom = THUMB_HEIGHT / page.rect.height
-            image = qtk.qimage(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)))
-            color = MARK_COLORS["title"] if n + 1 in titles else MARK_COLORS["image"] if n + 1 in images else ""
-            self.strip.add(n, image, color)
-            self.thumbs[n] = (image.width(), image.height())
-        self.mark_current()
+        inner = self.strip.widget()
+        inner.setUpdatesEnabled(False)  # pintar la tanda de golpe evita parpadeos en las miniaturas ya dibujadas
+        try:
+            for n in range(start, end):
+                if n > start and time.perf_counter() > until:  # el resto, en la tanda siguiente
+                    end = n
+                    break
+                page = self.pdf_doc[n]
+                zoom = THUMB_HEIGHT / page.rect.height
+                image = qtk.qimage(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)))
+                color = MARK_COLORS["title"] if n + 1 in titles else MARK_COLORS["image"] if n + 1 in images else ""
+                self.strip.add(n, image, color)
+                self.thumbs[n] = (image.width(), image.height())
+        finally:
+            inner.setUpdatesEnabled(True)
+        if start <= self.pdf_page < end:  # marcar solo cuando llega su página, no en cada tanda siguiente
+            self.mark_current()
         if end < self.pdf_doc.page_count:
             qtk.after(10, self.add_thumbs, job, end, titles, images)
 
@@ -4341,7 +4367,9 @@ class App:
         return {level: LEVEL_PLURAL[level] for level in convert.LEVELS}
 
     def open_options(self, category=None, scope=None, on_close=None):
-        """«Opciones»: en category, o en la última vista."""
+        """«Opciones»: en category, o en la última vista. Sin libro abierto no se abre."""
+        if not self.book:
+            return None
         self.options_window = options.OptionsDialog(self, self.option_choices(), PROFILES,
                                                     category or self.settings.get("options_page"), scope, on_close)
         return self.options_window
@@ -4460,7 +4488,8 @@ class App:
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setToolTip(path)
             card = self.recent_card(path)
-            item.setSizeHint(card.sizeHint())
+            # Ancho 0: Qt encaja la tarjeta al viewport y el título largo se recorta antes del distintivo PDF/EPUB
+            item.setSizeHint(QSize(0, card.sizeHint().height()))
             self.recent_list.addItem(item)
             self.recent_list.setItemWidget(item, card)
         missing = [(p, str(_thumb_path(p))) for p in recent if p not in self.thumbs_tried and Path(p).is_file()
@@ -4493,22 +4522,29 @@ class App:
         else:
             thumb.setPixmap(pixmap.scaled(44, 62, Qt.AspectRatioMode.KeepAspectRatio,
                                           Qt.TransformationMode.SmoothTransformation))
-        name = QLabel(path.stem)
-        name.setStyleSheet("font-weight: 600;")
+        name = StatusLabel(path.stem)
+        name.setToolTip(str(path))
+        bold = QFont(name.font())
+        bold.setWeight(QFont.Weight.DemiBold)
+        name.setFont(bold)
+        # Maximum + minimumSizeHint ancho 0: pegado al distintivo en títulos cortos y recortado con «…» en los largos
+        name.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         kind = QLabel("EPUB" if path.suffix.lower() == ".epub" else "PDF")  # Maryoku 01: el PDF y su EPUB, no repetidos
         kind.setStyleSheet(f"color: {colors['muted']}; border: 1px solid {colors['line']}; border-radius: 3px; "
                            "padding: 0 4px; font-size: 8pt;")
+        kind.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         when = ""
         if found and _review_path(path).is_file():
             when = f" · revisado el {datetime.fromtimestamp(_review_path(path).stat().st_mtime):%d/%m/%Y}"
         state = QLabel(f'<span style="color:{color}">●</span> {html.escape(status)}{when}')
         state.setObjectName("muted")
+        state.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         texts = QVBoxLayout()
         texts.setSpacing(2)
-        texts.addLayout(_row(name, kind, 1))
+        texts.addLayout(_row(name, kind, 1, spacing=6))
         texts.addWidget(state)
         texts.addStretch(1)
-        layout = _row(thumb, texts, margins=(6, 6, 6, 6), spacing=10)
+        layout = _row(thumb, texts, margins=(6, 6, 10, 6), spacing=10)
         layout.setStretch(1, 1)
         card.setLayout(layout)
         return card
@@ -4820,7 +4856,7 @@ class App:
             return
         texts = [convert._plain(b) for b in self.book.blocks if b.kind == "p"]
         if self.run(convert.unknown_words, (texts, self.words, bool(self.settings.get("spell_caps"))),
-                    self.spelling_dialog):
+                    self.spelling_dialog, report=True, busy="Revisando la ortografía…"):
             self.status.setText("Revisando la ortografía…")
         else:  # el menú no se desactiva como los botones
             self.status.setText("Espera a que termine el trabajo en curso")
@@ -5524,6 +5560,22 @@ class App:
             messagebox.showinfo("Convertir carpeta", f"{len(results)} EPUB generados junto a sus PDF.")
         if folder:
             self.result_dialog(folder)
+
+    def watch_folder(self):
+        """Activa o desactiva la carpeta vigilada directamente, sin pasar por Opciones."""
+        if self.watch:
+            if messagebox.askyesno("Carpeta vigilada", f"Se está vigilando:\n{self.watch}\n\n¿Dejar de vigilarla?"):
+                self.set_watch("")
+                self.save_settings()
+            return
+        folder = self.ask_folder()
+        if folder:
+            self.set_watch(folder)
+            self.save_settings()
+            messagebox.showinfo("Carpeta vigilada", f"Mientras esta ventana esté abierta, cada PDF nuevo de\n{folder}\n"
+                                "se convierte solo, junto al PDF, con su revisión, los datos de su serie o las "
+                                "opciones para libros nuevos.\n\nLos PDF que ya están en la carpeta no: para esos, "
+                                "«Convertir carpeta…».")
 
     def set_watch(self, folder):
         # Lo que ya hay al activarla no se toca: solo lo que llegue después
@@ -6501,6 +6553,247 @@ class App:
             messagebox.showinfo("Registro", f"Aún no hay nada apuntado en:\n{log}")
             return
         os.startfile(log)
+
+    def maybe_check_updates(self):
+        """Comprobación discreta al abrir (solo en .exe, una vez al día y si está activa en Opciones)."""
+        if getattr(sys, "frozen", False) and updater.should_auto_check(self.settings):
+            self.check_updates(silent=True)
+
+    def check_updates(self, silent=False):
+        """Herramientas → «Buscar actualizaciones…»: consulta GitHub Releases en segundo plano."""
+        if getattr(self, "_checking_updates", False):
+            if not silent:
+                self.status.setText("Ya se están buscando actualizaciones…")
+            return
+        self._checking_updates = True
+        if not silent:
+            self.status.setText("Buscando actualizaciones…")
+        box = queue.Queue()
+
+        def fetch():
+            try:
+                box.put(("ok", updater.check_latest()))
+            except Exception as e:
+                box.put(("err", str(e)))
+
+        def poll():
+            try:
+                kind, value = box.get_nowait()
+            except queue.Empty:
+                return
+            timer.stop()
+            self._checking_updates = False
+            if not shiboken6.isValid(self.root):
+                return
+            if kind == "err":
+                if not silent:
+                    self.status.setText("No se pudieron buscar actualizaciones")
+                    messagebox.showerror("Actualizaciones", value)
+                return
+            self.settings["last_update_check"] = time.time()
+            self.save_settings()
+            if value is None:
+                if not silent:
+                    self.status.setText(f"{APP_NAME} v{updater.APP_VERSION} está al día")
+                    messagebox.showinfo(
+                        "Actualizaciones",
+                        f"Ya tienes la última versión de {APP_NAME} (v{updater.APP_VERSION}).",
+                    )
+                return
+            if silent and self.settings.get("skipped_update") == value.tag:
+                return
+            if not silent:
+                self.status.setText(f"Nueva versión disponible: {value.tag}")
+            self.show_update_dialog(value)
+
+        timer = QTimer(self.root)
+        timer.timeout.connect(poll)
+        timer.start(80)
+        self._update_check_timer = timer
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def show_update_dialog(self, release):
+        """Muestra las novedades de una versión nueva y permite actualizar con el instalador o abrir GitHub."""
+        existing = getattr(self, "update_window", None)
+        if existing and shiboken6.isValid(existing) and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return existing
+        win, column = self.dialog("Actualización disponible")
+        mode = updater.install_mode()
+        can_install = mode == "installed" and bool(release.setup_url)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 2)
+        header.setSpacing(12)
+        logo = None
+        if ICON.is_file():
+            logo = QLabel()
+            logo.setPixmap(QIcon(str(ICON)).pixmap(QSize(44, 44)))
+            logo.setFixedSize(44, 44)
+            logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header.addWidget(logo, 0, Qt.AlignmentFlag.AlignVCenter)
+        titles = QVBoxLayout()
+        titles.setContentsMargins(0, 0, 0, 0)
+        titles.setSpacing(2)
+        titles.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        headline = f"Hay una versión nueva: {APP_NAME} {release.tag}"
+        titles.addWidget(_label(headline, "title"))
+        extra = " · versión de prueba" if release.prerelease else ""
+        titles.addWidget(_label(f"v{updater.APP_VERSION}  →  {release.tag}{extra}", "muted"))
+        header.addLayout(titles, 1)
+        column.addLayout(header)
+
+        notes = QTextBrowser()
+        notes.setOpenExternalLinks(True)
+        notes.document().setDocumentMargin(10)
+        notes.setMarkdown(release.notes or "Consulta los cambios completos en GitHub.")
+        column.addWidget(notes, 1)
+
+        if not can_install:
+            if mode == "portable":
+                hint = ("Usas la versión portable: descarga el nuevo .zip desde GitHub y descomprímelo conservando tu "
+                        "carpeta «datos».")
+            elif mode == "source":
+                hint = "Ejecutando desde código fuente: puedes descargar la nueva versión en GitHub o actualizar con git."
+            else:
+                hint = "Esta versión no incluye un instalador automático: puedes descargarla desde GitHub."
+            note = _label(hint, "muted")
+            note.setWordWrap(True)
+            column.addWidget(note)
+
+        progress = QProgressBar()
+        progress.hide()
+        status = _label("", "muted")
+        status.hide()
+        column.addWidget(progress)
+        column.addWidget(status)
+
+        stop = threading.Event()
+        downloading = [False]
+        dl_timer = [None]
+
+        def skip():
+            self.settings["skipped_update"] = release.tag
+            self.save_settings()
+            win.close()
+
+        def close_or_cancel():
+            if downloading[0]:
+                stop.set()
+                status.setText("Cancelando descarga…")
+                return
+            win.close()
+
+        def open_release():
+            webbrowser.open(release.html_url)
+            win.close()
+
+        def start_download():
+            if self.text_editor and self.text_editor.dirty():
+                messagebox.showinfo(
+                    "Actualizaciones",
+                    "Guarda o cierra el editor de texto antes de instalar la actualización.",
+                    parent=win,
+                )
+                return
+            if self.translations_running():
+                messagebox.showinfo(
+                    "Actualizaciones",
+                    "Espera a que termine o pausa la traducción en curso antes de actualizar.",
+                    parent=win,
+                )
+                return
+            downloading[0] = True
+            stop.clear()
+            action_btn.setEnabled(False)
+            skip_btn.setEnabled(False)
+            later_btn.setText("Cancelar")
+            progress.setRange(0, 0)
+            progress.show()
+            status.setText("Descargando instalador…")
+            status.show()
+            box = queue.Queue()
+
+            def run():
+                try:
+                    path = updater.download_setup(
+                        release,
+                        on_progress=lambda done, total: box.put(("prog", (done, total))),
+                        cancel=stop.is_set,
+                    )
+                    box.put(("done", path))
+                except InterruptedError:
+                    box.put(("cancel", None))
+                except Exception as e:
+                    box.put(("err", str(e)))
+
+            def poll_dl():
+                while True:
+                    try:
+                        kind, payload = box.get_nowait()
+                    except queue.Empty:
+                        return
+                    if not shiboken6.isValid(win):
+                        if dl_timer[0]:
+                            dl_timer[0].stop()
+                        return
+                    if kind == "prog":
+                        done, total = payload
+                        if total > 0:
+                            progress.setRange(0, 100)
+                            progress.setValue(min(100, int(done * 100 / total)))
+                            status.setText(f"Descargando… {done / 1048576:.1f} / {total / 1048576:.1f} MB")
+                        else:
+                            status.setText(f"Descargando… {done / 1048576:.1f} MB")
+                        continue
+                    if dl_timer[0]:
+                        dl_timer[0].stop()
+                    downloading[0] = False
+                    action_btn.setEnabled(True)
+                    skip_btn.setEnabled(True)
+                    later_btn.setText("Más tarde")
+                    if kind == "cancel":
+                        progress.hide()
+                        status.setText("Descarga cancelada.")
+                        return
+                    if kind == "err":
+                        progress.hide()
+                        status.setText("")
+                        messagebox.showerror("Actualizaciones", payload, parent=win)
+                        return
+                    status.setText("Iniciando instalador…")
+                    win.close()
+                    if not self.close():
+                        return
+                    try:
+                        updater.launch_installer(payload)
+                    except Exception as e:
+                        messagebox.showerror("Actualizaciones", str(e))
+                    return
+
+            timer = QTimer(win)
+            timer.timeout.connect(poll_dl)
+            timer.start(80)
+            dl_timer[0] = timer
+            threading.Thread(target=run, daemon=True).start()
+
+        win.on_reject = close_or_cancel
+        skip_btn = _button("Omitir esta versión", skip)
+        later_btn = _button("Más tarde", close_or_cancel)
+        if can_install:
+            web_btn = _button("Ver en GitHub", lambda: webbrowser.open(release.html_url))
+            action_btn = _button("Actualizar ahora", start_download, "primary")
+            buttons = _row(skip_btn, web_btn, 1, later_btn, action_btn)
+        else:
+            action_btn = _button("Abrir página de descarga", open_release, "primary")
+            buttons = _row(skip_btn, 1, later_btn, action_btn)
+        column.addLayout(buttons)
+        win.resize(520, 420)
+        win.parts = {"release": release, "logo": logo, "action": action_btn, "skip": skip_btn, "later": later_btn,
+                     "progress": progress, "status": status, "notes": notes, "can_install": can_install}
+        win.show()
+        self.update_window = win
+        return win
 
     def section_of(self, item):
         """Tramo de bloques de una fila: un capítulo hasta el siguiente capítulo (con sus subtítulos);
@@ -13218,8 +13511,9 @@ def _log_start():
     qtk.log_actions()  # clics, atajos y ventanas: lo que pasó antes de un fallo
     chromium = "sí" if webview.available() else f"no ({webview.ERROR or 'apagado'})"
     screen = qtk.app().primaryScreen()
-    LOG.info("=== %s · %s · Python %s · Qt %s · PyMuPDF %s · %s · Chromium: %s · pantalla %s a %d %% · %s",
-             APP_NAME, "exe" if getattr(sys, "frozen", False) else "fuente", platform.python_version(),
+    LOG.info("=== %s v%s · %s · Python %s · Qt %s · PyMuPDF %s · %s · Chromium: %s · pantalla %s a %d %% · %s",
+             APP_NAME, updater.APP_VERSION, "exe" if getattr(sys, "frozen", False) else "fuente",
+             platform.python_version(),
              PySide6.__version__, pymupdf.VersionBind, platform.platform(), chromium,
              f"{screen.size().width()}×{screen.size().height()}" if screen else "?",
              round(100 * screen.devicePixelRatio()) if screen else 100,
@@ -13270,4 +13564,5 @@ if __name__ == "__main__":
         last = next((p for p in window.settings.get("recent", []) if isinstance(p, str) and Path(p).is_file()), None)
         if last:
             qtk.after(200, window.open_path, last)
+    qtk.after(4000, window.maybe_check_updates)  # una vez al día en el .exe; nunca frena el arranque
     sys.exit(qtk.app().exec())

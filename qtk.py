@@ -794,13 +794,13 @@ class Strip(QScrollArea):
         self.row.setSpacing(6)
         self.row.addStretch(1)
         self.setWidget(inner)
-        self.labels, self.colors, self.current, self.blanks = {}, {}, None, []
+        self.labels, self.colors, self.current, self.shown, self.blanks = {}, {}, None, None, []
 
     def clear(self):
         for label in list(self.labels.values()) + self.blanks:
             label.hide()  # deleteLater espera al bucle de eventos: mientras, se veían las del libro anterior
             label.deleteLater()
-        self.labels, self.colors, self.current, self.blanks = {}, {}, None, []
+        self.labels, self.colors, self.current, self.shown, self.blanks = {}, {}, None, None, []
 
     def placeholders(self, count, width, color):
         """Rectángulos tenues mientras no hay miniaturas: la tira no queda como un hueco."""
@@ -815,6 +815,7 @@ class Strip(QScrollArea):
 
     def add(self, n, image, color):
         for label in self.blanks:
+            label.hide()  # ocultar ya: deleteLater los dejaba un fotograma junto a las miniaturas nuevas
             label.deleteLater()
         self.blanks = []
         label = QLabel()
@@ -834,10 +835,15 @@ class Strip(QScrollArea):
     def mark(self, n):
         """Destaca la miniatura de la página que muestra la vista previa."""
         old, self.current = self.current, n
-        for page in (old, n):
-            if page in self.labels:
-                self._border(page)
+        if n == old and self.shown == n:  # ya marcada y visible: no volver a desplazar la tira en cada tanda
+            return
+        if old != n and old in self.labels:
+            self._border(old)
         if n in self.labels:
+            self._border(n)
+            self.shown = n
+            if self.widget() and self.widget().layout():
+                self.widget().layout().activate()  # geometría al día antes de desplazar (sin salto a x=0)
             self.ensureWidgetVisible(self.labels[n])
 
     def outline(self, n):
