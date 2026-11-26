@@ -143,6 +143,7 @@ class Freezes:
         self.count, self.worst = 0, 0.0  # para el resumen al cerrar
         self.dumps = tempfile.TemporaryFile()  # las muestras, una tras otra; beat() las lee y lo vacía
         self.fd = self.dumps.fileno()
+        self.lock = threading.Lock()  # volcar y vaciar a la vez perdía o cortaba muestras (misma posición)
         threading.Thread(target=self._watch, daemon=True, name="congelada").start()
 
     def _watch(self):
@@ -155,10 +156,11 @@ class Freezes:
         while True:
             time.sleep(0.25)
             if not _waiting and time.monotonic() - self.last > self.limit / 2:
-                was = gc.isenabled()  # sin candado: esperarlo soltaba el GIL y al volver saltaba el recolector
-                gc.disable()
+                was = gc.isenabled()
+                gc.disable()  # antes del candado: esperarlo suelta el GIL y al volver podía saltar el recolector aquí
                 try:
-                    faulthandler.dump_traceback(self.fd, all_threads=True)
+                    with self.lock:
+                        faulthandler.dump_traceback(self.fd, all_threads=True)
                 finally:
                     if was:
                         gc.enable()
@@ -180,17 +182,16 @@ class Freezes:
         return _thread_stacks(self._take(read=True, empty=False).decode("utf-8", "replace"), self.thread.ident)
 
     def _take(self, read, empty):
-        # shortcut: sin candado, una muestra que el hilo escriba justo mientras se vacía puede perderse o salir
-        # cortada (solo al salir de una congelación); la lectura la descarta, no rompe nada
-        size = os.lseek(self.fd, 0, os.SEEK_END)
-        raw = b""
-        if size and read:
-            os.lseek(self.fd, 0, os.SEEK_SET)
-            raw = os.read(self.fd, size)
-        if size and empty:
-            os.lseek(self.fd, 0, os.SEEK_SET)
-            os.ftruncate(self.fd, 0)
-        return raw
+        with self.lock:  # el hilo espera a que acabe de leer y vaciar: ninguna muestra se pierde ni sale cortada
+            size = os.lseek(self.fd, 0, os.SEEK_END)
+            raw = b""
+            if size and read:
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                raw = os.read(self.fd, size)
+            if size and empty:
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                os.ftruncate(self.fd, 0)
+            return raw
 
 
 def peak_memory_mb():
