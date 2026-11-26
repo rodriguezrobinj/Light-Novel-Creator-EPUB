@@ -1835,7 +1835,7 @@ def removed_pieces(doc, lines, text=None):
     out = []
     for line in lines:
         m = convert.TOKEN.fullmatch(line.strip()) or convert.PICTURE.fullmatch(line.strip())
-        image = object_image(doc, m[2]) if m else None
+        image = None  # experimento: sin imágenes
         if image is not None:
             out.append((image, text(line)))
         elif out and isinstance(out[-1], str):
