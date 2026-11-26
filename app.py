@@ -8501,8 +8501,6 @@ class TextEditor:
         desk_row.addWidget(sheet, 20)
         # Vista «Código HTML» (Vista → Código): el mismo capítulo como su HTML, en lugar de la hoja
         self.code = editor.CodeEdit(theme.code_colors(app.dark))  # con números de línea y colores de código
-        # lo quitado entero en el código: las ilustraciones con su imagen, la de la hoja
-        self.code.look.images = lambda n: editor.object_image(self.sheet.document(), n)
         # su línea es un párrafo: la hoja (oculta) va a él, y con ella el original, el EPUB y la hoja web
         self.code.cursorPositionChanged.connect(lambda: self.code.isVisible()
                                                 and self.later("code", 150, self.code_moved))
@@ -11146,8 +11144,6 @@ class TextEditor:
         """(n.º de los párrafos cambiados, HTML de antes de cada párrafo) de la hoja web, en su orden. Lo de antes, solo
         en el primero de los que vienen del mismo (Intro): la hoja web compara con él los que lo siguen; Chromium saca
         su texto como el de la hoja (notas, saltos)."""
-        import websheet
-        removed = self.change_colors()[1]
         changed = {b.blockNumber() for b in self.sheet.changed_blocks()}
         marked, before, n, block = [], [], 0, self.sheet.document().firstBlock()
         deleted, gone, formats = self.sheet.look.deleted if self.sheet.look.changes else {}, [], []
@@ -11158,18 +11154,12 @@ class TextEditor:
             if above or below:  # quitados enteros: encima o debajo de este, como en la hoja
                 gone.append([n, " ¶ ".join(map(editor.removed_text, above)),
                              n + len(lines) - 1, " ¶ ".join(map(editor.removed_text, below))])
-                # con ilustraciones o separadores: su imagen, en el CSS (attr() solo da texto)
-                pictures = [websheet.gone_css(editor.removed_pieces(self.sheet.document(), side), removed, self.side_dark)
-                            for side in (above, below)]
-                if any(pictures):
-                    gone[-1] += pictures
             for line in lines:
                 # uno unido (Retroceso o Supr) se compara con los dos de antes, como en la hoja: su texto no es nuevo
                 before.append("".join(editor.to_code(x) for x in [original, *joined]) if head else None)
-                if block.blockNumber() in changed:  # una ilustración puesta también: la hoja web la recuadra
-                    marked.append(n)
                 if block.blockNumber() in changed and not (convert.TOKEN.fullmatch(line.strip())
                                                            or convert.PICTURE.fullmatch(line.strip())):
+                    marked.append(n)
                     # mismo texto con otro formato (una palabra en cursiva): sus letras, como en la hoja; solo si
                     # la línea no lleva saltos ni etiquetas vacías, que en la web no son letras
                     if head and len(lines) == 1 and editor.plain_line(line) == block.text() == editor.plain_line(
@@ -11206,7 +11196,7 @@ class TextEditor:
             block = block.next()
         data = {"spell": sorted(w.lower() for w in self.unknown - self.ignored_words), "issues": issues,
                 "changed": marked, "show": self.show_changes_action.isChecked(), "before": before, "gone": gone, "formats": formats,
-                "del_css": websheet.DEL_CSS % ((theme.css_color(colors["removed"]),) * 2 + (colors["changed"],)),
+                "del_css": websheet.DEL_CSS % ((theme.css_color(colors["removed"]),) * 2),
                 "colors": {"spell": self.sheet.tags.get("broken", {}).get("foreground", colors["Grave"]),
                            "change": theme.css_color(colors["added"])},
                 "levels": [colors.get(level, colors["Grave"]) for level in levels]}
@@ -11556,9 +11546,6 @@ class TextEditor:
                         block.setUserData(data)
                     data.whole = whole
                     self.code.look.rehighlightBlock(block)
-                    after = editor.text_beside(block, 1)
-                    if after.isValid():  # lo quitado detrás se enseña encima de la línea siguiente con texto
-                        self.code.look.rehighlightBlock(after)
             block = block.next()
 
     def refresh_code(self):
@@ -12651,8 +12638,6 @@ class TextEditor:
             self.draw_web()
         if self.web is not None:
             self.web.set_dark(on)
-            if self.web.loaded:
-                self.web_marks()  # lo quitado con ilustraciones es una imagen: con la letra del modo nuevo
 
     def show_web_page(self, view):
         """«Página n de m» de la pestaña EPUB u hoja web: lo que cabe en la vista es una página."""
