@@ -2018,7 +2018,7 @@ def make_room(look, block, text, at, above, taken, data):
     big = QFont(font)
     # la letra grande también baja: cuanto menos crece, menos se separa la línea de debajo. La etiqueta entra en
     # parte en el espacio entre párrafos (SPACE); una ilustración quitada, con su alto
-    room = max(row_height(data.pieces[0], font) + 3 - SPACE, GAP)
+    room = max(row_height([], font) + 3 - SPACE, GAP)  # experimento: hueco de una línea
     tall = _no_descent(round(metrics.ascent() + room)) if space is not None else None  # una letra: sin su dibujo
     if tall is not None:  # sube la línea sin bajarla: con una ilustración quitada, la 2.ª línea se separaba
         big = tall
