@@ -58,18 +58,25 @@ Reúne en un solo flujo todo el proceso editorial de una novela ligera: análisi
 
 ## Descargar y usar
 
-> Compatible con **Windows 10 y Windows 11 (64 bits)**. No requiere instalación ni Python.
+> Compatible con **Windows 10 y Windows 11 (64 bits)**. No requiere Python.
 
-1. Ve a la sección de [**Releases**](https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases) y descarga la versión portable (`LightNovelCreator-portable.zip`).
-2. Descomprime la carpeta completa en cualquier ubicación (incluida una memoria USB), manteniendo `PDF a EPUB.exe` junto a su carpeta `_internal`.
-3. Ejecuta **`PDF a EPUB.exe`** y arrastra un archivo **PDF** o **EPUB** a la ventana.
+Ve a la sección de [**Releases**](https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases) y elige el formato que prefieras:
+
+### Instalador (recomendado)
+1. Descarga **`LightNovelCreator_<versión>_x64-setup.exe`** y ejecútalo.
+2. Por defecto instala para tu usuario (sin pedir permisos de administrador), crea el acceso directo en el Menú Inicio y registra la app en **«Abrir con…»** para archivos PDF y EPUB.
+3. Tus preferencias, memoria de series y cachés se guardan en `%APPDATA%\PDF a EPUB` y se conservan al actualizar a nuevas versiones.
+
+### Versión portable (sin instalación)
+1. Descarga **`LightNovelCreator-portable.zip`** y descomprime la carpeta completa en cualquier ubicación (incluida una memoria USB), manteniendo `PDF a EPUB.exe` junto a su carpeta `_internal`.
+2. Ejecuta **`PDF a EPUB.exe`** y arrastra un archivo **PDF** o **EPUB** a la ventana.
 
 > [!NOTE]
 > **Aviso de Windows SmartScreen**: al no estar firmado con un certificado comercial, Windows puede mostrar *«Windows protegió su PC»*. Pulsa **Más información** y luego **Ejecutar de todas formas**. El primer arranque puede tardar unos segundos.
 
-### Modo portable y archivos generados
-- **Carpeta `datos` (junto al `.exe`)**: almacena las preferencias (`ajustes.json`), la memoria de series, las cachés y el registro de la aplicación (`registro.log`). Puedes copiar toda la carpeta a otro equipo o USB conservando tu configuración.
-- Si eliminas la carpeta `datos`, la aplicación guarda sus ajustes en `%APPDATA%\PDF a EPUB`.
+### Datos y archivos generados
+- **Versión instalada**: guarda las preferencias (`ajustes.json`), la memoria de series, las cachés y el registro (`registro.log`) en `%APPDATA%\PDF a EPUB`.
+- **Versión portable (carpeta `datos` junto al `.exe`)**: guarda toda la configuración dentro de `datos`, así puedes llevar la carpeta completa a otro equipo o USB. Si eliminas `datos`, pasa a usar `%APPDATA%\PDF a EPUB`.
 - Junto a cada libro abierto, el programa guarda su archivo de revisión (`<archivo>.lnepub.json`) y el EPUB o PDF generado.
 
 ---
@@ -164,23 +171,28 @@ La suite incluye más de 500 pruebas automatizadas (conversión con PDF sintéti
 .venv\Scripts\python.exe test_convert.py --paralelo 1
 ```
 
-### Compilar el ejecutable y paquete portable
+### Compilar el ejecutable, instalador y paquete portable
 
 ```powershell
 .venv\Scripts\python.exe -m PyInstaller --noconfirm "PDF a EPUB.spec"
 ```
 
 - El ejecutable se genera en modo carpeta dentro de `dist\Light Novel Creator\` (`PDF a EPUB.exe` junto a `_internal\`, optimizado para el arranque rápido con Chromium).
+- **Para compilar el instalador (`setup.exe`)** con [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+  ```powershell
+  & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=0.5.0 /DAppNumericVersion=0.5.0.0 installer\setup.iss
+  ```
+  El instalador queda en `dist\installer\LightNovelCreator_0.5.0_x64-setup.exe`.
 - **Para armar el `.zip` portable**: copia el contenido de `dist\Light Novel Creator\` junto con `portable\LEEME.txt` y `LICENSE`, crea dentro una carpeta vacía llamada `datos` y comprime la carpeta resultante.
 
 ### Integración continua y versiones
 
 - **Tests** ([`tests.yml`](.github/workflows/tests.yml)): cada PR y cada push a `master` ejecutan la suite en Windows. `master` solo acepta PR con el check `tests` en verde.
-- **Release** ([`release.yml`](.github/workflows/release.yml)): al empujar un tag `v*`, GitHub construye el `.exe`, comprueba Chromium, arma `LightNovelCreator-portable.zip` y publica la pre-release con las notas de los PR:
+- **Release** ([`release.yml`](.github/workflows/release.yml)): al empujar un tag `v*`, GitHub construye el `.exe`, comprueba Chromium, compila el instalador `LightNovelCreator_<versión>_x64-setup.exe` con Inno Setup, arma `LightNovelCreator-portable.zip` y publica ambos en la pre-release con las notas de los PR:
   ```powershell
   git tag v0.5.0; git push origin v0.5.0
   ```
-  Ejecutado a mano desde la pestaña *Actions*, deja el zip como artefacto sin publicar nada.
+  Ejecutado a mano desde la pestaña *Actions*, deja el instalador y el zip como artefactos sin publicar nada.
 - **Dependabot** ([`dependabot.yml`](.github/dependabot.yml)): cada mes abre PR con versiones nuevas de `requirements.txt` y de las acciones; las tres de PySide6 van juntas. Se fusionan a mano tras probar el `.exe`.
 - **Seguridad**: CodeQL analiza el código en cada PR; los fallos se avisan en privado según [`SECURITY.md`](SECURITY.md).
 
