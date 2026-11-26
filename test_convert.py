@@ -10381,8 +10381,6 @@ def test_window_new_books_use_saved_defaults():
                                     "options_page": ["mal"]}), encoding="utf-8")
     root, window = visible_window(settings)
     migrated = dict(window.settings["defaults"])
-    page = window.open_options().category  # última página mal escrita a mano: abre en la primera
-    window.options_window.parts["cancel"]()
     folder = TMP / f"libros-{time_ns()}"
     folder.mkdir()
     books = {}
@@ -10395,6 +10393,8 @@ def test_window_new_books_use_saved_defaults():
                                                   convert.Block("p", 1, "Texto.")], [0])
     window.pdf = books["con-revision"]
     window.show_book(book())
+    page = window.open_options().category  # última página mal escrita a mano: abre en la primera
+    window.options_window.parts["cancel"]()
     window.gray_var.set(False)  # este libro, sin gris
     window.save_review()
     window.pdf = books["nuevo"]
@@ -10446,22 +10446,46 @@ def test_window_options_this_book_live_and_cancel():
 
 
 def test_window_options_new_books_without_book():
-    """Sin libro abierto, «Este libro» está desactivado y lo cambiado va a «Libros nuevos» al Aceptar; Cancelar no
-    guarda nada."""
+    """Sin libro abierto, Opciones queda oculta en Herramientas y no se abre; «Vigilar una carpeta…» elige la
+    carpeta directamente sin abrir Opciones. Con libro abierto, Opciones reaparece y «Libros nuevos» guarda en
+    defaults solo al Aceptar."""
     import json
     import app
     root, window = visible_window()
-    dialog = window.open_options("Ilustraciones")
-    disabled, scope = not dialog.parts["this_book"].isEnabled(), dialog.scope
+    hidden_before = not window.options_action.isVisible()
+    blocked = window.open_options()
+    folder = TMP / f"vigilar-inicio-{time_ns()}"
+    folder.mkdir()
+    window.ask_folder = lambda: str(folder)
+    shown_info, orig_info, orig_yesno = [], app.messagebox.showinfo, app.messagebox.askyesno
+    app.messagebox.showinfo = lambda *a, **kw: shown_info.append(a)
+    app.messagebox.askyesno = lambda *a, **kw: True
+    try:
+        window.watch_folder()
+        watching_after = window.watch
+        saved_watch = json.loads(app.SETTINGS.read_text(encoding="utf-8")).get("watch")
+        no_options = getattr(window, "options_window", None) is None
+        window.watch_folder()
+        stopped_watch = window.watch
+    finally:
+        app.messagebox.showinfo, app.messagebox.askyesno = orig_info, orig_yesno
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
+    visible_after = window.options_action.isVisible()
+    dialog = window.open_options("Ilustraciones", "new")
+    scope = dialog.scope
     dialog.parts["put"]("gray", True)
     dialog.parts["cancel"]()
     after_cancel = window.settings["defaults"].get("gray")
-    dialog = window.open_options("Ilustraciones")
+    dialog = window.open_options("Ilustraciones", "new")
     dialog.parts["put"]("gray", True)
     dialog.parts["accept"]()
     stored = json.loads(app.SETTINGS.read_text(encoding="utf-8"))["defaults"]["gray"]
     window.close()
-    assert disabled and scope == "new" and after_cancel in (None, False) and stored is True, (disabled, scope, stored)
+    assert hidden_before and blocked is None and no_options, (hidden_before, blocked, no_options)
+    assert watching_after == str(folder) and saved_watch == str(folder) and stopped_watch == "", (
+        watching_after, saved_watch, stopped_watch)
+    assert shown_info and visible_after, (shown_info, visible_after)
+    assert scope == "new" and after_cancel in (None, False) and stored is True, (scope, after_cancel, stored)
 
 
 def test_window_options_search_profile_and_missing_font():
@@ -10528,6 +10552,7 @@ def test_window_options_app_pages():
     import app
     from PySide6.QtWidgets import QPushButton
     root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
     dialog = window.open_options("Apariencia")
     dialog.parts["put"]("theme", "Oscuro")
     live = window.dark
@@ -10784,7 +10809,16 @@ def test_window_options_new_pages_and_effects():
     look = (theme.colors(False)["acc"], qtk.app().font().pointSize())
     name, words_now = window.out_name(), list(window.words)
     dialog = window.open_options("Apariencia")
-    dialog.parts["reset"].click()
+    asked, orig_ask = [], qtk.messagebox.askyesno
+    try:
+        # Al cancelar la confirmación de «Restablecer» no se pierden los cambios
+        qtk.messagebox.askyesno = lambda *a, **kw: (asked.append(a), False)[1]
+        dialog.parts["reset"].click()
+        kept = (dialog.get("accent"), dialog.get("ui_font"))
+        qtk.messagebox.askyesno = lambda *a, **kw: (asked.append(a), True)[1]
+        dialog.parts["reset"].click()
+    finally:
+        qtk.messagebox.askyesno = orig_ask
     reset = (dialog.get("accent"), dialog.get("ui_font"))
     dialog.parts["accept"]()
     back = (theme.colors(False)["acc"], qtk.app().font().pointSize())
@@ -10792,6 +10826,7 @@ def test_window_options_new_pages_and_effects():
     import convert as cv
     caps = [w for w, _, _ in cv.unknown_words(["Ella vio a Zzyzx en la plaza."], caps=True)]
     plain = [w for w, _, _ in cv.unknown_words(["Ella vio a Zzyzx en la plaza."])]
+    assert len(asked) == 2 and kept == ("Verde", "10 pt"), (asked, kept)
     assert "number" in before and "number" not in after and levels["opening"] == "Grave", (before, after, levels)
     assert name == "ReZero - Volumen 3", name  # sin «:», que Windows no deja en un nombre
     assert words_now == ["rimuru"], words_now
@@ -18938,6 +18973,231 @@ def test_window_improve_small_illustrations():
     assert shown == [(1, False)] and max(app._image_size(improved)) == 1400, (shown, app._image_size(improved))
     assert "1 ilustración mejorada" in note, note
     assert stored and Path(stored[-1][2]).read_bytes() == improved and undone == small, stored
+
+
+def test_updater_versions_and_releases():
+    """Comparación de versiones, selección de release, URLs confiables, SHA256SUMS y frecuencia diaria."""
+    import updater
+    assert updater.is_newer("v0.5.0", "0.4.0")
+    assert updater.is_newer("0.5.0", "0.5.0-beta.1")
+    assert not updater.is_newer("0.4.0", "0.4.0")
+    assert not updater.is_newer("0.3.9", "0.4.0")
+    assert updater.parse_version("no-es-version") is None
+
+    assert updater.trusted_url("https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases")
+    assert updater.trusted_url("https://objects.githubusercontent.com/archivo.exe")
+    assert not updater.trusted_url("http://github.com/inseguro.exe")
+    assert not updater.trusted_url("https://evil.example/LightNovelCreator_0.5.0_x64-setup.exe")
+
+    items = [
+        {"tag_name": "v0.6.0", "draft": True, "assets": []},
+        {"tag_name": "v0.4.0", "draft": False, "assets": []},
+        {"tag_name": "v0.5.0", "draft": False, "prerelease": True, "name": "v0.5.0", "body": "- Mejora",
+         "html_url": "https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases/tag/v0.5.0",
+         "assets": [
+             {"name": "LightNovelCreator_0.5.0_x64-setup.exe",
+              "browser_download_url": "https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases/download/v0.5.0/LightNovelCreator_0.5.0_x64-setup.exe"},
+             {"name": "LightNovelCreator-portable.zip",
+              "browser_download_url": "https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases/download/v0.5.0/LightNovelCreator-portable.zip"},
+             {"name": "SHA256SUMS.txt",
+              "browser_download_url": "https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases/download/v0.5.0/SHA256SUMS.txt"},
+         ]},
+    ]
+    rel = updater.pick_release(items, current="0.4.0")
+    assert rel is not None and rel.version == "0.5.0" and rel.setup_name.endswith("-setup.exe"), rel
+    assert rel.checksums_url.endswith("SHA256SUMS.txt") and rel.portable_url.endswith("-portable.zip")
+    assert updater.pick_release(items, current="0.5.0") is None
+
+    sums = updater.parse_checksums("a" * 64 + "  LightNovelCreator_0.5.0_x64-setup.exe\n" + "b" * 64 + " *otro.zip\n")
+    assert sums["lightnovelcreator_0.5.0_x64-setup.exe"] == "a" * 64 and sums["otro.zip"] == "b" * 64
+
+    # Build local («-dev», la del repo): nunca se autoactualiza; las de release.yml sí, una vez al día
+    assert updater.APP_VERSION.endswith("-dev")
+    assert not updater.should_auto_check({"check_updates": True, "last_update_check": 0}, now=100_000)
+    orig_version = updater.APP_VERSION
+    try:
+        updater.APP_VERSION = "0.5.0"
+        assert updater.should_auto_check({"check_updates": True, "last_update_check": 0}, now=100_000)
+        assert not updater.should_auto_check({"check_updates": True, "last_update_check": 99_000}, now=100_000)
+        assert not updater.should_auto_check({"check_updates": False, "last_update_check": 0}, now=100_000)
+    finally:
+        updater.APP_VERSION = orig_version
+
+    port_dir = TMP / f"upd-port-{time_ns()}"
+    (port_dir / "datos").mkdir(parents=True)
+    inst_dir = TMP / f"upd-inst-{time_ns()}"
+    inst_dir.mkdir(parents=True)
+    assert updater.install_mode(False, port_dir / "PDF a EPUB.exe") == "source"
+    assert updater.install_mode(True, port_dir / "PDF a EPUB.exe") == "portable"
+    assert updater.install_mode(True, inst_dir / "PDF a EPUB.exe") == "installed"
+
+
+def test_updater_download_verifies_sha256():
+    """download_setup valida SHA-256 contra SHA256SUMS.txt y rechaza un binario manipulado."""
+    import hashlib
+    import io
+    import updater
+
+    payload = b"MZ-instalador-de-prueba" * 64
+    good_sha = hashlib.sha256(payload).hexdigest()
+    rel = updater.Release(
+        "0.5.0", "v0.5.0", "v0.5.0", "Notas",
+        "https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases/tag/v0.5.0",
+        "https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases/download/v0.5.0/LightNovelCreator_0.5.0_x64-setup.exe",
+        "LightNovelCreator_0.5.0_x64-setup.exe", "",
+        "https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases/download/v0.5.0/SHA256SUMS.txt",
+        False,
+    )
+
+    class _FakeResp(io.BytesIO):
+        def __init__(self, data, url):
+            super().__init__(data)
+            self._url = url
+            self.headers = {"Content-Length": str(len(data))}
+
+        def geturl(self):
+            return self._url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.close()
+
+    def fake_open(req, timeout=0):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if url.endswith("SHA256SUMS.txt"):
+            return _FakeResp(f"{expected[0]}  {rel.setup_name}\n".encode("utf-8"), url)
+        return _FakeResp(payload, url)
+
+    dest = TMP / f"upd-dl-{time_ns()}"
+    orig_open = updater.urllib.request.urlopen
+    seen = []
+    try:
+        updater.urllib.request.urlopen = fake_open
+        expected = [good_sha]
+        out = updater.download_setup(rel, dest_dir=dest, on_progress=lambda d, t: seen.append((d, t)))
+        assert out.is_file() and out.read_bytes() == payload and seen and seen[-1] == (len(payload), len(payload))
+
+        expected = ["0" * 64]
+        try:
+            updater.download_setup(rel, dest_dir=dest / "bad")
+            assert False, "debió rechazar un SHA-256 distinto"
+        except RuntimeError as e:
+            assert "SHA-256" in str(e), e
+        assert not (dest / "bad" / rel.setup_name).exists()
+
+        # Sin suma para el instalador (SHA256SUMS.txt ausente o sin su nombre): no se descarga ni se ejecuta
+        try:
+            updater.download_setup(rel._replace(checksums_url=""), dest_dir=dest / "nosum")
+            assert False, "debió rechazar un instalador sin SHA-256"
+        except RuntimeError as e:
+            assert "SHA-256" in str(e), e
+        assert not (dest / "nosum").exists()
+    finally:
+        updater.urllib.request.urlopen = orig_open
+
+
+def test_window_update_dialog_and_menu():
+    """Herramientas tiene «Buscar actualizaciones…», el diálogo respeta modo instalado/portable y guarda «Omitir»."""
+    import app
+    import updater
+    from PySide6.QtWidgets import QToolButton
+
+    settings = TMP / f"ajustes-upd-{time_ns()}.json"
+    root, window = visible_window(settings)
+    rel = updater.Release(
+        "9.9.9", "v9.9.9", "v9.9.9", "### Novedades\n- Mejora",
+        "https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases/tag/v9.9.9",
+        "https://github.com/rodriguezrobinj/Light-Novel-Creator-EPUB/releases/download/v9.9.9/LightNovelCreator_9.9.9_x64-setup.exe",
+        "LightNovelCreator_9.9.9_x64-setup.exe", "", "", False,
+    )
+    orig_mode = updater.install_mode
+    try:
+        tools = next(b.menu() for b in window.root.findChildren(QToolButton) if b.text() == "Herramientas")
+        assert any(a.text() == "Buscar actualizaciones…" for a in tools.actions())
+
+        updater.install_mode = lambda: "installed"
+        dlg = window.show_update_dialog(rel)
+        assert dlg.parts["logo"] is not None and not dlg.parts["logo"].pixmap().isNull()
+        assert dlg.parts["can_install"] and dlg.parts["action"].text() == "Actualizar ahora"
+        dlg.parts["skip"].click()
+        assert window.settings.get("skipped_update") == "v9.9.9"
+
+        updater.install_mode = lambda: "portable"
+        dlg2 = window.show_update_dialog(rel)
+        assert not dlg2.parts["can_install"] and dlg2.parts["action"].text() == "Abrir página de descarga"
+        dlg2.close()
+    finally:
+        updater.install_mode = orig_mode
+        window.close()
+
+
+def test_window_recent_long_title_keeps_format_badge_inside():
+    """En Recientes, un título muy largo se recorta con «…» para que PDF/EPUB nunca cruce el borde ni saque scroll
+    horizontal."""
+    import app
+    from PySide6.QtCore import Qt
+
+    root, window = visible_window()
+    long_epub = TMP / ("陰の実力者になりたくて 07 (逢沢 大介, 東西) " + "x" * 90 + ".epub")
+    short_pdf = TMP / "Corto.pdf"
+    try:
+        window.settings["recent"] = [str(short_pdf), str(long_epub)]
+        window.fill_recent()
+        app.qtk.app().processEvents()
+        assert window.recent_list.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        viewport_w = window.recent_list.viewport().width()
+        for idx, expected in ((0, "PDF"), (1, "EPUB")):
+            card = window.recent_list.itemWidget(window.recent_list.item(idx))
+            badge = next(lbl for lbl in card.findChildren(app.QLabel) if lbl.text() == expected)
+            assert card.width() <= viewport_w, (idx, card.width(), viewport_w)
+            assert badge.geometry().right() < card.width(), (idx, badge.geometry(), card.width())
+        assert long_epub.stem in card_text(window, 1)
+    finally:
+        window.close()
+
+
+def test_window_top_bar_buttons_same_height_and_strip_no_flicker():
+    """Los botones de la barra superior (Abrir, Convertir, Recientes, Herramientas) tienen exactamente el mismo alto;
+    la tira de miniaturas solo marca/desplaza una vez su página actual y no parpadea al añadir tandas siguientes."""
+    import app
+
+    root, window = visible_window()
+    try:
+        app.qtk.app().processEvents()
+        heights = {b.text(): b.height() for b in (window.open_btn, window.batch_btn, window.tools_btn)}
+        assert len(set(heights.values())) == 1, heights
+        assert window.recent_btn.height() == window.open_btn.height(), (
+            window.recent_btn.height(), window.open_btn.height())
+
+        # Tira con varias tandas: ensureWidgetVisible no se dispara de nuevo tras marcar la página actual
+        calls = []
+        orig_ensure = window.strip.ensureWidgetVisible
+        window.strip.ensureWidgetVisible = lambda w, *a, **kw: (calls.append(w), orig_ensure(w, *a, **kw))
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
+        window.pdf_page = 0
+        window.strip.mark(0)
+        calls.clear()
+        for n in range(1, 5):
+            window.strip.add(n, app.qtk.qimage(window.pdf_doc[n].get_pixmap(matrix=pymupdf.Matrix(0.1, 0.1))), "")
+            window.strip.mark(0)
+        assert calls == [], calls
+    finally:
+        window.close()
+
+
+def test_unknown_words_reports_progress():
+    """convert.unknown_words informa progreso de 0 a 100 para que la barra avance durante «Ortografía…»."""
+    seen = []
+    found = convert.unknown_words(
+        ["Ella dijó que la ciudd estaba lejos.", "Él caminaba por el bosque tranquilo."],
+        progress=lambda done, total: seen.append((done, total)),
+    )
+    assert any(w == "dijó" for w, _, _ in found), found
+    assert seen and seen[0][0] > 0 and seen[-1] == (100, 100), seen
+    assert all(a <= b for a, b in zip([d for d, _ in seen], [d for d, _ in seen[1:]])), seen
 
 
 def _run_tests(part, parts):

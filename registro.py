@@ -19,7 +19,7 @@ SIZE, KEPT = 2_000_000, 4  # 2 MB por archivo y 4 de antes: unos días de uso, s
 # Las partes de la app: su DEBUG se apunta. De las bibliotecas, solo avisos: PIL apuntaba cada etiqueta TIFF de cada
 # ilustración (7 de cada 10 líneas del registro con un EPUB japonés)
 OURS = {"app", "trabajo", "convert", "faithful", "translate", "chromium", "qt", "congelada", "acciones", "editor",
-        "websheet", "webview", "options", "qtk", "registro", "__main__"}
+        "websheet", "webview", "options", "qtk", "registro", "updater", "__main__"}
 
 
 class OnlyOurs(logging.Filter):

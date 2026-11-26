@@ -85,7 +85,7 @@ QPushButton[up="true"]:open, QToolButton[up="true"]:open {{ border-bottom-color:
     border-bottom-right-radius: 6px; border-top-color: {card}; border-top-left-radius: 0; border-top-right-radius: 0; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {hint}; }}
 QToolButton::menu-indicator {{ image: none; width: 0; }}
-QToolButton#menu {{ padding-right: 28px; }}
+QToolButton#menu {{ padding: 2px 28px 3px 12px; }}
 QToolButton#menu::menu-indicator {{ image: url("{chevron}"); subcontrol-origin: padding; subcontrol-position: center right;
     width: 12px; height: 12px; right: 9px; }}
 QPushButton#primary {{ background: {acc}; border-color: {acc}; color: {acc_ink}; font-weight: 600; padding: 6px 18px; }}

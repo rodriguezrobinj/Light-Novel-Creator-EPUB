@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  # Manual: construye el zip y lo deja como artefacto, sin publicar nada
+  # Manual: construye el instalador y el zip y los deja como artefactos, sin publicar nada
   workflow_dispatch:
 
 permissions:
@@ -20,6 +20,15 @@ jobs:
           python-version: "3.14"
           cache: pip
       - run: python -m pip install -r requirements.txt
+      - name: Fijar versión de la app
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ver = $env:GITHUB_REF_NAME -replace '^v', ''
+          # Así el .exe conoce exactamente su versión al buscar actualizaciones
+          $content = (Get-Content updater.py -Raw -Encoding utf8) -replace 'APP_VERSION = "[^"]+"', ('APP_VERSION = "' + $ver + '"')
+          [System.IO.File]::WriteAllText((Resolve-Path updater.py).Path, $content, [System.Text.UTF8Encoding]::new($false))
+          Select-String -Path updater.py -Pattern '^APP_VERSION ='
       - run: python -m PyInstaller --noconfirm "PDF a EPUB.spec"
       - name: Comprobar Chromium en el .exe
         timeout-minutes: 5
@@ -40,13 +49,79 @@ jobs:
           # 7-Zip y no Compress-Archive: este pierde la carpeta vacía datos/, y sin ella la app escribe en %APPDATA%
           Push-Location portable-zip; 7z a -tzip ..\LightNovelCreator-portable.zip LightNovelCreator | Out-Null; Pop-Location
           7z l LightNovelCreator-portable.zip | Select-String "datos|LEEME|LICENSE|PDF a EPUB.exe"
+      - name: Compilar el instalador (Inno Setup)
+        id: installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress | Out-Null
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
+            $ver = $env:GITHUB_REF_NAME -replace '^v', ''
+            $outName = "LightNovelCreator_${ver}_x64-setup"
+          } else {
+            $ver = "0.0.0-dev"
+            $outName = "LightNovelCreator_dev_x64-setup"
+          }
+          # VersionInfoVersion en Windows exige 4 números (A.B.C.D)
+          $parts = @(([regex]::Match($ver, '^\d+(\.\d+){0,3}').Value -split '\.') | Where-Object { $_ -ne '' })
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $numVer = ($parts[0..3]) -join '.'
+          & $iscc /Qp "/DAppVersion=$ver" "/DAppNumericVersion=$numVer" "/DOutputName=$outName" "installer\setup.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = "dist\installer\$outName.exe"
+          if (-not (Test-Path $exe)) { throw "No se generó el instalador: $exe" }
+          "path=$exe" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Get-Item $exe | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB, 1)}}
+      - name: Generar sumas SHA-256
+        shell: pwsh
+        run: |
+          $files = @("${{ steps.installer.outputs.path }}", "LightNovelCreator-portable.zip")
+          $lines = foreach ($f in $files) {
+            $item = Get-Item $f
+            $hash = (Get-FileHash $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($item.Name)"
+          }
+          [System.IO.File]::WriteAllLines((Join-Path (Get-Location) "SHA256SUMS.txt"), $lines, [System.Text.UTF8Encoding]::new($false))
+          Get-Content SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: LightNovelCreator-setup
+          path: |
+            ${{ steps.installer.outputs.path }}
+            SHA256SUMS.txt
       - uses: actions/upload-artifact@v7
         if: github.event_name == 'workflow_dispatch'
         with:
           name: LightNovelCreator-portable
-          path: LightNovelCreator-portable.zip
+          path: |
+            LightNovelCreator-portable.zip
+            SHA256SUMS.txt
       - name: Publicar la pre-release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" LightNovelCreator-portable.zip --title "${{ github.ref_name }} — versión de prueba" --prerelease --generate-notes --verify-tag
+        run: gh release create "${{ github.ref_name }}" "${{ steps.installer.outputs.path }}" LightNovelCreator-portable.zip SHA256SUMS.txt --title "${{ github.ref_name }} — versión de prueba" --prerelease --generate-notes --verify-tag
+
+  winget:
+    needs: release
+    # Solo se ejecuta en etiquetas estables (sin guion) y si el secreto WINGET_TOKEN está configurado
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    runs-on: windows-latest
+    # A nivel de job: el `if` de un paso no ve el `env` de ese mismo paso, y los secretos no valen en `if`
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - name: Actualizar paquete en WinGet (si WINGET_TOKEN está configurado)
+        if: env.WINGET_TOKEN != ''
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: rodriguezrobinj.LightNovelCreator
+          # La release es pre-release: sin la etiqueta explícita buscaría la última estable
+          release-tag: ${{ github.ref_name }}
+          installers-regex: '_x64-setup\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}

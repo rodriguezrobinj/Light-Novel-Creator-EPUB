@@ -1873,25 +1873,39 @@ def text_stats(texts):
             "dialog": round(100 * dialog / words) if words else 0}
 
 
-def unknown_words(texts, known=(), caps=False):
+def unknown_words(texts, known=(), caps=False, progress=None):
     """Palabras de texts que no están en el diccionario: [(palabra, veces, [sugerencias])], las más repetidas
     primero. Solo en minúscula y de 3 letras o más: con mayúscula suelen ser nombres. No cuentan known (el
     diccionario de la serie), los honoríficos ni las onomatopeyas ("aaah"). Se sugieren palabras correctas
     del propio libro, primero la que solo cambia en tildes: las de Hunspell tardan ~1 s cada una. caps: también
     las que empiezan en mayúscula (Opciones → Ortografía)."""
+    if progress:
+        progress(2, 100)
     words = collections.Counter(w for t in texts for w in spell_words(t))
     skip = spell_skip(known)
     spell, good, bad = _hunspell(), [], []
-    for w, n in words.items():
-        if spell_candidate(w, skip, caps):
-            (good if spell.lookup(w) else bad).append(w)
+    candidates = [w for w in words if spell_candidate(w, skip, caps)]
+    if progress:
+        progress(15, 100)
+    total_c = max(1, len(candidates))
+    step_c = max(1, total_c // 50)
+    for i, w in enumerate(candidates, 1):
+        (good if spell.lookup(w) else bad).append(w)
+        if progress and (i % step_c == 0 or i == total_c):
+            progress(15 + i * 50 // total_c, 100)
     folded = {_fold(w): w for w in sorted(good, key=lambda w: words[w])}  # la más usada gana
     found = []
-    for w in bad:
+    total_b = max(1, len(bad))
+    step_b = max(1, total_b // 35)
+    for i, w in enumerate(bad, 1):
         accents = [v for v in _accents(w) if v != w and spell.lookup(v)]
         near = difflib.get_close_matches(w, [g for g in good if abs(len(g) - len(w)) <= 2], 4, 0.75)
         same = [folded[_fold(w)]] if _fold(w) in folded else []
         found.append((w, words[w], list(dict.fromkeys(accents + same + near))[:4]))
+        if progress and (i % step_b == 0 or i == total_b):
+            progress(65 + i * 35 // total_b, 100)
+    if progress:
+        progress(100, 100)
     return sorted(found, key=lambda f: (-f[1], f[0]))
 
 

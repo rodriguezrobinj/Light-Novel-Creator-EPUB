@@ -95,6 +95,8 @@ OPTIONS = (
     Option("Inicio", "reopen_last", "check", "Abrir el último libro al empezar",
            "Al abrir la aplicación, el libro con el que se trabajó la última vez, sin pasar por «Recientes»."),
     Option("Inicio", "recent_max", "number", "Libros en «Recientes»", "Cuántos recuerda el menú y la pantalla de inicio."),
+    Option("Inicio", "check_updates", "check", "Buscar actualizaciones al abrir",
+           "Comprueba una vez al día si hay una versión nueva en GitHub y avisa sin interrumpir."),
     Option("Salida", "out_name", "choice", "Nombre del EPUB",
            "El nombre que propone «Generar EPUB»: el del PDF, el título del libro o «Serie - Volumen N»."),
     Option("Salida", "out_folder", "folder", "Carpeta donde guardar",
@@ -344,7 +346,16 @@ class OptionsDialog:
         self.scroll.setWidget(page)  # la página anterior se borra con su scroll
 
     def reset_page(self):
-        """«Restablecer»: las opciones de la página a sus valores de fábrica (del libro, en el alcance elegido)."""
+        """«Restablecer»: pide confirmación y vuelve las opciones de la página a sus valores de fábrica."""
+        where = f"«{self.category}»"
+        if self.is_book():
+            where += " para este libro" if self.scope == "book" else " para libros nuevos"
+        if not qtk.messagebox.askyesno(
+            "Restablecer opciones",
+            f"¿Volver las opciones de {where} a sus valores de fábrica?",
+            parent=self.win,
+        ):
+            return
         factory = {**self.owner.factory, **self.owner.app_factory()}
         for option in OPTIONS:
             if option.category == self.category and option.key in factory and option.kind != "translate":
