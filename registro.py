@@ -125,16 +125,27 @@ class Freezes:
         threading.Thread(target=self._watch, daemon=True, name="congelada").start()
 
     def _watch(self):
+        import gc
         import traceback
         while True:
             time.sleep(0.25)
             if not _waiting and time.monotonic() - self.last > self.limit / 2:
-                frame = sys._current_frames().get(self.thread.ident)
-                if frame is not None:  # solo archivo, línea y función: leer el código para dar formato tardaba
-                    # 0,6 s y la muestra llegaba tarde; el texto se forma al apuntarla. 30 marcos: con 14 se perdía
-                    # qué acción había empezado lo que tardaba
-                    stack = traceback.StackSummary.extract(traceback.walk_stack(frame), limit=30, lookup_lines=False)
-                    self.samples.append(tuple((f.filename, f.lineno, f.name, None) for f in reversed(stack)))
+                # Sin el recolector de ciclos mientras: los objetos que crea la muestra lo hacían saltar en este hilo,
+                # y la basura con objetos de Qt se destruía fuera del suyo (el proceso caía en sitios al azar)
+                was = gc.isenabled()
+                gc.disable()
+                try:
+                    frame = sys._current_frames().get(self.thread.ident)
+                    if frame is not None:  # solo archivo, línea y función: leer el código para dar formato tardaba
+                        # 0,6 s y la muestra llegaba tarde; el texto se forma al apuntarla. 30 marcos: con 14 se
+                        # perdía qué acción había empezado lo que tardaba
+                        stack = traceback.StackSummary.extract(traceback.walk_stack(frame), limit=30,
+                                                               lookup_lines=False)
+                        self.samples.append(tuple((f.filename, f.lineno, f.name, None) for f in reversed(stack)))
+                    del frame
+                finally:
+                    if was:
+                        gc.enable()
 
     def beat(self):
         now = time.monotonic()

@@ -8501,8 +8501,9 @@ class TextEditor:
         desk_row.addWidget(sheet, 20)
         # Vista «Código HTML» (Vista → Código): el mismo capítulo como su HTML, en lugar de la hoja
         self.code = editor.CodeEdit(theme.code_colors(app.dark))  # con números de línea y colores de código
-        # lo quitado entero en el código: las ilustraciones con su imagen, la de la hoja
-        self.code.look.images = lambda n: editor.object_image(self.sheet.document(), n)
+        # lo quitado entero en el código: las ilustraciones con su imagen, la de la hoja. Con la hoja, no con self: el
+        # editor y su código se tenían el uno al otro (un ciclo que solo libera el recolector, a destiempo)
+        self.code.look.images = lambda n, sheet=self.sheet: editor.object_image(sheet.document(), n)
         # su línea es un párrafo: la hoja (oculta) va a él, y con ella el original, el EPUB y la hoja web
         self.code.cursorPositionChanged.connect(lambda: self.code.isVisible()
                                                 and self.later("code", 150, self.code_moved))
