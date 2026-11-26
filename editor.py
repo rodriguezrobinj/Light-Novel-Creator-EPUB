@@ -2717,7 +2717,7 @@ class Sheet(QTextEdit):
         self.paint_frames(painter, layout, doc, dx, dy, event.rect())
         if self.look.changes and self.look.removed:
             paint_removed(self, painter, self.look.removed)
-        if self.look.changes:  # la ilustración o el separador puestos: recuadrados de verde, como lo quitado de rojo
+        if False:  # experimento: sin marco verde: recuadrados de verde, como lo quitado de rojo
             painter.setPen(QPen(self.bar_color, 3))
             for block in self.bars:
                 if block.isValid() and block.document() is doc and objects_of(block):
