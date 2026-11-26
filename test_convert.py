@@ -6813,6 +6813,18 @@ def test_window_editor_shows_deleted_pictures_and_joined_paragraphs():
     assert joined[2] == ("Tres.", [], False), joined
 
 
+def test_window_editor_paints_deleted_pictures_as_images():
+    pass  # experimento: mismo reparto que la rama
+
+
+def test_window_editor_deleted_pictures_fit_their_place():
+    pass  # experimento: mismo reparto que la rama
+
+
+def test_window_editor_marks_added_pictures_and_deleted_ones_in_code():
+    pass  # experimento: mismo reparto que la rama
+
+
 def test_window_editor_deleted_picture_back_by_undo():
     """Una ilustración quitada con Supr o Retroceso y vuelta con Ctrl+Z deja de salir tachada en el párrafo de al
     lado (los números de párrafo se corrían y se repintaba otro). Quitada, aceptada y vuelta con Ctrl+Z al reabrir
@@ -15498,6 +15510,10 @@ def test_websheet_shows_removed_paragraphs_and_format_changes():
         assert "Siete." not in got[1].split("|"), got  # unido: su texto no es nuevo (solo la unión, como en la hoja)
 
 
+def test_websheet_shows_deleted_and_added_pictures_as_images():
+    pass  # experimento: mismo reparto que la rama
+
+
 def test_websheet_pager_keeps_its_pages_when_the_cursor_moves():
     """Con la pestaña «Hoja web» (o EPUB) a la vista, mover el cursor de la hoja no pone en su paginador «Página n de
     m» del PDF (el panel «Original», oculto, se dibujaba igual). Al volver a «Original», su página es la del cursor."""
@@ -18724,12 +18740,30 @@ def _run_tests(part, parts):
     return failed
 
 
+PART_LIMIT = 900  # s que puede tardar la suite en paralelo (unos 300 en local, 60 en CI): más es una parte colgada
+
+
+def _quiet_crashes():
+    """Un proceso hijo que aborta (Qt, Chromium) se cierra y deja su código: Windows lo dejaba esperando a su
+    ventana de error, sin cerrar, y la suite esperaba con él (CI colgada 10 minutos)."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)  # sin ventanas de error críticos ni de fallo
+    try:
+        ctypes.cdll.ucrtbase._set_abort_behavior(0, 0x1 | 0x2)  # abort(): sin mensaje ni informe a Windows
+    except (OSError, AttributeError):
+        pass
+
+
 def _run_parallel(parts):
     """Reparte la suite en parts procesos, cada uno con su propia carpeta temporal (TEMP): dos pruebas a la vez no
     ven los archivos de la otra. Muestra la salida de cada parte al acabar. Devuelve el código de salida."""
     import subprocess
     import time
 
+    # la salida de las partes, a un archivo en cp1252: una letra que no cabe («❮») tiraba el lanzador y el resultado
+    sys.stdout.reconfigure(errors="replace")
     start = time.time()
     with tempfile.TemporaryDirectory(prefix="lnepub-test-", ignore_cleanup_errors=True) as root:
         runs = []
@@ -18744,8 +18778,15 @@ def _run_parallel(parts):
             runs.append((proc, log))
         ok = failed = 0
         tests = [name for name in globals() if name.startswith("test_")]
+        deadline = start + PART_LIMIT
         for part, (proc, log) in enumerate(runs):
-            code = proc.wait()
+            try:
+                code = proc.wait(timeout=max(1.0, deadline - time.time()))
+            except subprocess.TimeoutExpired:  # colgada: se para y cuenta como caída, con lo que llegó a escribir
+                proc.kill()
+                code = proc.wait()
+                log.seek(0, os.SEEK_END)
+                log.write(f"\nparte parada: seguía al cabo de {PART_LIMIT} s\n")
             log.seek(0)
             output = log.read()
             log.close()
@@ -18758,8 +18799,10 @@ def _run_parallel(parts):
             undone = [name for name in tests[part::parts] if name not in done]
             if undone or (code and not failed_here):
                 failed += 1  # se cayó (con o sin un FAIL antes): las que quedaban no pasan por buenas
-                print(f"FAIL la parte {part + 1} de {parts} terminó con el código {code} y {len(undone)} pruebas sin "
-                      f"hacer" + (f", desde {undone[0]}" if undone else ""))
+                # todas hechas y aun así un código: se cayó al cerrar (orden de destrucción de Qt/WebEngine), no en una prueba
+                print(f"FAIL la parte {part + 1} de {parts} terminó con el código {code} " +
+                      (f"y {len(undone)} pruebas sin hacer, desde {undone[0]}" if undone else
+                       "al salir del proceso, con todas sus pruebas hechas"))
     print(f"\n{ok} correctas, {failed} con FAIL en {time.time() - start:.0f} s ({parts} procesos)")
     return 1 if failed else 0
 
@@ -18770,6 +18813,7 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if "--parte" in args:
         part, parts = map(int, args[args.index("--parte") + 1].split("/"))
+        _quiet_crashes()
         sys.exit(1 if _run_tests(part, parts) else 0)
     parts = int(args[args.index("--paralelo") + 1]) if "--paralelo" in args else min(4, os.cpu_count() or 1)
     if parts > 1:
