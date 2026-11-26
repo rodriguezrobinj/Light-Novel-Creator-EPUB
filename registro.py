@@ -7,6 +7,7 @@ import collections
 import contextlib
 import functools
 import logging
+import os
 import re
 import reprlib
 import sys
@@ -111,38 +112,53 @@ def _where(samples):
             + "".join(traceback.StackSummary.from_list(list(stack)).format()))
 
 
+def _thread_stacks(text, ident):
+    """[((archivo, línea, función, None), …)] del hilo ident en cada volcado de faulthandler de text, de fuera adentro.
+    Solo los 30 marcos más internos: con 14 se perdía qué acción había empezado lo que tardaba."""
+    stacks, frames = [], None
+    for line in text.splitlines():
+        head = re.match(r"(?:Current thread|Thread) (0x[0-9a-fA-F]+)", line)
+        if head:
+            if frames:
+                stacks.append(tuple(reversed(frames[:30])))
+            frames = [] if int(head.group(1), 16) == ident else None
+        elif frames is not None and (m := re.match(r'\s+File "(.*)", line (\d+) in (.+)', line)):
+            frames.append((m.group(1), int(m.group(2)), m.group(3).strip(), None))
+    if frames:
+        stacks.append(tuple(reversed(frames[:30])))
+    return stacks
+
+
 class Freezes:
     """Congelaciones de la ventana: beat() lo llama un temporizador de la ventana cada 100 ms; si entre dos latidos
     pasa más de limit s, apunta cuánto duró, tras qué acción y dónde estaba la ventana (las pilas que un hilo aparte
     tomó mientras tanto). Así una ventana que «se congela» deja dicho por qué."""
 
     def __init__(self, limit=0.7):
+        import tempfile
         import threading
-        self.limit, self.last, self.samples = limit, time.monotonic(), []
+        self.limit, self.last = limit, time.monotonic()
         self.thread = threading.main_thread()
         self.log = logging.getLogger("congelada")
         self.count, self.worst = 0, 0.0  # para el resumen al cerrar
+        self.dumps = tempfile.TemporaryFile()  # las muestras, una tras otra; beat() las lee y lo vacía
+        self.fd = self.dumps.fileno()
         threading.Thread(target=self._watch, daemon=True, name="congelada").start()
 
     def _watch(self):
+        import faulthandler
         import gc
-        import traceback
+        # La pila de la ventana la escribe faulthandler, en C: recorrer f_back de sys._current_frames() desde este hilo
+        # hacía caer el proceso al pintar (CPython #118680, CI 3221225477). Este hilo no lee ni crea objetos: el
+        # recolector, si saltaba aquí, destruía objetos de Qt fuera de su hilo. Apagado mientras vuelca, porque
+        # faulthandler también lo hacía saltar. Las muestras se leen en beat(), en el hilo de la ventana
         while True:
             time.sleep(0.25)
             if not _waiting and time.monotonic() - self.last > self.limit / 2:
-                # Sin el recolector de ciclos mientras: los objetos que crea la muestra lo hacían saltar en este hilo,
-                # y la basura con objetos de Qt se destruía fuera del suyo (el proceso caía en sitios al azar)
-                was = gc.isenabled()
+                was = gc.isenabled()  # sin candado: esperarlo soltaba el GIL y al volver saltaba el recolector
                 gc.disable()
                 try:
-                    frame = sys._current_frames().get(self.thread.ident)
-                    if frame is not None:  # solo archivo, línea y función: leer el código para dar formato tardaba
-                        # 0,6 s y la muestra llegaba tarde; el texto se forma al apuntarla. 30 marcos: con 14 se
-                        # perdía qué acción había empezado lo que tardaba
-                        stack = traceback.StackSummary.extract(traceback.walk_stack(frame), limit=30,
-                                                               lookup_lines=False)
-                        self.samples.append(tuple((f.filename, f.lineno, f.name, None) for f in reversed(stack)))
-                    del frame
+                    faulthandler.dump_traceback(self.fd, all_threads=True)
                 finally:
                     if was:
                         gc.enable()
@@ -150,12 +166,31 @@ class Freezes:
     def beat(self):
         now = time.monotonic()
         gap, self.last = now - max(self.last, _resumed), now
-        samples, self.samples = self.samples, []
         started, self.started = getattr(self, "started", False), True
-        if gap > self.limit and started:  # el primer latido mide el arranque (crear la ventana), no una congelación
+        frozen = gap > self.limit and started  # el primer latido mide el arranque (crear la ventana), no una congelación
+        raw = self._take(read=frozen, empty=True)
+        if frozen:
             self.count, self.worst = self.count + 1, max(self.worst, gap)
             after = f" tras «{LAST_ACTION}»" if LAST_ACTION else ""
-            self.log.warning("La ventana no respondió %.1f s%s. Estaba en: %s", gap, after, _where(samples))
+            stacks = _thread_stacks(raw.decode("utf-8", "replace"), self.thread.ident)
+            self.log.warning("La ventana no respondió %.1f s%s. Estaba en: %s", gap, after, _where(stacks))
+
+    def stacks(self):
+        """Las pilas de la ventana tomadas desde el último latido (para las pruebas)."""
+        return _thread_stacks(self._take(read=True, empty=False).decode("utf-8", "replace"), self.thread.ident)
+
+    def _take(self, read, empty):
+        # shortcut: sin candado, una muestra que el hilo escriba justo mientras se vacía puede perderse o salir
+        # cortada (solo al salir de una congelación); la lectura la descarta, no rompe nada
+        size = os.lseek(self.fd, 0, os.SEEK_END)
+        raw = b""
+        if size and read:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            raw = os.read(self.fd, size)
+        if size and empty:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            os.ftruncate(self.fd, 0)
+        return raw
 
 
 def peak_memory_mb():

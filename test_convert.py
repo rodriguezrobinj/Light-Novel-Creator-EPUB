@@ -1917,6 +1917,7 @@ def test_log_notes_window_freezes_with_where_it_was():
         freezes.beat()
     finally:
         logging.getLogger("congelada").removeHandler(keep)
+        freezes.last = float("inf")  # su hilo deja de volcar para el resto de pruebas
     assert first == [], first
     assert len(seen) == 1 and "no respondió" in seen[0] and "test_log_notes_window_freezes" in seen[0], seen
 
@@ -1946,13 +1947,44 @@ def test_freeze_watcher_never_collects_garbage_in_its_thread():
             item.append(item)
             junk.append(item)
             del junk[:-50]
-        taken = len(freezes.samples)
+        taken = len(freezes.stacks())
     finally:
         gc.callbacks.remove(note)
         gc.set_threshold(*old)
         freezes.last = float("inf")  # deja de tomar muestras para el resto de pruebas de este proceso
     assert taken, "el vigilante no tomó muestras"
     assert "congelada" not in where, where.count("congelada")
+
+
+def test_freeze_watcher_reads_the_stack_without_frame_objects():
+    """El vigilante tomaba la pila con sys._current_frames() y f_back desde su hilo: CPython puede caer así (#118680)
+    y en CI caía pintando un botón (código 3221225477). La toma de faulthandler, que lee en C, da la misma pila; el
+    hilo solo la escribe y se lee en el de la ventana."""
+    import sys
+    import time
+    import registro
+    calls = []
+    orig = sys._current_frames
+    sys._current_frames = lambda: calls.append(1) or orig()
+    freezes = registro.Freezes(limit=0.1)
+    try:
+        time.sleep(0.1)
+        stuck_until = time_ns() + 600_000_000
+        while time_ns() < stuck_until:  # la ventana «ocupada», sin latir
+            sum(range(1000))
+        samples = freezes.stacks()
+    finally:
+        sys._current_frames = orig
+        freezes.last = float("inf")
+    assert samples and not calls, (len(samples), len(calls))
+    names = [f[2] for f in samples[-1]]
+    assert "test_freeze_watcher_reads_the_stack_without_frame_objects" in names and len(names) <= 30, names
+    dump = ('Thread 0x0000002a [otro] (most recent call first):\n  File "b.py", line 9 in otra\n\n'
+            'Current thread 0x00000007 (most recent call first):\n  File "a.py", line 2 in dentro\n'
+            '  File "a.py", line 1 in <module>\n')
+    assert registro._thread_stacks(dump, 7) == [(("a.py", 1, "<module>", None), ("a.py", 2, "dentro", None))]
+    assert registro._thread_stacks(dump, 42) == [(("b.py", 9, "otra", None),)] and registro._thread_stacks(dump, 5) == []
+    assert len(registro._thread_stacks(dump + dump, 7)) == 2  # un volcado tras otro: una pila por volcado
 
 
 def test_log_freezes_skip_windows_dialogs_and_say_after_what():
@@ -1985,6 +2017,7 @@ def test_log_freezes_skip_windows_dialogs_and_say_after_what():
     finally:
         logging.getLogger("congelada").removeHandler(keep)
         registro.LAST_ACTION = ""
+        freezes.last = float("inf")
     assert quiet == [], quiet
     assert len(seen) == 1 and "tras «Clic «Generar EPUB»»" in seen[0] and "muestras" in seen[0], seen
     assert freezes.count == 1 and freezes.worst >= 0.8
