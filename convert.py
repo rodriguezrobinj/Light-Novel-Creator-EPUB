@@ -164,6 +164,7 @@ class Book:
     revised: str = ""            # fecha de la última corrección del texto
     origin: str = ""             # EPUB de entrada leído por read_epub: write_epub lo parchea en vez de rehacerlo
     vertical: bool = False       # EPUB japonés escrito en vertical (de derecha a izquierda)
+    css_overrides: dict = field(default_factory=dict)  # {ruta_epub: texto_css} editado por el usuario en el editor
 
 
 VOLUME = re.compile(r"\b(?:vol(?:umen|ume)?\.?|tomo)\s*0*(\d+(?:[.,]\d+)?)", re.I)
@@ -1456,7 +1457,7 @@ BOX_INLINE = {"juego": "background-color: #000000; color: #ffffff; padding: 0.4e
               "nota": "border-left: 4px solid #8a8a8a; background-color: #f2f2f2; color: #333333; font-size: 0.85em; "
                       "padding: 0.3em 0.8em",
               "cita": "font-style: italic; font-size: 1.1em; padding: 0.3em 0.8em"}
-TABLE_CELL = re.compile(r"\s+\|\s+")  # « | » entre las celdas de una fila de tabla del editor
+TABLE_CELL = re.compile(r"[ \t]*\|[ \t]*")  # « | » entre las celdas de una fila de tabla del editor (conserva vacías)
 ALIGN_PREFIX = ({"center": CENTER, "frame": FRAME, "right": RIGHT, "frame-center": "<marco centro>",
                  "frame-right": "<marco derecha>", "table": "<tabla>", "table-head": "<tabla cabecera>"}
                 | {f"list-{style}": f"<lista {style}>" for style in LIST_STYLES}
@@ -4733,7 +4734,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     z.writestr(f"OEBPS/{name}", _kepub(text) if kepub else text)
             z.writestr("META-INF/com.apple.ibooks.display-options.xml", APPLE_OPTIONS)
             z.writestr("OEBPS/toc.ncx", BAD_XML.sub("", ncx))
-            z.writestr("OEBPS/style.css", css)
+            z.writestr("OEBPS/style.css", (book.css_overrides or {}).get("OEBPS/style.css", css))
             z.writestr("OEBPS/cover.xhtml", cover)
             cover_data = _shrink(book.cover, limit) if limit and book.cover else book.cover
             if cover_data[:4] == b"\x89PNG":  # ilustración con transparencia como portada: cover.jpg es JPEG

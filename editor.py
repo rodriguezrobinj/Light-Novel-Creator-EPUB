@@ -626,6 +626,358 @@ def check_shell(head, foot, f):
     return ""
 
 
+def validate_html(lines, h=0, f=None, shell=False, known=()):
+    """[(línea 1-based, mensaje)] de todos los fallos del código HTML: cabecera XHTML y cuerpo (etiquetas sin cerrar,
+    mal anidadas o partidas). Las mismas reglas que from_code y check_shell, sin detenerse en el primero."""
+    if f is None:
+        f = len(lines)
+    errors = []
+    if shell:
+        msg = check_shell(lines[:h], lines[f:], f + 1) if h else \
+            "Falta <body>: la cabecera tiene que acabar en él y en lo que envuelve el texto"
+        if msg:
+            m = re.match(r"Línea (\d+)", msg)
+            errors.append((int(m[1]) if m else 1, msg))
+    same = {to_code(old) for old in known}
+    for idx, raw in enumerate(lines[h:f]):
+        n = h + idx + 1
+        line = convert.double_quoted(raw).strip()
+        if not line or line in same or CODE_TOKEN.fullmatch(line) or CODE_OBJECT.fullmatch(line) \
+                or convert.RULE_LINE.fullmatch(line):
+            continue
+        if half := HALF_TAG.search(line):
+            errors.append((n, f"Línea {n}: a «{half[0][:20]}» le falta el «>» que la cierra"))
+            continue
+        m = CODE_LINE.fullmatch(line)
+        if not m:
+            if line.startswith("<") and convert.OPENING.match(line):
+                errors.append((n, f"Línea {n}: el párrafo no se cierra en la misma línea: {line[:60]}"))
+                continue
+            m = CODE_LINE.fullmatch(f"<p>{line}</p>")
+        if not convert._balanced(m[3]):
+            errors.append((n, f"Línea {n}: una etiqueta no se cierra o se cierra fuera de orden: {line[:60]}"))
+    return errors
+
+
+def validate_xml(text):
+    """[(línea 1-based, mensaje)] de un archivo XML/XHTML/OPF/NCX/SVG: [] si es XML bien formado."""
+    import xml.etree.ElementTree as ET
+    try:
+        ET.fromstring(text.encode("utf-8"))
+        return []
+    except ET.ParseError as e:
+        line, col = e.position
+        reason = XML_ERRORS.get(str(e).split(":")[0], "no es XML bien formado")
+        return [(max(1, line), f"Línea {line}, columna {col + 1}: {reason}")]
+
+
+def format_html(text):
+    """Normaliza comillas en etiquetas, quita espacios sobrantes y sangra las líneas sin tocar el contenido."""
+    out = []
+    for raw in clean(text).split("\n"):
+        line = convert.double_quoted(raw).strip()
+        out.append(line)
+    return "\n".join(out)
+
+
+CSS_PROPS = {
+    "margin": "Márgenes exteriores (arriba derecha abajo izquierda)",
+    "margin-top": "Margen superior", "margin-bottom": "Margen inferior",
+    "margin-left": "Margen izquierdo", "margin-right": "Margen derecho",
+    "padding": "Relleno interior", "padding-top": "Relleno superior", "padding-bottom": "Relleno inferior",
+    "padding-left": "Relleno izquierdo", "padding-right": "Relleno derecho",
+    "text-indent": "Sangría de la primera línea del párrafo",
+    "text-align": "Alineación del texto (left, right, center, justify)",
+    "text-decoration": "Subrayado o tachado (none, underline, line-through)",
+    "text-transform": "Mayúsculas y minúsculas (uppercase, lowercase, capitalize)",
+    "line-height": "Interlineado (ej. 1.5)",
+    "font-family": "Familia tipográfica", "font-size": "Tamaño de letra (ej. 1em, 0.9em)",
+    "font-style": "Estilo de letra (normal, italic)", "font-weight": "Grosor (normal, bold)",
+    "font-variant": "Versalitas (normal, small-caps)",
+    "letter-spacing": "Espacio entre letras", "word-spacing": "Espacio entre palabras",
+    "color": "Color del texto", "background-color": "Color de fondo", "background": "Fondo",
+    "border": "Borde (ej. 1px solid #888)", "border-left": "Borde izquierdo", "border-top": "Borde superior",
+    "border-bottom": "Borde inferior", "border-radius": "Esquinas redondeadas",
+    "border-collapse": "Unir bordes de tabla (collapse, separate)",
+    "display": "Modo de caja (block, inline, inline-block, none)",
+    "width": "Ancho", "max-width": "Ancho máximo", "height": "Alto", "max-height": "Alto máximo",
+    "page-break-before": "Salto de página antes (always, avoid, auto)",
+    "page-break-after": "Salto de página después (always, avoid, auto)",
+    "page-break-inside": "Evitar partir bloque entre páginas (avoid, auto)",
+    "break-before": "Salto antes (page, avoid, auto)", "break-after": "Salto después (page, avoid, auto)",
+    "break-inside": "Evitar corte interior (avoid, auto)",
+    "hyphens": "Partición silábica (auto, none, manual)",
+    "-webkit-hyphens": "Partición silábica en lectores WebKit (auto, none)",
+    "widows": "Líneas mínimas al inicio de página", "orphans": "Líneas mínimas al final de página",
+    "list-style-type": "Viñeta o numeración de lista (disc, decimal, none)",
+    "vertical-align": "Alineación vertical (baseline, super, sub, middle)",
+    "white-space": "Espacios y saltos (normal, nowrap, pre-wrap)",
+    "writing-mode": "Dirección de escritura (horizontal-tb, vertical-rl)",
+    "src": "Archivo de fuente en @font-face (url(...))",
+}
+CSS_VALUES = {
+    "text-align": ("left", "right", "center", "justify"),
+    "font-style": ("normal", "italic"), "font-weight": ("normal", "bold", "600", "700"),
+    "font-variant": ("normal", "small-caps"),
+    "text-decoration": ("none", "underline", "line-through"),
+    "text-transform": ("none", "uppercase", "lowercase", "capitalize"),
+    "display": ("block", "inline", "inline-block", "none"),
+    "border-collapse": ("collapse", "separate"),
+    "page-break-before": ("always", "avoid", "auto"), "page-break-after": ("always", "avoid", "auto"),
+    "page-break-inside": ("avoid", "auto"), "break-before": ("page", "avoid", "auto"),
+    "break-after": ("page", "avoid", "auto"), "break-inside": ("avoid", "auto"),
+    "hyphens": ("auto", "none", "manual"), "-webkit-hyphens": ("auto", "none", "manual"),
+    "list-style-type": ("disc", "circle", "square", "decimal", "lower-alpha", "upper-roman", "none"),
+    "vertical-align": ("baseline", "super", "sub", "middle", "top", "bottom"),
+    "writing-mode": ("horizontal-tb", "vertical-rl"),
+}
+
+
+def complete_css_at(before):
+    """Sugerencias de CSS para before: propiedades dentro de una regla y valores tras «propiedad: »."""
+    if m := re.search(r"([a-z-]+)\s*:\s*([a-z0-9_-]*)$", before, re.I):
+        prop, typed = m[1].lower(), m[2].lower()
+        vals = [v for v in CSS_VALUES.get(prop, ()) if v.startswith(typed) and v != typed]
+        return len(typed), [(v, f"{v};", 0, "") for v in vals]
+    if m := re.search(r"(?:^|[{;\s])([a-z-]{1,})$", before, re.I):
+        typed = m[1].lower()
+        if ":" in before[before.rfind("{") + 1:] and ";" not in before[before.rfind(":") + 1:]:
+            return 0, []
+        first = [p for p in CSS_PROPS if p.startswith(typed)]
+        more = [p for p in CSS_PROPS if p not in first and len(typed) >= 2 and typed in p]
+        return len(typed), [(p, f"{p}: ;", 1, CSS_PROPS[p]) for p in first + more]
+    return 0, []
+
+
+def validate_css(text):
+    """[(línea 1-based, mensaje)] de errores de sintaxis CSS: comentarios «/*» sin cerrar, cadenas sin cerrar,
+    llaves «{» / «}» desequilibradas y declaraciones sin «:» o sin «;»."""
+    errors = []
+    in_comment, comment_line = False, 0
+    braces = []  # [(línea, es_atrule_anidada)]
+    at_nest = re.compile(r"@(?:media|supports|layer|document|container)\b", re.I)
+    lines = text.splitlines()
+    for n, raw in enumerate(lines, 1):
+        i, length = 0, len(raw)
+        clean_parts = []
+        quote = ""
+        while i < length:
+            ch = raw[i]
+            if in_comment:
+                end = raw.find("*/", i)
+                if end < 0:
+                    i = length
+                else:
+                    in_comment = False
+                    i = end + 2
+                continue
+            if quote:
+                if ch == "\\" and i + 1 < length:
+                    clean_parts.append("  ")
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = ""
+                clean_parts.append(" ")
+                i += 1
+                continue
+            if ch == "/" and i + 1 < length and raw[i + 1] == "*":
+                in_comment, comment_line = True, n
+                i += 2
+                continue
+            if ch in ('"', "'"):
+                quote = ch
+                clean_parts.append(ch)
+                i += 1
+                continue
+            clean_parts.append(ch)
+            i += 1
+        if quote:
+            errors.append((n, f"Línea {n}: falta cerrar las comillas ({quote})"))
+        stripped = "".join(clean_parts).strip()
+        if not stripped:
+            continue
+        depth_before = len(braces)
+        in_decl_block = bool(braces) and not braces[-1][1]
+        for idx, ch in enumerate(stripped):
+            if ch == "{":
+                head = stripped[:idx].strip()
+                braces.append((n, bool(at_nest.match(head))))
+            elif ch == "}":
+                if not braces:
+                    errors.append((n, f"Línea {n}: llave de cierre «}}» sin una «{{» abierta antes"))
+                else:
+                    braces.pop()
+        if in_decl_block and "{" not in stripped and "}" not in stripped:
+            for stmt in stripped.split(";"):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                if ":" not in stmt:
+                    errors.append((n, f"Línea {n}: declaración sin «:»: {stmt[:50]}"))
+                else:
+                    prop, _, val = stmt.partition(":")
+                    if not prop.strip() or not re.fullmatch(r"[-A-Za-z_][-\w]*", prop.strip()):
+                        errors.append((n, f"Línea {n}: nombre de propiedad no válido: «{prop.strip()[:30]}»"))
+                    elif not val.strip():
+                        errors.append((n, f"Línea {n}: falta el valor tras «{prop.strip()}:»"))
+            if not stripped.endswith(";") and depth_before == len(braces):
+                nxt = next((s.strip() for s in lines[n:] if s.strip() and not s.strip().startswith("/*")), "")
+                if nxt and not nxt.startswith("}"):
+                    errors.append((n, f"Línea {n}: falta «;» al final de la declaración"))
+    if in_comment:
+        errors.append((comment_line, f"Línea {comment_line}: comentario «/*» sin cerrar con «*/»"))
+    for open_line, _ in braces:
+        errors.append((open_line, f"Línea {open_line}: llave «{{» sin cerrar con «}}»"))
+    return sorted(errors, key=lambda item: item[0])
+
+
+def format_css(text):
+    """Da formato limpio al CSS (sangría de 2 espacios, una declaración por línea) conservando comentarios y cadenas."""
+    tokens = re.findall(r"/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[{}]|;|\n|[^\"'{};\n/]+|/", text, re.S)
+    out, buf, depth = [], [], 0
+
+    def flush_buf():
+        part = re.sub(r"[ \t]+", " ", "".join(buf)).strip()
+        buf.clear()
+        return part
+
+    for tok in tokens:
+        if tok == "\n":
+            buf.append(" ")
+        elif tok.startswith("/*"):
+            before = flush_buf()
+            if before:
+                out.append("  " * depth + before)
+            out.append("  " * depth + tok.strip())
+        elif tok == "{":
+            head = flush_buf()
+            if out and depth == 0 and out[-1] != "":
+                out.append("")
+            out.append("  " * depth + (f"{head} {{" if head else "{"))
+            depth += 1
+        elif tok == "}":
+            tail = flush_buf()
+            if tail:
+                if ":" in tail and not tail.startswith("@"):
+                    k, _, v = tail.partition(":")
+                    tail = f"{k.strip()}: {v.strip()}"
+                out.append("  " * depth + tail + ("" if tail.endswith(";") else ";"))
+            depth = max(0, depth - 1)
+            out.append("  " * depth + "}")
+        elif tok == ";":
+            stmt = flush_buf()
+            if stmt:
+                if ":" in stmt and not stmt.startswith("@"):
+                    k, _, v = stmt.partition(":")
+                    stmt = f"{k.strip()}: {v.strip()}"
+                out.append("  " * depth + stmt + ";")
+        else:
+            buf.append(tok)
+    tail = flush_buf()
+    if tail:
+        out.append("  " * depth + tail)
+    return "\n".join(out).strip() + ("\n" if out else "")
+
+
+class CssLook(QSyntaxHighlighter):
+    """Resaltado de sintaxis CSS (selectores, @reglas, propiedades, valores, cadenas y comentarios multilínea)."""
+
+    def __init__(self, document, colors):
+        super().__init__(document)
+        self.colors = colors
+        self.changes, self.removed, self.originals, self.images = None, None, False, None
+
+    def highlightBlock(self, text):
+        prev = self.previousBlockState()
+        in_comment = bool(prev & 1) if prev >= 0 else False
+        depth = (prev >> 1) if prev >= 0 else 0
+        at = (lambda i: u16(text, i)) if any(ord(c) > 0xFFFF for c in text) else (lambda i: i)
+        formats = {}
+
+        def paint(start, end, key):
+            if end <= start:
+                return
+            if key not in formats:
+                formats[key] = QTextCharFormat()
+                formats[key].setForeground(QColor(self.colors[key]))
+            self.setFormat(at(start), at(end) - at(start), formats[key])
+
+        i, n = 0, len(text)
+        while i < n:
+            if in_comment:
+                end = text.find("*/", i)
+                if end < 0:
+                    paint(i, n, "comment")
+                    i = n
+                else:
+                    paint(i, end + 2, "comment")
+                    in_comment = False
+                    i = end + 2
+                continue
+            if text.startswith("/*", i):
+                end = text.find("*/", i + 2)
+                if end < 0:
+                    paint(i, n, "comment")
+                    in_comment = True
+                    i = n
+                else:
+                    paint(i, end + 2, "comment")
+                    i = end + 2
+                continue
+            ch = text[i]
+            if ch in ('"', "'"):
+                j = i + 1
+                while j < n and text[j] != ch:
+                    j += 2 if text[j] == "\\" and j + 1 < n else 1
+                paint(i, min(n, j + 1), "value")
+                i = min(n, j + 1)
+                continue
+            if ch in "{}":
+                paint(i, i + 1, "punct")
+                depth = depth + 1 if ch == "{" else max(0, depth - 1)
+                i += 1
+                continue
+            if ch == "@":
+                m = re.match(r"@[A-Za-z-]+", text[i:])
+                if m:
+                    paint(i, i + len(m[0]), "atrule")
+                    i += len(m[0])
+                    continue
+            if text.startswith("!important", i):
+                paint(i, i + 10, "atrule")
+                i += 10
+                continue
+            if depth == 0:
+                m = re.match(r"[^/{}'\"@]+", text[i:])
+                if m:
+                    seg = m[0]
+                    paint(i, i + len(seg), "selector")
+                    for pm in re.finditer(r"[,>+~]", seg):
+                        paint(i + pm.start(), i + pm.end(), "punct")
+                    i += len(seg)
+                    continue
+            else:
+                if ch in ":;":
+                    paint(i, i + 1, "punct")
+                    i += 1
+                    continue
+                m = re.match(r"([ \t]*)([-A-Za-z_][-\w]*)([ \t]*:)", text[i:])
+                if m:
+                    pstart = i + len(m[1])
+                    paint(pstart, pstart + len(m[2]), "prop")
+                    paint(i + len(m[0]) - 1, i + len(m[0]), "punct")
+                    i += len(m[0])
+                    continue
+                m = re.match(r"[^;{}'\"/!]+", text[i:])
+                if m:
+                    paint(i, i + len(m[0]), "css_val")
+                    i += len(m[0])
+                    continue
+            i += 1
+        self.setCurrentBlockState((depth << 1) | (1 if in_comment else 0))
+
+
 class CodeLook(QSyntaxHighlighter):
     """Colores de la vista de código, como un editor de código: < > y /, nombre de la etiqueta, atributos, sus
     valores, entidades (&amp;) y comentarios."""
@@ -856,6 +1208,7 @@ class CodeEdit(QTextEdit):
     def __init__(self, colors):
         super().__init__(objectName="code")
         self.setAcceptRichText(False)
+        self.errors = {}  # bloque 0-based -> mensaje de error en vivo
         self.look = CodeLook(self.document(), colors)
         self.gutter = _Gutter(self)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
@@ -976,8 +1329,13 @@ class CodeEdit(QTextEdit):
         self.gutter.update()  # los números de las líneas cambiadas, de verde
 
     def event(self, event):
-        if event.type() == QEvent.Type.ToolTip and removed_tip(self, event):  # lo quitado, entero
-            return True
+        if event.type() == QEvent.Type.ToolTip:
+            block = self.cursorForPosition(self.viewport().mapFrom(self, event.pos())).block()
+            if block.blockNumber() in self.errors:
+                QToolTip.showText(event.globalPos(), self.errors[block.blockNumber()], self)
+                return True
+            if removed_tip(self, event):  # lo quitado, entero
+                return True
         return super().event(event)
 
     def changed_lines(self):
@@ -1034,6 +1392,7 @@ class CodeEdit(QTextEdit):
     def setPlainText(self, text):
         # Sin colores mientras se carga y se espacia: cada paso volvía a colorear el documento entero (8 s al abrir
         # el código de un capítulo de 900 párrafos). Al volver a ponerlos, se colorea una vez
+        self.errors = {}
         self.look.setDocument(None)
         super().setPlainText("\n".join(pretty_line(line) for line in text.split("\n")))
         self.space_paragraphs()
@@ -1104,7 +1463,28 @@ class CodeEdit(QTextEdit):
         self.fit_gutter()
         self.space_paragraphs()  # el aire va con el tamaño de la letra
 
+    def set_errors(self, errors):
+        """Marca en vivo las líneas con error ([(línea 1-based, mensaje)]) con subrayado ondulado y marca en el margen."""
+        mapping = {}
+        for line, msg in errors:
+            b = max(0, int(line) - 1)
+            mapping[b] = f"{mapping[b]}\n{msg}" if b in mapping else msg
+        if mapping == self.errors:
+            return
+        self.errors = mapping
+        self.mark_line()
+        self.gutter.update()
+
+    def goto_line(self, line_num):
+        """Lleva el cursor a la línea 1-based line_num y la centra en la vista."""
+        block = self.document().findBlockByNumber(max(0, min(int(line_num) - 1, self.blockCount() - 1)))
+        if block.isValid():
+            self.setTextCursor(QTextCursor(block))
+            self.centerCursor()
+            self.setFocus()
+
     def mark_line(self):
+        selections = []
         line = QTextEdit.ExtraSelection()
         tint = QColor(QApplication.palette().color(QPalette.ColorRole.Highlight))
         tint.setAlpha(26)  # la banda del párrafo del cursor de la hoja (Sheet.paintEvent)
@@ -1113,7 +1493,25 @@ class CodeEdit(QTextEdit):
         line.cursor = self.textCursor()
         line.cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)  # el párrafo entero, con sus líneas partidas
         line.cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
-        self.setExtraSelections([line])
+        selections.append(line)
+        if self.errors:
+            err_color = QColor(self.look.colors.get("error", self.look.colors["attr"]))
+            bg = QColor(err_color)
+            bg.setAlpha(28)
+            for num in self.errors:
+                block = self.document().findBlockByNumber(num)
+                if not block.isValid():
+                    continue
+                sel = QTextEdit.ExtraSelection()
+                sel.format.setBackground(bg)
+                sel.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+                sel.format.setUnderlineColor(err_color)
+                sel.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+                sel.cursor = QTextCursor(block)
+                sel.cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                sel.cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+                selections.append(sel)
+        self.setExtraSelections(selections)
         self.gutter.update()  # el número de la línea del cursor, resaltado
 
     def paint_gutter(self, event):
@@ -1125,16 +1523,89 @@ class CodeEdit(QTextEdit):
         painter.setFont(self.font())
         block, here = self.cursorForPosition(QPoint(0, 0)).block(), self.textCursor().blockNumber()
         scroll, height = self.verticalScrollBar().value(), self.fontMetrics().height()
+        err_color = QColor(self.look.colors.get("error", self.look.colors["attr"]))
         while block.isValid():
             top = round(block.layout().position().y()) - scroll
             if top > event.rect().bottom():
                 break
             if block.isVisible():
-                painter.setPen(QColor(self.look.colors["number_on" if block.blockNumber() == here else "number"]))
-                painter.drawText(0, top, self.gutter.width() - 8, height, Qt.AlignmentFlag.AlignRight,
-                                 str(block.blockNumber() + 1))
+                num = block.blockNumber()
+                if num in self.errors:
+                    painter.fillRect(QRect(0, top, 3, height), err_color)
+                    painter.setPen(err_color)
+                else:
+                    painter.setPen(QColor(self.look.colors["number_on" if num == here else "number"]))
+                painter.drawText(0, top, self.gutter.width() - 8, height, Qt.AlignmentFlag.AlignRight, str(num + 1))
             block = block.next()
         painter.end()
+
+
+class CssEdit(CodeEdit):
+    """Editor de hojas CSS con resaltado, números de línea, autocompletado de propiedades/valores y validación."""
+
+    def __init__(self, colors):
+        super().__init__(colors)
+        self.look.setDocument(None)
+        self.look = CssLook(self.document(), colors)
+        self.setFont(QFont("Consolas", 10))
+
+    def setPlainText(self, text):
+        self.look.setDocument(None)
+        QTextEdit.setPlainText(self, text)
+        self.look.setDocument(self.document())
+        self.fit_gutter()
+        self.mark_line()
+
+    def space_paragraphs(self):
+        pass  # en CSS cada línea va pegada, sin margen de párrafo HTML ni sangría por etiquetas
+
+    def paint_guides(self):
+        pass  # el CSS lleva su propia sangría con espacios
+
+    def suggest(self, force=False):
+        popup = self.completer.popup()
+        before = self.before_cursor()
+        self.cut, self.items = complete_css_at(before)
+        if not self.items or not (force or self.cut or before.endswith(": ")):
+            popup.hide()
+            return
+        model = self.completer.model()
+        model.clear()
+        self.shown = {}
+        for item in self.items[:50]:
+            label, hint = item[0], item[3] if len(item) > 3 else ""
+            text = f"{label}   {hint}" if hint else label
+            row = QStandardItem(text)
+            row.setToolTip(hint)
+            model.appendRow(row)
+            self.shown[text] = item
+        rect = self.cursorRect()
+        rect.setWidth(popup.sizeHintForColumn(0) + popup.verticalScrollBar().sizeHint().width() + 24)
+        self.completer.complete(rect)
+        popup.setCurrentIndex(model.index(0, 0))
+
+    def keyPressEvent(self, event):
+        key, popup = event.key(), self.completer.popup()
+        if popup.isVisible() and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab, Qt.Key.Key_Escape,
+                                         Qt.Key.Key_Backtab):
+            event.ignore()
+            return
+        mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        if key == Qt.Key.Key_Space and mods == Qt.KeyboardModifier.ControlModifier:
+            self.suggest(force=True)
+            return
+        if key == Qt.Key.Key_Tab and not mods:
+            self.insertPlainText("  ")
+            return
+        QTextEdit.keyPressEvent(self, event)
+        if event.text() == "{":
+            after = self.textCursor().block().text()[self.textCursor().positionInBlock():]
+            if not after.startswith("}"):
+                self.replace_before(0, "}", 1)
+        if (event.text() and event.text().isprintable()) or key == Qt.Key.Key_Backspace:
+            self.suggest()
+        elif popup.isVisible() and key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home, Qt.Key.Key_End):
+            popup.hide()
 
 
 def is_heading_line(line):
@@ -3440,13 +3911,93 @@ class Sheet(QTextEdit):
     def insert_table(self, columns, rows, head=True):
         """Tabla tras el párrafo del cursor: una línea por fila y « | » entre las celdas, para escribir encima; con
         head, la primera es la cabecera. Un deshacer."""
-        cells = lambda word: " | ".join(f"{word} {n + 1}" for n in range(columns))
-        lines = ([(None, convert.ALIGN_PREFIX["table-head"] + cells("Columna"))] if head else []) + [
-            (None, convert.ALIGN_PREFIX["table"] + cells("Celda")) for _ in range(rows)]
+        data = ([tuple(f"Columna {n + 1}" for n in range(columns))] if head else []) + [
+            tuple(f"Celda {n + 1}" for n in range(columns)) for _ in range(rows)]
+        self.set_table(data, head=head)
+
+    def table_at(self, block=None):
+        """Si block (o el cursor) está en una tabla de la hoja, devuelve (primer_bloque, último_bloque, [[celdas]],
+        tiene_cabecera); si no, None."""
+        here = block if block is not None else self.textCursor().block()
+        if not here.isValid() or not here.blockFormat().property(TABLE_ROW):
+            return None
+        start = end = here
+        while start.previous().isValid() and start.previous().blockFormat().property(TABLE_ROW):
+            start = start.previous()
+        while end.next().isValid() and end.next().blockFormat().property(TABLE_ROW):
+            end = end.next()
+        rows_data, has_head, cur = [], False, start
+        while cur.isValid():
+            kind = cur.blockFormat().property(TABLE_ROW)
+            if cur == start:
+                has_head = kind == "table-head"
+            raw = _lines(cur)
+            body = convert.split_prefix(raw[0])[1] if raw else cur.text()
+            cells = [c.strip() for c in convert.TABLE_CELL.split(body)]
+            rows_data.append(cells)
+            if cur == end:
+                break
+            cur = cur.next()
+        width = max((len(r) for r in rows_data), default=1)
+        rows_data = [r + [""] * (width - len(r)) for r in rows_data]
+        return start, end, rows_data, has_head
+
+    def set_table(self, rows_data, head=True, replace=None):
+        """Inserta o sustituye una tabla ([[celda, …], …]) en un solo paso de deshacer. Si replace=(inicio, fin)
+        está dado, sustituye esas filas contiguas; si rows_data está vacío, borra la tabla."""
+        if not rows_data:
+            if replace:
+                self.delete_table(replace)
+            return
+        lines = []
+        for idx, row in enumerate(rows_data):
+            prefix = convert.ALIGN_PREFIX["table-head"] if head and idx == 0 else convert.ALIGN_PREFIX["table"]
+            cells = [re.sub(r"\s*\|\s*", " / ", str(c).replace("\n", " ").strip()) for c in row]
+            lines.append((None, prefix + " | ".join(cells)))
         cursor = self.textCursor()
         cursor.beginEditBlock()
-        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
-        insert_lines(cursor, lines, self.pictures)
+        if replace:
+            start, end = replace
+            cursor.setPosition(start.position())
+            cursor.setPosition(end.position() + end.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            first_block = cursor.block()
+            first_fmt = QTextBlockFormat()
+            table_format(first_fmt, "table-head" if head else "table")
+            cursor.setBlockFormat(first_fmt)
+            insert_lines(cursor, lines, self.pictures)
+            # si el primer bloque quedó vacío por el salto inicial de insert_lines, se limpia
+            if first_block.isValid() and not first_block.text().strip() and first_block.next().isValid():
+                clean_cur = QTextCursor(first_block)
+                clean_cur.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor)
+                clean_cur.removeSelectedText()
+        else:
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+            insert_lines(cursor, lines, self.pictures)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+
+    def delete_table(self, replace=None):
+        """Borra la tabla del cursor (o de replace=(inicio, fin)) en un solo paso de deshacer."""
+        found = replace or (self.table_at()[:2] if self.table_at() else None)
+        if not found:
+            return
+        start, end = found
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        if end.next().isValid():
+            cursor.setPosition(start.position())
+            cursor.setPosition(end.next().position(), QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        elif start.previous().isValid():
+            prev = start.previous()
+            cursor.setPosition(prev.position() + prev.length() - 1)
+            cursor.setPosition(end.position() + end.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+        else:
+            cursor.select(QTextCursor.SelectionType.Document)
+            cursor.removeSelectedText()
+            cursor.setBlockFormat(QTextBlockFormat())
         cursor.endEditBlock()
         self.setTextCursor(cursor)
 

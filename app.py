@@ -1359,7 +1359,7 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "autocase": "Mayúsculas del español al abrir", "replacements": "Reemplazos",
                 "words": "Diccionario de la serie", "glossary": "Glosario", "tr_glossary": "Glosario de traducción",
                 "tr_notes": "Personajes y estilo de traducción", "ignored": "Avisos ignorados", "comments": "Comentarios",
-                "alts": "Descripciones de ilustraciones",
+                "alts": "Descripciones de ilustraciones", "css_overrides": "CSS personalizado",
                 "echoes": "Buscar ecos", "whole_words": "No partir palabras en el PDF",
                 "pdf_size": "Tamaño de PDF preferido", **dict(MORE_FIELDS), "synopsis": "Página de sinopsis",
                 "endnotes": "Notas al final del libro", "note_style": "Llamada de nota", "heading_font": "Fuente de títulos",
@@ -6896,6 +6896,7 @@ class App:
                      glossary=self.glossary, tr_glossary=self.tr_glossary, ignored=self.ignored, comments=self.comments,
                      alts=self.alts, tr_notes=self.tr_notes, editor_at=self.editor_at, work=self.work,
                      editor_history=self.editor_history,
+                     css_overrides=dict(getattr(self.book, "css_overrides", None) or {}),
                      faithful=bool(getattr(self.book, "origin", "")))  # revisión del EPUB leído por su HTML
         return state
 
@@ -6977,6 +6978,9 @@ class App:
         self.last_problems = state.get("problems")
         self.ignored = state["ignored"] if isinstance(state.get("ignored"), list) else []
         self.alts = {str(k): str(v) for k, v in state["alts"].items()} if isinstance(state.get("alts"), dict) else {}
+        if isinstance(state.get("css_overrides"), dict):
+            self.book.css_overrides = {str(k): str(v) for k, v in state["css_overrides"].items()
+                                       if isinstance(v, str)}
         self.comments = [c for c in state.get("comments", []) if isinstance(c, dict)  # el .json se edita a mano
                          and isinstance(c.get("note"), str) and isinstance(c.get("text"), str)]
         history = state.get("editor_history")
@@ -8815,6 +8819,8 @@ class TextEditor:
                                                 and self.later("code", 150, self.code_moved))
         self.code.textChanged.connect(lambda: self.code.isVisible() and self.code.hasFocus()
                                       and self.later("codelive", 30, self.apply_code_live))
+        self.code.textChanged.connect(lambda: self.code.isVisible()
+                                      and self.later("codeval", 180, self.validate_code))
         self.applying_code = False  # la hoja cambia por el código: el código no se vuelve a escribir
         self.code.setFont(QFont("Segoe UI", 9))  # la de la ventana, como el visor del explorador de archivos
         self.shells = {}  # (inicio, fin) -> cabecera editada en «Código HTML» sin guardar aún
@@ -8961,6 +8967,19 @@ class TextEditor:
         left_column.setSpacing(0)
         left_column.addWidget(self.view_tabs, 0, Qt.AlignmentFlag.AlignLeft)
         left_column.addWidget(desk, 1)
+        # Barra de validación en vivo y formateo bajo «Código HTML» (oculta cuando se ve la hoja)
+        self.code_bar = QFrame(objectName="bar")
+        self.code_errors = []
+        self.code_status = _button(f"{theme.ICONS['ok']} XHTML válido", self.goto_code_error, "ok")
+        self.code_status.setFlat(True)
+        self.code_status.setToolTip("Estado del código HTML (pulsa para ir al primer error)")
+        self.code_format_btn = _button("Formatear", self.format_code)
+        self.code_format_btn.setToolTip("Normaliza comillas y sangría del HTML sin cambiar el texto")
+        self.code_bar.setLayout(_row(self.code_status, 1, self.code_format_btn,
+                                     margins=(theme.SPACE["pad"], theme.SPACE["tight"],
+                                              theme.SPACE["pad"], theme.SPACE["tight"])))
+        self.code_bar.hide()
+        left_column.addWidget(self.code_bar)
         self.split = QSplitter()
         self.split.addWidget(self.nav_panel())
         self.split.addWidget(self.files_panel())
@@ -9311,8 +9330,8 @@ class TextEditor:
         group("Ilustraciones", [self.picture_btn])
         group("Vínculos", [tool("Enlace", "Enlace en el texto elegido: a una página web o a otro capítulo del libro "
                                 "(Ctrl+Alt+K)", self.show_link_bar, icon="link")])
-        group("Tabla", [tool("Tabla…", "Tabla de filas y columnas (pantallas de estado, listas de objetos): una fila por "
-                             "línea, con « | » entre las celdas", self.table_dialog, icon="table")])
+        group("Tabla", [tool("Tabla…", "Editor visual de tablas (pantallas de estado, fichas, listas de objetos): "
+                             "crea una tabla nueva o edita la del cursor", self.table_dialog, icon="table")])
         # un botón con menú: dos grandes ensanchaban «Insertar» más que la pantalla
         chapter_tools, _ = menu_tool("Capítulo ▾", "Una página nueva, dividir el capítulo en el cursor, o un "
                                      "capítulo nuevo con el título oculto (en el índice, no en la página)", [
@@ -9724,6 +9743,7 @@ class TextEditor:
                                    if n.lower().endswith(".css"))
             except (OSError, zipfile.BadZipFile):
                 pass  # sin el EPUB de entrada: solo las de la app
+        css += "".join((self.app.book.css_overrides or {}).values())
         selectors = re.sub(r"\{[^}]*\}", " ", re.sub(r"/\*.*?\*/", "", css, flags=re.S))  # sin valores: «.ttf»
         return sorted(set(re.findall(r"\.([A-Za-z_][\w-]*)", selectors)))
 
@@ -10174,6 +10194,34 @@ class TextEditor:
         if not self.files.isHidden():
             self.fill_files()
 
+    def write_files(self, path):
+        """El EPUB de un PDF como se generará con las opciones de ahora, sin reducir imágenes, con el cursor de
+        espera. Devuelve lo de write_epub."""
+        book = self.app.book
+        chapters, removed, breaks = _plan(book, self.app.rows())
+        options = self.app.write_options(breaks)
+        options.update(shrink=False, trim=False, gray=False, kepub=False, preview=True)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            return convert.write_epub(book, chapters, path, removed=removed, **options)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def app_css(self, path):
+        """El CSS path de la app sin el CSS propio: el del EPUB del explorador ya lo lleva, y tomado por original,
+        Guardar sin cambios quitaba el propio y «Restablecer» no volvía al de la app."""
+        book, saved = self.app.book, self.app.book.css_overrides
+        plain = os.path.join(tempfile.gettempdir(), f"lnepub-css-original-{os.getpid()}.epub")
+        book.css_overrides = {}
+        try:
+            self.write_files(plain)
+            with zipfile.ZipFile(plain) as z:
+                return z.read(path).decode("utf-8", "replace")
+        finally:
+            book.css_overrides = saved
+            with contextlib.suppress(OSError):
+                os.remove(plain)
+
     def fill_files(self):
         """Los archivos del EPUB original o, con un PDF, los del que se generará con las opciones de ahora (escrito
         aparte, sin reducir imágenes: los nombres son los mismos). Ese se escribe una vez por editor: tarda un segundo
@@ -10190,14 +10238,7 @@ class TextEditor:
             else:
                 path = self.files_path
                 if not self.files_written:
-                    chapters, removed, breaks = _plan(book, self.app.rows())
-                    options = self.app.write_options(breaks)
-                    options.update(shrink=False, trim=False, gray=False, kepub=False, preview=True)
-                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                    try:
-                        firsts = convert.write_epub(book, chapters, path, removed=removed, **options)
-                    finally:
-                        QApplication.restoreOverrideCursor()
+                    firsts = self.write_files(path)
                     self.file_sections = {f"OEBPS/{name}": k for name, k in firsts.items()}
                     self.files_written = True
             with zipfile.ZipFile(path) as z:
@@ -10366,11 +10407,110 @@ class TextEditor:
             column.addWidget(sample, 1)
             column.addWidget(_label(f"{families[0] if families else 'Letra que no se puede mostrar'} · {size}",
                                     "muted"))
+        elif low.endswith(".css"):
+            if not hasattr(self, "css_originals"):
+                self.css_originals = {}
+            if path not in self.css_originals:  # el de un EPUB de entrada es el suyo; el de un PDF, sin el propio
+                self.css_originals[path] = (self.app_css(path) if path in self.app.book.css_overrides
+                                            and not self.app.book.origin else data.decode("utf-8", "replace"))
+            original_css = self.css_originals[path]
+            overrides = self.app.book.css_overrides
+            current_css = overrides.get(path, original_css)
+            code = editor.CssEdit(theme.code_colors(self.app.dark))
+            code.setPlainText(current_css)
+            column.addWidget(code, 1)
+            css_errors = []
+            status_btn = _button(f"{theme.ICONS['ok']} CSS válido",
+                                 lambda: css_errors and code.goto_line(css_errors[0][0]), "ok")
+            status_btn.setFlat(True)
+
+            def check_css():
+                css_errors[:] = editor.validate_css(code.toPlainText())
+                code.set_errors(css_errors)
+                if css_errors:
+                    n = len(css_errors)
+                    first = css_errors[0][1]
+                    label = first if n == 1 else f"{convert.counted(n, 'aviso')} — {first}"
+                    status_btn.setText(f"{theme.ICONS['warn']} {label}")
+                    status_btn.setObjectName("warn")
+                else:
+                    status_btn.setText(f"{theme.ICONS['ok']} CSS válido")
+                    status_btn.setObjectName("ok")
+                status_btn.style().unpolish(status_btn)
+                status_btn.style().polish(status_btn)
+
+            def do_format():
+                formatted = editor.format_css(code.toPlainText())
+                if formatted != code.toPlainText():
+                    cursor = code.textCursor()
+                    cursor.select(QTextCursor.SelectionType.Document)
+                    cursor.insertText(formatted)
+                check_css()
+
+            def do_reset():
+                if code.toPlainText() != original_css:
+                    cursor = code.textCursor()
+                    cursor.select(QTextCursor.SelectionType.Document)
+                    cursor.insertText(original_css)
+                check_css()
+
+            def do_save():
+                text = code.toPlainText()
+                errs = editor.validate_css(text)
+                if errs:
+                    msg = "\n".join(m for _, m in errs[:5])
+                    if not messagebox.askyesno("CSS con avisos", f"Se encontraron avisos en {path}:\n\n{msg}\n\n"
+                                               "¿Guardar este CSS de todos modos?", parent=win):
+                        code.goto_line(errs[0][0])
+                        return
+                if text == original_css:
+                    overrides.pop(path, None)
+                else:
+                    overrides[path] = text
+                self.files_written = False
+                self.code.classes = self.book_classes()
+                self.app.save_review()
+                if self.web_shown():
+                    self.draw_web()
+                self.app.update_preview()
+                win.close()
+
+            val_timer = QTimer(win)
+            val_timer.setSingleShot(True)
+            val_timer.timeout.connect(check_css)
+            code.textChanged.connect(lambda: val_timer.start(180))
+            fmt_btn = _button("Formatear", do_format)
+            reset_btn = _button("Restablecer", do_reset)
+            reset_btn.setToolTip("Vuelve al CSS original del libro")
+            save_btn = _button("Guardar", do_save, "primary")
+            cancel_btn = _button("Cancelar", win.close)
+            column.addLayout(_row(status_btn, 1, fmt_btn, reset_btn))
+            column.addWidget(_label(f"{path} · {size}", "muted"))
+            column.addLayout(_row(1, cancel_btn, save_btn))
+            check_css()
+            win.resize(900, 650)
+            win.parts = {"code": code, "status": status_btn, "format": fmt_btn, "reset": reset_btn,
+                         "save": save_btn, "cancel": cancel_btn, "check": check_css}
+            win.show()
+            self.file_view = win
+            return
         else:
+            text = data.decode("utf-8", "replace")
             code = editor.CodeEdit(theme.code_colors(self.app.dark))
-            code.setPlainText(data.decode("utf-8", "replace"))
+            code.setPlainText(text)
             code.setReadOnly(True)
             column.addWidget(code, 1)
+            if low.endswith((".xhtml", ".html", ".xml", ".opf", ".ncx", ".svg")):
+                xml_errors = editor.validate_xml(text)
+                code.set_errors(xml_errors)
+                if xml_errors:
+                    status_btn = _button(f"{theme.ICONS['warn']} {xml_errors[0][1]}",
+                                         lambda: code.goto_line(xml_errors[0][0]), "warn")
+                else:
+                    status_btn = _button(f"{theme.ICONS['ok']} XML válido", lambda: None, "ok")
+                status_btn.setFlat(True)
+                column.addLayout(_row(status_btn, 1))
+                win.parts = {"code": code, "status": status_btn}
             column.addWidget(_label(f"{path} · {size} · solo lectura", "muted"))
             win.resize(900, 650)
         column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
@@ -10990,6 +11130,11 @@ class TextEditor:
         if note:  # una nota: editarla o quitarla sin tocar «[Nota: …]» a mano
             menu.addAction("Editar nota…", lambda: self.note_dialog(note))
             menu.addAction("Quitar nota", lambda: self.on_sheet(lambda: self.sheet.set_note("", note[:2])))
+            menu.addSeparator()
+        tbl = sheet.table_at(here.block())
+        if tbl:  # tabla de la hoja: editarla visualmente o quitarla entera
+            menu.addAction("Editar tabla…", lambda t=tbl: self.table_dialog(t))
+            menu.addAction("Quitar tabla", lambda r=tbl[:2]: self.on_sheet(lambda: self.sheet.delete_table(r)))
             menu.addSeparator()
         block = here.block()
         for name in editor.objects_of(block):
@@ -11725,6 +11870,8 @@ class TextEditor:
                                    [("", "")] * len(saved[0]) + self.code_wholes())
             self.sheet.hide()
             self.code.show()
+            self.code_bar.show()
+            self.validate_code()
             block = self.code.document().findBlockByNumber(h + line)
             if block.isValid():
                 self.code.setTextCursor(QTextCursor(block))
@@ -11739,6 +11886,7 @@ class TextEditor:
             try:
                 text = editor.from_code("\n".join(lines[h:f]), [x for xs in self.sheet.all_lines() for x in xs])
             except ValueError as e:
+                self.validate_code()
                 self.sync_view()
                 messagebox.showwarning("Código HTML", f"{e}\n\nArréglalo para volver a la hoja.", parent=self.win)
                 return
@@ -11747,6 +11895,7 @@ class TextEditor:
         code = lines[h:self.code.textCursor().blockNumber()]
         self.sheet.setTextCursor(QTextCursor(self.web_block(sum(1 for raw in code if raw.strip()))))
         self.code.hide()
+        self.code_bar.hide()
         self.sheet.show()
         self.sheet.ensureCursorVisible()
         self.sheet.setFocus()
@@ -11819,6 +11968,49 @@ class TextEditor:
             self.shells[self.current] = (self.code_shell[0], "\n".join(head) + "\n", "\n" + "\n".join(foot) + "\n")
         self.code_shell, self.code_frame = self.shell_of(*self.current), (head, foot)
         return True
+
+    def validate_code(self):
+        """Valida en vivo la vista «Código HTML» (cabecera XHTML y cuerpo) y marca las líneas con error."""
+        if not self.code.isVisible():
+            return []
+        lines, h, f = self.code_parts()
+        errors = editor.validate_html(lines, h, f, shell=bool(self.code_shell),
+                                      known=[x for xs in self.sheet.all_lines() for x in xs])
+        self.code_errors = errors
+        self.code.set_errors(errors)
+        if errors:
+            n = len(errors)
+            first = errors[0][1]
+            text = first if n == 1 else f"{convert.counted(n, 'error', 'errores')} — {first}"
+            self.code_status.setText(f"{theme.ICONS['warn']} {text}")
+            self.code_status.setObjectName("warn")
+        else:
+            self.code_status.setText(f"{theme.ICONS['ok']} XHTML válido")
+            self.code_status.setObjectName("ok")
+        self.code_status.style().unpolish(self.code_status)
+        self.code_status.style().polish(self.code_status)
+        return errors
+
+    def goto_code_error(self):
+        """Salta en «Código HTML» a la primera línea con error."""
+        if self.code_errors:
+            self.code.goto_line(self.code_errors[0][0])
+
+    def format_code(self):
+        """Normaliza comillas y sangría del código HTML sin cambiar el texto."""
+        if not self.code.isVisible():
+            return
+        line = self.code.textCursor().blockNumber()
+        formatted = editor.format_html(self.code.code())
+        if formatted != self.code.code():
+            cursor = self.code.textCursor()
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.SelectionType.Document)
+            cursor.insertText("\n".join(editor.pretty_line(ln) for ln in formatted.split("\n")))
+            cursor.endEditBlock()
+        self.code.goto_line(line + 1)
+        self.validate_code()
+        self.apply_code_live()
 
     def apply_code_live(self):
         """Lo escrito en el código, a la hoja si ya vale (a medio escribir una etiqueta, aún no): así la hoja web, el
@@ -12025,25 +12217,189 @@ class TextEditor:
                                     and 'class="' in b.opening)
         return [(re.search(r'class="([^"]*)"', o)[1], o) for o, _ in count.most_common(15)]
 
-    def table_dialog(self):
-        """«Tabla…»: columnas, filas y cabecera; la tabla va tras el párrafo del cursor, lista para escribir encima."""
+    def table_dialog(self, existing=None):
+        """Editor visual de tablas: crea una tabla nueva o edita la tabla donde está el cursor, con cuadrícula
+        interactiva, plantillas de novela ligera, cabecera y orden de filas."""
+        found = existing or (None if self.web_on else self.sheet.table_at())
         win = Dialog(self.win)
-        win.setWindowTitle("Tabla")
-        columns, rows, head = QSpinBox(), QSpinBox(), QCheckBox("Primera fila de cabecera")
+        win.setWindowTitle("Editar tabla" if found else "Tabla")
+        win.resize(*theme.DIALOG["m"])
+        TEMPLATES = {
+            "Personalizada": None,
+            "Pantalla de estado": (True, [["Atributo", "Valor"], ["Nombre", ""], ["Nivel", "1"], ["HP / MP", "100 / 50"]]),
+            "Ficha de personaje": (True, [["Campo", "Detalle"], ["Nombre", ""], ["Título / Clase", ""], ["Habilidades", ""]]),
+            "Habilidades": (True, [["Habilidad", "Nivel", "Efecto"], ["", "1", ""], ["", "1", ""]]),
+        }
+        init_rows = found[2] if found else [["Columna 1", "Columna 2"], ["Celda 1", "Celda 2"], ["Celda 1", "Celda 2"]]
+        init_head = found[3] if found else True
+        columns, rows = QSpinBox(), QSpinBox()
         columns.setRange(1, 8)
-        columns.setValue(2)
         rows.setRange(1, 40)
-        rows.setValue(3)
-        head.setChecked(True)
-        ok, cancel = _button("Insertar", win.accept, "primary"), _button("Cancelar", win.reject)
+        head = QCheckBox("Primera fila de cabecera")
+        head.setChecked(init_head)
+        template = QComboBox()
+        template.addItems(list(TEMPLATES))
+        grid = QTableWidget(len(init_rows), max(1, len(init_rows[0])))
+        grid.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        grid.setAlternatingRowColors(True)
+
+        def style_header():
+            bold = QFont(grid.font())
+            bold.setBold(True)
+            normal = QFont(grid.font())
+            tint = QColor(theme.colors(self.app.dark)["sel"])
+            clear = QColor(Qt.GlobalColor.transparent)
+            for c in range(grid.columnCount()):
+                item = grid.item(0, c)
+                if item is None:
+                    item = QTableWidgetItem("")
+                    grid.setItem(0, c, item)
+                item.setFont(bold if head.isChecked() else normal)
+                item.setBackground(tint if head.isChecked() else clear)
+
+        def load_grid(data, has_head):
+            grid.blockSignals(True)
+            cols = max(1, max((len(r) for r in data), default=2))
+            grid.setRowCount(len(data))
+            grid.setColumnCount(cols)
+            for r, row_vals in enumerate(data):
+                for c in range(cols):
+                    grid.setItem(r, c, QTableWidgetItem(row_vals[c] if c < len(row_vals) else ""))
+            grid.blockSignals(False)
+            columns.blockSignals(True)
+            rows.blockSignals(True)
+            columns.setValue(cols)
+            rows.setValue(len(data))
+            columns.blockSignals(False)
+            rows.blockSignals(False)
+            head.setChecked(has_head)
+            style_header()
+
+        def read_grid():
+            return [[(grid.item(r, c).text() if grid.item(r, c) else "") for c in range(grid.columnCount())]
+                    for r in range(grid.rowCount())]
+
+        def resize_grid():
+            r_target, c_target = rows.value(), columns.value()
+            old_r, old_c = grid.rowCount(), grid.columnCount()
+            grid.setRowCount(r_target)
+            grid.setColumnCount(c_target)
+            for r in range(r_target):
+                for c in range(c_target):
+                    if grid.item(r, c) is None:
+                        grid.setItem(r, c, QTableWidgetItem(
+                            f"Columna {c + 1}" if r == 0 and head.isChecked() and c >= old_c else ""))
+            if old_r == 0 or r_target > 0:
+                style_header()
+
+        def add_row():
+            if grid.rowCount() >= 40:
+                return
+            at = grid.currentRow() + 1 if grid.currentRow() >= 0 else grid.rowCount()
+            grid.insertRow(at)
+            for c in range(grid.columnCount()):
+                grid.setItem(at, c, QTableWidgetItem(""))
+            rows.blockSignals(True)
+            rows.setValue(grid.rowCount())
+            rows.blockSignals(False)
+            style_header()
+            grid.setCurrentCell(at, max(0, grid.currentColumn()))
+
+        def del_row():
+            if grid.rowCount() <= 1:
+                return
+            at = grid.currentRow() if grid.currentRow() >= 0 else grid.rowCount() - 1
+            grid.removeRow(at)
+            rows.blockSignals(True)
+            rows.setValue(grid.rowCount())
+            rows.blockSignals(False)
+            style_header()
+
+        def add_col():
+            if grid.columnCount() >= 8:
+                return
+            at = grid.currentColumn() + 1 if grid.currentColumn() >= 0 else grid.columnCount()
+            grid.insertColumn(at)
+            for r in range(grid.rowCount()):
+                grid.setItem(r, at, QTableWidgetItem(f"Columna {at + 1}" if r == 0 and head.isChecked() else ""))
+            columns.blockSignals(True)
+            columns.setValue(grid.columnCount())
+            columns.blockSignals(False)
+            style_header()
+
+        def del_col():
+            if grid.columnCount() <= 1:
+                return
+            at = grid.currentColumn() if grid.currentColumn() >= 0 else grid.columnCount() - 1
+            grid.removeColumn(at)
+            columns.blockSignals(True)
+            columns.setValue(grid.columnCount())
+            columns.blockSignals(False)
+            style_header()
+
+        def move_row(delta):
+            r = grid.currentRow()
+            target = r + delta
+            if r < 0 or not 0 <= target < grid.rowCount():
+                return
+            for c in range(grid.columnCount()):
+                a = grid.item(r, c).text() if grid.item(r, c) else ""
+                b = grid.item(target, c).text() if grid.item(target, c) else ""
+                grid.setItem(r, c, QTableWidgetItem(b))
+                grid.setItem(target, c, QTableWidgetItem(a))
+            style_header()
+            grid.setCurrentCell(target, max(0, grid.currentColumn()))
+
+        def apply_template(name):
+            chosen = TEMPLATES.get(name)
+            if chosen:
+                load_grid(chosen[1], chosen[0])
+
+        columns.valueChanged.connect(lambda _: resize_grid())
+        rows.valueChanged.connect(lambda _: resize_grid())
+        head.toggled.connect(lambda _: style_header())
+        template.currentTextChanged.connect(apply_template)
+        load_grid(init_rows, init_head)
+
+        add_r_btn, del_r_btn = _button("+ Fila", add_row), _button("− Fila", del_row)
+        add_c_btn, del_c_btn = _button("+ Columna", add_col), _button("− Columna", del_col)
+        up_btn, down_btn = _button("↑", lambda: move_row(-1)), _button("↓", lambda: move_row(1))
+        up_btn.setToolTip("Subir la fila seleccionada")
+        down_btn.setToolTip("Bajar la fila seleccionada")
+        ok = _button("Aplicar" if found else "Insertar", win.accept, "primary")
+        cancel = _button("Cancelar", win.reject)
+        removed = {"yes": False}
+
+        def remove_table():
+            removed["yes"] = True
+            win.accept()
+
         column = QVBoxLayout(win)
-        column.addLayout(_row(_label("Columnas:"), columns, _label("Filas:"), rows, 1))
-        column.addWidget(head)
-        column.addWidget(_label("En la hoja cada fila es una línea, con « | » entre las celdas: se escribe encima.",
-                                "muted"))
-        column.addLayout(_row(1, ok, cancel))
+        column.addLayout(_row(_label("Columnas:"), columns, _label("Filas:"), rows, head, 1,
+                              _label("Plantilla:"), template))
+        column.addLayout(_row(add_r_btn, del_r_btn, add_c_btn, del_c_btn, up_btn, down_btn, 1))
+        column.addWidget(grid, 1)
+        tip = _label("Haz doble clic o pulsa Tab para moverte por las celdas. Admite <i>cursiva</i> y "
+                     "<b>negrita</b>.", "muted")
+        tip.setTextFormat(Qt.TextFormat.PlainText)
+        column.addWidget(tip)
+        if found:
+            drop_btn = _button("Quitar tabla", remove_table, "warn")
+            column.addLayout(_row(drop_btn, 1, cancel, ok))
+        else:
+            drop_btn = None
+            column.addLayout(_row(1, cancel, ok))
+        win.parts = {"table": grid, "columns": columns, "rows": rows, "head": head, "template": template,
+                     "add_row": add_row, "del_row": del_row, "add_col": add_col, "del_col": del_col,
+                     "move_up": lambda: move_row(-1), "move_down": lambda: move_row(1), "read": read_grid,
+                     "ok": ok, "cancel": cancel, "remove": drop_btn}
+        self.table_window = win
         if win.exec():
-            self.on_sheet(lambda: self.sheet.insert_table(columns.value(), rows.value(), head.isChecked()))
+            if removed["yes"] and found:
+                self.on_sheet(lambda: self.sheet.delete_table(found[:2]))
+            else:
+                data, has_head = read_grid(), head.isChecked()
+                self.on_sheet(lambda: self.sheet.set_table(data, head=has_head, replace=found[:2] if found else None))
 
     def note_dialog(self, note=None):
         """Nota al pie en un cuadro: nueva en el cursor o, con el cursor en una (o note), la de ahí. En la hoja va como
