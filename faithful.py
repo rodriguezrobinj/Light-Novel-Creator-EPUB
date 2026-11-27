@@ -1134,6 +1134,8 @@ def write_faithful(book, chapters, out_path, lang="es", removed=(), typography=F
                         continue
                     if name == opf_path:
                         out.writestr(name, new_opf)
+                    elif name in (book.css_overrides or {}):
+                        out.writestr(name, book.css_overrides[name])
                     elif name in texts:
                         out.writestr(name, texts[name])
                     elif name in turned:

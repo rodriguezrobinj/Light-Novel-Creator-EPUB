@@ -8482,7 +8482,7 @@ def test_editor_file_explorer():
     QTest.mouseDClick(ed.files.viewport(), Qt.MouseButton.LeftButton, pos=where)
     viewer = ed.file_view
     shown = viewer.findChild(app.editor.CodeEdit)
-    css, read_only = shown.toPlainText(), shown.isReadOnly()
+    css, is_css_edit, read_only = shown.toPlainText(), isinstance(shown, app.editor.CssEdit), shown.isReadOnly()
     viewer.close()
     remembered = window.settings.get("editor_files")
     ed.win.done(0)
@@ -8504,7 +8504,7 @@ def test_editor_file_explorer():
     assert list(groups) == ["Texto", "Estilos", "Imágenes", "Tipos de letra", "Miscelánea"], list(groups)
     assert texts[:3] == ["cubierta.xhtml", "titulo.xhtml", "capitulo01.xhtml"], texts
     assert opened == expected, (opened, expected)
-    assert ".lucida" in css and read_only, (css, read_only)
+    assert ".lucida" in css and is_css_edit and not read_only, (css, is_css_edit, read_only)
     assert css_size.endswith(" B") and css_size[0].isdigit(), css_size  # el peso de cada archivo, a su lado
     assert remembered is True and shown_again and window2.settings["editor_files"] is False
     assert group.text(0) == "Texto" and "sec001.xhtml" in names and "cover.xhtml" in names, names
@@ -19314,6 +19314,217 @@ def test_unknown_words_reports_progress():
     assert any(w == "dijó" for w, _, _ in found), found
     assert seen and seen[0][0] > 0 and seen[-1] == (100, 100), seen
     assert all(a <= b for a, b in zip([d for d, _ in seen], [d for d, _ in seen[1:]])), seen
+
+
+def test_editor_visual_table_create_edit_templates_and_delete():
+    """Editor visual de tablas: crea una tabla con celdas vacías y formato, la detecta con table_at, permite editar
+    filas/columnas/orden y plantillas en un solo deshacer, ofrece «Editar tabla…» en el clic derecho y llega al EPUB."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtGui import QTextCursor
+    import app
+    import editor
+
+    # celdas vacías conservadas en table_row
+    row_html = convert.table_row("Atributo |  | 10")
+    assert row_html == '<table class="tabla"><tr><td>Atributo</td><td></td><td>10</td></tr></table>', row_html
+
+    root, window, ed = editor_on([convert.Block("heading", 1, "Capítulo 1"),
+                                  convert.Block("p", 1, "Antes."),
+                                  convert.Block("p", 1, "Después.")], [0])
+    try:
+        # Insertar desde el diálogo visual usando una plantilla + añadir fila + mover fila
+        cur = ed.sheet.textCursor()
+        cur.setPosition(ed.sheet.document().findBlockByNumber(1).position())
+        ed.sheet.setTextCursor(cur)
+
+        def drive_insert():
+            dlg = ed.table_window
+            dlg.parts["template"].setCurrentText("Pantalla de estado")
+            dlg.parts["add_row"]()
+            r = dlg.parts["table"].rowCount() - 1
+            dlg.parts["table"].item(r, 0).setText("Rango")
+            dlg.parts["table"].item(r, 1).setText("<i>S</i>")
+            dlg.parts["table"].setCurrentCell(r, 0)
+            dlg.parts["move_up"]()
+            dlg.parts["ok"].click()
+
+        QTimer.singleShot(0, drive_insert)
+        ed.table_dialog()
+        lines = ed.sheet.content().split("\n\n")
+        assert lines[1] == "Antes." and lines[-1] == "Después.", lines
+        assert lines[2] == "<tabla cabecera>Atributo | Valor", lines
+        assert any("<i>S</i>" in ln for ln in lines), lines
+
+        # Cursor dentro de la tabla -> table_at la detecta y clic derecho ofrece «Editar tabla…» y «Quitar tabla»
+        tbl_block = ed.sheet.document().findBlockByNumber(2)
+        c = QTextCursor(tbl_block)
+        ed.sheet.setTextCursor(c)
+        found = ed.sheet.table_at()
+        assert found is not None and found[3] is True and found[2][0] == ["Atributo", "Valor"], found
+        menu = ed.mark_menu(ed.sheet.cursorRect(c).center())
+        actions = [a.text() for a in menu.actions()]
+        assert "Editar tabla…" in actions and "Quitar tabla" in actions, actions
+
+        # Editar tabla existente (sin cabecera, añadir columna) y comprobar que un solo Ctrl+Z la revierte
+        before_edit = ed.sheet.content()
+
+        def drive_edit():
+            dlg = ed.table_window
+            assert dlg.windowTitle() == "Editar tabla"
+            dlg.parts["head"].setChecked(False)
+            dlg.parts["add_col"]()
+            dlg.parts["table"].item(0, 2).setText("Notas")
+            dlg.parts["ok"].click()
+
+        QTimer.singleShot(0, drive_edit)
+        ed.table_dialog()
+        edited_lines = ed.sheet.content().split("\n\n")
+        assert edited_lines[2].startswith("<tabla>") and "Notas" in edited_lines[2], edited_lines
+        ed.sheet.undo()
+        assert ed.sheet.content() == before_edit
+
+        # Quitar tabla entera y comprobar que Antes. y Después. siguen intactos
+        ed.sheet.delete_table()
+        after_delete = ed.sheet.content().split("\n\n")
+        assert after_delete == ["# Capítulo 1", "Antes.", "Después."], after_delete
+    finally:
+        ed.win.done(0)
+        window.close()
+
+
+def test_code_view_live_html_validation_and_format():
+    """En «Código HTML»: la barra inferior valida en vivo cabecera y cuerpo, marca las líneas con error en el editor,
+    salta al fallo al pulsar el aviso y «Formatear» normaliza comillas y sangría."""
+    from PySide6.QtGui import QTextCursor
+    import editor
+
+    # Validación pura de HTML y XML
+    errs = editor.validate_html(["<p>Bien.</p>", "<p><i>Sin cerrar</p>", "<p>Otro <span"], 0, 3)
+    assert len(errs) == 2 and [e[0] for e in errs] == [2, 3], errs
+    assert editor.validate_xml("<root><a/></root>") == []
+    xml_errs = editor.validate_xml("<root><a></root>")
+    assert len(xml_errs) == 1 and xml_errs[0][0] == 1, xml_errs
+    assert editor.format_html("  <p class='nota'>Hola</p>  ") == '<p class="nota">Hola</p>'
+
+    root, window, ed = editor_on([convert.Block("heading", 1, "Capítulo 1"),
+                                  convert.Block("p", 1, "Uno."),
+                                  convert.Block("p", 1, "Dos.")], [0])
+    try:
+        ed.toggle_code()
+        assert ed.code_bar.isVisible() and "XHTML válido" in ed.code_status.text(), ed.code_status.text()
+        # Romper una línea en el cuerpo -> validate_code la marca y goto_code_error lleva el cursor allí
+        lines, h, f = ed.code_parts()
+        broken_block = ed.code.document().findBlockByNumber(h + 1)
+        cur = QTextCursor(broken_block)
+        cur.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        cur.insertText("<p><i>Roto</p>")
+        ed.code.setTextCursor(QTextCursor(ed.code.document().firstBlock()))
+        found = ed.validate_code()
+        assert found and found[0][0] == h + 2, found
+        assert (h + 1) in ed.code.errors and ed.code_status.objectName() == "warn"
+        ed.goto_code_error()
+        assert ed.code.textCursor().blockNumber() == h + 1
+
+        # Arreglar con comillas simples y formatear -> vuelve a XHTML válido con comillas dobles
+        cur = QTextCursor(ed.code.document().findBlockByNumber(h + 1))
+        cur.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        cur.insertText("<p class='nota'><i>Bien</i></p>")
+        ed.format_code()
+        assert not ed.code_errors and not ed.code.errors and "XHTML válido" in ed.code_status.text()
+        assert '<p class="nota"><i>Bien</i></p>' in ed.code.code()
+    finally:
+        ed.win.done(0)
+        window.close()
+
+
+def test_css_editor_highlight_validation_format_and_epub_override():
+    """CSS en el explorador: CssEdit colorea, autocompleta, valida en vivo, formatea, guarda en book.css_overrides
+    (persistido en revisión), actualiza el autocompletado de clases en Código HTML y llega al EPUB generado."""
+    import app
+    import editor
+
+    # Validación, formateo y autocompletado CSS
+    assert editor.validate_css("body {\n  margin: 0 4%;\n  line-height: 1.5;\n}\n") == []
+    bad_css = "body {\n  margin 0\n  color: red;\n}\n}\n/* sin cerrar"
+    css_errs = editor.validate_css(bad_css)
+    err_lines = {line for line, _ in css_errs}
+    assert {2, 5, 6}.issubset(err_lines), css_errs
+    formatted = editor.format_css("p.nota{color:#333;margin:0 1em}")
+    assert "p.nota {\n  color: #333;\n  margin: 0 1em;\n}" in formatted, formatted
+    cut, items = editor.complete_css_at("  text-al")
+    assert cut == 7 and any(i[0] == "text-align" for i in items), (cut, items)
+    cut2, items2 = editor.complete_css_at("  text-align: ce")
+    assert cut2 == 2 and any(i[0] == "center" for i in items2), (cut2, items2)
+
+    # Edición de CSS en un EPUB fiel: persiste en revisión, añade clases al autocompletado y sale en el EPUB
+    src = sigil_epub(TMP / "Sigil css edit.epub")
+    root, window = visible_window()
+    window.pdf = src
+    window.show_book(convert.analyze(src))
+    k = window.book.candidates[2]
+    window.tree.selection_set(str(k))
+    ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+    try:
+        ed.toggle_files()
+        ed.show_file("OEBPS/Styles/style.css")
+        viewer = ed.file_view
+        assert isinstance(viewer.parts["code"], editor.CssEdit)
+        assert "CSS válido" in viewer.parts["status"].text()
+        viewer.parts["code"].setPlainText(viewer.parts["code"].toPlainText() + "\n.mi-clase-nueva { color: red; }\n")
+        viewer.parts["check"]()
+        assert "CSS válido" in viewer.parts["status"].text()
+        viewer.parts["save"].click()
+        assert "OEBPS/Styles/style.css" in window.book.css_overrides
+        assert "mi-clase-nueva" in ed.code.classes
+
+        # Revisión guarda y restaura css_overrides
+        state = window.review_state()
+        assert "OEBPS/Styles/style.css" in state["css_overrides"]
+        window.book.css_overrides = {}
+        window.load_review(state)
+        assert "OEBPS/Styles/style.css" in window.book.css_overrides
+
+        # Escritura del EPUB aplica el CSS editado
+        out = TMP / "Sigil css edit out.epub"
+        chapters = [(c, window.book.blocks[c].title) for c in window.book.candidates]
+        convert.write_epub(window.book, chapters, out, style=convert.ORIGINAL, typography=False, contents=False)
+        assert ".mi-clase-nueva" in epub_file(out, "OEBPS/Styles/style.css")
+    finally:
+        ed.win.done(0)
+        window.close()
+
+
+def test_css_editor_keeps_own_css_of_a_pdf_book_in_a_new_editor():
+    """Libro de PDF: el «original» del CSS salía del EPUB de vista previa, que ya lleva el CSS propio. En otra
+    apertura del editor, Guardar sin cambios lo tomaba por el original y lo quitaba, y «Restablecer» no volvía al
+    de la app. El original es el que escribe la app, sin el CSS propio."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    k = window.book.candidates[0]
+    window.tree.selection_set(str(k))
+    found = []
+    try:
+        for edit in (True, False, "reset"):
+            ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+            try:
+                ed.toggle_files()
+                ed.show_file("OEBPS/style.css")
+                parts = ed.file_view.parts
+                if edit is True:
+                    parts["code"].setPlainText(parts["code"].toPlainText() + "\n.mia { color: red; }\n")
+                elif edit == "reset":
+                    parts["reset"].click()
+                parts["save"].click()
+                root.update()
+                found.append(".mia" in window.book.css_overrides.get("OEBPS/style.css", ""))
+            finally:
+                ed.win.done(0)
+    finally:
+        window.close()
+    assert found == [True, True, False], found
 
 
 def _run_tests(part, parts):
