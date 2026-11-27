@@ -2845,6 +2845,89 @@ def test_window_thumbnail_strip():
     assert "página 4" in caption and selected == "Capitulo 2: Final", (caption, selected)
 
 
+def test_window_strip_thumbnails_stay_put_while_more_arrive():
+    """Nageki 1: al cargar, las portadas anchas del principio de la tira y sus vecinas parpadeaban unos segundos.
+    Cada tanda nueva apretaba la fila (el hueco interior aún del ancho viejo) y todas las miniaturas se movían y
+    se pisaban. Una miniatura ya puesta no se mueve al llegar las siguientes."""
+    from PySide6.QtGui import QImage
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))  # la tira se ve: oculta, Qt no la coloca
+    window.thumb_job += 1  # sin las tandas de show_book: las pone la prueba
+    strip = window.strip
+    strip.clear()
+    root.update()
+    seen, moved = {}, []
+    for batch in range(6):
+        for n in range(batch * 10, batch * 10 + 10):
+            image = QImage(96 if n in (1, 2) else 52, 70, QImage.Format.Format_RGB32)  # 1 y 2: dobles páginas
+            image.fill(0x808080)
+            strip.add(n, image, "")
+        root.update()
+        for n, label in strip.labels.items():
+            if seen.setdefault(n, label.x()) != label.x():
+                moved.append((n, seen[n], label.x()))
+    labels = [strip.labels[n] for n in sorted(strip.labels)]
+    overlaps = [(a.x(), b.x()) for a, b in zip(labels, labels[1:]) if a.geometry().right() >= b.x()]
+    window.close()
+    assert not moved, moved[:5]
+    assert not overlaps, overlaps[:5]
+
+
+def test_window_strip_cover_thumbnail_shows_the_cover_in_the_epub():
+    """Nageki 1: clic en la miniatura de la portada dejaba en el EPUB la ilustración que estaba antes. La portada
+    no es un bloque: su miniatura elige la fila «Portada». Y desde la portada, una página de en medio de un capítulo
+    elige ese capítulo, no deja la portada en el EPUB."""
+    import app
+
+    doc = pymupdf.open()
+    add_page(doc, 1, [(72, 100, "PORTADA", 30, "hebo")])
+    add_page(doc, 2, [(72, 100, "Capitulo 1: Inicio", 20, "helv"), (92, 140, "Un parrafo.", 11, "cour")])
+    add_page(doc, 3, [(92, 140, "Otro parrafo del mismo capitulo.", 11, "cour")])
+    doc.save(TMP / "portada-tira.pdf")
+    B = convert.Block
+    root, window = visible_window()
+    window.pdf = TMP / "portada-tira.pdf"
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 2, "Capitulo 1: Inicio"), B("p", 2, "Un parrafo."),
+                                                      B("p", 3, "Otro parrafo del mismo capitulo.")], [0]))
+    window.tree.selection_set("0")
+    root.update()
+    window.jump(0)
+    root.update()
+    on_cover = window.tree.current(), window.epub_caption.text()
+    window.jump(2)
+    root.update()
+    middle = window.tree.current(), window.pdf_page, window.epub_caption.text()
+    window.close()
+    assert on_cover == (app.COVER, "EPUB · portada"), on_cover
+    assert middle[:2] == ("0", 2) and "portada" not in middle[2], middle
+
+
+def test_window_quality_report_e_key_opens_the_editor():
+    """La solución del informe dice «corrígelo con «Editar texto…» (tecla E)», pero E en la lista del informe no
+    hacía nada. Ahora abre el editor en el aviso elegido, como «Abrir en el editor»."""
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent, Qt
+
+    B = convert.Block
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1: Inicio"),
+                                                      B("p", 1, "Ella dijo hola.. y se fue.")], [0]))
+    opened = []
+    window.edit_issue = opened.append
+    window.quality()
+    root.update()
+    parts = root.dialogs()[-1].parts
+    table = parts["table"]
+    row = next(i for i in parts["rows"]() if not i.startswith("k:"))
+    table.selection_set(row)
+    table.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_E, Qt.KeyboardModifier.NoModifier, "e"))
+    root.update()
+    window.close()
+    assert len(opened) == 1, opened
+
+
 def app_colors():
     import app
     return app.MARK_COLORS

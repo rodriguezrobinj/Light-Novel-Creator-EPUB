@@ -10,7 +10,7 @@ from PySide6.QtCore import (QEasingCurve, QEvent, QItemSelectionModel, QObject, 
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPalette,
                            QPen, QPixmap, QPolygonF, QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QPushButton,
+                               QLayout, QPushButton,
                                QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTabBar, QTextEdit, QToolTip, QTreeWidget, QTreeWidgetItem,
                                QWidget)
@@ -792,6 +792,9 @@ class Strip(QScrollArea):
         self.row = QHBoxLayout(inner)
         self.row.setContentsMargins(4, 4, 4, 4)
         self.row.setSpacing(6)
+        # Del tamaño justo de sus miniaturas: ajustado por la tira, cada tanda nueva apretaba la fila con el ancho
+        # viejo y todas se movían y pisaban un momento (parpadeo de las portadas anchas al cargar)
+        self.row.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
         self.row.addStretch(1)
         self.setWidget(inner)
         self.labels, self.colors, self.current, self.shown, self.blanks = {}, {}, None, None, []
