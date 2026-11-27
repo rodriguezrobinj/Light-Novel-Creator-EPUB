@@ -10207,21 +10207,6 @@ class TextEditor:
         finally:
             QApplication.restoreOverrideCursor()
 
-    def app_css(self, path):
-        """El CSS path de la app sin el CSS propio: el del EPUB del explorador ya lo lleva, y tomado por original,
-        Guardar sin cambios quitaba el propio y «Restablecer» no volvía al de la app."""
-        book, saved = self.app.book, self.app.book.css_overrides
-        plain = os.path.join(tempfile.gettempdir(), f"lnepub-css-original-{os.getpid()}.epub")
-        book.css_overrides = {}
-        try:
-            self.write_files(plain)
-            with zipfile.ZipFile(plain) as z:
-                return z.read(path).decode("utf-8", "replace")
-        finally:
-            book.css_overrides = saved
-            with contextlib.suppress(OSError):
-                os.remove(plain)
-
     def fill_files(self):
         """Los archivos del EPUB original o, con un PDF, los del que se generará con las opciones de ahora (escrito
         aparte, sin reducir imágenes: los nombres son los mismos). Ese se escribe una vez por editor: tarda un segundo
@@ -10408,17 +10393,33 @@ class TextEditor:
             column.addWidget(_label(f"{families[0] if families else 'Letra que no se puede mostrar'} · {size}",
                                     "muted"))
         elif low.endswith(".css"):
-            if not hasattr(self, "css_originals"):
-                self.css_originals = {}
-            if path not in self.css_originals:  # el de un EPUB de entrada es el suyo; el de un PDF, sin el propio
-                self.css_originals[path] = (self.app_css(path) if path in self.app.book.css_overrides
-                                            and not self.app.book.origin else data.decode("utf-8", "replace"))
-            original_css = self.css_originals[path]
-            overrides = self.app.book.css_overrides
-            current_css = overrides.get(path, original_css)
+            overrides, whole = self.app.book.css_overrides, data.decode("utf-8", "replace")
+            # Un PDF: la app rehace su hoja con Estilo, Letra y Perfil; lo propio va detrás (write_epub) y gana
+            # sobre ella sin congelarla. Un EPUB de entrada: su hoja es suya, se sustituye entera
+            layered = not self.app.book.origin
             code = editor.CssEdit(theme.code_colors(self.app.dark))
+            reference = None
+            if layered:
+                original_css, current_css = "", overrides.get(path, "")  # «Restablecer»: sin CSS propio
+                reference = editor.CssEdit(theme.code_colors(self.app.dark))
+                reference.setPlainText(whole[:len(whole) - len(current_css)] if current_css
+                                       and whole.endswith(current_css) else whole)
+                reference.setReadOnly(True)
+                halves = QSplitter(Qt.Orientation.Vertical)
+                for caption, widget in (("CSS de la app: cambia con Estilo, Letra y Perfil (solo lectura)", reference),
+                                        ("Tu CSS: va detrás del de la app y gana sobre él", code)):
+                    half = QWidget()
+                    half_column = QVBoxLayout(half)
+                    half_column.setContentsMargins(0, 0, 0, 0)
+                    half_column.addWidget(_label(caption, "muted"))
+                    half_column.addWidget(widget, 1)
+                    halves.addWidget(half)
+                column.addWidget(halves, 1)
+            else:
+                original_css = whole
+                current_css = overrides.get(path, original_css)
+                column.addWidget(code, 1)
             code.setPlainText(current_css)
-            column.addWidget(code, 1)
             css_errors = []
             status_btn = _button(f"{theme.ICONS['ok']} CSS válido",
                                  lambda: css_errors and code.goto_line(css_errors[0][0]), "ok")
@@ -10481,7 +10482,7 @@ class TextEditor:
             code.textChanged.connect(lambda: val_timer.start(180))
             fmt_btn = _button("Formatear", do_format)
             reset_btn = _button("Restablecer", do_reset)
-            reset_btn.setToolTip("Vuelve al CSS original del libro")
+            reset_btn.setToolTip("Vacía tu CSS: queda solo el de la app" if layered else "Vuelve al CSS original del libro")
             save_btn = _button("Guardar", do_save, "primary")
             cancel_btn = _button("Cancelar", win.close)
             column.addLayout(_row(status_btn, 1, fmt_btn, reset_btn))
@@ -10490,7 +10491,7 @@ class TextEditor:
             check_css()
             win.resize(900, 650)
             win.parts = {"code": code, "status": status_btn, "format": fmt_btn, "reset": reset_btn,
-                         "save": save_btn, "cancel": cancel_btn, "check": check_css}
+                         "save": save_btn, "cancel": cancel_btn, "check": check_css, "reference": reference}
             win.show()
             self.file_view = win
             return

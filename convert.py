@@ -4606,6 +4606,8 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                 'h1, h1 span, h2 { font-family: "Titulos", serif; font-weight: normal; }\n')
     css += BOX_STYLES.get(box_style, "")
     css += css_extra
+    # El CSS propio del editor, detrás: gana sobre el de la app y Estilo, Letra y Perfil siguen cambiándolo
+    css += (book.css_overrides or {}).get("OEBPS/style.css", "")
     manifest += [f'<item id="f{k}" href="{src}" media-type="application/vnd.ms-opentype"/>' for k, src in enumerate(fonts)]
     toc_page = "contents.xhtml" if contents else "nav.xhtml"
     # Orden de la referencia (Sigil): portada, sinopsis, láminas, página de título, logo, índice, lectura, notas
@@ -4734,7 +4736,7 @@ def write_epub(book, chapters, out_path, lang="es", removed=(), typography=False
                     z.writestr(f"OEBPS/{name}", _kepub(text) if kepub else text)
             z.writestr("META-INF/com.apple.ibooks.display-options.xml", APPLE_OPTIONS)
             z.writestr("OEBPS/toc.ncx", BAD_XML.sub("", ncx))
-            z.writestr("OEBPS/style.css", (book.css_overrides or {}).get("OEBPS/style.css", css))
+            z.writestr("OEBPS/style.css", css)
             z.writestr("OEBPS/cover.xhtml", cover)
             cover_data = _shrink(book.cover, limit) if limit and book.cover else book.cover
             if cover_data[:4] == b"\x89PNG":  # ilustración con transparencia como portada: cover.jpg es JPEG
