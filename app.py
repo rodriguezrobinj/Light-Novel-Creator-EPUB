@@ -3575,11 +3575,23 @@ class App:
         self.pdf_page = n
         self.draw_pdf()
         item = next((i for i in self.tree.get_children() if self.book.blocks[int(i)].page == n + 1), None)
+        if item is None and n == self.cover_page() and self.tree.exists(COVER):
+            item = COVER  # la portada no es un bloque: sin esto, el EPUB seguía con la fila de antes
+        elif item is None and n == self.toc_page() and self.tree.exists(CONTENTS):
+            item = CONTENTS
         if item:
             self.tree.selection_set(item)
             self.tree.see(item)
-        else:  # una página de en medio de una sección: el EPUB, a ella
-            self.follow_original()
+            return
+        if self.tree.current() in (COVER, CONTENTS):  # desde una fila fija, la sección que tiene esa página
+            item = next((i for i in reversed(self.reading_rows()) if self.book.blocks[int(i)].page - 1 <= n), None)
+            if item is None:
+                return
+            self.tree.selection_set(item)  # update_preview la abre por su principio: de vuelta a la página n
+            self.tree.see(item)
+            self.pdf_page = n
+            self.draw_pdf()
+        self.follow_original()  # una página de en medio de una sección: el EPUB, a ella
 
     def remember(self, change):
         """Apunta un cambio para Ctrl+Z y guarda la revisión poco después (autosave)."""
@@ -6168,6 +6180,7 @@ class App:
         bold.setWeight(QFont.Weight.DemiBold)
         table.tag_configure("group", font=bold)
         table.double_clicked.connect(lambda _: open_issue())  # doble clic: al editor, en el trozo exacto
+        table.bind_key(Qt.Key.Key_E, lambda: open_issue())  # la solución lo dice: «(tecla E)»
         panes.addWidget(table)
         right = QWidget()
         side = QVBoxLayout(right)
@@ -6205,7 +6218,7 @@ class App:
         all_btn = _button("Arreglar todos", lambda: confirm_all(same_kind(chosen_kind())))
         ignore_btn = _button("Ignorar", lambda: ignore(chosen_issue()))
         edit_btn = _button("Abrir en el editor", lambda: open_issue())
-        edit_btn.setToolTip("Abre el capítulo con el trozo del aviso elegido (también con doble clic en la lista)")
+        edit_btn.setToolTip("Abre el capítulo con el trozo del aviso elegido (también con doble clic en la lista o la tecla E)")
         side.addStretch(1)
         aside = QWidget()  # el detalle se desplaza; los botones, siempre a la vista debajo
         aside_column = QVBoxLayout(aside)
