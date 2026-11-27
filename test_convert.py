@@ -19527,6 +19527,43 @@ def test_css_editor_keeps_own_css_of_a_pdf_book_in_a_new_editor():
     assert found == [True, True, False], found
 
 
+def test_css_editor_own_css_of_a_pdf_book_goes_after_the_app_css():
+    """Libro de PDF: el CSS propio sustituía style.css entero y Estilo o Letra dejaban de cambiar el EPUB. Ahora el
+    editor muestra el de la app de solo lectura y edita solo lo propio, que va detrás: gana sobre el de la app y
+    las opciones siguen cambiándolo."""
+    import app
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    k = window.book.candidates[0]
+    window.tree.selection_set(str(k))
+    ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+    try:
+        ed.toggle_files()
+        ed.show_file("OEBPS/style.css")
+        parts = ed.file_view.parts
+        start = parts["code"].toPlainText(), parts["reference"].isReadOnly(), parts["reference"].toPlainText()
+        parts["code"].setPlainText("p { text-indent: 3em; }\n")
+        parts["save"].click()
+        root.update()
+        ed.show_file("OEBPS/style.css")  # de nuevo: lo propio, sin repetir el de la app
+        again = ed.file_view.parts["code"].toPlainText(), ed.file_view.parts["reference"].toPlainText()
+    finally:
+        ed.win.done(0)
+    sheets = {}
+    chapters = [(c, window.book.blocks[c].title) for c in window.book.candidates]
+    for style in ("Clásico", "Novela ligera"):
+        out = TMP / f"capa-{style}.epub"
+        convert.write_epub(window.book, chapters, out, style=style)
+        sheets[style] = epub_file(out, "OEBPS/style.css")
+    window.close()
+    assert start[0] == "" and start[1] and "body" in start[2], start[:2]
+    assert again == ("p { text-indent: 3em; }\n", start[2]), again
+    assert all(s.endswith("p { text-indent: 3em; }\n") for s in sheets.values()), sheets
+    assert sheets["Clásico"] != sheets["Novela ligera"]  # el estilo sigue cambiando la hoja
+
+
 def _run_tests(part, parts):
     """Ejecuta las pruebas part, part+parts, part+2·parts… en este proceso. Devuelve cuántas fallaron."""
     global TMP
