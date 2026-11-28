@@ -10,3 +10,15 @@ dist/
 .superpowers/
 .claude/
 CLAUDE.md
+
+# Herramientas locales de IA (agentes, skills, reglas, MCP): nunca al repositorio
+.mcp.json
+AGENTS.md
+GEMINI.md
+.gemini/
+.agy/
+.antigravity/
+.cursor/
+.cursorrules
+.windsurfrules
+docs/superpowers/
