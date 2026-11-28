@@ -18032,6 +18032,41 @@ def test_translate_batches_and_dpapi():
     assert translate.unprotect("YWJjZGVm") == ""
 
 
+def test_registro_crash_details_redacts_secrets():
+    """crash_details nunca vuelca claves API ni cabeceras de autorización en registro.log/errores.log."""
+    import registro
+
+    def boom():
+        api_key = "sk-proj-supersecreta123456"
+        headers = {
+            "Authorization": "Bearer sk-ant-otraClavePrivada999",
+            "x-api-key": "sk-ant-claveDirecta888",
+            "X-Goog-Api-Key": "AIzaSyDummyKeyValue1234567890abcd",
+            "DeepL-Auth-Key": "12345678-1234-1234-1234-1234567890ab:fx",
+            "Content-Type": "application/json",
+        }
+        fields = {"text": "hola", "username": "lector@ejemplo.com", "apiKey": "lt-secreta-999"}
+        encoded = "text=hola&apiKey=lt-en-url-777&language=es"
+        key = "profile"  # nombre común no secreto: debe seguir viéndose para depurar
+        count = 42
+        raise RuntimeError("fallo de prueba")
+
+    try:
+        boom()
+    except RuntimeError as exc:
+        details = registro.crash_details(exc.__traceback__)
+    for leaked in (
+        "sk-proj-supersecreta123456",
+        "sk-ant-otraClavePrivada999",
+        "sk-ant-claveDirecta888",
+        "AIzaSyDummyKeyValue1234567890abcd",
+        "12345678-1234-1234-1234-1234567890ab:fx",
+        "lt-secreta-999",
+        "lt-en-url-777",
+    ):
+        assert leaked not in details, details
+    assert "<oculto>" in details, details
+    assert "key = 'profile'" in details and "count = 42" in details, details
 
 
 def test_translate_doubts_and_second_pass():

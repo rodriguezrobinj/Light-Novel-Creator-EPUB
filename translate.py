@@ -7,6 +7,7 @@ import hashlib
 import html
 import json
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -740,23 +741,40 @@ def models(name, api_key="", base=""):
         raise TranslateError(f"{name} devolvió una lista de modelos que no se entiende.") from None
 
 
-# Claves API cifradas con DPAPI de Windows: solo este usuario en este equipo las puede leer
+# Claves API cifradas con DPAPI de Windows: solo este usuario en este equipo las puede leer.
+# CRYPTPROTECT_UI_FORBIDDEN (0x01) evita que Windows abra diálogos en el proceso de trabajo o en pruebas.
+_DPAPI_UI_FORBIDDEN = 0x01
+
+
 class _Blob(ctypes.Structure):
     _fields_ = [("size", ctypes.c_ulong), ("data", ctypes.POINTER(ctypes.c_char))]
 
 
 def _dpapi(data, protect):
+    if sys.platform != "win32":
+        raise OSError("DPAPI solo está disponible en Windows.")
     crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
+    blob_ptr = ctypes.POINTER(_Blob)
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    fn.argtypes = [blob_ptr, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                   ctypes.c_void_p, ctypes.c_ulong, blob_ptr]
+    fn.restype = ctypes.c_int
     buffer = ctypes.create_string_buffer(data, len(data))
     source, out = _Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char))), _Blob()
-    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
-    if not fn(ctypes.byref(source), None, None, None, None, 0, ctypes.byref(out)):
-        raise OSError("DPAPI")
     try:
-        return ctypes.string_at(out.data, out.size)
+        if not fn(ctypes.byref(source), None, None, None, None, _DPAPI_UI_FORBIDDEN, ctypes.byref(out)):
+            raise OSError("DPAPI")
+        try:
+            return ctypes.string_at(out.data, out.size)
+        finally:
+            if out.data and out.size:
+                ctypes.memset(out.data, 0, out.size)  # limpia la clave descifrada antes de liberar
+            kernel32.LocalFree(ctypes.cast(out.data, ctypes.c_void_p))
     finally:
-        kernel32.LocalFree(ctypes.cast(out.data, ctypes.c_void_p))
+        if data:
+            ctypes.memset(buffer, 0, len(data))
 
 
 def protect(text):
@@ -768,5 +786,5 @@ def unprotect(data):
     """La clave guardada con protect; "" si no se puede leer (otro usuario u otro equipo)."""
     try:
         return _dpapi(base64.b64decode(data), False).decode("utf-8") if data else ""
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         return ""
