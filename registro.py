@@ -223,10 +223,50 @@ def peak_memory_mb():
 
 _short = reprlib.Repr(maxstring=120, maxother=120, maxlist=6, maxdict=6, maxlevel=2)
 
+# Nombres y patrones de credenciales que nunca deben acabar en claro en registro.log ni errores.log
+_SECRET_NAMES = frozenset({
+    "api_key", "apikey", "secret", "token", "password", "passwd", "authorization", "auth_header", "credentials",
+})
+_SECRET_DICT_KEYS = _SECRET_NAMES | frozenset({
+    "x-api-key", "x-goog-api-key", "deepl-auth-key", "api-key", "access_token", "refresh_token",
+})
+_SECRET_PATTERNS = (
+    (re.compile(r"(?i)\b(Bearer|DeepL-Auth-Key)\s+[^\s'\"\\,}]+"), r"\1 <oculto>"),
+    (re.compile(r"(?i)\b(apiKey|api_key|x-api-key|x-goog-api-key)\s*([=:])\s*['\"]?[^&\s'\"\\,}]+['\"]?"),
+     r"\1\2<oculto>"),
+    (re.compile(r"\bsk-(?:ant-|proj-|or-)?[A-Za-z0-9_-]{12,}\b"), "<oculto>"),
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"), "<oculto>"),
+    (re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:fx\b"), "<oculto>"),
+)
+
+
+def redact(text):
+    """Sustituye claves API y cabeceras de autorización por «<oculto>» antes de guardar texto en el registro."""
+    for pat, repl in _SECRET_PATTERNS:
+        text = pat.sub(repl, text)
+    return text
+
+
+def _scrub(name, value, depth=0):
+    """Copia segura para repr: oculta variables y campos de diccionarios que llevan claves API."""
+    low = str(name).lower()
+    if low in _SECRET_NAMES and value not in ("", None):
+        return "<oculto>"
+    if isinstance(value, dict) and depth < 2:
+        cleaned = {}
+        for k, v in list(value.items())[:12]:
+            k_low = str(k).lower()
+            if k_low in _SECRET_DICT_KEYS or (low in ("keys", "grammar") and (low == "keys" or k_low == "key")):
+                cleaned[k] = "<oculto>" if v not in ("", None) else v
+            else:
+                cleaned[k] = _scrub(k, v, depth + 1)
+        return cleaned
+    return value
+
 
 def crash_details(tb):
-    """Las variables de la función donde saltó el fallo, cortas: en el .exe la pila no trae el código y, sin ellas,
-    «'NoneType' object has no attribute…» no decía qué valía qué."""
+    """Las variables de la función donde saltó el fallo, cortas y sin claves API: en el .exe la pila no trae el
+    código y, sin ellas, «'NoneType' object has no attribute…» no decía qué valía qué."""
     while tb is not None and tb.tb_next is not None:
         tb = tb.tb_next
     if tb is None:
@@ -234,7 +274,8 @@ def crash_details(tb):
     lines = []
     for name, value in list(tb.tb_frame.f_locals.items())[:20]:
         try:
-            shown = _short.repr(value)
+            safe = _scrub(name, value)
+            shown = "<oculto>" if safe == "<oculto>" else redact(_short.repr(safe))
         except Exception as e:  # un __repr__ que falla no tapa el fallo de verdad
             shown = f"<{type(value).__name__}: {type(e).__name__}>"
         lines.append(f"    {name} = {shown}")
