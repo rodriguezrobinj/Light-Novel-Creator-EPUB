@@ -1594,9 +1594,9 @@ def edit_section(book, start, end, text, folder=None, exact=False):
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, [_line(old[k], k).strip() for k in range(start, end)],
                                                       lines, autojunk=False).get_opcodes():
         if op == "replace" and i2 - i1 == j2 - j1:
-            origin |= {j1 + n: old[start + i1 + n] for n in range(i2 - i1)
+            origin |= {j1 + n: (start + i1 + n, old[start + i1 + n]) for n in range(i2 - i1)
                        if old[start + i1 + n].kind in ("p", "heading")}
-    new, kept = [], {}
+    new, kept, renamed_heads = [], {}, {}
     for j, line in enumerate(lines):
         m = TOKEN.fullmatch(line)
         k = int(m.group(2)) if m else -1
@@ -1633,14 +1633,16 @@ def edit_section(book, start, end, text, folder=None, exact=False):
             align = next((a for a, p in ALIGN_PREFIX.items() if p == prefix), "")
             new.append(Block("p", page, _inline(rest.strip() if align else line), align=align))
         if j in origin and new[-1].kind in ("p", "heading") and not (m or line in same):
-            page = new[-1].page = origin[j].page
-            new[-1].rect = origin[j].rect
-            was, now = origin[j], new[-1]
+            old_k, was = origin[j]
+            page = new[-1].page = was.page
+            new[-1].rect = was.rect
+            now = new[-1]
             if was.src and was.kind in ("p", "heading"):  # EPUB de entrada: se escribe en el mismo elemento
                 now.src, now.orig, now.title = was.src, was.orig, was.title
                 now.tag = now.tag or was.tag
             if was.kind == now.kind == "heading":
                 now.image = was.image  # el título dibujado (Witch 1) sigue con su nombre corregido o traducido
+                renamed_heads[old_k] = start + len(new) - 1  # un título editado sigue siendo capítulo si lo era
             # Traducido sin la marca (revisiones de antes de los recuadros, o la IA la quitó): sigue en su recuadro
             # y con su viñeta. Quitar solo el recuadro deja el mismo texto, y eso no se toca.
             if (was.kind == now.kind == "p" and was.align == "frame" and not now.align
@@ -1653,7 +1655,8 @@ def edit_section(book, start, end, text, folder=None, exact=False):
         new[0] = replace(new[0], shell=old[start].shell)
     book.blocks = old[:start] + new + old[end:]
     mapping = _Shift(start, end, len(new) - (end - start), kept, len(old))
-    book.candidates = [mapping[k] for k in book.candidates if k in mapping]
+    book.candidates = [mapping[k] if k in mapping else renamed_heads[k]
+                       for k in book.candidates if k in mapping or k in renamed_heads]
     return mapping
 
 
@@ -2619,6 +2622,7 @@ QUALITY_KINDS = [
     ("honorific", "Honorífico escrito de varias formas", "Menor"), ("glossary", "Nombre distinto al glosario", "Menor"),
     ("capital", "Minúscula tras un punto", "Menor"), ("end", "Falta el punto final", "Menor"),
     ("name-variant", "Nombre escrito de dos formas", "Menor"),
+    ("title_case", "Mayúsculas de título al estilo inglés", "Menor"),
 ] + [(kind, title, "Menor") for kind, title, _, _, _ in TYPOS]
 
 
@@ -2744,6 +2748,66 @@ def shown_text(b, k):
     return shown[2:] if b.kind == "heading" else shown
 
 
+# Palabras funcionales españolas que van en minúscula dentro de un título (artículos, preposiciones y conjunciones)
+TITLE_LOWER = frozenset(
+    "a al con de del el en la las lo los o para por que se sin su sus un una unos unas y e u ni "
+    "entre hacia hasta desde sobre tras contra".split()
+)
+# Signos que abren un tramo nuevo en un título: la palabra que sigue puede ir en mayúscula
+TITLE_BREAK = re.compile(r"[:—–―─.¿¡?!\n]|\s+-\s+")  # ─ y ―: rayas de traducciones fan (Farming Life 51)
+# Etiquetas HTML y notas al pie dentro de la línea del título: su contenido no se toca
+_TITLE_SKIP = re.compile(r"</?[a-z][^>]*>|\[Nota:[^\]]*\]")
+
+
+def _fix_title_case(line, opening=""):
+    """Pone en minúscula las palabras funcionales españolas con mayúscula inicial dentro de cada tramo de un título,
+    sobre _line para conservar cursiva, negrita y notas. Devuelve la línea arreglada o None si no hay cambios."""
+    prefix = opening or ("# " if line.startswith("# ") else "")
+    body = line[len(prefix):]
+    chars, pos, cursor = [], [], 0
+    for m in _TITLE_SKIP.finditer(body):
+        for i in range(cursor, m.start()):
+            chars.append(body[i])
+            pos.append(i)
+        if m[0].startswith("<br"):
+            chars.append("\n")
+            pos.append(-1)
+        cursor = m.end()
+    for i in range(cursor, len(body)):
+        chars.append(body[i])
+        pos.append(i)
+    plain = "".join(chars)
+    if not plain.strip() or plain.isupper():
+        return None
+    out = list(body)
+    changed = False
+    cuts = [0, *(x for m in TITLE_BREAK.finditer(plain) for x in m.span()), len(plain)]
+    for s, e in zip(cuts[0::2], cuts[1::2]):
+        seg = plain[s:e]
+        if not seg.strip() or seg.isupper():
+            continue
+        words = list(re.finditer(r"[^\W\d_]+", seg))
+        for idx, m in enumerate(words):
+            if idx == 0:
+                continue
+            w = m[0]
+            if (m.start() > 0 and seg[m.start() - 1] in "-'’"
+                    or m.end() < len(seg) and seg[m.end()] in "-'’"):
+                continue
+            if w.lower() not in TITLE_LOWER:
+                continue
+            if len(w) == 1:
+                # «A», «Y»…: solo si sigue una palabra en mayúscula (no «Rango A» ni «Proyecto Y» ni «Rango A en…»)
+                if not (w.isupper() and idx + 1 < len(words) and words[idx + 1][0][0].isupper()):
+                    continue
+            elif not (w[0].isupper() and w[1:].islower()):
+                continue
+            at = pos[s + m.start()]
+            out[at] = out[at].lower()
+            changed = True
+    return prefix + "".join(out) if changed else None
+
+
 def _issue_span(issue, blocks):
     """(inicio, fin) del problema del aviso en el texto del párrafo como lo muestra el editor (sin etiquetas, con
     «[Nota: …]»): el editor lo subraya ahí, como Word, y no el párrafo entero. None si no se sabe."""
@@ -2755,6 +2819,8 @@ def _issue_span(issue, blocks):
     edit = issue.edit
     if edit and edit[2] and edit[:2] == (issue.block, issue.block + 1):  # arreglo de este párrafo: lo que cambia
         after = TAGS.sub("", edit[2])
+        if b.kind == "heading" and after.startswith("# "):
+            after = after[2:]
         start = len(os.path.commonprefix([shown, after]))
         tail = len(os.path.commonprefix([shown[start:][::-1], after[start:][::-1]]))
         return _words_around(shown, start, max(start, len(shown) - tail))
@@ -2961,9 +3027,22 @@ def quality_report(book, echoes=False, glossary=(), lang="es"):
     report = [i for i in report if not (i.kind == "unpaired" and unpaired_signs[i.block] in many)]
     last = None
     for k, end in zip(heads, heads[1:]):
+        title = _plain(blocks[k]).strip()
+        if spanish:
+            line = _line(blocks[k], k)
+            fixed = _fix_title_case(line, blocks[k].opening)
+            if fixed:
+                prefix = blocks[k].opening or ("# " if fixed.startswith("# ") else "")
+                after_plain = _unhtml(_inline(fixed[len(prefix):])).strip()
+                report.append(Issue(
+                    "title_case", k, blocks[k].page, "Menor", "Mayúsculas de título al estilo inglés",
+                    "En español solo va en mayúscula la primera palabra del título y los nombres propios, no todas "
+                    "las palabras.",
+                    "«Arreglar» pone en minúscula solo artículos, preposiciones y conjunciones; el resto (por si hay "
+                    "nombres propios) revísalo con «Editar texto…» (tecla E).",
+                    _cut(title), _cut(after_plain), (k, k + 1, fixed), title))
         if k not in book.candidates:
             continue
-        title = _plain(blocks[k]).strip()
         nxt = next((j for j in heads if j > k and j in book.candidates), len(blocks))
         letters = sum(_letters(_plain(b)) for b in blocks[k + 1:nxt] if b.kind == "p")
         if letters < 300 and not PART_TITLE.match(title):
@@ -5014,7 +5093,7 @@ def write_pdf(book, chapters, out_path, size="A5", progress=None, **options):
     # ignore_cleanup_errors: el antivirus aún lee un EPUB de paso recién escrito y Windows no deja borrarlo; no es
     # motivo para perder el PDF (lo que quede lo borra la limpieza de lnepub-*)
     with tempfile.TemporaryDirectory(prefix="lnepub-pdf-", ignore_cleanup_errors=True) as tmp:
-        epub = None
+        epub, written = None, ""
         for attempt in range(4):  # cada vuelta, el primer subtítulo colgado de cada capítulo; casi siempre basta 1
             # MuPDF no hace caso de page-break-before: un relleno arriba del alto que queda lo empuja, y en la
             # página nueva el relleno que sobra no se ve

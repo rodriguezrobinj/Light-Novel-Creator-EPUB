@@ -39,18 +39,18 @@ OPTIONS = (
            "El Kobo muestra páginas y estadísticas de lectura; el archivo acaba en .kepub.epub."),
     Option("Perfil y formato", "lang", "language", "Idioma del libro",
            "Decide cómo se parten las palabras, la voz de lectura y los avisos del informe."),
-    _section("Aspecto", "Texto"),
+    _section("Aspecto", "Letra y estilo"),
     Option("Aspecto", "style", "choice", "Estilo",
            "La maqueta del libro: márgenes, sangría, títulos. «Original», con un EPUB: su CSS, sin tocar. También en "
            "la barra de abajo, junto a la vista previa."),
     Option("Aspecto", "font", "choice", "Letra",
-           "«Del lector» deja elegir la letra en el lector. Una propia (.ttf, .otf), con «Otra…» en la barra de abajo."),
+           "«Del lector» deja elegir la letra en el lector. Una propia (TTF u OTF), con «Otra…» en la barra de abajo."),
     Option("Aspecto", "separator", "choice", "Separador de escena",
            "Lo que va entre dos escenas. Uno escrito a mano o «Icono propio», en la barra de abajo."),
     _section("Aspecto", "Títulos, notas y recuadros"),
-    Option("Aspecto", "heading_font", "choice", "Fuente de títulos",
+    Option("Aspecto", "heading_font", "choice", "Letra de los títulos",
            "Los títulos de capítulo con otra letra: Eagle Lake es caligráfica. «Archivo propio» usa el de abajo."),
-    Option("Aspecto", "heading_font_file", "file", "Archivo de fuente de títulos", "Un .ttf o .otf, para «Archivo propio»."),
+    Option("Aspecto", "heading_font_file", "file", "Archivo de fuente de títulos", "Un archivo TTF u OTF, para «Archivo propio»."),
     Option("Aspecto", "note_style", "choice", "Llamada de nota", "Cómo se ve el número de la nota en el texto."),
     Option("Aspecto", "box_style", "choice", "Estilo de recuadros",
            "«Pantalla de juego»: fondo negro, brillo azul y letra blanca, como las ventanas de opciones de un juego."),
@@ -79,7 +79,7 @@ OPTIONS = (
            "Todas las notas en una página «Notas», con enlace de vuelta. Si no, cada capítulo lleva las suyas al final."),
     Option("Ilustraciones", "shrink", "check", "Reducir imágenes", "Las imágenes son casi todo el peso del EPUB."),
     Option("Ilustraciones", "shrink_size", "number", "Lado mayor, en píxeles", "Tamaño de las imágenes reducidas."),
-    Option("Ilustraciones", "gray", "check", "Imágenes en gris", "Para e-readers de tinta: pesa menos y se ve igual."),
+    Option("Ilustraciones", "gray", "check", "Imágenes en gris", "Para lectores de tinta electrónica: pesa menos y se ve igual."),
     Option("Ilustraciones", "trim", "check", "Recortar márgenes blancos de las ilustraciones",
            "Quita el borde blanco que traen algunas ilustraciones escaneadas."),
     Option("PDF", "whole_words", "check", "No partir palabras al final de línea",
@@ -114,8 +114,9 @@ OPTIONS = (
            "Lo editado, marcado en la hoja desde el principio (Vista → Mostrar cambios)."),
     Option("Editor", "editor_nav", "check", "Panel de navegación al abrir",
            "Títulos, avisos, comentarios y cambios del capítulo a la izquierda (F9)."),
-    Option("Editor", "editor_dark", "check", "Panel en modo oscuro",
-           "Original, EPUB y hoja web con fondo oscuro y letra clara; las ilustraciones no cambian."),
+    Option("Editor", "editor_dark", "check", "Vistas en oscuro",
+           "Original, EPUB y hoja web con fondo oscuro y letra clara; las ilustraciones no cambian. Con el tema "
+           "oscuro, la hoja web ya lo está."),
     Option("Editor", "editor_spell", "check", "Subrayar las faltas de ortografía",
            "Mientras se escribe, en rojo; el diccionario es de español. Sin esto, «Ortografía…» sigue funcionando."),
     Option("Editor", "editor_resume", "check", "Ofrecer volver a donde lo dejaste",
@@ -129,7 +130,7 @@ OPTIONS = (
            "Dónde corre LanguageTool al pulsar «Revisar gramática» en el Informe de calidad. En este equipo es "
            "privado y sin límites; languagetool.org no descarga nada, pero el texto sale del equipo y va más lento."),
     Option("Traducción", "translate", "translate", "Motor, modelo y clave de API",
-           "Servicio que traduce, su modelo y su clave, e idiomas con los que empieza «Traducir»."),
+           "Servicio que traduce e idiomas con los que empieza «Traducir». El modelo y la clave, en «Traducir» → «Motor y claves…»."),
     Option("Carpeta vigilada", "watch", "folder", "Carpeta vigilada",
            "Mientras la ventana esté abierta, cada PDF nuevo que llegue a ella se convierte solo."),
     Option("Informe de calidad", "echoes", "check", "Buscar ecos (palabras repetidas cerca)",
@@ -143,6 +144,9 @@ BOOK_KEYS = tuple(o.key for o in OPTIONS if o.category in CATEGORIES[BOOK] and o
 
 FILE_TYPES = {"logo": ("Imagen", "*.png *.jpg *.jpeg"), "heading_font_file": ("Fuente", "*.ttf *.otf")}
 NUMBERS = {"shrink_size": (400, 4000, 100), "editor_zoom": (50, 200, 10), "recent_max": (3, 30, 1)}  # mín, máx, paso
+# Opciones y subfilas con etiqueta a la izquierda: comparten un único ancho para no saltar al cambiar de página
+LABELLED_KINDS = ("choice", "language", "number", "folder", "file", "grammar")
+EXTRA_LABELS = ("Motor:", "Modelo:", "URL:", "Clave:", "Traducir de:", "Servidor:", "Usuario:")
 
 
 def fold(text):
@@ -197,6 +201,8 @@ class OptionsDialog:
         group.addButton(this_book)
         group.addButton(new_books)
         this_book.setEnabled(bool(owner.book))
+        if not owner.book:
+            this_book.setToolTip("Abre un libro para cambiar solo sus opciones")
         (this_book if self.scope == "book" else new_books).setChecked(True)
         self.scope_row = QWidget()
         scope_layout = QHBoxLayout(self.scope_row)
@@ -223,11 +229,14 @@ class OptionsDialog:
         column.addLayout(buttons)
         self.items = {}  # categoría o encabezado -> QListWidgetItem
         bold = QFont(listing.font())
-        bold.setBold(True)
-        for header, names in CATEGORIES.items():
-            item = QListWidgetItem(header.upper())
+        bold.setWeight(QFont.Weight.DemiBold)
+        for n, (header, names) in enumerate(CATEGORIES.items()):
+            item = QListWidgetItem(header)
             item.setFlags(Qt.ItemFlag.NoItemFlags)  # encabezado: no se elige
             item.setFont(bold)
+            if n > 0:  # aire antes del segundo bloque: «La aplicación» no pegada a «PDF»
+                item.setSizeHint(item.sizeHint().expandedTo(listing.fontMetrics().size(0, header) * 1.6))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
             listing.addItem(item)
             self.items[header] = item
             for name in names:
@@ -240,9 +249,30 @@ class OptionsDialog:
         listing.currentItemChanged.connect(lambda item, _: item and self.show(item.text().strip()))
         this_book.toggled.connect(lambda on: self.set_scope("book" if on else "new"))
         self.category = None
+        self.page_labels = []
+        self.label_w = self.calc_label_width()
         pages = [name for group in CATEGORIES.values() for name in group]  # ajustes.json se puede editar a mano
-        self.show(category if category in pages else CATEGORIES[BOOK][0])
+        default_page = CATEGORIES[BOOK][0] if owner.book else CATEGORIES[APP][0]
+        self.show(category if category in pages else default_page)
         win.show()
+
+    def calc_label_width(self):
+        """Ancho de la etiqueta más larga de todas las páginas: la columna de controles empieza en la misma x."""
+        metrics = (self.win if self.win.isVisible() else self.owner.root).fontMetrics()
+        texts = [f"{o.label}:" for o in OPTIONS if o.kind in LABELLED_KINDS and o.key != "watch"] + list(EXTRA_LABELS)
+        return max(metrics.horizontalAdvance(t) for t in texts) + theme.SPACE["pad"]
+
+    def make_label(self, text):
+        lbl = QLabel(text)
+        lbl.setFixedWidth(self.label_w)
+        self.page_labels.append(lbl)
+        return lbl
+
+    def sync_label_width(self):
+        self.label_w = self.calc_label_width()
+        for lbl in self.page_labels:
+            if shiboken6.isValid(lbl):
+                lbl.setFixedWidth(self.label_w)
 
     def is_book(self, category=None):
         return (category or self.category) in CATEGORIES[BOOK]
@@ -277,6 +307,8 @@ class OptionsDialog:
             else:  # apply_theme lee el acento y la letra de los ajustes (restore_options los devuelve)
                 self.owner.settings[key] = value
             self.owner.apply_theme()
+            if key == "ui_font":
+                self.sync_label_width()
         if key in BOOK_KEYS and self.scope == "book":
             self.owner.update_preview()
         if len(changes) > 1:
@@ -323,24 +355,43 @@ class OptionsDialog:
         head.addWidget(reset)
         layout.addLayout(head)
         self.parts["widgets"], self.parts["notes"], self.parts["reset"] = {}, {}, reset
-        for option in OPTIONS:
-            if option.category == category and option.kind == SECTION:
-                caption = QLabel(option.label.upper())  # como los encabezados de la lista de la izquierda
+        self.page_labels = []
+        cat_opts = [o for o in OPTIONS if o.category == category]
+        for option in cat_opts:
+            if option.kind == SECTION:
+                caption = QLabel(option.label)
                 caption.setObjectName("muted")
                 bold = QFont(caption.font())
-                bold.setBold(True)
+                bold.setWeight(QFont.Weight.DemiBold)
                 caption.setFont(bold)
                 caption.setContentsMargins(0, theme.SPACE["section"], 0, theme.SPACE["tight"])
                 layout.addWidget(caption)
-            elif option.category == category:
+            else:
                 self.add_option(layout, option)
         self.parts["copy"] = None
         if self.is_book() and self.scope == "book":
-            copy_btn = QPushButton("Usar también para libros nuevos")
-            copy_btn.setToolTip("Copia los valores de esta página a «Libros nuevos»")
-            keys = [o.key for o in OPTIONS if o.category == category and o.kind != SECTION]
-            copy_btn.clicked.connect(lambda: self.defaults.update({k: self.owner.fields()[k].get() for k in keys}))
-            layout.addWidget(copy_btn, 0, Qt.AlignmentFlag.AlignLeft)
+            # Verbo explícito para distinguirlo del selector «Aplicar a» de arriba
+            copy_btn = QPushButton("Copiar esta página a «Libros nuevos»")
+            copy_btn.setToolTip("Copia una vez los valores de esta página a los de «Libros nuevos». Para editarlos "
+                                "directamente, elige «Libros nuevos» arriba.")
+            copy_note = QLabel("")
+            copy_note.setObjectName("ok")
+            copy_note.hide()
+            keys = [o.key for o in cat_opts if o.kind != SECTION]
+
+            def copy_to_new():
+                self.defaults.update({k: self.owner.fields()[k].get() for k in keys})
+                copy_note.setText(f"{theme.ICONS['ok']} Copiado a «Libros nuevos»")
+                copy_note.show()
+                qtk.after(2500, lambda: shiboken6.isValid(copy_note) and copy_note.hide())
+
+            copy_btn.clicked.connect(copy_to_new)
+            copy_row = QHBoxLayout()
+            copy_row.setContentsMargins(0, theme.SPACE["tight"], 0, 0)
+            copy_row.addWidget(copy_btn)
+            copy_row.addWidget(copy_note)
+            copy_row.addStretch(1)
+            layout.addLayout(copy_row)
             self.parts["copy"] = copy_btn
         layout.addStretch(1)
         self.scroll.setWidget(page)  # la página anterior se borra con su scroll
@@ -350,9 +401,10 @@ class OptionsDialog:
         where = f"«{self.category}»"
         if self.is_book():
             where += " para este libro" if self.scope == "book" else " para libros nuevos"
+        extra = " Tus claves de API se conservarán." if self.category == "Traducción" else ""
         if not qtk.messagebox.askyesno(
             "Restablecer opciones",
-            f"¿Volver las opciones de {where} a sus valores de fábrica?",
+            f"¿Volver las opciones de {where} a sus valores de fábrica?{extra}",
             parent=self.win,
         ):
             return
@@ -360,6 +412,9 @@ class OptionsDialog:
         for option in OPTIONS:
             if option.category == self.category and option.key in factory and option.kind != "translate":
                 self.store(option.key, copy.deepcopy(factory[option.key]))
+        if self.category == "Traducción":  # motor e idiomas de fábrica; las claves guardadas no se pierden
+            data = self.values.setdefault("translate", {})
+            data.update(engine=next(iter(translate.ENGINES)), src="auto", dst="es", base="")
         if self.category == "Informe de calidad":  # todos los avisos, cada uno con su gravedad de siempre
             self.values.update(quality_off=[], quality_levels={})
         if self.is_book() and self.scope == "book":
@@ -368,6 +423,7 @@ class OptionsDialog:
             self.owner.theme_var.set(self.values["theme"])
             self.owner.settings.update(accent=self.values["accent"], ui_font=self.values["ui_font"])
             self.owner.apply_theme()
+            self.sync_label_width()
         self.show(self.category)
 
     def add_option(self, layout, option):
@@ -389,7 +445,7 @@ class OptionsDialog:
             line = QHBoxLayout(row)
             line.setContentsMargins(0, 0, 0, 0)
             if key != "watch":  # la carpeta vigilada tiene su página; lo demás comparte la suya
-                line.addWidget(QLabel(f"{option.label}:"))
+                line.addWidget(self.make_label(f"{option.label}:"))
             line.addWidget(widget, 1)
             line.addWidget(pick)
             line.addWidget(stop)
@@ -426,7 +482,7 @@ class OptionsDialog:
             row = QWidget()
             line = QHBoxLayout(row)
             line.setContentsMargins(0, 0, 0, 0)
-            line.addWidget(QLabel(f"{option.label}:"))
+            line.addWidget(self.make_label(f"{option.label}:"))
             line.addWidget(widget)
             line.addStretch(1)
         note = QLabel(option.help)
@@ -435,10 +491,20 @@ class OptionsDialog:
         note.setContentsMargins(22 if option.kind == "check" else 0, 0, 0, 8)
         fixed = self.profiles.get(self.get("profile"), {})
         if key in fixed and key != "profile":
-            note.setText(f"{option.help} Fijada por el perfil {self.get('profile')}.")
+            note.setText(f"{option.help} Del perfil {self.get('profile')}: cambiarla pasa el perfil a «Personalizado».")
         text = self.parts["search"].text().strip()
         if text and option in find(text):
-            row.setStyleSheet(f"background: {theme.colors(self.owner.dark)['sel']};")
+            if row is widget:  # casilla suelta: en su contenedor, así el resaltado lleva margen y sigue al tema
+                wrap = QWidget(objectName="hit")
+                wrap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+                box = QHBoxLayout(wrap)
+                box.setContentsMargins(4, 2, 4, 2)
+                box.addWidget(row)
+                row = wrap
+            else:
+                row.setObjectName("hit")
+                row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+                row.layout().setContentsMargins(4, 2, 4, 2)
         layout.addWidget(row)
         layout.addWidget(note)
         if option.kind == "folder":
@@ -484,13 +550,18 @@ class OptionsDialog:
         dst.setCurrentIndex(max(0, dst.findData(data.get("dst", "es"))))
         status.setObjectName("muted")
         status.setWordWrap(True)
+        status.hide()
         rows, shown = {}, {"name": engine.currentText()}  # el motor cuyos campos se ven ahora
+
+        def set_status(text):
+            status.setText(text)
+            status.setVisible(bool(text))
 
         def labelled(text, *widgets):
             row = QWidget()
             line = QHBoxLayout(row)
             line.setContentsMargins(0, 0, 0, 0)
-            line.addWidget(QLabel(text))
+            line.addWidget(self.make_label(text))
             for widget in widgets:
                 line.addWidget(widget)
             line.addStretch(1)
@@ -501,7 +572,7 @@ class OptionsDialog:
         rows["model"] = labelled("Modelo:", model, models_btn)
         rows["base"] = labelled("URL:", base)
         rows["key"] = labelled("Clave:", key, eye)
-        labelled("Traducir de:", src, QLabel("a:"), dst)
+        labelled("Traducir de:", src, QLabel("a"), dst)
         layout.addWidget(status)
         note = QLabel(option.help)
         note.setObjectName("muted")
@@ -513,10 +584,15 @@ class OptionsDialog:
             name = shown["name"]
             data.update(engine=engine.currentText(), src=src.currentData(), dst=dst.currentData())
             data["models"][name] = model.currentText().strip()
-            try:
-                data["keys"][name] = translate.protect(key.text().strip())
-            except OSError:
-                data["keys"].pop(name, None)
+            typed = key.text().strip()
+            if typed:
+                try:
+                    data["keys"][name] = translate.protect(typed)
+                except OSError:
+                    data["keys"].pop(name, None)
+            elif translate.unprotect(data["keys"].get(name, "")):
+                # Solo borra si la clave era de este equipo: en modo portable no destruye la de otro PC
+                data["keys"][name] = ""
             if translate.ENGINES[name].get("custom"):
                 data["base"] = base.text().strip()
 
@@ -526,7 +602,9 @@ class OptionsDialog:
             for widget in (model, base, key):
                 widget.blockSignals(True)  # poner los valores del motor no es escribir
             qtk.fill_choices(model, [], data["models"].get(name) or info.get("model", ""))  # la buscada era de otro motor
-            key.setText(translate.unprotect(data["keys"].get(name, "")))
+            saved = data["keys"].get(name, "")
+            plain = translate.unprotect(saved)
+            key.setText(plain)
             base.setText(data.get("base") or info.get("base", ""))
             for widget in (model, base, key):
                 widget.blockSignals(False)
@@ -534,13 +612,18 @@ class OptionsDialog:
             rows["base"].setVisible(bool(info.get("custom")))
             rows["key"].setVisible(info["kind"] != "google")
             key.setPlaceholderText("Opcional" if info.get("custom") else "Clave API")
-            status.setText("")
+            # Versión portable llevada a otro equipo: DPAPI no puede leer claves de otro usuario/PC
+            if saved and not plain and info["kind"] != "google":
+                set_status("La clave guardada pertenece a otro usuario o equipo y no se puede leer aquí; "
+                           "vuelve a escribirla.")
+            else:
+                set_status("")
 
         def find_models():
             """La lista de modelos de la API, en un hilo: sin conexión tardaría en fallar."""
             name, info = engine.currentText(), translate.ENGINES[engine.currentText()]
             if info.get("key") and not key.text().strip():
-                status.setText(f"Falta la clave de {name}: sin ella la API no da la lista.")
+                set_status(f"Falta la clave de {name}: sin ella la API no da la lista.")
                 return
             found, url = queue.Queue(), base.text().strip() if info.get("custom") else ""
             typed = key.text().strip()
@@ -567,12 +650,12 @@ class OptionsDialog:
                 models_btn.setEnabled(True)
                 if isinstance(result, str) or not result or engine.currentText() != name:
                     if engine.currentText() == name:
-                        status.setText(result or f"{name} no devolvió ningún modelo.")
+                        set_status(result or f"{name} no devolvió ningún modelo.")
                     return
                 qtk.fill_choices(model, result, model.currentText().strip() or result[0])
                 keep()
                 count = f"{len(result)} modelo" + ("s" if len(result) != 1 else "")
-                status.setText(f"{name} ofrece {count}: elige uno en «Modelo».")
+                set_status(f"{name} ofrece {count}: elige uno en «Modelo».")
 
             qtk.after(200, wait)
 
@@ -634,16 +717,21 @@ class OptionsDialog:
         key.setText(translate.unprotect(str(data.get("key") or "")))
         key.setEchoMode(QLineEdit.EchoMode.Password)
         key.setPlaceholderText("Clave API")
+        eye = QPushButton(theme.ICONS["show"])
+        eye.setToolTip("Mostrar u ocultar la clave")
+        eye.clicked.connect(lambda: key.setEchoMode(QLineEdit.EchoMode.Normal if key.echoMode()
+                                                    == QLineEdit.EchoMode.Password else QLineEdit.EchoMode.Password))
         rows = {}
-        for name, text, widget in (("engine", "Revisión de gramática:", engine), ("url", "Servidor:", url),
-                                   ("user", "Usuario:", user), ("key", "Clave:", key)):
+        for name, text, widgets in (("engine", "Revisión de gramática:", (engine,)), ("url", "Servidor:", (url,)),
+                                    ("user", "Usuario:", (user,)), ("key", "Clave:", (key, eye))):
             row = QWidget()
             line = QHBoxLayout(row)
             line.setContentsMargins(0, 0, 0, 0)
-            line.addWidget(QLabel(text))
-            line.addWidget(widget, 0 if name == "engine" else 1)
-            if name != "engine":
-                widget.setMinimumWidth(260)
+            line.addWidget(self.make_label(text))
+            for widget in widgets:
+                if widget in (url, user, key):
+                    widget.setMinimumWidth(260)
+                line.addWidget(widget)
             line.addStretch(1)
             layout.addWidget(row)
             rows[name] = row
@@ -660,7 +748,7 @@ class OptionsDialog:
 
         engine.currentIndexChanged.connect(lambda _: keep())  # con ratón, teclado o rueda: los campos de ese motor
         for widget in (url, user, key):
-            widget.editingFinished.connect(keep)
+            widget.textChanged.connect(lambda _: keep())
         keep()
         note = QLabel(option.help)
         note.setObjectName("muted")

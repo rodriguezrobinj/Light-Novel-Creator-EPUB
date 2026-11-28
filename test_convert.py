@@ -1656,11 +1656,12 @@ def test_window_bottom_bar_stays_visible_with_previews():
 
     bottom = window.root.height()
     shown = [(w.isVisible(), w.mapTo(window.root, QPoint(0, w.height())).y() <= bottom)
-             for w in (window.gen_btn, window.progress, window.quality_btn)]
+             for w in (window.gen_btn, window.status, window.quality_btn)]
+    idle_hidden = not window.progress.isVisible()
     image_height = window.pdf_view.image.height() if window.pdf_view.image else 0
     fits = window.root.minimumSizeHint().height() <= 600 and window.root.height() == 600  # no crece por debajo
     window.close()
-    assert shown == [(True, True)] * 3, shown
+    assert shown == [(True, True)] * 3 and idle_hidden, (shown, idle_hidden)
     assert 0 < image_height < 560, image_height  # se ajustó al alto disponible
     assert fits, window.root.minimumSizeHint()
 
@@ -2793,7 +2794,7 @@ def test_window_device_preview_and_dark_mode():
     window.tree.selection_set(first_title(window))
     root.update()
     shapes = {}
-    for device in ("Celular", "Tablet"):
+    for device in ("Móvil", "Tablet"):
         window.device_var.set(device)
         window.draw_epub()
         shapes[device] = window.epub_view.image.height() / window.epub_view.image.width()
@@ -2802,7 +2803,7 @@ def test_window_device_preview_and_dark_mode():
     window.draw_epub()
     dark = sum(window.epub_view.image.pixelColor(2, 2).getRgb()[:3])
     window.close()
-    assert shapes["Celular"] > shapes["Tablet"], shapes  # el celular es más alargado
+    assert shapes["Móvil"] > shapes["Tablet"], shapes  # el móvil es más alargado
     assert light > 600 and dark < 150, (light, dark)
 
 
@@ -2954,7 +2955,7 @@ def test_window_device_change_keeps_layout():
     window.tree.selection_set(first_title(window))
     root.update()
     sizes = set()
-    for device in ("Celular", 'E-reader 6"', "Tablet", "Celular"):
+    for device in ("Móvil", 'E-reader 6"', "Tablet", "Móvil"):
         window.device_var.set(device)
         window.draw_epub()
         root.update()
@@ -3675,14 +3676,13 @@ def test_window_illustrations_export_and_replace_with_comparison():
         root.update()
         dialog = root.dialogs()[-1]
         listed = dialog.parts["list"].count()
-        click = lambda text: next(b for b in dialog.findChildren(QPushButton) if b.text() == text).click()
-        click("Exportar todas…")
+        dialog.parts["export_all"]()
         exported = sorted(f.name for f in folder.iterdir())
         new2, new3 = jpeg(640, 880), jpeg(680, 960)
         (folder / exported[1]).write_bytes(new2)
         (folder / exported[2]).write_bytes(new3)
         window.confirm_image = lambda k, data, batch=False, parent=None: asked.append((k, batch)) or answers.pop(0)
-        click("Cambiar desde carpeta…")
+        dialog.parts["replace_folder"]()
         note = dialog.parts["note"].text()
         after = [b.image for b in window.book.blocks if b.kind == "image"]
         state = app.json.loads(app.json.dumps(window.review_state()))  # como se guarda: Ctrl+Z ya no la toca
@@ -3755,7 +3755,8 @@ def test_window_describe_image_reaches_the_epub():
     blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto."), B("image", 2, image=pic)]
     original, told = app._ask_line, []
     info = app.messagebox.showinfo
-    app._ask_line = lambda parent, title, label, text: "Emilia en el mercado"
+    labels = []
+    app._ask_line = lambda parent, title, label, text: labels.append(label) or "Emilia en el mercado"
     app.messagebox.showinfo = lambda title, message, **_: told.append(message)
     try:
         root, window = visible_window()
@@ -3774,6 +3775,9 @@ def test_window_describe_image_reaches_the_epub():
     finally:
         app._ask_line, app.messagebox.showinfo = original, info
     assert before.startswith("Sin descripción") and shown == "Descripción: Emilia en el mercado", (before, shown)
+    # lo que dirá de verdad, con el capítulo y comillas de segundo nivel (no «Ilustración de «capítulo»»)
+    assert before.endswith("dirá «Ilustración de “Capítulo 1”»") and "Vacío: «Ilustración de “Capítulo 1”»" in labels[0], (
+        before, labels)
     assert state["alts"] == {convert.image_key(pic): "Emilia en el mercado"}, state["alts"]
     with zipfile.ZipFile(out) as z:
         pages = {n: z.read(n).decode() for n in z.namelist() if n.endswith(".xhtml")}
@@ -4708,7 +4712,7 @@ def test_anilist_results_and_fill_only_empty_fields():
         window.close()
     assert got == ("Autor del PDF", "Kei", "Fantasía, Recuentos de la vida, Raro",
                    "Chise was an office worker.\n\nNow she is a witch & more."), got
-    assert "Aloha" not in asked[0] and "Ilustraciones: Kei" in asked[0] and "en inglés" in asked[0], asked
+    assert "Aloha" not in asked[0] and "Ilustrador/a: Kei" in asked[0] and "en inglés" in asked[0], asked
     assert natives == ("アロハ座長", "Maryoku Cheat na Majo ni Narimashita"), natives  # para «Más datos…»
 
 
@@ -4742,6 +4746,92 @@ def test_window_character_page():
     assert checked == [True, False] and before == "0 veces" and after == "1 vez", (checked, before, after)
     assert page == (["Personajes", "<b>Tom</b>: el gato"], app.ON), page
     assert undone == blocks, (undone, blocks)
+
+
+def test_window_data_panel_leaves_room_for_the_list():
+    """«Editar datos» ocupa el sitio de las vistas previas: la lista sigue entera, con su alto (encima de todo dejaba
+    la lista en tres filas y las vistas ilegibles). «Ocultar datos» vuelve a las vistas. La lista no se ensancha:
+    su divisor no se arrastra."""
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                      convert.Block("p", 1, "Texto.")], [0]))
+    root.geometry("900x600+0+0")
+    root.update()
+    tree_h = window.tree.height()
+    window.toggle_data()
+    root.update()
+    shown = (window.data_panel.isVisible(), window.pages.isVisible(), window.strip.isVisible(),
+             window.data_btn.text(), window.tree.height())
+    window.toggle_data()
+    root.update()
+    back = (window.data_panel.isVisible(), window.pages.isVisible())
+    split = window.left_pane.parentWidget()
+    locked = all(not split.handle(n).isEnabled() for n in range(1, split.count()))
+    window.close()
+    assert shown == (True, False, False, "Ocultar datos", tree_h), (shown, tree_h)
+    assert back == (False, True) and locked, (back, locked)
+
+
+def test_window_focus_ring_only_from_the_keyboard():
+    """El borde azul del foco en botones y casillas solo sale al llegar con Tab: al abrir una ventana o tras un clic,
+    «Editar texto…» o «Vistas en oscuro» salían marcados en azul sin que nadie los eligiera con el teclado."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
+
+    root, window = visible_window()
+    win, column = window.dialog("Foco")
+    first, check = QPushButton("Uno"), QCheckBox("Casilla")
+    column.addWidget(first)
+    column.addWidget(check)
+    win.show()
+    win.activateWindow()
+    root.update()
+    QTest.mouseClick(check, Qt.MouseButton.LeftButton)
+    root.update()
+    clicked = check.property("keyfocus")
+    QApplication.sendEvent(check, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier))
+    root.update()
+    tabbed = (QApplication.focusWidget() is first, first.property("keyfocus"))
+    win.close()
+    window.close()
+    assert not clicked and check.isChecked(), clicked
+    assert tabbed == (True, True), tabbed
+
+
+def test_editor_panel_arrows_leave_room_above_the_status_bar():
+    """Las flechas «« ‹ Página n de m › »» y el zoom − + del panel del editor tocaban la barra de estado: el panel no
+    tenía margen abajo. Ahora quedan 8 px entre ellos y la barra."""
+    B = convert.Block
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto.")], [0]))
+    window.tree.selection_set("0")
+    window.pdf_doc = None
+    editor = window.edit_text()
+    root.update()
+    win = editor.win
+    arrow_bottom = editor.prev_page.mapTo(win, editor.prev_page.rect().bottomLeft()).y()
+    bar_top = editor.status_bar.mapTo(win, editor.status_bar.rect().topLeft()).y()
+    win.done(0)
+    window.close()
+    assert bar_top - arrow_bottom >= 8, (arrow_bottom, bar_top)
+
+
+def test_alignment_icons_are_drawn_lines():
+    """Los cuatro botones de alineación son rayas como en Word, del mismo trazo; los glifos «⇤ ≡ ⇥ ≣» no
+    combinaban entre sí."""
+    import app
+    import theme
+
+    images = {k: app._glyph_icon(theme.ICONS[k], "#000000", 16).pixmap(16, 16).toImage()
+              for k in ("left", "center", "right", "justify")}
+    def ink(image, x0, x1):
+        return sum(image.pixelColor(x, y).alpha() > 0 for x in range(x0, x1) for y in range(16))
+    left, right = images["left"], images["right"]
+    assert all(ink(i, 0, 16) for i in images.values()), "icono vacío"
+    assert ink(left, 2, 6) > ink(right, 2, 6) and ink(right, 10, 14) > ink(left, 10, 14)
+    assert len({bytes(i.constBits()) for i in images.values()}) == 4
 
 
 def test_window_new_volume_inherits_series_data():
@@ -8587,7 +8677,7 @@ def test_code_view_layout_keeps_the_code():
 
 
 def test_editor_code_view_whole_page_with_editable_head():
-    """«Código HTML» enseña la página entera del capítulo (<?xml>, <head>, <body>…) con la letra del visor y el
+    """«Código HTML» enseña la página entera del capítulo (<?xml>, <head>, <body>…) con letra monoespaciada y el
     texto sangrado. La cabecera se puede editar: llega al EPUB (PDF y EPUB de entrada, el resto del original igual),
     se apunta en la revisión y vuelve al rehacer el libro; una cabecera rota se avisa y no se sale del código."""
     import app
@@ -8650,7 +8740,7 @@ def test_editor_code_view_whole_page_with_editable_head():
     finally:
         app.messagebox.showwarning = original
     assert shown[0].startswith("<?xml") and "<head>" in "".join(shown) and shown[-1] == "</html>", shown
-    assert indented and family == "Segoe UI", (indented, family)
+    assert indented and family in ("Cascadia Mono", "Consolas"), (indented, family)
     assert left and shell and '<meta name="lnc" content="sí"/>' in shell[1], shell
     assert len(head_edit) == 1 and head_edit[0][1] == 0, head_edit
     assert '<meta name="lnc" content="sí"/>' in page and "<h1" in page and "Uno <i>dos</i>." in page, page
@@ -9904,11 +9994,13 @@ def test_text_editor_ribbon_tabs_like_word():
     editor.show_changes_action.setChecked(False)
     from_menu = editor.show_changes_box.isChecked()
     big = editor.read_btn.toolButtonStyle(), editor.read_btn.icon().isNull()
+    tones = editor.glyph_color("▲"), editor.glyph_color("▷"), editor.colors["warn"], editor.colors["ink"]
     editor.win.done(0)
     window.close()
     assert names == ["Inicio", "Formato", "Insertar", "Revisar", "Vista"], names
+    assert tones[:2] == tones[2:], tones  # «Avisos» con su ▲ en rojo de aviso, como en el resto de la app
     assert all(len(n) == 1 for n in owners.values()), owners
-    assert (where["N"], where["Color ▾"], where["Símbolos ▾"], where["Leer"], where["Navegación"]) == tuple(names), where
+    assert (where["N"], where["Color"], where["Símbolos"], where["Leer"], where["Navegación"]) == tuple(names), where
     assert where["S"] == where["x₂"] == "Inicio" and where["Furigana"] == "Formato" and where["Navegación"] == "Vista"
     assert visible == [(n, True, True) for n in range(5)], visible
     assert from_box and not from_menu, (from_box, from_menu)
@@ -10562,14 +10654,16 @@ def test_window_options_this_book_live_and_cancel():
 
 
 def test_window_options_new_books_without_book():
-    """Sin libro abierto, Opciones queda oculta en Herramientas y no se abre; «Vigilar una carpeta…» elige la
-    carpeta directamente sin abrir Opciones. Con libro abierto, Opciones reaparece y «Libros nuevos» guarda en
-    defaults solo al Aceptar."""
+    """Sin libro abierto, Opciones sigue visible y accesible en Herramientas (en «Libros nuevos» y «La aplicación»);
+    «Vigilar una carpeta…» elige la carpeta directamente. Con libro abierto, «Libros nuevos» guarda en defaults
+    solo al Aceptar."""
     import json
     import app
     root, window = visible_window()
-    hidden_before = not window.options_action.isVisible()
-    blocked = window.open_options()
+    visible_before = window.options_action.isVisible()
+    no_book_dialog = window.open_options()
+    no_book_state = (no_book_dialog.scope, no_book_dialog.category, no_book_dialog.parts["this_book"].isEnabled())
+    no_book_dialog.parts["cancel"]()
     folder = TMP / f"vigilar-inicio-{time_ns()}"
     folder.mkdir()
     window.ask_folder = lambda: str(folder)
@@ -10580,7 +10674,6 @@ def test_window_options_new_books_without_book():
         window.watch_folder()
         watching_after = window.watch
         saved_watch = json.loads(app.SETTINGS.read_text(encoding="utf-8")).get("watch")
-        no_options = getattr(window, "options_window", None) is None
         window.watch_folder()
         stopped_watch = window.watch
     finally:
@@ -10597,7 +10690,7 @@ def test_window_options_new_books_without_book():
     dialog.parts["accept"]()
     stored = json.loads(app.SETTINGS.read_text(encoding="utf-8"))["defaults"]["gray"]
     window.close()
-    assert hidden_before and blocked is None and no_options, (hidden_before, blocked, no_options)
+    assert visible_before and no_book_state == ("new", "Apariencia", False), (visible_before, no_book_state)
     assert watching_after == str(folder) and saved_watch == str(folder) and stopped_watch == "", (
         watching_after, saved_watch, stopped_watch)
     assert shown_info and visible_after, (shown_info, visible_after)
@@ -10606,7 +10699,7 @@ def test_window_options_new_books_without_book():
 
 def test_window_options_search_profile_and_missing_font():
     """Buscar «guion» deja Texto y PDF y resalta la opción; sin coincidencias, un aviso. El perfil Kindle marca los
-    guiones con su nota; desmarcarlos pasa a «Personalizado». «Usar también para libros nuevos» copia la página."""
+    guiones con su nota; desmarcarlos pasa a «Personalizado». «Copiar esta página a «Libros nuevos»» copia la página."""
     root, window = visible_window()
     window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
     dialog = window.open_options("Perfil y formato", "book")
@@ -10634,8 +10727,8 @@ def test_window_options_search_profile_and_missing_font():
     copied = dialog.defaults["hyphenate"]
     dialog.parts["cancel"]()
     window.close()
-    assert shown == ["EL LIBRO", "Texto", "PDF"] and page == "Texto", (shown, page)
-    assert empty and "Fijada por el perfil Kindle" in note and profile == "Personalizado", (empty, note, profile)
+    assert shown == ["El libro", "Texto", "PDF"] and page == "Texto", (shown, page)
+    assert empty and "Del perfil Kindle" in note and profile == "Personalizado", (empty, note, profile)
     assert copied is False, copied
     assert (lang_shown, lang_editable, lang_put) == ("Español", False, "en"), (lang_shown, lang_editable, lang_put)
     assert header.endswith("Español") or header.endswith("Inglés"), header
@@ -10862,7 +10955,7 @@ def test_window_options_are_only_in_options():
     assert "Opciones ▾" not in bar and "Opciones del libro…" not in bar and len(combos) == 4, (bar, combos)
     assert window.style_var.get() in combos and "Aspecto" in pages and style_shown == combos[1], (combos, pages)
     assert from_options == "Moderno", from_options
-    assert "Tema" not in menus and "Opciones…  (Ctrl+,)" in menus, menus
+    assert "Tema" not in menus and "Opciones…\tCtrl+," in menus, menus
     assert not data_combos and link, (data_combos, link)
 
 
@@ -10981,11 +11074,14 @@ def test_window_kindle_profile_hyphenates():
     window.profile_var.set("Kindle")
     window.apply_profile()
     kindle = window.write_options()["hyphenate"]
-    window.profile_var.set("Celular")
+    kindle_device = window.device_var.get()
+    window.profile_var.set("Móvil")
     window.apply_profile()
     phone = window.write_options()["hyphenate"]
+    phone_device = window.device_var.get()  # la vista previa sigue al perfil
     window.close()
     assert kindle and not phone, (kindle, phone)
+    assert (kindle_device, phone_device) == ('E-reader 6"', "Móvil"), (kindle_device, phone_device)
 
 
 def test_typography_double_dash_comma_before_aside_and_ellipsis_period():
@@ -12151,6 +12247,61 @@ def test_quality_report_fixes_fansub_typos():
                                                   "<i>¿Qué haces?</i>", "«¿Qué?» ¡Ven aquí!"], [b.html for b in book.blocks]
 
 
+def test_quality_report_flags_english_title_case():
+    """Nageki 1: títulos en español con mayúsculas al estilo inglés («La Guarida Del Lobo Blanco») avisan y su
+    arreglo pone en minúscula solo las palabras funcionales conservando cursiva y negrita; los títulos en mayúsculas,
+    los correctos, los de una palabra, los ingleses o un libro en inglés no avisan."""
+    B = convert.Block
+    titles = [
+        # Nageki 1: deben avisar
+        "Capítulo 1: Hacer Frente Al Servicio Comunitario",
+        "Capítulo 3: La Guarida Del Lobo Blanco",
+        "La <i>Guarida</i> Del Lobo",
+        "Capítulo 4: La Bella Y La Bestia",
+        "Capítulo 5: <i>El Regreso De</i> <b>Los</b> Héroes",
+        # No deben avisar
+        "CAPÍTULO 2: EL REVOLTIJO",
+        "Capítulo 1: Hacer frente al servicio comunitario",
+        "El señor de los anillos",
+        "Parte Uno: Stifled Shadow",
+        "Prólogo",
+        "Epílogo: El final",
+        "CAPÍTULO 2: PROYECTO Y",
+        "Capítulo 6: Misión de rango A",
+        "Capítulo 7 — El comienzo",
+        "Capítulo 8: ¿La verdad?",
+        "Capítulo 9: Hacer Frente AL Enemigo",
+        "Capítulo 10: La Historia de O'Brien",
+        "Capítulo 51: Recolectando información ─ Tras la oscuridad",  # Farming Life 1: «─» abre tramo
+    ]
+    blocks = [B("heading", n + 1, t) for n, t in enumerate(titles)]
+    book = convert.Book("Libro", "", b"", blocks, list(range(len(titles))))
+    report = [i for i in convert.quality_report(book) if i.kind == "title_case"]
+    assert [(i.block, i.level, i.title) for i in report] == [
+        (k, "Menor", "Mayúsculas de título al estilo inglés") for k in range(5)], \
+        [(i.block, i.text) for i in report]
+    assert report[0].text == "Capítulo 1: Hacer Frente Al Servicio Comunitario", report[0]
+    assert report[0].before == "Capítulo 1: Hacer Frente Al Servicio Comunitario", report[0]
+    assert report[0].after == "Capítulo 1: Hacer Frente al Servicio Comunitario", report[0]
+    assert "Editar texto…" in report[0].solution and "tecla E" in report[0].solution, report[0].solution
+    assert convert.shown_text(blocks[0], 0)[slice(*report[0].span)] == "Al", report[0].span
+    for issue in sorted(report, key=lambda i: -i.edit[0]):
+        convert.edit_section(book, *issue.edit)
+    assert [b.html for b in book.blocks[:5]] == [
+        "Capítulo 1: Hacer Frente al Servicio Comunitario",
+        "Capítulo 3: La Guarida del Lobo Blanco",
+        "La <i>Guarida</i> del Lobo",
+        "Capítulo 4: La Bella y la Bestia",
+        "Capítulo 5: <i>El Regreso de</i> <b>los</b> Héroes",
+    ], [b.html for b in book.blocks[:5]]
+    assert book.candidates == list(range(len(titles))), book.candidates
+    assert [i for i in convert.quality_report(book) if i.kind == "title_case"] == []
+    # Libro en inglés: la regla española no aplica
+    english = convert.Book("Book", "", b"", [B("heading", 1, "The Lord Of The Rings"),
+                                             B("heading", 2, "La Guarida Del Lobo Blanco")], [0, 1])
+    assert [i for i in convert.quality_report(english, lang="en") if i.kind == "title_case"] == []
+
+
 def test_opening_marks_with_many_dots_is_fast():
     """Muchos puntos seguidos tras un «¡No!» tardaban segundos en el informe (retroceso de la expresión)."""
     import time
@@ -12737,9 +12888,34 @@ def test_window_find_and_replace():
     assert name == "Rhuda vio su destino.", name
 
 
+def test_window_quality_opens_before_moving_previews():
+    """Abrir el informe no mueve la ventana principal: llevarla al primer aviso rehacía el EPUB de la vista previa y
+    congelaba la ventana 0,7 s con un libro real (recorrido de Nageki 1). Las vistas van al aviso que elige el usuario."""
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Todo en orden por aquí."), B("heading", 2, "Capítulo 2"),
+              B("p", 2, "Ella abrió la puerta y dijo que"), B("p", 3, "nadie vendría.")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 2]))
+    window.tree.selection_set("2")
+    window.quality()  # su primer aviso: «Capítulo muy corto» del capítulo 1
+    at_open = window.tree.selection()
+    root.update()
+    later = window.tree.selection()
+    table = window.quality_window.parts["table"]
+    first = window.quality_window.parts["rows"]()[0]
+    table.selection_set(table.get_children()[0])  # el usuario pasa por la cabecera del grupo y elige el aviso
+    table.selection_set(first)
+    root.update()
+    chosen = window.tree.selection()
+    window.close()
+    assert at_open == ("2",) and later == ("2",), (at_open, later)
+    assert chosen == ("0",), chosen
+
+
 def test_window_spelling():
     """Ortografía: la revisión corre en el proceso de trabajo; «Cambiar todas» corrige el libro, «Añadir al
-    diccionario» la guarda para la serie, y el editor subraya las que quedan."""
+    diccionario» la guarda para la serie, y el editor subraya las que quedan. Ninguna sugerencia viene elegida:
+    salen de palabras parecidas del libro («genocida» -> «reconocida») y un clic sin mirar no debe cambiar nada."""
     import time
 
     B = convert.Block
@@ -12754,8 +12930,10 @@ def test_window_spelling():
         time.sleep(0.05)
     parts = root.dialogs()[-1].parts
     words = [parts["table"].set(i, "word") for i in parts["table"].get_children()]
-    first = (parts["fix"].text(), parts["places"].count())
-    parts["change"].click()  # «dijó», la más repetida, por su sugerencia «dijo»
+    first = (parts["fix"].text(), parts["places"].count(), parts["change"].isEnabled(),
+             parts["change"].objectName())
+    parts["chips"].itemAt(0).widget().click()  # la sugerencia «dijo»
+    parts["change"].click()  # «dijó», la más repetida
     root.update()
     fixed = [b.html for b in window.book.blocks]
     rest = [parts["table"].set(i, "word") for i in parts["table"].get_children()]
@@ -12771,9 +12949,31 @@ def test_window_spelling():
     state = (window.words, sorted(window.unknown))
     window.close()
     assert words[0] == "dijó" and set(words) == {"dijó", "ciudd", "golem"}, words
-    assert first == ("dijo", 2), first
+    assert first == ("", 2, False, ""), first
     assert fixed[1:] == ["Ella dijo que la ciudd estaba lejos.", "Él dijo que la ciudad era grande y el golem también."], fixed
     assert state == (["golem"], ["ciudd"]) and marked == ["ciudd"], (state, marked)
+
+
+def test_window_spelling_result_does_not_steal_focus():
+    """La ortografía tarda: si mientras tanto se abrió otra herramienta, su ventana sale detrás y el foco sigue
+    donde se escribía; la línea de estado dice dónde quedó."""
+    from PySide6.QtWidgets import QApplication
+
+    B = convert.Block
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Ella dijó.")], [0]))
+    other, _ = window.dialog("Otra herramienta")
+    other.show()
+    other.activateWindow()
+    root.update()
+    before = QApplication.activeWindow() is other
+    window.spelling_dialog([("dijó", 1, ["dijo"])])
+    root.update()
+    after, status = QApplication.activeWindow(), window.status.text()
+    shown = window.spelling_window.isVisible()
+    window.close()
+    assert before and shown and after is other, (before, shown, after)
+    assert status == "Ortografía lista: está detrás de «Otra herramienta»", status
 
 
 def test_window_spelling_change_one_ignore_and_search():
@@ -12791,6 +12991,8 @@ def test_window_spelling_change_one_ignore_and_search():
     first_place = places.itemWidget(places.item(0)).text()
     chips = [parts["chips"].itemAt(n).widget().text() for n in range(parts["chips"].count())
              if parts["chips"].itemAt(n).widget()]
+    unchosen = (parts["preview"].text(), parts["one"].isEnabled())
+    parts["chips"].itemAt(0).widget().click()  # «dijo»
     preview = parts["preview"].text()
     places.setCurrentRow(1)  # «Él dijó que sí.»
     parts["one"].click()
@@ -12805,8 +13007,10 @@ def test_window_spelling_change_one_ignore_and_search():
     window.close()
     plain_place = html.unescape(re.sub(r"<[^>]+>", "", first_place)).replace(" ", " ")
     assert "pág. 1" in plain_place and "Ella dijó que no." in plain_place and "Llegó" not in plain_place, plain_place
+    assert "…" not in plain_place, plain_place  # frase entera: sin «…» pegado al punto («no.…»)
     assert "font-weight:600" in first_place.replace(" ", "") and chips == ["dijo", "dijeron"], (first_place, chips)
     assert "Así quedaría" in preview and "line-through" in preview, preview
+    assert unchosen == ("Elige una sugerencia o escribe la palabra correcta para ver el cambio.", False), unchosen
     assert after_one[0][1:3] == ["Llegó tarde. Ella dijó que no. Luego se fue.", "Él dijo que sí."], after_one
     assert after_one[1:] == (1, ["dijó", "ciudd"]), after_one
     assert filtered == ["ciudd"] and progress == "Revisadas 1 de 2" and words == [], (filtered, progress, words)
@@ -13329,7 +13533,7 @@ def test_window_quality_dialog_score_and_export():
     window.quality()
     root.update()
     parts = root.dialogs()[-1].parts
-    summary = parts["summary"].text()
+    summary, score = parts["summary"].text(), parts["ring"].score
     out = TMP / "exportado.html"
     asked = []
     original = app.filedialog.asksaveasfilename
@@ -13341,7 +13545,7 @@ def test_window_quality_dialog_score_and_export():
         app.filedialog.asksaveasfilename = original
     window.close()
     page = out.read_text(encoding="utf-8")
-    assert summary.startswith("Nota 0/100 · "), summary  # 2 avisos «Revisar» en 11 palabras
+    assert score == 0 and not summary.startswith("Nota"), (score, summary)  # 2 avisos «Revisar» en 11 palabras
     assert "Párrafo partido" in page and "Número suelto" in page, page[:300]
     assert asked[0]["initialfile"].endswith("informe de calidad.html"), asked
 
@@ -13458,7 +13662,7 @@ def test_window_quality_report_previews_fixes_and_undo():
     assert listed == ["Número suelto", "Número suelto", "Párrafo partido"], listed  # el tipo con más, primero
     assert groups == ["Número suelto (2)", "Párrafo partido (1)"], groups
     assert shown[0] == "nadie vendría." and "dijo que ¶" in shown[1] and "line-through" in shown[2], shown
-    assert label == "Arreglar todos los de este tipo (2)" and choices == 2, (label, choices)
+    assert label == "Arreglar todos (2)" and choices == 2, (label, choices)
     assert "12" not in fixed[0] and "13" not in fixed[0] and fixed[1] == ["Párrafo partido"], fixed
     assert fixed[2] == "▲ 1 por revisar", fixed
     assert undone == [b.html for b in blocks], undone
@@ -13778,7 +13982,7 @@ def test_window_cover_from_illustration_quality_and_series_panel():
     window.close()
     assert label.startswith("Portada: ilustración de la página") and same, label
     assert len(panels) == 3, panels
-    assert "Sin revisar" in states or "Revisado, sin EPUB" in states, states
+    assert "Sin empezar" in states or "En curso, sin EPUB" in states, states
 
 
 def test_missing_volumes_text():
@@ -13798,6 +14002,26 @@ def test_missing_volumes_text():
     assert none == "", none
 
 
+def test_window_anilist_picks_the_closest_title_first():
+    """AniList ordena por popularidad: con «Nageki no Bourei wa Intai Shitai» salía elegida primero otra serie del
+    autor (… Bouken Shitai …). La más parecida va arriba y elegida, y los nombres largos no piden barra horizontal."""
+    import app
+    found = [{"name": "Nageki no Bourei wa Bouken Shitai: Nageki no Bourei wa Intai Shita Tanpenshuu (2025)",
+              "romaji_title": "Nageki no Bourei wa Bouken Shitai: Nageki no Bourei wa Intai Shita Tanpenshuu"},
+             {"name": "Nageki no Bourei wa Intai Shitai: Saijiyaku Hunter ni Yoru Saikiyou Party Ikusei Jutsu (2018)"
+                      " · Let This Grieving Soul Retire",
+              "romaji_title": "Nageki no Bourei wa Intai Shitai: Saijiyaku Hunter ni Yoru Saikiyou Party Ikusei Jutsu"}]
+    root, window = visible_window()
+    chosen = []
+    window.pick_online(found, "Nageki no Bourei wa Intai Shitai", chosen.append)
+    win, box, pick = window.online_window
+    first, wrap = box.currentItem().text(), box.wordWrap()
+    pick()
+    window.close()
+    assert first.startswith("Nageki no Bourei wa Intai Shitai:") and wrap, (first, wrap)
+    assert chosen and chosen[0] is found[1], chosen
+
+
 def test_window_series_panel_shows_missing_and_sent():
     """Con los tomos 1 y 3, el panel avisa del 2; el envío al lector apuntado sale en la columna «Enviado»."""
     import app
@@ -13811,14 +14035,21 @@ def test_window_series_panel_shows_missing_and_sent():
     root, window = visible_window()
     app._record_send(folder / "Serie - Volumen 01.epub", "USB")
     window.pdf = folder / "Serie - Volumen 01.pdf"
+    review = {"blocks": 1, "rows": {}, "problems": [],  # tomo 3 revisado sin EPUB: sus avisos no son «Ninguno»
+              "pdf": app._fingerprint(folder / "Serie - Volumen 03.pdf")}
+    app._review_path(folder / "Serie - Volumen 03.pdf").write_text(json.dumps(review), encoding="utf-8")
+    window.series_var.set("Mi Serie")
     window.series_panel()
     root.update()
     win, table = window.series_window
     sent = [table.set(i, "sent") for i in table.get_children()]
+    warn = [table.set(i, "warn") for i in table.get_children()]
     labels = [w.text() for w in win.findChildren(app.QLabel)]
+    title = win.windowTitle()
     window.close()
     assert sent == [f"USB · {app.datetime.now():%d/%m}", "—"], sent
     assert "Falta el tomo 2" in labels, labels
+    assert title == "Serie · Mi Serie" and warn[1] == "—", (title, warn)
 
 
 def test_window_status_line_elides_and_gets_report_memos():
@@ -15115,6 +15346,32 @@ def test_websheet_click_on_picture_or_separator_moves_the_cursor():
     assert all(found.values()), found
 
 
+def test_websheet_page_label_is_not_the_pdf_one():
+    """Con la pestaña «Hoja web», volver a dibujar el original (zoom, «Vistas en oscuro») no pone en la barra del
+    panel «Página 7 de 406» del PDF: la etiqueta es de la pestaña a la vista. Con el tema oscuro, la hoja web
+    también sale oscura (era blanca al lado de la hoja oscura)."""
+    with with_chromium():
+        src = sigil_epub(TMP / "Sigil - Volumen 14.epub")
+        root, window = visible_window()
+        try:
+            window.pdf = src
+            window.show_book(convert.analyze(src))
+            window.theme_var.set("Oscuro")
+            window.apply_theme()
+            k = next(c for c in window.book.candidates if window.book.blocks[c].title.startswith("Capítulo 1"))
+            ed = web_editor(window, k)
+            before = ed.page_label.text()
+            ed.set_side_dark(True)
+            ed.set_side_dark(False)
+            ed.redraw()
+            after, dark = ed.page_label.text(), ed.web.dark
+            ed.win.done(0)
+        finally:
+            window.close()
+    assert "del PDF" not in after and not re.search(r"de \d{3}", after) and after == before, (before, after)
+    assert dark, "la hoja web, clara con el tema oscuro"
+
+
 def editor_objects(block):
     import editor
     return editor.objects_of(block)
@@ -16164,11 +16421,6 @@ def test_websheet_is_default_and_does_what_chromium_cannot():
     assert remembered and window.settings.get("editor_web") is False, window.settings.get("editor_web")
 
 
-def editor_dump(ed):
-    import editor
-    return editor.dump(ed.sheet.document())
-
-
 def faithful_chapters(book):
     return [(k, book.blocks[k].title) for k in book.candidates]
 
@@ -16275,15 +16527,15 @@ def test_window_fixed_layout_epub_preview_matches_original_and_device():
     import app
     from PySide6.QtGui import QColor
     root, window = visible_window()
-    window.pdf = kadokawa_fixed_epub(TMP / "Kadokawa celular.epub")
-    window.device_var.set("Celular")
+    window.pdf = kadokawa_fixed_epub(TMP / "Kadokawa movil.epub")
+    window.device_var.set("Móvil")
     window.show_book(convert.analyze(window.pdf))
     window.tree.selection_set("0")
     root.update()
     first = window.epub_load(0)
     pictured = bool(first.get_image_info()) and not first.get_text().strip()
     shot = window.device_image(first, False)
-    width, height = app.DEVICES["Celular"]
+    width, height = app.DEVICES["Móvil"]
     middle = QColor(shot.pixel(shot.width() // 2, shot.height() // 2)).lightness()
     pages = [(window.epub_page, window.pdf_page)]
     while window.epub_page < window.epub_pages - 1:
@@ -16972,8 +17224,9 @@ def test_window_start_screen_shows_only_what_needs_no_book():
 
     root, window = visible_window()
     hidden = [w.isVisible() for w in (window.bottom, window.options_row, window.gen_btn, window.quality_btn,
-                                      window.find_btn, window.recent_btn, window.file_label)]
+                                      window.find_btn, window.recent_btn, window.open_btn, window.batch_btn)]
     tools_off = [a.isVisible() for a in window.book_actions]  # ocultas: en gris parecían activas (tema oscuro)
+    top_options = [b for b in window.root.findChildren(app.QPushButton) if b.text() == "Opciones…"]
     pdf = TMP / "inicio.pdf"  # copia propia: otras pruebas dejan revisión y EPUB junto a novela.pdf
     pdf.write_bytes(make_novel().read_bytes())
     gone = TMP / "perdido.epub"
@@ -16984,8 +17237,9 @@ def test_window_start_screen_shows_only_what_needs_no_book():
     window.show_book(convert.Book("Libro", "", jpeg(300, 420), [convert.Block("heading", 1, "Capítulo 1"),
                                                                  convert.Block("p", 1, "Texto.")], [0]))
     shown = [w.isVisible() for w in (window.bottom, window.options_row, window.gen_btn, window.quality_btn,
-                                     window.find_btn, window.recent_btn, window.file_label)]
+                                     window.find_btn, window.recent_btn, window.open_btn, window.batch_btn)]
     tools_on = [a.isVisible() for a in window.book_actions]
+    top_options += [b for b in window.root.findChildren(app.QPushButton) if b.text() == "Opciones…" and b.isVisible()]
     thumb = app._thumb_path(pdf).is_file()
     card = window.recent_card(str(pdf))
     with_cover = any(not label.pixmap().isNull() for label in card.findChildren(app.QLabel))
@@ -17011,9 +17265,10 @@ def test_window_start_screen_shows_only_what_needs_no_book():
         app._start_thumbs = start
     window.close()
     assert started and started[0][0][0] == str(later), started
-    assert hidden == [False] * 7 and not any(tools_off), (hidden, tools_off)
-    assert shown == [True] * 7 and all(tools_on), (shown, tools_on)
-    assert "inicio" in cards[0] and "PDF" in cards[0] and "Sin revisar" in cards[0], cards[0]
+    assert hidden == [False] * 8 and not any(tools_off), (hidden, tools_off)
+    assert shown == [True] * 8 and all(tools_on), (shown, tools_on)
+    assert not top_options, top_options  # «Opciones…» solo en Herramientas, ni en la bienvenida ni con libro
+    assert "inicio" in cards[0] and "PDF" in cards[0] and "Sin empezar" in cards[0], cards[0]
     assert "perdido" in cards[1] and "EPUB" in cards[1] and "No se encuentra" in cards[1], cards[1]
     assert thumb and with_cover, (thumb, with_cover)
     assert left == ([str(pdf)], 1), left
@@ -17089,18 +17344,40 @@ def test_window_generates_pdf_from_menu():
         dialog = root.dialogs()[-1]
         title = dialog.windowTitle()
         buttons = [b.text() for b in dialog.findChildren(QPushButton)]
+        more_actions = [a.text() for b in dialog.findChildren(app.QToolButton) if b.menu() for a in b.menu().actions()]
         pages = len(pymupdf.open(out))
         window.close()
     finally:
         app.filedialog.asksaveasfilename, app.messagebox.showerror = saved, showerror
     assert errors == ["Ese es el PDF original: elige otro nombre."], errors
-    assert title == "PDF listo" and "Abrir PDF" in buttons and "Validar con EPUBCheck" not in buttons, (title, buttons)
+    assert title == "PDF listo" and "Abrir PDF" in buttons and "Validar con EPUBCheck" not in buttons + more_actions, (
+        title, buttons, more_actions)
     assert pages > 1, pages
+
+def test_window_find_counts_past_500_and_cuts_between_words():
+    """Con más de 500 párrafos que lo tienen, la cuenta es la de verdad (no «500 resultados (se muestran los 500
+    primeros)») y cada fragmento empieza y acaba en palabra entera, no «…r de los cazadores»."""
+    B = convert.Block
+    text = "Los cazadores de tesoros se reunieron en la plaza mayor antes del alba y Tino los miraba con calma total."
+    blocks = [B("heading", 1, "Capítulo 1")] + [B("p", 1, text) for _ in range(620)]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.find()
+    window.find_entry.setText("Tino")
+    window.search_book()
+    count, rows, first = window.find_count.text(), window.find_results.count(), window.find_results.item(0).text()
+    window.close()
+    assert count == "620 párrafos · se ven los 500 primeros" and rows == 500, (count, rows)
+    snippet = first.split(" · ", 1)[1]
+    words = text.split()
+    assert snippet.startswith("…") and snippet.strip("…").split()[0] in words, snippet
+    assert snippet.rstrip("…").split()[-1] in words, snippet
+
 
 def test_window_find_bar_and_result_dialog():
     """Ctrl+F abre la barra sobre la lista; elegir un resultado lleva la vista previa a su página. Al generar,
     un solo diálogo con los avisos, el tamaño y los botones."""
-    from PySide6.QtWidgets import QPlainTextEdit, QPushButton
+    from PySide6.QtWidgets import QPlainTextEdit, QPushButton, QToolButton
 
     root, window = visible_window()
     window.pdf = make_novel()
@@ -17120,22 +17397,21 @@ def test_window_find_bar_and_result_dialog():
     dialog = window.result_window
     texts = [w.toPlainText() for w in dialog.findChildren(QPlainTextEdit)]
     buttons = [b.text() for b in dialog.findChildren(QPushButton)]
+    more = next((b for b in dialog.findChildren(QToolButton) if b.text() == "Más"), None)
+    more_actions = [a.text() for a in more.menu().actions()] if more and more.menu() else []
     title = dialog.windowTitle()
     window.close()
-    assert shown and found[1] >= 1 and found[0].startswith(f"{found[1]} resultado"), found
+    assert shown and found[1] >= 1 and found[0].startswith(f"{found[1]} párrafo"), found
     assert page == window.book.blocks[window.matches[0][0]].page - 1 and hidden, page
     assert title == "EPUB guardado con avisos" and texts == ["sec1.xhtml: algo raro"], (title, texts)
-    # «Validar con EPUBCheck» va en su fila, debajo: la de los botones ya llena 1093 px con un lector conectado
-    assert buttons[:2] == ["Abrir EPUB", "Abrir carpeta"] and buttons[-2:] == ["Cerrar", "Validar con EPUBCheck"], \
-        buttons
+    assert "Abrir carpeta" in buttons and "Validar con EPUBCheck" in more_actions and buttons[-2:] == ["Abrir EPUB", "Cerrar"], (
+        buttons, more_actions)
 
 
 def test_window_result_dialog_phone_and_calibre():
     """«Enviar al móvil» siempre; «Añadir a Calibre» solo si Calibre está instalado, y lo abre con el EPUB."""
     import app
-    from PySide6.QtWidgets import QPushButton
-
-    import app
+    from PySide6.QtWidgets import QPushButton, QToolButton
 
     out = TMP / "calibre.epub"
     out.write_bytes(b"x")
@@ -17148,9 +17424,11 @@ def test_window_result_dialog_phone_and_calibre():
             app._calibre = lambda: found
             window.result_dialog(str(out))
             buttons = {b.text(): b for b in window.result_window.findChildren(QPushButton)}
-            seen.append(("Enviar al móvil" in buttons, "Añadir a Calibre" in buttons))
-            if "Añadir a Calibre" in buttons:
-                buttons["Añadir a Calibre"].click()
+            more = next(b for b in window.result_window.findChildren(QToolButton) if b.text() == "Más")
+            actions = {a.text(): a for a in more.menu().actions()}
+            seen.append(("Enviar al móvil…" in buttons, "Añadir a Calibre" in actions))
+            if "Añadir a Calibre" in actions:
+                actions["Añadir a Calibre"].trigger()
             window.result_window.close()
     finally:
         app._calibre, app.subprocess.Popen = calibre, popen
@@ -17159,6 +17437,139 @@ def test_window_result_dialog_phone_and_calibre():
     assert seen == [(True, False), (True, True)], seen
     assert launched == [["C:/Calibre2/calibre.exe", str(out)]], launched
     assert sent.startswith("Calibre · "), sent
+
+
+def test_window_result_dialog_mentions_quality():
+    """«Revisado: sin problemas» se leía como «el libro está bien» con 12 avisos de calidad: el encabezado dice solo
+    que el EPUB es válido, y bajo él van los avisos del informe (el texto de la barra) y «Ver informe»."""
+    import app
+    from PySide6.QtWidgets import QLabel, QPushButton
+
+    B = convert.Block
+    out = TMP / "calidad.epub"
+    out.write_bytes(b"x" * 1000)
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto de prueba. " * 250)]  # un párrafo muy largo: aviso
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    bar = window.quality_btn.text()
+    window.result_dialog(str(out))
+    dialog = window.result_window
+    labels = [w.text() for w in dialog.findChildren(QLabel)]
+    buttons = {b.text(): b for b in dialog.findChildren(QPushButton)}
+    shown = "Ver informe" in buttons
+    buttons["Ver informe"].click()
+    root.update()
+    opened = window.quality_window.isVisible()
+    window.quality_window.close()
+    dialog.close()
+    window.quality_report = lambda: []  # sin avisos de calidad: ni la línea ni el botón
+    window.result_dialog(str(out))
+    clean_labels = [w.text() for w in window.result_window.findChildren(QLabel)]
+    clean_buttons = [b.text() for b in window.result_window.findChildren(QPushButton)]
+    window.result_window.close()
+    window.result_dialog(str(out), ["sec1.xhtml: algo raro"])  # con avisos de check_epub, sin cambios
+    warned = [w.text() for w in window.result_window.findChildren(QLabel)]
+    window.close()
+    line = next((t for t in labels if t.startswith("Informe de calidad: ")), "")
+    assert "EPUB válido: los lectores lo abrirán." in labels and "Revisado: sin problemas." not in labels, labels
+    assert line and bar == f"▲ {line.removeprefix('Informe de calidad: ')}", (line, bar)
+    assert shown and opened, (shown, opened)
+    assert "EPUB válido: los lectores lo abrirán." in clean_labels, clean_labels
+    assert not any(t.startswith("Informe de calidad") for t in clean_labels) and "Ver informe" not in clean_buttons
+    assert "La revisión encontró avisos" in warned and not any(t.startswith("Informe de calidad") for t in warned)
+
+
+def test_window_profile_syncs_preview_device_on_reopen():
+    """Al reabrir un libro cuya revisión guarda el perfil «Móvil», la vista previa pasa a «Móvil» (el aparato
+    vive en los ajustes de la app, no en la revisión). «Personalizado» deja el aparato como estaba."""
+    copy = TMP / "perfil-aparato.pdf"
+    copy.write_bytes(make_novel().read_bytes())
+    root, window = visible_window()
+    window.pdf = copy
+    window.show_book(convert.analyze(copy))
+    window.profile_var.set("Móvil")
+    window.save_review()
+    window.profile_var.set("Kindle")
+    window.device_var.set('E-reader 6"')
+    window.show_book(convert.analyze(copy))
+    reopened = (window.profile_var.get(), window.device_var.get())
+    window.profile_var.set("Personalizado")
+    window.save_review()
+    window.device_var.set("Tablet")
+    window.show_book(convert.analyze(copy))
+    custom = (window.profile_var.get(), window.device_var.get())
+    window.close()
+    assert reopened == ("Móvil", "Móvil"), reopened
+    assert custom == ("Personalizado", "Tablet"), custom
+
+
+def test_volume_status_in_progress_and_not_started():
+    """«Revisado» es solo el ✓ de un capítulo: un tomo con revisión guardada pero sin EPUB está «En curso», y
+    sin revisión «Sin empezar»."""
+    import app
+
+    pdf = TMP / "estado-tomo.pdf"
+    pdf.write_bytes(make_novel().read_bytes())
+    for path in (app._review_path(pdf), app._volume_epub(pdf)):
+        path.unlink(missing_ok=True)
+    root, window = visible_window()
+    fresh = app._volume_status(pdf)
+    window.pdf = pdf
+    window.show_book(convert.analyze(pdf))
+    window.save_review()
+    reviewed = sum(window.tree.set(i, "ok") == "✓" for i in window.tree.get_children())
+    started = app._volume_status(pdf)
+    epub = app._volume_epub(pdf)
+    epub.write_bytes(b"x")
+    stamp = app._review_path(pdf).stat().st_mtime
+    os.utime(epub, (stamp - 100, stamp - 100))
+    stale = app._volume_status(pdf)
+    os.utime(epub, (stamp + 100, stamp + 100))
+    done = app._volume_status(pdf)
+    window.close()
+    epub.unlink()
+    app._review_path(pdf).unlink()
+    assert fresh == "Sin empezar" and reviewed == 0 and started == "En curso, sin EPUB", (fresh, reviewed, started)
+    assert stale == "EPUB anterior a la revisión" and done == "EPUB generado", (stale, done)
+
+
+def test_window_quality_no_fix_label_is_visible_and_controls_explain():
+    """Un aviso sin arreglo automático enseña «Sin arreglo automático…» fuera del área con scroll, legible, y deja
+    «Arreglar» y «Arreglar todos» a la vista pero desactivados y con su ayuda; «Arreglar» no queda como un botón
+    principal gris."""
+    import theme
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto de prueba. " * 250)]  # párrafo muy largo: sin arreglo
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    window.quality()
+    root.update()
+    win, parts = window.quality_window, window.quality_window.parts
+    table = parts["table"]
+    first = next(i for i in parts["rows"]() if table.set(i, "title").startswith("Párrafo muy largo"))
+    table.selection_set(first)
+    root.update()
+    label, fix, every = parts["no_fix"], parts["fix"], parts["all"]
+    top, bottom = label.mapTo(win, label.rect().topLeft()), label.mapTo(win, label.rect().bottomRight())
+    inside = win.rect().contains(top) and win.rect().contains(bottom)
+    fix_state = (fix.isVisible(), fix.isEnabled(), fix.toolTip(), fix.objectName())
+    all_state = (every.isVisible(), every.isEnabled(), every.toolTip())
+    window.close()
+
+    def luminance(color):
+        def channel(v):
+            v /= 255
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+        return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+    ratios = [(max(luminance(c["muted"]), luminance(c["bg"])) + 0.05) / (min(luminance(c["muted"]), luminance(c["bg"])) + 0.05)
+              for c in (theme.colors(False), theme.colors(True))]
+    assert label.isVisible() and inside and label.objectName() == "muted", (label.isVisible(), inside)
+    assert fix_state[:2] == (True, False) and "Abrir en el editor" in fix_state[2] and fix_state[3] != "primary", fix_state
+    assert all_state[:2] == (True, False) and "Abrir en el editor" in all_state[2], all_state
+    assert min(ratios) >= 4.5, ratios
 
 
 def test_window_guide_names_serious_warnings_and_colors_follow_theme():
@@ -17269,6 +17680,25 @@ def test_window_version_after_each_new_epub():
     assert changes == "1 dato", changes
 
 
+def test_window_versions_empty_delete_looks_disabled():
+    """Versiones sin ninguna: «Borrar» está desactivado y se ve gris como «Restaurar»; el rojo de #warn pesaba
+    más que :disabled y parecía activo."""
+    from PySide6.QtWidgets import QApplication
+
+    import theme
+
+    root, window = versioned_window()
+    window.versions()
+    parts = window.versions_window.parts
+    enabled = (parts["delete"].isEnabled(), parts["restore"].isEnabled())
+    window.close()
+    qss = QApplication.instance().styleSheet()
+    rule = re.search(r"QPushButton#warn:disabled[^{]*\{([^}]*)\}", qss)
+    assert enabled == (False, False), enabled
+    assert rule and theme.colors(False)["hint"] in rule.group(1), rule
+    assert qss.index("QPushButton#warn:disabled") > qss.index("QPushButton#warn {"), "la regla gris va detrás"
+
+
 def test_window_versions_dialog_saves_renames_and_deletes():
     import app
 
@@ -17284,8 +17714,12 @@ def test_window_versions_dialog_saves_renames_and_deletes():
     rows = [parts["table"].set(i, "name") for i in parts["table"].get_children()]
     parts["table"].selection_set("0")
     compared = parts["box"].toPlainText()
-    parts["name"].setText("Sin grupo")
-    parts["rename"].click()
+    orig_ask = app._ask_line
+    app._ask_line = lambda *a, **kw: "Sin grupo"
+    try:
+        parts["rename"].click()
+    finally:
+        app._ask_line = orig_ask
     original = app.messagebox.askyesno
     app.messagebox.askyesno = lambda *args, **kwargs: True
     try:
@@ -17298,7 +17732,7 @@ def test_window_versions_dialog_saves_renames_and_deletes():
     window.close()
     assert rows == ["Con grupo", "Antes de corregir"], rows  # la más nueva arriba, como git log
     assert "«Grupo Z»" in compared, compared
-    assert names == ["Sin grupo"] and title == "Versiones · 1 versión", (names, title)
+    assert names == ["Sin grupo"] and title == "Versiones", (names, title)
 
 
 def test_damaged_versions_file_is_set_aside():
@@ -17594,6 +18028,10 @@ def test_translate_batches_and_dpapi():
     secret = translate.protect("sk-secreta-ñ")
     assert secret and "sk-secreta" not in secret and translate.unprotect(secret) == "sk-secreta-ñ"
     assert translate.unprotect("no es base64 válido!") == "" and translate.protect("") == ""
+    # Un blob corrupto (base64 válido pero no cifrado por DPAPI) devuelve vacío en vez de fallar
+    assert translate.unprotect("YWJjZGVm") == ""
+
+
 
 
 def test_translate_doubts_and_second_pass():
@@ -18071,8 +18509,8 @@ def test_window_translate_chapters_style_and_doubts():
         # Filtros con su cuenta, buscador y «Anterior/Siguiente» entre lo que se ve
         chips, total = parts["chips"], len(table.get_children())
         visible = lambda: [i for i in table.get_children() if not table.rows[i].isHidden()]
-        assert chips["all"].text() == f"Todos {total}" and chips["Dudoso"].text() == "Dudosos 1", chips["Dudoso"].text()
-        assert chips["A mano"].text() == "A mano 1" and chips["done"].text() == f"Traducidos {total - 2}"
+        assert chips["all"].text() == f"Todos ({total})" and chips["Dudoso"].text() == "Dudosos (1)", chips["Dudoso"].text()
+        assert chips["A mano"].text() == "A mano (1)" and chips["done"].text() == f"Traducidos ({total - 2})"
         chips["Dudoso"].click()
         assert visible() == [other], visible()
         chips["all"].click()
@@ -18165,7 +18603,7 @@ def test_window_translate_spanish_warnings():
         parts["check"](later=False)
         assert started, "con traducciones al español, la ortografía arranca"
         assert table.rows[bad].data(2, app.WARN_ROLE) == 1 and table.rows[typo].data(2, app.WARN_ROLE) is None
-        assert chips["warn"].text() == "Con avisos 1", chips["warn"].text()
+        assert chips["warn"].text() == "Con avisos (1)", chips["warn"].text()
         chips["warn"].click()
         assert [i for i in table.get_children() if not table.rows[i].isHidden()] == [bad]
         chips["all"].click()
@@ -18177,10 +18615,10 @@ def test_window_translate_spanish_warnings():
         parts["check"](later=False)
         assert parts["look"].unknown == {"palbra"} and table.rows[typo].data(2, app.WARN_ROLE) == 1
         assert parts["warnings"][translate.key(table.set(typo, "orig"))] == ["No está en el diccionario: «palbra»"]
-        assert chips["warn"].text() == "Con avisos 2"
+        assert chips["warn"].text() == "Con avisos (2)"
         parts["add_word"]("palbra")
         assert "palbra" in window.words and table.rows[typo].data(2, app.WARN_ROLE) is None
-        assert parts["look"].unknown == set() and chips["warn"].text() == "Con avisos 1"
+        assert parts["look"].unknown == set() and chips["warn"].text() == "Con avisos (1)"
         # Corregida a mano, el aviso se va (el informe nuevo llega del hilo)
         parts["translation"].setPlainText("Abrió la puerta y no la cerró.")
         table.selection_set(typo)
@@ -18188,12 +18626,12 @@ def test_window_translate_spanish_warnings():
         while table.rows[bad].data(2, app.WARN_ROLE) and time.time() < end:
             root.update()
             time.sleep(0.02)
-        assert table.rows[bad].data(2, app.WARN_ROLE) is None and chips["warn"].text() == "Con avisos 0"
+        assert table.rows[bad].data(2, app.WARN_ROLE) is None and chips["warn"].text() == "Con avisos (0)"
         # A otro idioma, el español no opina
         parts["translation"].setPlainText("Escribió (una sola palabra mal en la carta.")
         parts["dst"].setCurrentIndex(parts["dst"].findData("en"))
         parts["dst"].activated.emit(parts["dst"].currentIndex())
-        assert not parts["warnings"] and chips["warn"].text() == "Con avisos 0"
+        assert not parts["warnings"] and chips["warn"].text() == "Con avisos (0)"
         parts["close"]()
     finally:
         app._start_spell_process = saved_spell
@@ -18287,7 +18725,7 @@ def test_window_translate_series_memory():
         table, chips = parts["table"], parts["chips"]
         row, other = (next(i for i in table.get_children() if table.set(i, "orig") == text) for text in (same, near))
         assert table.set(row, "state") == "De la serie" and "desenvainó" in table.set(row, "trans")
-        assert chips["De la serie"].text() == "De la serie 1" and "ya traducido" in parts["status"].text()
+        assert chips["De la serie"].text() == "De la serie (1)" and "ya traducido" in parts["status"].text()
         saved = app._read_translation(window.pdf)["done"][translate.key(same)]
         assert saved["memory"] and saved["source"] == same and not saved["hand"], saved
         assert str(app._translation_path(window.pdf).resolve()) in app._memory_index()["serie de prueba"]
@@ -18303,7 +18741,7 @@ def test_window_translate_series_memory():
         parts["translation"].setPlainText("El caballero desenvainó su espada y miró al dragón sin temor.")
         table.selection_set(other)
         root.update()
-        assert table.set(row, "state") == "A mano" and chips["De la serie"].text() == "De la serie 0"
+        assert table.set(row, "state") == "A mano" and chips["De la serie"].text() == "De la serie (0)"
         assert "memory" not in app._read_translation(window.pdf)["done"][translate.key(same)]
         parts["close"]()
     finally:
@@ -18416,7 +18854,7 @@ def test_window_translate_review():
         assert all("source" in v and "translation" in v for data in asked for v in data.values())
         states = {i: table.set(i, "state") for i in table.get_children()}
         assert states[first] == "Con fallos" and set(states.values()) == {"Con fallos", "Revisado"}, states
-        assert chips["Con fallos"].text() == "Con fallos 1" and chips["done"].text() == f"Traducidos {total - 1}"
+        assert chips["Con fallos"].text() == "Con fallos (1)" and chips["done"].text() == f"Traducidos ({total - 1})"
         assert "1 párrafo con fallos" in parts["status"].text(), parts["status"].text()
         table.selection_set(first)
         root.update()
@@ -18680,13 +19118,26 @@ def test_style_guide_tokens_icons_and_no_loose_colors():
     # Excepción: U+1F5CE (documento) sale monocromo, comprobado dibujándolo con la fuente de Windows
     emoji = re.compile("[🀀-🗍🗏-🫿⚠⏮⏭⚙⛓❗⚓]")
     assert not [k for k, v in theme.ICONS.items() if emoji.search(v)], theme.ICONS
-    allowed = {"app.py": {"#1f6fd1", "#2e9d4a", "#f08c00"}, "qtk.py": {"#f08c00"}, "options.py": set(),
+    allowed = {"app.py": {"#1f6fd1", "#7e57c2", "#f08c00"}, "qtk.py": {"#f08c00"}, "options.py": set(),
                "editor.py": {"#2a62c8", "#888888", "#2e9d4a"}, "report.py": set()}  # marcas que no cambian con el tema
     for name, colors in allowed.items():
         text = (Path(__file__).parent / name).read_text(encoding="utf-8")
         assert not emoji.findall(text), (name, emoji.findall(text))
         loose = set(re.findall(r"#[0-9a-fA-F]{6}\b", text)) - colors
         assert not loose, (name, loose)
+    guide = (Path(__file__).parent / "docs" / "ui-style-guide.md").read_text(encoding="utf-8")
+    assert "«Cerrar» es `primary` solo si es la única acción del diálogo" in guide
+    icon_sec = guide.split("## 7. Iconografía", 1)[1].split("\n\nReglas:", 1)[0]
+    guide_icons = {}
+    for line in icon_sec.splitlines():
+        if line.startswith("|") and "---" not in line and "Clave" not in line:
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            for idx in range(0, len(cells), 3):
+                if idx + 1 < len(cells) and cells[idx]:
+                    keys = [k.strip().strip("`") for k in cells[idx].split("/")]
+                    vals = [v.strip().strip("`") for v in cells[idx + 1].split(" / ")]
+                    guide_icons.update(zip(keys, vals))
+    assert guide_icons == theme.ICONS, (set(guide_icons.items()) ^ set(theme.ICONS.items()))
 
 
 def _fake_lt(answer):
@@ -19062,8 +19513,8 @@ def test_window_improve_small_illustrations():
         window.run = lambda work, args, done, **options: ran.append(work) or True
         window.images_dialog()
         dialog = window.images_window
-        buttons = {b.text(): b for b in dialog.findChildren(app.QPushButton)}
-        buttons["Mejorar las pequeñas…"].click()
+        actions = {a.text(): a for a in dialog.parts["improve_menu"].actions()}
+        actions["Las pequeñas…"].trigger()
         no_download = (list(asked), list(ran))
         for name in upscale.KEEP:  # instalado
             (upscale.folder(app.SETTINGS.parent) / name).parent.mkdir(parents=True, exist_ok=True)
@@ -19073,9 +19524,9 @@ def test_window_improve_small_illustrations():
             work(*args, progress=lambda *_: None) if report else work(*args)) or True
         window.confirm_image = lambda k, new, batch=False, parent=None: shown.append((k, batch)) or "replace"
         dialog.parts["list"].setCurrentRow(1)
-        buttons["Mejorar esta"].click()  # la grande: ya llega
+        actions["Esta ilustración"].trigger()  # la grande: ya llega
         big_note = dialog.parts["note"].text()
-        buttons["Mejorar las pequeñas…"].click()
+        actions["Las pequeñas…"].trigger()
         improved = window.book.blocks[1].image
         note = dialog.parts["note"].text()
         stored = [e for e in window.edits if e[0] == "image"]
@@ -19146,6 +19597,22 @@ def test_updater_versions_and_releases():
     assert updater.install_mode(False, port_dir / "PDF a EPUB.exe") == "source"
     assert updater.install_mode(True, port_dir / "PDF a EPUB.exe") == "portable"
     assert updater.install_mode(True, inst_dir / "PDF a EPUB.exe") == "installed"
+
+
+def test_updater_notes_in_spanish():
+    """Las notas automáticas de GitHub salían en inglés en el aviso de actualización («What's Changed», «by @x in»)."""
+    import updater
+    body = ("## What's Changed\n* fix: la app ya no se cae al azar by @alguien in "
+            "https://github.com/a/b/pull/32\n* feat(editor): editor de CSS by @alguien in https://github.com/a/b/pull/33\n\n"
+            "## New Contributors\n* @otra made their first contribution in https://github.com/a/b/pull/30\n\n"
+            "**Full Changelog**: https://github.com/a/b/compare/v0.5.0...v0.5.1")
+    notes = updater.spanish_notes(body)
+    assert notes.splitlines()[:3] == ["## Novedades", "* La app ya no se cae al azar ([#32](https://github.com/a/b/pull/32))",
+                                      "* Editor de CSS ([#33](https://github.com/a/b/pull/33))"], notes
+    assert "## Personas que colaboran por primera vez" in notes and "@otra ([primer cambio](" in notes, notes
+    assert "[Todos los cambios](https://github.com/a/b/compare/v0.5.0...v0.5.1)" in notes, notes
+    assert not re.search(r"What's|by @|Full Changelog|made their", notes), notes
+    assert updater.spanish_notes("### Novedades\n- Mejora") == "### Novedades\n- Mejora"
 
 
 def test_updater_download_verifies_sha256():
@@ -19281,18 +19748,18 @@ def test_window_top_bar_buttons_same_height_and_strip_no_flicker():
 
     root, window = visible_window()
     try:
+        window.pdf = make_novel()
+        window.show_book(convert.analyze(window.pdf))
         app.qtk.app().processEvents()
-        heights = {b.text(): b.height() for b in (window.open_btn, window.batch_btn, window.tools_btn)}
+        heights = {b.text(): b.height() for b in (window.open_btn, window.batch_btn, window.tools_btn, window.recent_btn)}
         assert len(set(heights.values())) == 1, heights
-        assert window.recent_btn.height() == window.open_btn.height(), (
-            window.recent_btn.height(), window.open_btn.height())
+        assert window.pdf_btn.height() == window.gen_btn.height(), (
+            window.pdf_btn.height(), window.gen_btn.height())
 
         # Tira con varias tandas: ensureWidgetVisible no se dispara de nuevo tras marcar la página actual
         calls = []
         orig_ensure = window.strip.ensureWidgetVisible
         window.strip.ensureWidgetVisible = lambda w, *a, **kw: (calls.append(w), orig_ensure(w, *a, **kw))
-        window.pdf = make_novel()
-        window.show_book(convert.analyze(window.pdf))
         window.pdf_page = 0
         window.strip.mark(0)
         calls.clear()
@@ -19562,6 +20029,1231 @@ def test_css_editor_own_css_of_a_pdf_book_goes_after_the_app_css():
     assert again == ("p { text-indent: 3em; }\n", start[2]), again
     assert all(s.endswith("p { text-indent: 3em; }\n") for s in sheets.values()), sheets
     assert sheets["Clásico"] != sheets["Novela ligera"]  # el estilo sigue cambiando la hoja
+
+
+def test_window_ux_ui_polish_and_live_theme_recolor():
+    """Pulido UX/UI: «Celular» migra a «Móvil», «Restablecer» en Traducción restaura motor e idiomas conservando claves,
+    cambiar de tema actualiza en vivo los diálogos abiertos y la hoja del editor, «Código HTML» usa fuente monoespaciada,
+    y los buscadores distinguen «Reemplazar todo» de «Ver todos»."""
+    import app
+    import editor as edmod
+    import theme
+    import translate
+    from PySide6.QtGui import QFontInfo
+    from PySide6.QtWidgets import QPushButton
+
+    B = convert.Block
+    root, window = visible_window()
+    # 1. Migración silenciosa de «Celular» -> «Móvil» en ajustes y revisiones
+    window.apply_state({"profile": "Celular"})
+    migrated_profile = window.profile_var.get()
+
+    # 2. Restablecer en Opciones -> Traducción conserva claves y vuelve a Google / auto -> es
+    window.settings["translate"] = {"engine": "OpenAI (IA)", "src": "ja", "dst": "en",
+                                    "keys": {"OpenAI (IA)": translate.protect("clave-secreta")}}
+    dlg = window.open_options("Traducción")
+    orig_yesno = app.qtk.messagebox.askyesno
+    app.qtk.messagebox.askyesno = lambda *a, **kw: True
+    try:
+        dlg.reset_page()
+    finally:
+        app.qtk.messagebox.askyesno = orig_yesno
+    reset_tr = dict(dlg.values["translate"])
+    dlg.parts["cancel"]()
+
+    # 3. Libro abierto: buscadores desambiguados, barra de progreso oculta, tema en vivo en Informe, Ortografía y Editor
+    window.pdf = make_novel()
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto con palabrarara."), B("p", 1, "12")]
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    idle_progress = window.progress.isVisible()
+    main_find_buttons = {b.text() for b in window.find_bar.findChildren(QPushButton)}
+
+    window.quality()
+    qwin = window.quality_window
+    window.spelling_dialog([("palabrarara", 1, ["palabra"])])
+    swin = window.spelling_window
+
+    window.theme_var.set("Oscuro")
+    window.apply_theme()
+    dark_report = (qwin.parts["ring"].dark, qwin.parts["bars"].dark, qwin.parts["strip"].dark)
+    qwin.close()
+    swin.close()
+
+    window.tree.selection_set("0")
+    window.edit_text()
+    ed = window.text_editor
+    try:
+        ed_find_buttons = {b.text() for b in ed.find_frame.findChildren(QPushButton)}
+        ed.code.ensurePolished()
+        code_font = ed.code.font()
+        code_fixed = (QFontInfo(code_font).fixedPitch()
+                      or code_font.family() in ("Cascadia Mono", "Consolas")
+                      or code_font.styleHint() == app.QFont.StyleHint.Monospace)
+        window.theme_var.set("Claro")
+        window.apply_theme()
+        light_tags = dict(ed.sheet.tags)
+        window.theme_var.set("Oscuro")
+        window.apply_theme()
+        dark_tags = dict(ed.sheet.tags)
+        dark_link = edmod.LINK_COLOR
+    finally:
+        ed.win.done(0)
+        window.theme_var.set("Claro")
+        window.apply_theme()
+    window.close()
+
+    assert migrated_profile == "Móvil", migrated_profile
+    assert reset_tr["engine"] == next(iter(translate.ENGINES)) and reset_tr["src"] == "auto" and reset_tr["dst"] == "es", reset_tr
+    assert translate.unprotect(reset_tr["keys"]["OpenAI (IA)"]) == "clave-secreta", reset_tr
+    assert not idle_progress, idle_progress
+    assert "Reemplazar todo" in main_find_buttons and "Todos" not in main_find_buttons, main_find_buttons
+    assert "Ver todos" in ed_find_buttons and "Todos" not in ed_find_buttons, ed_find_buttons
+    assert dark_report == (True, True, True), dark_report
+    assert code_fixed, "Código HTML debe usar fuente monoespaciada"
+    assert light_tags == theme.editor_tags(False) and dark_tags == theme.editor_tags(True), (light_tags, dark_tags)
+    assert dark_link == theme.colors(True)["acc"], dark_link
+
+
+def test_window_glyph_buttons_have_accessible_names():
+    """A1: todo botón visible sin letras (glifo o icono) recibe nombre accesible desde su ayuda emergente, sin el
+    atajo entre paréntesis; uno sin ayuda queda tal cual."""
+    from PySide6.QtWidgets import QAbstractButton, QPushButton
+
+    B = convert.Block
+    root, window = visible_window()
+    window.pdf = make_novel()
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto de prueba."),
+              B("heading", 2, "Capítulo 2"), B("p", 2, "Más texto.")]
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 2]))
+    root.update()
+
+    def missing_names(widget):
+        missing = []
+        for btn in widget.findChildren(QAbstractButton):
+            if btn.isVisible() and not any(ch.isalpha() for ch in btn.text().replace("&", "")):
+                if not btn.accessibleName().strip():
+                    missing.append((type(btn).__name__, btn.text(), btn.toolTip()))
+        return missing
+
+    main_missing = missing_names(window.root)
+    window.tree.selection_set("0")
+    window.edit_text()
+    ed = window.text_editor
+    try:
+        ed_missing = []
+        for idx in range(ed.ribbon_tabs.count()):
+            ed.ribbon_tabs.setCurrentIndex(idx)
+            root.update()
+            ed_missing.extend((idx, item) for item in missing_names(ed.win))
+        center_acc = ed.center_btn.accessibleName()
+        review_acc = ed.review_btn.accessibleName()
+        # Botón sin ayuda emergente: no se le inventa un nombre
+        bare = QPushButton("+", ed.win)
+        bare.show()
+        root.update()
+        bare_acc = bare.accessibleName()
+        bare.close()
+    finally:
+        ed.win.done(0)
+    window.close()
+
+    assert not main_missing, main_missing
+    assert not ed_missing, ed_missing
+    assert center_acc and "(Ctrl+E)" not in center_acc, center_acc
+    assert review_acc and "(Ctrl+Intro)" not in review_acc, review_acc
+    assert bare_acc == "", bare_acc
+
+
+def test_window_shortcuts_arrows_avoid_emoji_presentation():
+    """V1: en «Atajos de teclado», las flechas ↑ ↓ usan Segoe UI Symbol (monocromas en el color del texto), no el
+    respaldo a emoji de Windows."""
+    import theme
+    from PySide6.QtWidgets import QLabel
+
+    root, window = visible_window()
+    window.show_shortcuts()
+    root.update()
+    win = window.shortcuts_window
+    arrows = [lbl for lbl in win.findChildren(QLabel)
+              if lbl.objectName() == "key" and lbl.text() in ("↑", "↓")]
+    for lbl in arrows:
+        lbl.ensurePolished()
+    info = [(lbl.text(), bool(lbl.property("sign")), lbl.font().family()) for lbl in arrows]
+    window.close()
+
+    assert 'QLabel#key[sign="true"]' in theme.QSS and "Segoe UI Symbol" in theme.QSS
+    assert len(info) == 2 and {t for t, _, _ in info} == {"↑", "↓"}, info
+    assert all(sign and fam == "Segoe UI Symbol" for _, sign, fam in info), info
+
+
+def test_window_strip_tooltips_explain_page_and_marks():
+    """V5: cada miniatura de qtk.Strip lleva ayuda emergente con su número de página y explica el borde azul de inicio
+    de capítulo y el naranja de la página visible ahora."""
+    import app
+    import pymupdf
+
+    root, window = visible_window()
+    try:
+        window.pdf = make_novel()
+        book = convert.analyze(window.pdf)
+        window.show_book(book)
+        # Carga directa de la primera tanda de miniaturas (ruta real de add_thumbs, sin esperar al temporizador)
+        titles = {b.page for b in window.book.blocks if b.kind == "heading"}
+        images = {b.page for b in window.book.blocks if b.kind == "image"}
+        window.thumb_job += 1
+        window.strip.clear()
+        window.add_thumbs(window.thumb_job, 0, titles, images)
+        ch_page = min(titles) - 1
+        plain_page = next(n for n in window.strip.labels if n + 1 not in titles and n + 1 not in images)
+        window.strip.mark(ch_page)
+        tips_at_ch = {n: lbl.toolTip() for n, lbl in window.strip.labels.items()}
+        window.strip.mark(plain_page)
+        tips_at_plain = {n: lbl.toolTip() for n, lbl in window.strip.labels.items()}
+        # Incluso añadiendo sin texto explícito, Strip pone el número de página
+        raw_img = app.qtk.qimage(window.pdf_doc[0].get_pixmap(matrix=pymupdf.Matrix(0.1, 0.1)))
+        window.strip.add(99, raw_img, "")
+        default_tip = window.strip.labels[99].toolTip()
+    finally:
+        window.close()
+
+    assert f"Página {ch_page + 1}" in tips_at_ch[ch_page] and "capítulo" in tips_at_ch[ch_page], tips_at_ch[ch_page]
+    assert "Página que se ve ahora" in tips_at_ch[ch_page], tips_at_ch[ch_page]
+    assert f"Página {plain_page + 1}" in tips_at_ch[plain_page] and "Página que se ve ahora" not in tips_at_ch[plain_page], tips_at_ch[plain_page]
+    assert "Página que se ve ahora" not in tips_at_plain[ch_page] and "capítulo" in tips_at_plain[ch_page], tips_at_plain[ch_page]
+    assert f"Página {plain_page + 1}" in tips_at_plain[plain_page] and "Página que se ve ahora" in tips_at_plain[plain_page], tips_at_plain[plain_page]
+    assert "Página 100" in default_tip, default_tip
+
+
+def test_window_quality_report_bars_and_strip_have_level_tooltips():
+    """V11: en el informe de calidad, cada barra de tipos indica el nivel y la cuenta en su ayuda emergente y cada
+    celda de la franja «Capítulos» muestra el capítulo y el desglose de avisos por nivel."""
+    from PySide6.QtCore import QEvent, QPoint
+    from PySide6.QtGui import QHelpEvent
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Que haces?"), B("p", 1, "12"), B("p", 1, "Dónde estás?"),
+              B("heading", 2, "Capítulo 2"), B("p", 2, "Un párrafo limpio sin ningún problema real.")]
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0, 4]))
+    window.quality()
+    root.update()
+    parts = window.quality_window.parts
+    bars, strip = parts["bars"], parts["strip"]
+    bars.grab()  # ejercita el pintado con nivel junto a la cuenta
+    strip.grab()
+    bar_tips = [bars.row_tip(n) for n in range(len(bars.rows))]
+    cell_tips = [strip.cell_tip(n) for n in range(len(strip.cells))]
+    bar_ev = QHelpEvent(QEvent.Type.ToolTip, QPoint(10, bars.ROW // 2), bars.mapToGlobal(QPoint(10, bars.ROW // 2)))
+    strip_ev = QHelpEvent(QEvent.Type.ToolTip, QPoint(10, 10), strip.mapToGlobal(QPoint(10, 10)))
+    bar_handled = bars.event(bar_ev)
+    strip_handled = strip.event(strip_ev)
+    window.close()
+
+    assert bar_tips and all(any(lv in tip for lv in ("Grave", "Por revisar", "Menor")) and "aviso" in tip
+                            for tip in bar_tips), bar_tips
+    assert len(cell_tips) == 2, cell_tips
+    assert "Capítulo 1" in cell_tips[0] and "aviso" in cell_tips[0] and (
+        "por revisar" in cell_tips[0] or "menor" in cell_tips[0]), cell_tips[0]
+    assert "Capítulo 2" in cell_tips[1] and "aviso" in cell_tips[1], cell_tips[1]
+    assert bar_handled and strip_handled, (bar_handled, strip_handled)
+
+
+def test_window_terminology_is_consistent():
+    """Títulos de ventana sin cifras duplicadas y etiquetas coherentes en el panel de datos sin recortar a 1366×700."""
+    import app
+    from PySide6.QtWidgets import QLabel
+
+    pdf = TMP / "Terminologia - Volumen 1.pdf"
+    make_novel().replace(pdf)
+    root, window = visible_window()
+    window.pdf = pdf
+    window.show_book(convert.Book("Libro", "", b"", [
+        convert.Block("heading", 1, "Capítulo 1"),
+        convert.Block("p", 1, "Texto del libro.")
+    ], [0]))
+
+    # 1. Título del informe de calidad
+    window.quality()
+    root.update()
+    quality_title = window.quality_window.windowTitle()
+    window.quality_window.close()
+
+    # 2. Título de Versiones
+    window.versions()
+    root.update()
+    versions_title = window.versions_window.windowTitle()
+    window.versions_window.close()
+
+    # 3. Etiquetas del panel de datos y comprobación de recorte a 1366x700
+    window.root.resize(1366, 700)
+    window.toggle_data()
+    root.update()
+
+    labels = {lbl.text(): lbl for lbl in window.data_panel.findChildren(QLabel) if lbl.text()}
+    window.close()
+
+    assert quality_title == "Informe de calidad", quality_title
+    assert versions_title == "Versiones", versions_title
+    assert "Ilustrador/a:" in labels, list(labels.keys())
+    assert "Volumen:" in labels, list(labels.keys())
+    assert "Grupo de traducción:" in labels, list(labels.keys())
+    assert "Corrector/a:" in labels, list(labels.keys())
+    assert "Editor/a:" in labels, list(labels.keys())
+
+    # Comprobación de que ninguna etiqueta relevante del panel está recortada
+    for text in ("Ilustrador/a:", "Volumen:", "Grupo de traducción:", "Corrector/a:", "Editor/a:"):
+        lbl = labels[text]
+        req_w = lbl.fontMetrics().horizontalAdvance(text)
+        act_w = lbl.width()
+        assert act_w >= req_w, f"La etiqueta {text!r} se recorta: ancho {act_w} < requerido {req_w}"
+
+
+def test_window_options_label_column_is_aligned():
+    """V3: todas las páginas de Opciones comparten un ancho de etiqueta común para que el primer control de cada fila
+    con etiqueta a la izquierda empiece en la misma coordenada x (tolerancia 2 px) y el formulario no salte."""
+    import options
+    import translate
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
+
+    root, window = visible_window()
+    window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                    convert.Block("p", 1, "Texto.")], [0]))
+    dialog = window.open_options()
+    seen = []
+
+    def record_rows(cat):
+        root.update()
+        page = dialog.scroll.widget()
+        for row in page.findChildren(QWidget):
+            if row.parentWidget() is not page or not row.isVisibleTo(dialog.win) or not isinstance(row.layout(), QHBoxLayout):
+                continue
+            line = row.layout()
+            if line.count() < 2:
+                continue
+            first, second = line.itemAt(0).widget(), line.itemAt(1).widget()
+            if isinstance(first, QLabel) and first.text().endswith(":") and second and second.isVisibleTo(dialog.win):
+                seen.append((cat, first.text(), second.mapTo(dialog.win, QPoint(0, 0)).x()))
+
+    pages = [name for group in options.CATEGORIES.values() for name in group]
+    for cat in pages:
+        dialog.show(cat)
+        record_rows(cat)
+        if cat == "Traducción":
+            custom_name = next((n for n, info in translate.ENGINES.items() if info.get("custom")), None)
+            if custom_name:
+                eng = dialog.parts["engine"]
+                eng.setCurrentIndex(eng.findText(custom_name))
+                eng.activated.emit(eng.currentIndex())
+                record_rows(cat)
+        elif cat == "Ortografía":
+            gram = dialog.parts["widgets"]["grammar"]
+            for code in ("custom", "premium"):
+                idx = gram.findData(code)
+                if idx >= 0:
+                    gram.setCurrentIndex(idx)
+                    record_rows(cat)
+    # Al subir el tamaño de letra de la ventana, el ancho común se actualiza sin recortar etiquetas
+    dialog.show("Apariencia")
+    dialog.put("ui_font", "11 pt")
+    root.update()
+    unclipped_11 = all(lbl.width() >= lbl.fontMetrics().horizontalAdvance(lbl.text()) for lbl in dialog.page_labels)
+    dialog.cancel()
+    window.close()
+
+    xs = [x for _, _, x in seen]
+    checked_cats = {cat for cat, _, _ in seen}
+    assert {"Traducción", "Perfil y formato", "Aspecto", "Apariencia", "Ortografía"} <= checked_cats, checked_cats
+    assert xs and max(xs) - min(xs) <= 2, seen
+    assert unclipped_11
+
+
+def test_window_result_dialog_elides_folder_and_groups_more_menu():
+    """V8: en «EPUB listo», la etiqueta muestra el nombre arriba y la carpeta recortada por el medio al ancho del
+    diálogo con la ruta completa en el toolTip, y «Añadir a Calibre» / «Validar con EPUBCheck» van en «Más»."""
+    import app
+    from PySide6.QtWidgets import QLabel, QPushButton, QToolButton
+
+    deep = (TMP / "carpeta_de_novelas_ligeras_traducidas" / "temporada_primera_edicion_revisada"
+            / "volumenes_completos_en_espanol")
+    deep.mkdir(parents=True, exist_ok=True)
+    out = deep / "Novela ligera - Volumen 01.epub"
+    out.write_bytes(b"x" * 4096)
+    root, window = visible_window()
+    validated = []
+    calibre = app._calibre
+    orig_validate = window.validate_epub
+    window.validate_epub = lambda p: validated.append(p)
+    try:
+        app._calibre = lambda: "C:/Calibre2/calibre.exe"
+        window.result_dialog(str(out))
+        root.update()
+        dialog = window.result_window
+        info = next(w for w in dialog.findChildren(QLabel) if w.text().startswith(out.name))
+        lines = info.text().splitlines()
+        full_folder_w = info.fontMetrics().horizontalAdvance(str(out.parent))
+        shown_folder_w = info.fontMetrics().horizontalAdvance(lines[1])
+        info_w, dlg_w, tip = info.width(), dialog.width(), info.toolTip()
+        push_texts = [b.text() for b in dialog.findChildren(QPushButton)]
+        more = next((b for b in dialog.findChildren(QToolButton) if b.text() == "Más"), None)
+        more_obj = more.objectName() if more else ""
+        actions = {a.text(): a for a in more.menu().actions()} if more and more.menu() else {}
+        if "Validar con EPUBCheck" in actions:
+            actions["Validar con EPUBCheck"].trigger()
+        window.close()
+    finally:
+        app._calibre, window.validate_epub = calibre, orig_validate
+
+    assert lines[0] == out.name and len(lines) == 3 and "…" in lines[1], lines
+    assert info_w <= dlg_w and shown_folder_w <= dlg_w < full_folder_w, (info_w, shown_folder_w, dlg_w, full_folder_w)
+    assert tip == str(out), (tip, str(out))
+    assert more is not None and more_obj == "menu", (more, more_obj)
+    assert "Añadir a Calibre" in actions and "Validar con EPUBCheck" in actions, list(actions)
+    assert "Añadir a Calibre" not in push_texts and "Validar con EPUBCheck" not in push_texts, push_texts
+    assert validated == [str(out)], validated
+
+
+def test_window_series_panel_selects_open_book_and_enables_open():
+    """V10: al abrir el panel de serie queda seleccionada la fila del tomo abierto (o la primera sin libro abierto),
+    «Abrir» está activo y la cabecera cabe en una sola línea."""
+    import app
+    from PySide6.QtWidgets import QPushButton
+
+    folder = TMP / f"serie-v10-{time_ns()}"
+    folder.mkdir()
+    vols = []
+    for n in (1, 2):
+        path = folder / f"Serie - Volumen 0{n}.pdf"
+        with pymupdf.open() as doc:
+            add_page(doc, 1, [(72, 100, f"Capítulo {n}", 18, "helv"), (72, 140, "Texto del tomo.", 11, "cour")])
+            doc.save(path)
+        vols.append(path)
+    root, window = visible_window()
+    window.pdf = vols[1]
+    window.show_book(convert.analyze(vols[1]))
+    window.series_panel()
+    root.update()
+    win, table = window.series_window
+    open_btn = next(b for b in win.findChildren(QPushButton) if b.text() == "Abrir")
+    with_book = (table.selection(), open_btn.isEnabled(), open_btn.objectName())
+    header_h = table.header().height()
+    line_h = table.fontMetrics().height()
+    warn_room = (table.columnWidth(2), table.header().fontMetrics().horizontalAdvance("Avisos del EPUB"))
+    win.close()
+
+    window.pdf = None
+    askdir = app.filedialog.askdirectory
+    app.filedialog.askdirectory = lambda **kw: str(folder)
+    try:
+        window.series_panel()
+        root.update()
+        win2, table2 = window.series_window
+        open_btn2 = next(b for b in win2.findChildren(QPushButton) if b.text() == "Abrir")
+        without_book = (table2.selection(), open_btn2.isEnabled())
+    finally:
+        app.filedialog.askdirectory = askdir
+        window.close()
+
+    assert with_book == ((str(vols[1]),), True, "primary"), with_book
+    assert without_book == ((str(vols[0]),), True), without_book
+    assert header_h <= line_h + 18 and warn_room[0] >= warn_room[1] + 16, (header_h, line_h, warn_room)
+
+
+def test_window_close_button_is_secondary_when_other_actions_exist():
+    """Regla «Cerrar»: «Cerrar» es primary solo cuando es la única acción del diálogo («Atajos de teclado», visor de
+    solo lectura); cuando hay acciones propias («Ilustraciones», ilustración en el explorador del editor) es secundario."""
+    import app
+    from PySide6.QtWidgets import QPushButton
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto."), B("image", 2, image=jpeg(300, 400))]
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+
+    window.images_dialog()
+    root.update()
+    img_close = next(b for b in window.images_window.findChildren(QPushButton) if b.text() == "Cerrar").objectName()
+    window.images_window.close()
+
+    window.show_shortcuts()
+    root.update()
+    sc_close = next(b for b in window.shortcuts_window.findChildren(QPushButton) if b.text() == "Cerrar").objectName()
+    window.shortcuts_window.close()
+
+    ed = app.TextEditor(window, "0", *window.section_bounds(0))
+    try:
+        ed.toggle_files()
+        ed.show_file("OEBPS/img/b00002.jpg")
+        root.update()
+        file_img_close = next(b for b in ed.file_view.findChildren(QPushButton) if b.text() == "Cerrar").objectName()
+        ed.show_file("OEBPS/content.opf")
+        root.update()
+        file_ro_close = next(b for b in ed.file_view.findChildren(QPushButton) if b.text() == "Cerrar").objectName()
+        ed.file_view.close()
+    finally:
+        ed.win.done(0)
+    window.close()
+
+    assert img_close != "primary" and img_close == "", img_close
+    assert sc_close == "primary", sc_close
+    assert file_img_close == "" and file_ro_close == "primary", (file_img_close, file_ro_close)
+
+
+def test_editor_heading_looks_like_title_not_link():
+    """I5: el título del capítulo en la hoja va en la tinta del tema y seminegrita, sin subrayado ni azul de acento,
+    conservando la onda de ortografía y sin alterar lo que devuelve dump()."""
+    import app
+    import editor
+    import theme
+    from PySide6.QtGui import QTextCharFormat
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Parte Uno: Stifled Shadow"), B("p", 1, "Texto del capítulo.")]
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+    try:
+        for choice, dark in (("Claro", False), ("Oscuro", True)):
+            window.theme_var.set(choice)
+            window.apply_theme()
+            ed = app.TextEditor(window, "0", *window.section_bounds(0))
+            try:
+                ed.sheet.look.set_unknown({"Stifled"})
+                root.update()
+                block = ed.sheet.document().firstBlock()
+                before_dump = editor.dump(ed.sheet.document())
+                ranges = block.layout().formats()
+                # Primer tramo («Parte Uno: »): sin subrayado, peso >= 600, color ink (no acento)
+                title_fmt = next(r.format for r in ranges if r.start == 0)
+                spell_fmt = next(r.format for r in ranges
+                                 if r.start <= block.text().index("Stifled") < r.start + r.length)
+                colors = theme.colors(dark)
+                fg = title_fmt.foreground().color().name()
+                assert not title_fmt.fontUnderline(), (choice, title_fmt.underlineStyle())
+                assert title_fmt.fontWeight() >= 600, (choice, title_fmt.fontWeight())
+                assert fg == colors["ink"] and fg != colors["acc"], (choice, fg, colors["ink"], colors["acc"])
+                assert spell_fmt.underlineStyle() == QTextCharFormat.UnderlineStyle.SpellCheckUnderline, choice
+                assert before_dump == "# Parte Uno: Stifled Shadow\n\nTexto del capítulo.", before_dump
+            finally:
+                ed.win.done(0)
+    finally:
+        window.close()
+
+
+def test_editor_original_panel_follows_dark_var():
+    """V2: el panel «Original» del editor sigue App.dark_var; con dark_var activo el margen es oscuro (luminancia < 0,3)
+    y con dark_var apagado queda claro aunque el tema de la ventana sea oscuro."""
+    import app
+
+    def margin_luminance(image):
+        c = image.pixelColor(image.width() // 2, 8)
+        return (0.2126 * c.red() + 0.7152 * c.green() + 0.0722 * c.blue()) / 255.0
+
+    root, window = visible_window()
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    window.theme_var.set("Oscuro")
+    window.apply_theme()
+    k = int(first_title(window))
+    try:
+        window.dark_var.set(False)
+        ed = app.TextEditor(window, str(k), *window.section_bounds(k))
+        try:
+            root.update()
+            lum_off = margin_luminance(ed.canvas.image)
+            window.dark_var.set(True)
+            root.update()
+            lum_live = margin_luminance(ed.canvas.image)
+        finally:
+            ed.win.done(0)
+        # También al abrir el editor con dark_var ya activo desde la ventana principal
+        ed2 = app.TextEditor(window, str(k), *window.section_bounds(k))
+        try:
+            root.update()
+            lum_on = margin_luminance(ed2.canvas.image)
+        finally:
+            ed2.win.done(0)
+    finally:
+        window.close()
+    assert lum_off > 0.7, lum_off
+    assert lum_live < 0.3 and lum_on < 0.3, (lum_live, lum_on)
+
+
+def test_empty_page_or_separator_lines_and_doc_icon():
+    """V9: la pantalla vacía enmarca la «o» entre dos líneas horizontales (sep) y usa theme.ICONS['doc']."""
+    import theme
+    from PySide6.QtWidgets import QFrame, QLabel
+
+    root, window = visible_window()
+    try:
+        root.update()
+        page = window.stack.widget(0)
+        labels = page.findChildren(QLabel)
+        or_label = next(lbl for lbl in labels if lbl.text() == "o")
+        or_row = or_label.parentWidget()
+        lines = [f for f in or_row.findChildren(QFrame) if f.objectName() == "sep"]
+        icons = [lbl for lbl in labels if "40pt" in lbl.styleSheet()]
+        assert len(lines) == 2, lines
+        assert all(line.frameShape() == QFrame.Shape.HLine for line in lines)
+        left_x, mid_x, right_x = lines[0].geometry().center().x(), or_label.geometry().center().x(), lines[1].geometry().center().x()
+        assert left_x < mid_x < right_x, (left_x, mid_x, right_x)
+        assert icons and icons[0].text() == theme.ICONS["doc"], [i.text() for i in icons]
+    finally:
+        window.close()
+
+
+def test_find_results_highlight_term_and_keep_text():
+    """Menor 1: los resultados de búsqueda resaltan el término con el delegado en los dos temas sin perder el texto ni
+    el recorte con «…» a la derecha."""
+    import app
+    import theme
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QFontMetrics, QImage, QPainter
+    from PySide6.QtWidgets import QStyleOptionViewItem
+
+    B = convert.Block
+    text = "Los cazadores de tesoros se reunieron en la plaza mayor y Tino los miraba con calma."
+    blocks = [B("heading", 1, "Capítulo 1"), B("p", 1, text)]
+    root, window = visible_window()
+    try:
+        window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+        window.find()
+        window.find_entry.setText("tino")
+        window.search_book()
+        delegate = window.find_results.itemDelegate()
+        row_text = window.find_results.item(0).text()
+        runs = delegate.runs(row_text)
+        assert isinstance(delegate, app._FindHits)
+        assert "".join(piece for piece, _ in runs) == row_text, runs
+        assert any(hit and piece.lower() == "tino" for piece, hit in runs), runs
+        fm = QFontMetrics(window.find_results.font())
+        clipped = delegate.fit_runs(runs, fm, fm, 90)
+        assert "".join(p for p, _ in clipped).endswith("…"), clipped
+        for choice, dark in (("Claro", False), ("Oscuro", True)):
+            window.theme_var.set(choice)
+            window.apply_theme()
+            img = QImage(900, 26, QImage.Format.Format_ARGB32)
+            img.fill(theme.colors(dark)["base"])
+            opt = QStyleOptionViewItem()
+            opt.rect = QRect(0, 0, 900, 26)
+            opt.font = window.find_results.font()
+            opt.widget = window.find_results
+            painter = QPainter(img)
+            delegate.paint(painter, opt, window.find_results.model().index(0, 0))
+            painter.end()
+            want = theme.colors(dark)["sel"].lower()
+            found_sel = any(img.pixelColor(x, y).name().lower() == want
+                            for y in range(2, img.height() - 2, 2) for x in range(img.width()))
+            assert found_sel, (choice, want)
+    finally:
+        window.close()
+
+
+def test_window_quality_opens_fast_and_drains_large_report():
+    """I2: abrir el informe de calidad con miles de avisos no bloquea la ventana (< 250 ms) y termina de poblar
+    la tabla por tandas con qtk.after(0, …)."""
+    import time
+
+    B = convert.Block
+    blocks, candidates = [], []
+    for ch in range(1, 31):
+        candidates.append(len(blocks))
+        blocks.append(B("heading", ch * 10, f"Capítulo {ch}: Título del capítulo {ch}"))
+        for p in range(120):
+            txt = (f"En el capítulo {ch}, el protagonista caminaba  despacio por el bosque - mientras pensaba "
+                   + ("palabra " * 15) + "extra.")
+            blocks.append(B("p", ch * 10 + p // 15, txt))
+    root, window = visible_window()
+    try:
+        window.show_book(convert.Book("Novela larga", "Autor", b"", blocks, candidates))
+        root.update()
+        total_issues = len(window.quality_report())  # ya cacheado, como cuando el usuario abre el diálogo
+        t0 = time.perf_counter()
+        window.quality()
+        elapsed = time.perf_counter() - t0
+        parts = window.quality_window.parts
+        table, state = parts["table"], parts["state"]
+        initial_rows = len(table.rows)
+        had_pending = bool(state["pending"])
+        for _ in range(60):
+            if not state["pending"]:
+                break
+            root.update()
+        final_rows = len(table.rows)
+        expected_rows = total_issues + len(state["groups"])
+    finally:
+        window.close()
+    assert total_issues >= 1000, total_issues
+    # Lo que garantiza la rapidez es pintar primero unas pocas filas y diferir el resto (~200 ms aislado, ~780 antes).
+    # El tiempo, con la suite en 4 procesos o en CI, varía mucho: solo sirve de red contra un bloqueo largo
+    assert initial_rows <= 300, initial_rows
+    assert elapsed < 1.5, f"App.quality() tardó {elapsed * 1000:.1f} ms"
+    assert had_pending and initial_rows < final_rows and final_rows == expected_rows, (
+        had_pending, initial_rows, final_rows, expected_rows)
+
+
+def test_window_chapter_list_tooltip_shows_full_title_or_shortcuts():
+    """V4: al pedir ayuda emergente sobre una celda recortada en la lista de capítulos muestra el título entero;
+    sobre una que cabe conserva la ayuda habitual de atajos (SHORTCUTS)."""
+    import app
+    from PySide6.QtCore import QEvent, QPoint
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtWidgets import QApplication, QToolTip
+
+    B = convert.Block
+    long_title = "Capítulo 1: Hacer Frente Al Servicio Comunitario De La Capital Imperial"
+    short_title = "Prólogo"
+    blocks = [B("heading", 1, long_title), B("p", 1, "Texto."), B("heading", 2, short_title), B("p", 2, "Más.")]
+    root, window = visible_window()
+    try:
+        window.show_book(convert.Book("Libro", "", b"", blocks, [0, 2]))
+        window.root.resize(1100, 700)
+        root.update()
+        col_x = window.tree.columnViewportPosition(1) + 12
+        tips = []
+        for iid in ("0", "2"):
+            QToolTip.hideText()
+            pos = QPoint(col_x, window.tree.visualItemRect(window.tree.rows[iid]).center().y())
+            ev = QHelpEvent(QEvent.Type.ToolTip, pos, window.tree.viewport().mapToGlobal(pos))
+            QApplication.sendEvent(window.tree.viewport(), ev)
+            tips.append(QToolTip.text())
+    finally:
+        window.close()
+    assert tips[0] == long_title, tips[0]
+    assert tips[1] == app.SHORTCUTS, tips[1]
+
+
+def test_window_series_panel_header_single_line_and_vcentered():
+    """V10: la cabecera del Panel de serie tiene altura de una sola línea y todos los títulos centrados en vertical
+    (incluido «Tomo», que quedaba arriba por faltar AlignVCenter)."""
+    from PySide6.QtCore import Qt
+
+    folder = TMP / f"serie-hdr-{time_ns()}"
+    folder.mkdir()
+    pdf = folder / "Serie - Volumen 01.pdf"
+    with pymupdf.open() as doc:
+        add_page(doc, 1, [(72, 100, "Capítulo 1", 18, "helv"), (72, 140, "Texto.", 11, "cour")])
+        doc.save(pdf)
+    root, window = visible_window()
+    try:
+        window.pdf = pdf
+        window.show_book(convert.analyze(pdf))
+        window.series_panel()
+        root.update()
+        win, table = window.series_window
+        hdr = table.header()
+        aligns = [table.headerItem().textAlignment(n) for n in range(table.columnCount())]
+        elide = hdr.textElideMode()
+        h_normal = hdr.height()
+        table.setColumnWidth(2, 70)  # incluso estrechada, no parte a dos líneas
+        root.update()
+        h_narrow = hdr.height()
+        line_h = hdr.fontMetrics().height()
+        win.close()
+    finally:
+        window.close()
+    assert aligns[0] == int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), aligns
+    assert all(a & int(Qt.AlignmentFlag.AlignVCenter) for a in aligns), aligns
+    assert elide == Qt.TextElideMode.ElideRight, elide
+    assert h_normal <= line_h + 18 and h_narrow == h_normal, (h_normal, h_narrow, line_h)
+
+
+def test_window_goto_chapter_filters_jumps_and_lists_shortcut():
+    """A4(a): Ctrl+G «Ir al capítulo…» filtra los títulos de la lista, selecciona con Intro o doble clic, está en
+    Herramientas (solo con libro) y sale en «Atajos de teclado» y en SHORTCUTS."""
+    import app
+    import shiboken6
+    import theme
+    from PySide6.QtWidgets import QLabel
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Prólogo"), B("p", 1, "Uno."),
+              B("heading", 2, "Capítulo 1: El bosque"), B("p", 2, "Dos."),
+              B("heading", 3, "Capítulo 2: El dragón dorado"), B("p", 3, "Tres.")]
+    root, window = visible_window()
+    try:
+        goto_action = next((a for a in window.book_actions if "Ir al capítulo" in a.text()), None)
+        hidden_before = goto_action is not None and not goto_action.isVisible()
+        window.show_book(convert.Book("Libro", "", b"", blocks, [0, 2, 4]))
+        root.update()
+        shown_with_book = goto_action is not None and goto_action.isVisible()
+        window.tree.selection_set("0")
+        window.goto_chapter()
+        root.update()
+        win = window.goto_window
+        size = (win.width(), win.height())
+        parts = win.parts
+        parts["entry"].setText("dragon")  # sin tilde encuentra «dragón»
+        root.update()
+        filtered_count = parts["list"].count()
+        parts["entry"].returnPressed.emit()
+        root.update()
+        after_enter = (window.tree.selection(), shiboken6.isValid(win) and win.isVisible())
+        # Doble clic sobre otra fila
+        window.goto_chapter()
+        root.update()
+        win2 = window.goto_window
+        win2.parts["entry"].setText("bosque")
+        root.update()
+        win2.parts["list"].itemDoubleClicked.emit(win2.parts["list"].item(0))
+        root.update()
+        after_dbl = (window.tree.selection(), shiboken6.isValid(win2) and win2.isVisible())
+        window.show_shortcuts()
+        root.update()
+        sc_texts = [lbl.text() for lbl in window.shortcuts_window.findChildren(QLabel)]
+        window.shortcuts_window.close()
+    finally:
+        window.close()
+    assert hidden_before and shown_with_book and "\tCtrl+G" in goto_action.text(), (hidden_before, shown_with_book)
+    assert size == theme.DIALOG["s"], (size, theme.DIALOG["s"])
+    assert filtered_count == 1 and after_enter == (("4",), False), (filtered_count, after_enter)
+    assert after_dbl == (("2",), False), after_dbl
+    assert "Ctrl+G" in app.SHORTCUTS and "Ir al capítulo" in sc_texts, (app.SHORTCUTS, sc_texts)
+
+
+def test_window_remove_row_status_shows_title_and_undo_hint():
+    """A4(b): quitar una fila con Q (o clic hasta «Quitar») muestra en la barra de estado el título quitado y cómo
+    deshacer con Ctrl+Z."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1: El comienzo"), B("p", 1, "Texto."),
+              B("heading", 2, "Capítulo 2: El regreso"), B("p", 2, "Más.")]
+    root, window = visible_window()
+    try:
+        window.show_book(convert.Book("Libro", "", b"", blocks, [0, 2]))
+        root.update()
+        window.tree.selection_set("0")
+        window.tree.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Q, Qt.KeyboardModifier.NoModifier, "q"))
+        root.update()
+        kind_q, status_q = window.tree.set("0", "inc"), window.status.text()
+        window.undo()
+        restored = window.tree.set("0", "inc")
+        # También al pasar a «Quitar» haciendo clic en la columna Tipo
+        window.tree.selection_set("2")
+        x, y, w, h = window.tree.bbox("2", "inc")
+        ev = type("E", (), {"x": x + w // 2, "y": y + h // 2})()
+        for _ in range(4):
+            window.on_click(ev)
+            if window.tree.set("2", "inc") == "Quitar":
+                break
+        status_click = window.status.text()
+    finally:
+        window.close()
+    assert kind_q == "Quitar" and restored == "Capítulo", (kind_q, restored)
+    assert status_q == "Quitado: «Capítulo 1: El comienzo» · Ctrl+Z para deshacer", status_q
+    assert status_click == "Quitado: «Capítulo 2: El regreso» · Ctrl+Z para deshacer", status_click
+
+
+def test_window_tools_menu_omits_duplicate_find_entry():
+    """Menor 2: «Buscar en el libro» no se repite en el menú Herramientas; se quedan el botón Buscar y Ctrl+F."""
+    B = convert.Block
+    root, window = visible_window()
+    try:
+        window.show_book(convert.Book("Libro", "", b"", [B("heading", 1, "Capítulo 1"), B("p", 1, "Texto.")], [0]))
+        root.update()
+        menu_texts = [a.text() for a in window.tools_btn.menu().actions() if a.text()]
+        find_btn_visible = window.find_btn.isVisible() and window.find_btn.text() == "Buscar"
+        window.find()
+        root.update()
+        bar_visible = window.find_bar.isVisible()
+    finally:
+        window.close()
+    assert not any("Buscar en el libro" in t for t in menu_texts), menu_texts
+    assert find_btn_visible and bar_visible, (find_btn_visible, bar_visible)
+
+
+def test_window_images_dialog_groups_improve_in_bottom_menu():
+    """Menor 3: en «Ilustraciones» las acciones de mejorar pasan a un botón de menú «Mejorar» en la fila inferior,
+    junto a Exportar, Cambiar y Describir; la línea de descripción sigue bajo la imagen."""
+    from PySide6.QtWidgets import QPushButton, QToolButton
+
+    B = convert.Block
+    blocks = [B("heading", 1, "Capítulo 1"), B("image", 2, image=jpeg(300, 400)), B("p", 2, "Texto.")]
+    root, window = visible_window()
+    try:
+        window.show_book(convert.Book("Libro", "", b"", blocks, [0]))
+        window.images_dialog()
+        root.update()
+        win = window.images_window
+        push_texts = [b.text() for b in win.findChildren(QPushButton)]
+        tool_btns = {b.text(): b for b in win.findChildren(QToolButton)}
+        improve_btn = tool_btns.get("Mejorar")
+        improve_actions = [a.text() for a in improve_btn.menu().actions()] if improve_btn and improve_btn.menu() else []
+        described_text = win.parts["described"].text()
+        same_row = (improve_btn is not None and "Exportar" in tool_btns
+                    and abs(improve_btn.mapTo(win, improve_btn.rect().center()).y()
+                            - tool_btns["Exportar"].mapTo(win, tool_btns["Exportar"].rect().center()).y()) <= 4)
+        described_above = (improve_btn is not None
+                           and win.parts["described"].mapTo(win, win.parts["described"].rect().bottomLeft()).y()
+                           < improve_btn.mapTo(win, improve_btn.rect().topLeft()).y())
+        win.close()
+    finally:
+        window.close()
+    assert "Mejorar esta" not in push_texts and "Mejorar las pequeñas…" not in push_texts, push_texts
+    assert improve_actions == ["Esta ilustración", "Las pequeñas…"], improve_actions
+    assert same_row and described_above and described_text.startswith("Sin descripción:"), (
+        same_row, described_above, described_text)
+
+
+def test_window_translate_arrows_tooltips_and_language_label():
+    """Menor 4: en «Traducir», las flechas bajo el original tienen ayuda emergente («Párrafo anterior» / «Párrafo
+    siguiente») y el desplegable de idiomas lleva delante la etiqueta «Idioma:»."""
+    import qtk
+    from PySide6.QtWidgets import QLabel
+
+    root, window = versioned_window()
+    try:
+        win = window.translate_book()
+        root.update()
+        arrows = win.findChildren(qtk.ArrowButton)
+        tips = [b.toolTip() for b in arrows]
+        combo = win.parts["langs"]
+        lang_labels = [lbl for lbl in win.findChildren(QLabel) if lbl.text() == "Idioma:"]
+        before_combo = (bool(lang_labels)
+                        and abs(lang_labels[0].mapTo(win, lang_labels[0].rect().center()).y()
+                                - combo.mapTo(win, combo.rect().center()).y()) <= 6
+                        and lang_labels[0].mapTo(win, lang_labels[0].rect().topRight()).x()
+                        <= combo.mapTo(win, combo.rect().topLeft()).x())
+        win.parts["close"]()
+    finally:
+        window.close()
+    assert "Párrafo anterior" in tips and "Párrafo siguiente" in tips, tips
+    assert lang_labels and before_combo, (lang_labels, before_combo)
+
+
+def test_window_anilist_results_show_two_lines_with_muted_subtitle():
+    """Menor 6: «Resultados de AniList» muestra cada serie en dos líneas (título principal arriba y año · título en
+    inglés debajo más pequeño y en color muted), manteniendo selección y doble clic."""
+    import app
+    import shiboken6
+    import theme
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtWidgets import QStyleOptionViewItem
+
+    found = [{"name": "Nageki no Bourei wa Intai Shitai: Saijiyaku Hunter (2018) · Let This Grieving Soul Retire",
+              "romaji_title": "Nageki no Bourei wa Intai Shitai: Saijiyaku Hunter"},
+             {"name": "Solo Titulo (2024)", "romaji_title": "Solo Titulo"}]
+    root, window = visible_window()
+    chosen = []
+    try:
+        window.pick_online(found, "Nageki no Bourei wa Intai Shitai", chosen.append)
+        root.update()
+        win, box, _ = window.online_window
+        texts = [box.item(n).text() for n in range(box.count())]
+        delegate = box.itemDelegate()
+        assert isinstance(delegate, app._OnlineItem)
+        muted_drawn = {}
+        smaller_sub = delegate._sub_font(box.font()).pointSizeF() < box.font().pointSizeF()
+        for choice, dark in (("Claro", False), ("Oscuro", True)):
+            window.theme_var.set(choice)
+            window.apply_theme()
+            img = QImage(620, 60, QImage.Format.Format_ARGB32)
+            img.fill(theme.colors(dark)["base"])
+            opt = QStyleOptionViewItem()
+            opt.rect = QRect(0, 0, 620, 60)
+            opt.font = box.font()
+            opt.widget = box
+            painter = QPainter(img)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, False)
+            delegate.paint(painter, opt, box.model().index(0, 0))
+            painter.end()
+            want_ink = theme.colors(dark)["ink"].lower()
+            want_muted = theme.colors(dark)["muted"].lower()
+            seen = {img.pixelColor(x, y).name().lower() for y in range(img.height()) for x in range(img.width())}
+            muted_drawn[choice] = want_ink in seen and want_muted in seen
+        box.setCurrentRow(1)
+        box.itemDoubleClicked.emit(box.item(1))
+        root.update()
+        closed_after = not (shiboken6.isValid(win) and win.isVisible())
+    finally:
+        window.close()
+    assert texts[0] == "Nageki no Bourei wa Intai Shitai: Saijiyaku Hunter\n2018 · Let This Grieving Soul Retire", texts
+    assert texts[1] == "Solo Titulo\n2024", texts
+    assert smaller_sub and all(muted_drawn.values()), (smaller_sub, muted_drawn)
+    assert closed_after and chosen == [found[1]], (closed_after, chosen)
+
+
+def test_window_recent_card_without_cover_uses_doc_icon_token():
+    """Literal 🗎: la miniatura de «Recientes» sin portada usa theme.ICONS['doc'] y no queda el literal suelto en app.py."""
+    import app
+    import theme
+    from PySide6.QtWidgets import QLabel
+
+    missing_thumb = TMP / f"sin-portada-{time_ns()}.pdf"
+    missing_thumb.write_bytes(make_novel().read_bytes())
+    app._thumb_path(missing_thumb).unlink(missing_ok=True)
+    root, window = visible_window()
+    try:
+        card = window.recent_card(str(missing_thumb))
+        icons = [lbl.text() for lbl in card.findChildren(QLabel) if lbl.text() == theme.ICONS["doc"]]
+    finally:
+        window.close()
+    src = (Path(__file__).parent / "app.py").read_text(encoding="utf-8")
+    assert icons == [theme.ICONS["doc"]], icons
+    assert '"\U0001f5ce"' not in src and "'\U0001f5ce'" not in src
+
+
+def test_text_editor_home_ribbon_edition_group_and_font_grid():
+    """V6: en «Inicio» desaparece el grupo «Deshacer», «Edición» (a la izquierda de «Fuente») reúne Deshacer, Rehacer y
+    Buscar, y la fila 2 de «Fuente» arranca bajo el primer botón de la fila 1 con el mismo hueco entre botones."""
+    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtWidgets import QApplication, QLabel, QLayout
+
+    def collect_widgets(layout):
+        found = []
+        for idx in range(layout.count()):
+            item = layout.itemAt(idx)
+            if item.widget() is not None:
+                found.append(item.widget())
+            elif isinstance(item.layout(), QLayout):
+                found.extend(collect_widgets(item.layout()))
+        return found
+
+    B = convert.Block
+    root, window, ed = editor_on([B("heading", 1, "Capítulo 1"), B("p", 1, "Texto de prueba.")], [0])
+    try:
+        ed.win.resize(1366, 700)
+        ed.win.show()
+        root.update()
+        home = ed.ribbon_pages.widget(0)
+        home_row = home.layout()
+        groups = {}
+        group_order = []
+        for idx in range(home_row.count()):
+            sub = home_row.itemAt(idx).layout()
+            if sub is not None:
+                widgets = collect_widgets(sub)
+                caption = widgets[-1].text() if widgets and isinstance(widgets[-1], QLabel) else ""
+                group_order.append(caption)
+                groups[caption] = widgets
+        all_labels = [lbl.text() for lbl in ed.ribbon_bar.findChildren(QLabel)]
+        edit_widgets = groups.get("Edición", [])
+        # Posiciones en la rejilla de «Fuente» en cinta normal y en cinta estrecha (nivel >= 2)
+        bold_x = ed.bold_btn.mapTo(home, QPoint(0, 0)).x()
+        case_x = ed.case_btn.mapTo(home, QPoint(0, 0)).x()
+        row1_gap = ed.italic_btn.geometry().left() - ed.bold_btn.geometry().right()
+        row2_gap = ed.caps_btn.geometry().left() - ed.case_btn.geometry().right()
+        undo_col_ok = (ed.undo_btn.geometry().top() < ed.redo_btn.geometry().top()
+                       and ed.find_btn.geometry().left() > ed.undo_btn.geometry().right()
+                       and ed.find_btn.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        ed.compact_to(2)
+        QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest.value)
+        root.update()
+        compact_text = ed.case_btn.text()
+        compact_dx = abs(ed.case_btn.mapTo(home, QPoint(0, 0)).x() - ed.bold_btn.mapTo(home, QPoint(0, 0)).x())
+        compact_gap = ed.caps_btn.geometry().left() - ed.case_btn.geometry().right()
+        ed.find_btn.click()
+        root.update()
+        find_opened = ed.find_frame.isVisible()
+        ed.find_frame.hide()
+        ed.show_view(1)
+        root.update()
+        code_view_ok = ed.edit_group.isEnabled() and not ed.find_btn.isEnabled()
+        ed.show_view(0)
+        root.update()
+        sheet_view_ok = ed.find_btn.isEnabled()
+    finally:
+        ed.win.done(0)
+        window.close()
+    assert "Deshacer" not in all_labels and "Deshacer" not in groups, (all_labels, group_order)
+    assert group_order == ["Edición", "Fuente", "Párrafo"], group_order
+    assert {ed.undo_btn, ed.redo_btn, ed.find_btn} <= set(edit_widgets), edit_widgets
+    assert undo_col_ok, "Deshacer y Rehacer en columna con Buscar grande a su derecha"
+    assert abs(case_x - bold_x) <= 2, (case_x, bold_x)
+    assert abs(row2_gap - row1_gap) <= 1, (row1_gap, row2_gap)
+    assert compact_text == "Aa" and compact_dx <= 2 and abs(compact_gap - row1_gap) <= 1, (
+        compact_text, compact_dx, compact_gap, row1_gap)
+    assert find_opened and code_view_ok and sheet_view_ok, (find_opened, code_view_ok, sheet_view_ok)
+
+
+def test_text_editor_unified_zoom_controls_for_sheet_and_panel():
+    """V7: la hoja y el panel derecho comparten el mismo control «− [QSlider] + N %», con sus ayudas, rangos, pasos y
+    ajustes guardados, y mover cada deslizador cambia su zoom."""
+    import re
+    import app
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QLabel, QPushButton, QSlider
+
+    root, window = visible_window()
+    window.settings["editor_zoom"] = 120
+    window.pdf = make_novel()
+    window.show_book(convert.analyze(window.pdf))
+    ed = app.TextEditor(window, "1", 0, len(window.book.blocks))
+    try:
+        ed.win.showNormal()
+        ed.win.resize(1300, 760)
+        root.update()
+        ed.split.setSizes([650, 650])
+        root.update()
+        ed.sheet.setTextCursor(ed.sheet.document().find("Ella penso"))
+        ed.draw_source()
+
+        def describe(bar):
+            lay = bar.layout()
+            items = [lay.itemAt(i).widget() for i in range(lay.count())]
+            xs = [w.mapTo(ed.win, QPoint(0, 0)).x() for w in items]
+            return items, xs
+
+        sheet_items, sheet_xs = describe(ed.text_zoom_bar)
+        side_items, side_xs = describe(ed.side_zoom_bar)
+        init_labels = (ed.text_zoom_label.text(), ed.zoom_label.text())
+        base_page_w, base_code_pt = ed.page_width(), ed.code.font().pointSizeF()
+        base_canvas_w = ed.canvas.width()
+
+        # Mover el deslizador de la hoja y pulsar − / + (paso 10, rango 50..200)
+        ed.text_zoom.setValue(160)
+        root.update()
+        sheet_after_slider = (ed.text_zoom_label.text(), ed.page_width() > base_page_w,
+                              ed.code.font().pointSizeF() > base_code_pt)
+        sheet_items[0].click()  # −
+        sheet_after_minus = ed.text_zoom.value(), ed.text_zoom_label.text()
+        sheet_items[2].click()  # +
+        sheet_after_plus = ed.text_zoom.value(), ed.text_zoom_label.text()
+
+        # Mover el deslizador del panel y pulsar − / + / zoom() (paso 25, rango 50..300)
+        ed.side_zoom.setValue(150)
+        root.update()
+        side_after_slider = (ed.zoom_label.text(), ed.pdf_zoom, ed.canvas.width() > base_canvas_w)
+        side_items[0].click()  # −
+        side_after_minus = ed.side_zoom.value(), ed.zoom_label.text(), ed.pdf_zoom
+        side_items[2].click()  # +
+        side_after_plus = ed.side_zoom.value(), ed.zoom_label.text(), ed.pdf_zoom
+        ed.zoom(25)
+        side_after_wheel = ed.side_zoom.value(), ed.zoom_label.text(), ed.pdf_zoom
+        narrow_ok = 50 <= ed.side_zoom.minimumWidth() < ed.text_zoom.width()
+    finally:
+        ed.win.done(0)
+        window.close()
+
+    for items, xs, suffix in ((sheet_items, sheet_xs, "de la hoja"), (side_items, side_xs, "del panel")):
+        assert len(items) == 4 and xs == sorted(xs) and len(set(xs)) == 4, (items, xs)
+        assert isinstance(items[0], QPushButton) and items[0].text() == "−", items[0]
+        assert isinstance(items[1], QSlider), items[1]
+        assert isinstance(items[2], QPushButton) and items[2].text() == "+", items[2]
+        assert isinstance(items[3], QLabel) and re.fullmatch(r"\d+ %", items[3].text()), items[3].text()
+        assert items[0].toolTip() == f"Reducir zoom {suffix}", items[0].toolTip()
+        assert items[2].toolTip() == f"Aumentar zoom {suffix}", items[2].toolTip()
+    assert init_labels == ("120 %", "100 %"), init_labels
+    assert sheet_after_slider == ("160 %", True, True), sheet_after_slider
+    assert sheet_after_minus == (150, "150 %") and sheet_after_plus == (160, "160 %"), (
+        sheet_after_minus, sheet_after_plus)
+    assert side_after_slider == ("150 %", 1.5, True), side_after_slider
+    assert side_after_minus == (125, "125 %", 1.25) and side_after_plus == (150, "150 %", 1.5), (
+        side_after_minus, side_after_plus)
+    assert side_after_wheel == (175, "175 %", 1.75) and narrow_ok, (side_after_wheel, narrow_ok)
+
+
+def test_window_options_copy_to_new_books_label_and_tooltip():
+    """I4: en Opciones con libro abierto, el botón de copiar a «Libros nuevos» aclara que copia una vez esta página
+    (sin parecer un duplicado de «Aplicar a»), lleva su ayuda emergente y sigue copiando con confirmación."""
+    from PySide6.QtWidgets import QLabel
+
+    root, window = visible_window()
+    try:
+        window.show_book(convert.Book("Libro", "", b"", [convert.Block("p", 1, "Texto.")], []))
+        dialog = window.open_options("Texto", "book")
+        root.update()
+        btn = dialog.parts["copy"]
+        text, tip = btn.text(), btn.toolTip()
+        want = not dialog.defaults.get("hyphenate", False)
+        dialog.parts["put"]("hyphenate", want)
+        btn.click()
+        root.update()
+        copied = dialog.defaults["hyphenate"]
+        ok_notes = [lbl.text() for lbl in dialog.win.findChildren(QLabel)
+                    if lbl.objectName() == "ok" and lbl.isVisible()]
+        dialog.set_scope("new")
+        copy_in_new = dialog.parts["copy"]
+        dialog.parts["cancel"]()
+    finally:
+        window.close()
+    assert text == "Copiar esta página a «Libros nuevos»", text
+    assert tip == ("Copia una vez los valores de esta página a los de «Libros nuevos». "
+                   "Para editarlos directamente, elige «Libros nuevos» arriba."), tip
+    assert copied is want and any("Copiado a «Libros nuevos»" in n for n in ok_notes), (copied, want, ok_notes)
+    assert copy_in_new is None, copy_in_new
+
+
+def test_window_data_panel_date_picker_opens_and_fills_date():
+    """I6a: en «Editar datos», el botón «Elegir…» junto a Fecha abre un calendario en la fecha válida del campo (si
+    la hay) y al elegir un día escribe AAAA-MM-DD, sin impedir escribir solo el año a mano."""
+    from PySide6.QtCore import QDate
+    from PySide6.QtWidgets import QCalendarWidget, QPushButton
+
+    root, window = visible_window()
+    try:
+        window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                          convert.Block("p", 1, "Texto.")], [0]))
+        window.toggle_data()
+        root.update()
+        pick_btn = next((b for b in window.data_panel.findChildren(QPushButton) if b.text() == "Elegir…"), None)
+        tip = pick_btn.toolTip() if pick_btn else ""
+        # Con fecha válida en el campo, el calendario abre en ella
+        window.date_var.set("2024-05-03")
+        pick_btn.click()
+        root.update()
+        pop, cal = window.date_popup
+        opened_on = (pop.isVisible(), isinstance(cal, QCalendarWidget),
+                     cal.selectedDate(), cal.yearShown(), cal.monthShown())
+        # Al elegir un día se escribe AAAA-MM-DD y se cierra el popup
+        cal.clicked.emit(QDate(2025, 11, 7))
+        root.update()
+        after_pick = (window.date_var.get(), pop.isVisible())
+        # Escribir solo el año sigue funcionando sin romperse
+        window.date_var.set("2024")
+        pick_btn.click()
+        root.update()
+        pop2, _ = window.date_popup
+        year_only = (window.date_var.get(), pop2.isVisible())
+        pop2.close()
+    finally:
+        window.close()
+    assert pick_btn is not None and tip == "Elegir la fecha en un calendario", (pick_btn, tip)
+    assert opened_on == (True, True, QDate(2024, 5, 3), 2024, 5), opened_on
+    assert after_pick == ("2025-11-07", False), after_pick
+    assert year_only == ("2024", True), year_only
+
+
+def test_window_replacements_and_glossary_moved_to_tools_menu():
+    """I6b: «Reemplazos…» y «Glosario…» salen del panel «Editar datos» y pasan a Herramientas justo tras «Ortografía…»,
+    ocultos sin libro y visibles con libro, abriendo sus diálogos."""
+    from PySide6.QtWidgets import QPushButton
+
+    root, window = visible_window()
+    try:
+        menu_actions = [a for a in window.tools_btn.menu().actions() if a.text()]
+        menu_texts = [a.text() for a in menu_actions]
+        by_text = {a.text(): a for a in menu_actions}
+        repl_act, gloss_act = by_text.get("Reemplazos…"), by_text.get("Glosario…")
+        in_book_actions = repl_act in window.book_actions and gloss_act in window.book_actions
+        hidden_without_book = (repl_act is not None and not repl_act.isVisible()
+                               and gloss_act is not None and not gloss_act.isVisible())
+        window.show_book(convert.Book("Libro", "", b"", [convert.Block("heading", 1, "Capítulo 1"),
+                                                          convert.Block("p", 1, "Texto.")], [0]))
+        window.toggle_data()
+        root.update()
+        panel_buttons = [b.text() for b in window.data_panel.findChildren(QPushButton)]
+        visible_with_book = repl_act.isVisible() and gloss_act.isVisible()
+        repl_act.trigger()
+        gloss_act.trigger()
+        root.update()
+        repl_open = (window.replacements_window[0].isVisible(), window.replacements_window[0].windowTitle())
+        gloss_open = (window.glossary_window[0].isVisible(), window.glossary_window[0].windowTitle())
+        window.replacements_window[0].close()
+        window.glossary_window[0].close()
+    finally:
+        window.close()
+    spell_idx = menu_texts.index("Ortografía…")
+    assert menu_texts[spell_idx + 1:spell_idx + 3] == ["Reemplazos…", "Glosario…"], menu_texts
+    assert in_book_actions and hidden_without_book and visible_with_book, (
+        in_book_actions, hidden_without_book, visible_with_book)
+    assert "Reemplazos…" not in panel_buttons and "Glosario…" not in panel_buttons, panel_buttons
+    assert "Portada…" in panel_buttons and "Más datos…" in panel_buttons, panel_buttons
+    assert repl_open == (True, "Reemplazos") and gloss_open == (True, "Glosario"), (repl_open, gloss_open)
 
 
 def _run_tests(part, parts):

@@ -502,6 +502,7 @@ if AVAILABLE:
         def show_note(self, text):
             """Un aviso en lugar del capítulo (lo que no se edita aquí)."""
             import html
+            import theme
             self.loaded = False
             if self.dead:  # setHtml con el proceso muerto cerraba la aplicación (Chromium, 0x80000003): encima, en Qt
                 self.cover.setPixmap(QPixmap())
@@ -514,7 +515,10 @@ if AVAILABLE:
                 self.cover.show()
                 self.cover.raise_()
                 return
-            self.setHtml(f"<p style='font:14px sans-serif;color:#777;margin:24px'>{html.escape(text)}</p>")
+            colors = theme.colors(self.dark)
+            self.setHtml(f"<html style='background:{colors['sheet']}'><body style='background:{colors['sheet']};margin:0'>"
+                         f"<p style='font:14px \"Segoe UI\",sans-serif;color:{colors['muted']};margin:24px'>"
+                         f"{html.escape(text)}</p></body></html>")
 
         def _loaded(self, ok):
             import websheet

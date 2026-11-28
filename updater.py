@@ -26,6 +26,38 @@ TRUSTED_HOSTS = ("github.com", "api.github.com", "objects.githubusercontent.com"
                  "release-assets.githubusercontent.com")
 LOG = logging.getLogger("updater")
 
+# Notas que GitHub escribe solo en inglés («What's Changed», «* fix: … by @x in URL»): la app habla español
+NOTE_HEADINGS = {"what's changed": "Novedades", "new contributors": "Personas que colaboran por primera vez"}
+NOTE_TYPES = re.compile(r"^(feat|fix|docs|merge|perf|refactor|chore|test|ci|build|style)(\([^)]*\))?!?:\s*", re.I)
+
+
+def spanish_notes(markdown):
+    """Las notas de una versión en español: títulos traducidos, cada cambio sin «fix:» ni «by @x in URL» (con el
+    enlace al pull request detrás) y «Full Changelog» como «Todos los cambios»."""
+    out = []
+    for line in markdown.splitlines():
+        heading = re.match(r"^(#+)\s*(.+?)\s*$", line)
+        if heading and heading[2].lower() in NOTE_HEADINGS:
+            out.append(f"{heading[1]} {NOTE_HEADINGS[heading[2].lower()]}")
+            continue
+        first = re.match(r"^([*-])\s+@(\S+) made their first contribution in (\S+)\s*$", line)
+        if first:
+            out.append(f"{first[1]} @{first[2]} ([primer cambio]({first[3]}))")
+            continue
+        item = re.match(r"^([*-])\s+(.*?)(?: by @\S+)?(?: in (https://\S+/pull/(\d+)))?\s*$", line)
+        if item and item[2]:
+            text = NOTE_TYPES.sub("", item[2])
+            text = text[:1].upper() + text[1:]
+            out.append(f"{item[1]} {text}" + (f" ([#{item[4]}]({item[3]}))" if item[3] else ""))
+            continue
+        full = re.match(r"^\*\*Full Changelog\*\*:\s*(\S+)\s*$", line)
+        if full:
+            out.append(f"[Todos los cambios]({full[1]})")
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 Release = namedtuple(
     "Release",
     "version tag title notes html_url setup_url setup_name portable_url checksums_url prerelease",
