@@ -1208,6 +1208,12 @@ class CodeEdit(QTextEdit):
     def __init__(self, colors):
         super().__init__(objectName="code")
         self.setAcceptRichText(False)
+        mono = QFont("Cascadia Mono", 9)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        if not QFontInfo(mono).fixedPitch():
+            mono = QFont("Consolas", 9)
+            mono.setStyleHint(QFont.StyleHint.Monospace)
+        self.setFont(mono)
         self.errors = {}  # bloque 0-based -> mensaje de error en vivo
         self.look = CodeLook(self.document(), colors)
         self.gutter = _Gutter(self)
@@ -2825,7 +2831,8 @@ class Look(QSyntaxHighlighter):
             return u16(text, i) if wide else i
         if block.blockFormat().property(HEADING) and not block.blockFormat().property(BOOK_LOOK):  # el libro manda
             f = QTextCharFormat()
-            f.setFontWeight(QFont.Weight.Bold)
+            f.setFontWeight(QFont.Weight.DemiBold)  # seminegrita y sin subrayado: azul + subrayado parece enlace
+            f.setFontUnderline(False)
             # Capítulo grande; subtítulo un punto menor, como Título 1 y Título 2 en Word
             subtitle = block.blockFormat().property(LEVEL) not in (None, "Capítulo")
             f.setProperty(QTextFormat.Property.FontSizeAdjustment, 1 if subtitle else 2)
@@ -3299,7 +3306,7 @@ class Sheet(QTextEdit):
         return found
 
     def paragraphs(self):
-        """(párrafos de texto, número del del cursor o None, palabras): para la barra de estado."""
+        """(párrafos de texto, número del párrafo del cursor o None, palabras): para la barra de estado."""
         count, current, words, here = 0, None, 0, self.textCursor().block()
         block = self.document().firstBlock()
         while block.isValid():

@@ -21,19 +21,21 @@ Se leen por rol, no por valor. Claro / oscuro:
 
 | Rol | Claro | Oscuro | Cuándo |
 |---|---|---|---|
-| `bg` | `#f3f3f3` | `#202020` | Fondo de ventana y diálogo |
+| `bg` | `#eef0f3` | `#202020` | Fondo de ventana y diálogo |
 | `card` | `#ffffff` | `#2b2b2b` | Tarjetas, barras, listas y tablas |
 | `base` | `#ffffff` | `#1f1f1f` | Fondo de campos de texto y casillas |
-| `line` | `#e1e1e1` | `#3d3d3d` | Bordes y separadores |
-| `ink` | `#1b1b1b` | `#ececec` | Texto normal |
-| `muted` | `#6b6b6b` | `#a0a0a0` | Texto de apoyo: subtítulos, estado, cabeceras |
-| `hint` | `#9a9a9a` | `#7a7a7a` | Solo lo desactivado y el texto de ejemplo |
-| `acc` / `acc_hover` | `#2a62c8` / `#2353ab` | `#7099f5` / `#85a9f7` | Acción principal, enlaces, foco, pestaña activa |
+| `line` | `#d9dce1` | `#3d3d3d` | Bordes de tarjetas y separadores |
+| `edge` | `#9ea4ac` | `#4a4a4a` | Bordes de botones, campos y casillas |
+| `ink` | `#16181b` | `#ececec` | Texto normal |
+| `muted` | `#545a63` | `#a0a0a0` | Texto de apoyo: subtítulos, estado, cabeceras |
+| `hint` | `#80868f` | `#7a7a7a` | Solo lo desactivado y el texto de ejemplo |
+| `acc` / `acc_hover` / `acc_press` | `#0f5fc2` / `#0c4fa3` / `#093f84` | `#7099f5` / `#85a9f7` / `#5b86ea` | Acción principal, enlaces, foco, pestaña activa (acento configurable en `ACCENTS`) |
 | `acc_ink` | `#ffffff` | `#111111` | Texto sobre `acc` |
-| `sel` | `#dce8fc` | `#2f3d5c` | Fila o botón elegido |
-| `hover` / `press` | `#ececec` / `#e2e2e2` | `#353535` / `#3d3d3d` | Botón con el ratón encima / pulsado |
+| `sel` | `#d6e6fb` | `#2f3d5c` | Fila o botón elegido |
+| `hover` / `press` | `#eef3fa` / `#dde7f5` | `#353535` / `#3d3d3d` | Botón con el ratón encima / pulsado |
 | `warn` | `#c62828` | `#ff6b6b` | Error o algo grave |
 | `ok` | `#2e7d32` | `#7bc47f` | Hecho o correcto |
+| `scroll` / `scroll_hover` | `#c1c6ce` / `#9aa1ab` | `#555555` / `#757575` | Tirador de barras de desplazamiento Fluent |
 
 Reglas:
 
@@ -42,7 +44,9 @@ Reglas:
 - **Niveles de aviso:** `Grave` (rojo), `Revisar` (naranja), `Menor` (gris azulado). Los mismos en el
   informe de calidad, el editor y los avisos del botón (`theme.level_colors`, `theme.mark_colors`).
 - **Estados de párrafo** de «Traducir»: `theme.state_colors`. **Colores de fila** de la lista de
-  capítulos: `theme.kind_colors`. **Marcas del editor y comparaciones:** `theme.editor_tags`,
+  capítulos: `theme.kind_colors` (ilustración en violeta y separador en pardo: el verde ya es «correcto» y el
+  naranja «Revisar»). **Lo que se ve ahora** (miniatura, recuadro del título en la vista del PDF, párrafo en el
+  editor) va en naranja `MARK_COLORS["current"]`, nunca en rojo, que es error. **Marcas del editor y comparaciones:** `theme.editor_tags`,
   `theme.diff_tags`. No se repiten en otro sitio.
 - Un color que no cambia con el tema (borde de miniatura, barrita de cambios) va en una constante con
   comentario y se añade a la lista del test.
@@ -85,19 +89,24 @@ Se eligen por nombre de objeto (`_button(texto, acción, nombre)`, `_label(texto
 |---|---|---|
 | (sin nombre) | Botón secundario: borde, radio 6 | Cualquier acción que no sea la principal |
 | `primary` | Relleno `acc`, seminegrita | La acción que cierra la tarea: «Generar EPUB…», «Aceptar». **Uno por ventana**, abajo a la derecha |
+| `accent` | Relleno `sel`, borde `acc`, seminegrita | Acción destacada dentro de una barra contextual (sin competir con el `primary` de la ventana) |
 | `warn` | Texto rojo en botón o etiqueta | Algo grave o destructivo; lleva siempre su texto |
 | `ok` | Texto verde | Confirmación pequeña |
-| `chip` | Botón-etiqueta redondo, marcable | Filtros que se activan y desactivan |
+| `chip` | Botón-etiqueta redondo, marcable | Filtros que se activan y desactivan. Marcado = fondo `sel` y borde `acc`, sin seminegrita (el texto más ancho se cortaba). La cuenta entre paréntesis: «Todos (12)» |
 | `link` | Texto `acc` subrayado, sin borde | Acción secundaria dentro de un texto: «¿Muchos tomos? …» |
 | `tool` | Botón de la cinta del editor, sin borde | Solo en `ribbon`; marcado = `sel` con borde `acc`. Grande (`icon=`): glifo de `GLYPH` px arriba y nombre abajo, para lo principal de un grupo |
-| `sep` | Línea vertical de 1 px, color `line` | Entre grupos de una pestaña de la cinta |
+| `sep` | Línea vertical de 1 px, color `line` | Entre grupos de una pestaña de la cinta o paneles paralelos |
 | `card` | Tarjeta: `card`, borde `line`, radio 8 | Agrupar contenido relacionado |
-| `bar` | Barra sin borde, fondo `card` | Barras de arriba y de abajo de la ventana |
+| `bar` / `topBar` / `bottomBar` | Barra fondo `card`, con borde inferior (`topBar`) o superior (`bottomBar`) | Barras de arriba y de abajo de la ventana y del editor |
 | `ribbon` | Cinta con línea inferior | Barras del editor (buscar, enlace, comparar) |
 | `drop` | Zona de soltar, borde discontinuo | Solo la pantalla de inicio |
-| `muted` / `title` / `big` | Etiquetas | Ver colores y tipografía |
+| `hit` | Resaltado suave (`sel`, radio 6) | Coincidencia de búsqueda en Opciones |
+| `muted` / `title` / `big` / `key` | Etiquetas | Ver colores y tipografía; `key` dibuja una tecla en «Atajos de teclado» |
+| `section` | Etiqueta en seminegrita, color del texto | Nombre de un apartado dentro de un panel: «Problema», «Solución» |
 
 - Los campos (`QLineEdit`, `QComboBox`, `QSpinBox`) ya traen borde, radio 5 y foco azul: no se retocan.
+- **Foco con teclado:** botones y casillas solo se marcan en azul al llegar con Tab (`theme._Shown` pone la propiedad `keyfocus`). Al abrir una ventana o tras un clic no se marcan: parecía que algo estaba elegido.
+- **Alineación** (izquierda, centro, derecha, justificado): cuatro rayas dibujadas (`app.ALIGN_LINES`), como Word.
 - Estado de error en un campo: texto `warn` con `setStyleSheet` leyendo `theme.level_colors`, no un rojo propio.
 - Un botón sin texto lleva siempre ayuda emergente.
 
@@ -111,11 +120,15 @@ Se eligen por nombre de objeto (`_button(texto, acción, nombre)`, `_label(texto
 
 - Entran en una pantalla de 1366 px con el zoom del 125 % (como «Opciones», 860 × 560). Lo que no cabe se
   desplaza, no se corta.
-- Botones en una fila abajo, con `1` a la izquierda para empujarlos a la derecha. **Cancelar** va a la
-  izquierda del botón `primary`, que lleva el verbo de la acción: «Aceptar», «Reemplazar», «Usar esta
-  forma». Si el cuadro solo muestra algo, basta «Cerrar»; es `primary` si es lo único que se puede pulsar.
+- Botones en una fila abajo, con `1` a la izquierda para empujarlos a la derecha. Estándar Windows Fluent: **el botón `primary` va a la izquierda de «Cancelar»** (o de «Cerrar») y lleva el verbo de la acción: «Aceptar», «Reemplazar», «Usar esta forma». Todo diálogo editable lleva «Cancelar» explícito y toda herramienta de consulta lleva «Cerrar».
+- **Botón «Cerrar» en herramientas de consulta:** «Cerrar» es `primary` solo si es la única acción del diálogo (como «Atajos de teclado»); si hay otras acciones (como en «Ilustraciones», «Ortografía», «Informe de calidad» o «Versiones»), «Cerrar» va como secundario.
 - Un aviso previsto usa `messagebox` de `qtk`; el título dice qué pasa, el cuerpo qué hacer.
 - La ventana pone su estado en una línea `muted` abajo, no en un cuadro que haya que cerrar.
+- **Listas de tamaño fijo:** la lista de capítulos y las de los diálogos no se ensanchan arrastrando (`app._lock`); el reparto lo dan los factores de estiramiento.
+- «Editar datos» ocupa el sitio de las vistas previas, nunca encima de la lista.
+- «Opciones…» vive solo en Herramientas (y Ctrl+,): ni en la bienvenida ni repetido en la barra.
+- Lo que va encima de una barra de abajo (las flechas y el zoom del panel del editor) deja 8 px hasta ella: con 0 la tocaba.
+- El resultado de un trabajo que tardó (Ortografía, AniList) no se lleva el foco: si mientras tanto se abrió otra herramienta, sale detrás (`App.show_late`) y la línea de estado dice dónde quedó.
 
 ## 7. Iconografía
 
@@ -125,17 +138,21 @@ Un icono es un **glifo de texto monocromo** que toma el color del tema. Los glif
 | Clave | Glifo | | Clave | Glifo | | Clave | Glifo |
 |---|---|---|---|---|---|---|---|
 | `warn` | ▲ | | `undo` | ↶ | | `search` | ⌕ |
-| `ok` | ✓ | | `redo` | ↷ | | `read` | ♪ |
+| `ok` | ✓ | | `redo` | ↷ | | `read` | ▷ |
 | `close` | ✕ | | `note` | ✎ | | `link` | ↗ |
 | `menu` / `menu_open` | ▾ / ▴ | | `split` | ✂ | | `doc` | 🗎 |
 | `prev` / `next` | ◀ / ▶ | | `join` | ⤒ | | `dot` | ● |
-| `first` / `last` | ◀◀ / ▶▶ | | `center` | ≡ | | `minus` | − |
-| `nav` | ☰ | | `frame` | ▭ | | `right` | ⇥ |
+| `first` / `last` | ◀◀ / ▶▶ | | `center` / `left` | ≡ / ⇤ | | `minus` | − |
+| `nav` | ☰ | | `frame` | ▭ | | `right` / `justify` | ⇥ / ≣ |
 | `scene` | ❖ | | `symbols` | Ω | | `changes` | ± |
-| `stats` | Σ | | `show` | ◉ | | | |
+| `stats` | Σ | | `show` | ◉ | | `image` | ▣ |
+| `indent` | ↦ | | `ruby` | ふ | | `newline` | ↵ |
+| `code` | `</>` | | `clear` | ⌫ | | `web` | ◎ |
+| `style` | ¶ | | `table` | ▦ | | `inlink` / `files` | ⤷ / ▤ |
 
 Reglas:
 
+- **Flechas de pasar página** de las vistas y del editor: las dibuja `qtk.ArrowButton` (‹ › y « »), no son glifos de texto; `prev` / `next` quedan para texto.
 - **Nunca un emoji.** Sale a color por Segoe UI Emoji, no sigue el tema y Windows 10 y 11 lo dibujan
   distinto. Qt ignora el selector `U+FE0E`, así que `⚠` o `⚙` salen a color aunque se pida texto: se
   cambia de glifo. Ya salieron a color `⚠ ⏮ ⏭ ⚙ ⛓ ❗ ⚓` y todo lo de `U+1F000` en adelante, salvo `🗎`.

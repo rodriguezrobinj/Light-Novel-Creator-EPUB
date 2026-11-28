@@ -1,5 +1,6 @@
 """Ventana para convertir PDFs de novelas ligeras a EPUB."""
 import base64
+import bisect
 import collections
 import concurrent.futures
 import contextlib
@@ -39,12 +40,13 @@ from pathlib import Path
 import pymupdf
 import segno
 import shiboken6
-from PySide6.QtCore import QEvent, QEventLoop, QLockFile, QMimeData, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (QDate, QEvent, QEventLoop, QLocale, QLockFile, QMimeData, QObject, QPoint, QRect, QRectF,
+                            QSize, Qt, QTimer, Signal)
 from PySide6.QtGui import (QAction, QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QImage, QKeyEvent, QKeySequence, QPainter,
                            QPainterPath,
                            QPalette, QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextLayout)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
-                               QInputDialog, QTreeWidget, QTreeWidgetItem,
+from PySide6.QtWidgets import (QApplication, QCalendarWidget, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QInputDialog, QTreeWidget, QTreeWidgetItem,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPlainTextEdit,
                                QProgressBar,
                                QAbstractItemView, QButtonGroup, QHeaderView, QStyle, QStyledItemDelegate,
@@ -149,10 +151,10 @@ MORE_FIELDS = (("subtitle", "Subtítulo"), ("book_type", "Tipo"), ("franchise", 
 BOOK_FIELDS += tuple(name for name, _ in MORE_FIELDS)
 # Perfil de salida -> opciones que fija (los demás perfiles dejan las opciones como estén)
 PROFILES = {"Personalizado": {},
-            "Celular": {"gray": False, "shrink": True, "shrink_size": 1200, "epub2": False, "kepub": False, "hyphenate": False},
+            "Móvil": {"gray": False, "shrink": True, "shrink_size": 1200, "epub2": False, "kepub": False, "hyphenate": False},
             "E-reader de tinta": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": False, "hyphenate": False},
             "Tablet": {"gray": False, "shrink": True, "shrink_size": 2000, "epub2": False, "kepub": False, "hyphenate": False},
-            # Kindle en color: Amazon convierte el EPUB y la app del celular y el Colorsoft lo muestran
+            # Kindle en color: Amazon convierte el EPUB y la app del móvil y el Colorsoft lo muestran
             "Kindle": {"gray": False, "shrink": True, "shrink_size": 1600, "epub2": False, "kepub": False, "hyphenate": True},
             "Kobo": {"gray": True, "shrink": True, "shrink_size": 1400, "epub2": False, "kepub": True, "hyphenate": False},
             "Lector antiguo (EPUB 2)": {"gray": False, "shrink": True, "shrink_size": 1400, "epub2": True,
@@ -167,18 +169,23 @@ KIND_COLOR = theme.kind_colors(False)  # colores de cada tipo de fila; en oscuro
 PREVIEW_BOX = (480, 640)  # ancho y alto máximos de cada vista previa, en píxeles
 PREVIEW_CHROME = 40       # alto de la fila ◀ leyenda ▶ de cada vista previa
 PAGE_GAP = 8              # píxeles entre la página y la siguiente en el panel del editor
-DEVICES = {"Celular": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
+DEVICES = {"Móvil": (300, 560), 'E-reader 6"': (420, 560), "Tablet": (560, 750)}  # página en puntos
+PROFILE_DEVICES = {"Móvil": "Móvil", "Tablet": "Tablet", "E-reader de tinta": 'E-reader 6"', "Kindle": 'E-reader 6"',
+                   "Kobo": 'E-reader 6"', "Lector antiguo (EPUB 2)": 'E-reader 6"'}  # perfil -> vista previa
 THUMB_HEIGHT = 64         # alto de las miniaturas del PDF, en píxeles
 THUMBS_PER_TICK = 6       # miniaturas por tanda como mucho: dibujarlas todas de golpe congelaría la ventana
 THUMBS_TICK_S = 0.05      # y no más de 50 ms por tanda: 6 láminas a color de un EPUB, juntas, la paraban 0,9 s
 SUGGEST_AHEAD = 40        # sugerencias de ortografía pedidas por adelantado en cada capítulo
-MARK_COLORS = {"title": "#1f6fd1", "image": "#2e9d4a", "current": "#f08c00"}  # bordes de las miniaturas
+# Bordes de las miniaturas, como los tipos de fila de la lista (ilustración en violeta); el naranja es lo que se
+# ve ahora, también el recuadro del título en la vista del PDF y el párrafo en el editor
+MARK_COLORS = {"title": "#1f6fd1", "image": "#7e57c2", "current": "#f08c00"}
+MARK_TIPS = {"title": "empieza un capítulo (borde azul)", "image": "ilustración (borde violeta)"}
 ICON = Path(__file__).parent / "icon.ico"  # en el .exe, junto a los módulos (--add-data icon.ico;.)
 LEVEL_NAMES = {"Grave": ("grave", "graves"), "Revisar": ("por revisar", "por revisar"),
                "Menor": ("menor", "menores")}  # singular y plural: «1 grave», «2 graves»
 LEVEL_PLURAL = {level: names[1] for level, names in LEVEL_NAMES.items()}
 # Herramientas con índices de bloques del libro: se cierran al restaurar una versión y al abrir otro libro
-BLOCK_TOOLS = ("spelling_window", "page_window", "quality_window", "images_window", "cover_window")
+BLOCK_TOOLS = ("spelling_window", "page_window", "quality_window", "images_window", "cover_window", "goto_window")
 # Las que guardan en el libro abierto lo que leyeron del anterior: se cierran al abrir otro libro
 BOOK_TOOLS = ("translate_window", "versions_window", "replacements_window", "glossary_window", "online_window")
 # Atajos de teclado por grupos: la ventana «Atajos de teclado…» los enseña en tabla. «+» separa teclas que van a la
@@ -188,9 +195,12 @@ SHORTCUT_GROUPS = [
         ("C", "Marcar como capítulo"), ("S", "Marcar como subtítulo"), ("X", "Marcar como separador de escena"),
         ("Q", "Quitar del libro"), ("I", "Marcar como ilustración"), ("D / G", "Ilustración doble: dividir o girar"),
         ("F2", "Cambiar el título (también doble clic)"), ("E", "Editar el texto de la fila"),
-        ("R", "Marcar como revisado"), ("Alt+↑ / Alt+↓", "Mover la fila (también arrastrándola)")]),
+        ("R", "Marcar como revisado"), ("Ctrl+G", "Ir al capítulo"),
+        ("Alt+↑ / Alt+↓", "Mover la fila (también arrastrándola)")]),
     ("Editor de texto", [
         ("Ctrl+K / Ctrl+I", "Cursiva"), ("Ctrl+N / Ctrl+B", "Negrita"), ("Ctrl+S", "Subrayado"),
+        ("Ctrl+Mayús+=", "Superíndice"), ("Ctrl+=", "Subíndice"),
+        ("Ctrl+Mayús+> / Ctrl+Mayús+<", "Agrandar o reducir la letra"),
         ("Ctrl+T", "Título o párrafo"), ("Ctrl+E", "Centrar"), ("Ctrl+D", "Alinear a la derecha"),
         ("Ctrl+J", "Unir con el párrafo siguiente"), ("Mayús+Intro", "Salto de línea en el mismo párrafo"),
         ("Mayús+F3", "Mayúsculas y minúsculas"), ("Ctrl+Alt+-", "Raya (—)"), ("Ctrl+Alt+.", "Puntos suspensivos (…)"),
@@ -199,11 +209,12 @@ SHORTCUT_GROUPS = [
         ("F11", "Modo concentración"), ("Ctrl+Intro", "Revisado y al capítulo siguiente sin revisar"),
         ("Ctrl+RePág / Ctrl+AvPág", "Capítulo anterior o siguiente")]),
     ("General", [
-        ("Ctrl+Z", "Deshacer"), ("Ctrl+Y", "Rehacer (en el editor)"), ("Ctrl+F", "Buscar en el libro"),
-        ("Ctrl+,", "Opciones")]),
+        ("Ctrl+O", "Abrir PDF o EPUB"), ("Ctrl+Z", "Deshacer"), ("Ctrl+Y", "Rehacer (en el editor)"),
+        ("Ctrl+F", "Buscar en el libro"), ("Ctrl+,", "Opciones"), ("F1", "Atajos de teclado")]),
 ]
 SHORTCUTS = ("Clic en Tipo, o teclas C (capítulo), S (subtítulo), X (separador), Q (quitar), I (ilustración),"
-             " D/G (doble: dividir o girar)\nDoble clic o F2: editar título · E: editar texto · R: revisado\n"
+             " D/G (doble: dividir o girar)\nDoble clic o F2: editar título · E: editar texto · R: revisado"
+             " · Ctrl+G: ir al capítulo\n"
              "Arrastrar o Alt+↑/↓: mover · Ctrl+F: buscar · Ctrl+Z: deshacer · Ctrl+,: opciones")
 
 
@@ -772,7 +783,7 @@ def _write_options(state, breaks=()):
 
 
 def _heading_font(state):
-    """Fuente de títulos de write_epub: una de las incluidas o la ruta de la propia si sigue en su sitio."""
+    """Letra de los títulos de write_epub: una de las incluidas o la ruta de la propia si sigue en su sitio."""
     choice = str(state.get("heading_font", ""))
     if choice in convert.HEADING_FONTS:
         return choice
@@ -1362,7 +1373,7 @@ FIELD_LABELS = {"title": "Título", "author": "Autor", "series": "Serie", "volum
                 "alts": "Descripciones de ilustraciones", "css_overrides": "CSS personalizado",
                 "echoes": "Buscar ecos", "whole_words": "No partir palabras en el PDF",
                 "pdf_size": "Tamaño de PDF preferido", **dict(MORE_FIELDS), "synopsis": "Página de sinopsis",
-                "endnotes": "Notas al final del libro", "note_style": "Llamada de nota", "heading_font": "Fuente de títulos",
+                "endnotes": "Notas al final del libro", "note_style": "Llamada de nota", "heading_font": "Letra de los títulos",
                 "heading_font_file": "Archivo de fuente de títulos", "box_style": "Estilo de recuadros", "logo": "Logo",
                 "title_image": "Ilustración de la página de título"}
 
@@ -1992,15 +2003,25 @@ def _volume_epub(pdf):
     return epub if epub.exists() else Path(_epub_name(_out(pdf), True))
 
 
+def _title_score(series, item):
+    """Cuánto se parece series a algún título del resultado de AniList (romanizado, inglés o japonés): 1 si es igual."""
+    wanted = series.casefold().strip()
+    names = [item.get("romaji_title", ""), item.get("original_title", "")]
+    names += [re.sub(r" \(\d{4}\)$", "", part) for part in item.get("name", "").split(" · ")]
+    names += [n.split(":")[0] for n in names]  # sin el subtítulo: «Serie: Subtítulo largo» es la serie
+    return max((difflib.SequenceMatcher(None, wanted, n.casefold().strip()).ratio() for n in names if n), default=0)
+
+
 def _volume_status(pdf):
-    """Estado de un tomo: «EPUB generado», «EPUB anterior a la revisión», «Revisado, sin EPUB» o «Sin revisar»."""
+    """Estado de un tomo: «EPUB generado», «EPUB anterior a la revisión», «En curso, sin EPUB» o «Sin empezar».
+    «Revisado» queda para el ✓ de cada capítulo: una revisión guardada no dice cuántos se han revisado."""
     pdf = Path(pdf)
     state, epub = _read_review(pdf), _volume_epub(pdf)
     if epub.exists() and (not state or epub.stat().st_mtime >= _review_path(pdf).stat().st_mtime - 5):
         return "EPUB generado"
     if epub.exists():
         return "EPUB anterior a la revisión"
-    return "Revisado, sin EPUB" if state else "Sin revisar"
+    return "En curso, sin EPUB" if state else "Sin empezar"
 
 
 class Window(QMainWindow):
@@ -2190,7 +2211,7 @@ class _Cards(QStyledItemDelegate):
     """Fila de «Traducir» como tarjeta: el original arriba y su traducción debajo, dos líneas cada uno, sin las
     etiquetas <i> y <b>; en la columna del estado, un punto de su color. Con columnas de una línea, un párrafo
     largo y su traducción se leían como un solo bloque."""
-    PAD = 7
+    PAD = 5  # con 7 cada párrafo pedía 85 px y solo cabían dos filas y media
 
     def __init__(self, tree, colors):
         super().__init__(tree)
@@ -2264,6 +2285,176 @@ class _Cards(QStyledItemDelegate):
         painter.restore()
 
 
+class _FindHits(QStyledItemDelegate):
+    """Fila de resultados de búsqueda: resalta el término buscado con fondo sel y seminegrita en los dos temas,
+    manteniendo el texto plano del ítem y el recorte con «…» a la derecha."""
+
+    def __init__(self, view, colors):
+        super().__init__(view)
+        self.colors = colors  # () -> theme.colors(dark)
+        self.term = ""
+
+    def runs(self, text, term=None):
+        """Parte text en [(trozo, coincide)] sin tocar «pág. N · » ni perder caracteres."""
+        needle = self.term if term is None else term
+        if not needle:
+            return [(text, False)]
+        prefix, sep, body = text.partition(" · ")
+        head = [(prefix + sep, False)] if sep else []
+        target = body if sep else text
+        out, pos = [], 0
+        for m in re.finditer(re.escape(needle), target, re.IGNORECASE):
+            if m.start() > pos:
+                out.append((target[pos:m.start()], False))
+            out.append((m.group(0), True))
+            pos = m.end()
+        if pos < len(target):
+            out.append((target[pos:], False))
+        return head + out
+
+    def fit_runs(self, runs, fm_norm, fm_hit, width):
+        """Recorta la lista de tramos al ancho disponible terminando con «…» a la derecha."""
+        total = sum((fm_hit if hit else fm_norm).horizontalAdvance(piece) for piece, hit in runs)
+        if total <= width:
+            return runs
+        shown, used = [], 0
+        for piece, hit in runs:
+            fm = fm_hit if hit else fm_norm
+            w = fm.horizontalAdvance(piece)
+            if used + w <= width:
+                shown.append((piece, hit))
+                used += w
+                continue
+            rem = max(0, width - used)
+            cut = fm.elidedText(piece, Qt.TextElideMode.ElideRight, rem)
+            if cut:
+                shown.append((cut, hit))
+            elif shown:
+                prev_text, prev_hit = shown[-1]
+                shown[-1] = (prev_text.rstrip() + "…", prev_hit)
+            break
+        return shown
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
+        if not rect.isValid() or rect.width() <= 0:
+            rect = opt.rect.adjusted(4, 0, -4, 0)
+        opt.text = ""
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        tones = self.colors()
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        normal_font = QFont(opt.font)
+        hit_font = QFont(opt.font)
+        hit_font.setWeight(QFont.Weight.DemiBold)
+        fm_norm, fm_hit = QFontMetrics(normal_font), QFontMetrics(hit_font)
+        pieces = self.fit_runs(self.runs(text), fm_norm, fm_hit, rect.width())
+        painter.save()
+        painter.setClipRect(rect)
+        x = rect.left()
+        ink = QColor(tones["acc_ink"] if selected else tones["ink"])
+        bg = QColor(tones["sel"])
+        for piece, hit in pieces:
+            fm = fm_hit if hit else fm_norm
+            w = fm.horizontalAdvance(piece)
+            if hit and not selected:  # sobre la fila elegida (acc), basta la seminegrita para no bajar contraste
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(bg)
+                painter.drawRoundedRect(QRectF(x - 1, rect.top() + 1, w + 2, rect.height() - 2), 3, 3)
+            painter.setFont(hit_font if hit else normal_font)
+            painter.setPen(ink)
+            painter.drawText(QRect(x, rect.top(), w + 2, rect.height()),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, piece)
+            x += w
+        painter.restore()
+
+
+_ONLINE_YEAR = re.compile(r"\s*\((\d{4})\)\s*$")
+
+
+def _plain_fast(block):
+    """Texto sin HTML de un bloque; evita regex y unescape cuando no hay etiquetas ni entidades."""
+    text = block.html
+    return text if "<" not in text and "&" not in text else convert._plain(block)
+
+
+def _word_count_fast(text):
+    """Palabras de text: sin caracteres CJK (ningún código >= U+2E80) evita la regex de convert.word_count."""
+    if not text:
+        return 0
+    return len(text.split()) if max(text) < "\u2e80" else convert.word_count(text)
+
+
+def _split_online_name(item):
+    """Parte un resultado de AniList en (título principal, «año · título en inglés») para no cortarlo a mitad."""
+    left, _, english = item.get("name", "").partition(" · ")
+    match = _ONLINE_YEAR.search(left)
+    year = match.group(1) if match else ""
+    main = left[:match.start()].strip() if match else left.strip()
+    sub = " · ".join(part for part in (year, english.strip()) if part)
+    return main, sub
+
+
+class _OnlineItem(QStyledItemDelegate):
+    """Resultado de AniList en dos niveles: título principal arriba y, si hay año o título en inglés, debajo más
+    pequeño y en gris (muted) para que los títulos largos se lean sin partirse a mitad."""
+    PAD_X, PAD_Y, GAP = 6, 4, 2
+
+    def __init__(self, view, colors):
+        super().__init__(view)
+        self.colors = colors  # () -> theme.colors(dark)
+
+    @staticmethod
+    def _sub_font(base):
+        font = QFont(base)
+        pt = font.pointSizeF()
+        if pt > 0:
+            font.setPointSizeF(max(7.5, pt - 1.0))
+        return font
+
+    def _width(self, option):
+        view = self.parent()
+        w = option.rect.width() if option.rect.width() > 40 else (view.viewport().width() if view else 600)
+        return max(120, w - 2 * self.PAD_X - 8)
+
+    def sizeHint(self, option, index):
+        main, _, sub = (index.data() or "").partition("\n")
+        width = self._width(option)
+        flags = int(Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap)
+        h = QFontMetrics(option.font).boundingRect(QRect(0, 0, width, 1000), flags, main).height()
+        if sub:
+            sub_fm = QFontMetrics(self._sub_font(option.font))
+            h += self.GAP + sub_fm.boundingRect(QRect(0, 0, width, 1000), flags, sub).height()
+        return QSize(width + 2 * self.PAD_X, h + 2 * self.PAD_Y)
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = index.data() or ""  # initStyleOption cambia «\n» por U+2028
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        opt.text = ""
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        main, _, sub = text.partition("\n")
+        tones = self.colors()
+        rect = option.rect.adjusted(self.PAD_X, self.PAD_Y, -self.PAD_X, -self.PAD_Y)
+        flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap)
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(QColor(tones["ink"]))
+        main_h = QFontMetrics(opt.font).boundingRect(QRect(0, 0, rect.width(), 1000), flags, main).height()
+        painter.drawText(QRect(rect.left(), rect.top(), rect.width(), main_h + 2), flags, main)
+        if sub:
+            sub_font = self._sub_font(opt.font)
+            painter.setFont(sub_font)
+            painter.setPen(QColor(tones["muted"]))
+            y = rect.top() + main_h + self.GAP
+            painter.drawText(QRect(rect.left(), y, rect.width(), max(1, rect.bottom() - y + 2)), flags, sub)
+        painter.restore()
+
+
 def _label(text="", name=None):
     label = QLabel(text)
     if name:
@@ -2283,6 +2474,13 @@ def _fold_icon(dark, up):
     return QIcon(pixmap)
 
 
+# Rayas de los iconos de alineación: (inicio, largo) de cada una, en fracción del ancho
+ALIGN_LINES = {theme.ICONS["left"]: [(0, 1), (0, 0.6), (0, 1), (0, 0.6)],
+               theme.ICONS["center"]: [(0, 1), (0.2, 0.6), (0, 1), (0.2, 0.6)],
+               theme.ICONS["right"]: [(0, 1), (0.4, 0.6), (0, 1), (0.4, 0.6)],
+               theme.ICONS["justify"]: [(0, 1), (0, 1), (0, 1), (0, 1)]}
+
+
 def _glyph_icon(glyph, color, size=GLYPH):
     """Glifo de theme.ICONS dibujado como icono monocromo de size px, con el color del texto del tema. Se escala
     a la caja: a tamaño de letra, «±» salía diminuto y «▲» enorme al lado."""
@@ -2290,6 +2488,16 @@ def _glyph_icon(glyph, color, size=GLYPH):
     pixmap = QPixmap(round(size * ratio), round(size * ratio))
     pixmap.setDevicePixelRatio(ratio)
     pixmap.fill(Qt.GlobalColor.transparent)
+    lines = ALIGN_LINES.get(glyph)
+    if lines:  # alineación: cuatro rayas como en Word; los glifos «⇤ ≡ ⇥ ≣» no se parecían entre sí
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        thick, left, width = max(1.5, size / 9), size * 0.12, size * 0.76
+        for n, (start, length) in enumerate(lines):
+            top = size * 0.2 + n * (size * 0.6 - thick) / 3
+            painter.fillRect(QRectF(left + start * width, top, length * width, thick), QColor(color))
+        painter.end()
+        return QIcon(pixmap)
     path = QPainterPath()
     path.addText(0, 0, QFont("Segoe UI", 40), glyph)
     box = path.boundingRect()
@@ -2304,6 +2512,13 @@ def _glyph_icon(glyph, color, size=GLYPH):
     painter.fillPath(path, QColor(color))
     painter.end()
     return QIcon(pixmap)
+
+
+def _lock(splitter):
+    """Divisor fijo: las listas tienen su tamaño y no se arrastran (el reparto lo dan los factores de estiramiento)."""
+    for n in range(1, splitter.count()):
+        splitter.handle(n).setEnabled(False)
+        splitter.handle(n).setCursor(Qt.CursorShape.ArrowCursor)
 
 
 def _button(text, command, name=None):
@@ -2436,15 +2651,17 @@ class App:
         outer.setSpacing(0)
 
         # Barra superior
-        top = QFrame(objectName="bar")
+        top = QFrame(objectName="topBar")
         self.open_btn = _button("Abrir PDF o EPUB…", self.open_pdf)
+        self.open_btn.setToolTip("Abrir un PDF o EPUB (Ctrl+O)")
         self.batch_btn = _button("Convertir carpeta…", self.convert_folder)
         self.recent_menu = QMenu(root)
         tools = QMenu(root)
-        # Las que trabajan sobre el libro abierto: en gris sin libro (update_chrome), no un aviso al pulsarlas
+        # Las que trabajan sobre el libro abierto: ocultas sin libro (update_chrome), no un aviso al pulsarlas
         self.book_actions = [tools.addAction(text, action) for text, action in (
-            ("Buscar en el libro…  (Ctrl+F)", self.find), ("Informe de calidad…", self.quality),
+            ("Ir al capítulo…\tCtrl+G", self.goto_chapter), ("Informe de calidad…", self.quality),
             ("Ortografía…", self.spelling),
+            ("Reemplazos…", self.edit_replacements), ("Glosario…", self.edit_glossary),
             ("Página de personajes…", self.character_page), ("Ilustraciones…", self.images_dialog),
             ("Traducir…", self.translate_book),
             ("Versiones…", self.versions))]
@@ -2453,24 +2670,26 @@ class App:
         tools.addAction("Volumen recopilatorio…", self.omnibus)
         tools.addAction("Vigilar una carpeta…", self.watch_folder)
         tools.addSeparator()
-        self.options_action = tools.addAction("Opciones…  (Ctrl+,)", lambda: self.open_options())
-        self.book_actions.append(self.options_action)
-        tools.addAction("Atajos de teclado…", self.show_shortcuts)
+        self.options_action = tools.addAction("Opciones…\tCtrl+,", lambda: self.open_options())
+        tools.addAction("Atajos de teclado…\tF1", self.show_shortcuts)
         tools.addAction("Registro de la aplicación", self.open_log)
         tools.addAction("Buscar actualizaciones…", self.check_updates)
         tools.addSeparator()
         support = tools.addMenu("Apoyar el proyecto")
         for text, url in DONATE:
             support.addAction(text, lambda url=url: webbrowser.open(url))
-        self.file_label = _label("Ningún archivo", "muted")
         self.recent_btn = _menu_button("Recientes", self.recent_menu)
         self.tools_btn = _menu_button("Herramientas", tools)
         self.find_btn = _button("Buscar", self.find)
+        self.find_btn.setToolTip("Buscar y reemplazar en el libro (Ctrl+F)")
         top.setLayout(_row(self.open_btn, self.batch_btn, self.recent_btn, self.tools_btn,
-                           self.file_label, 1, self.find_btn, margins=(10, 8, 10, 8)))
+                           1, self.find_btn, margins=(10, 8, 10, 8)))  # «Opciones…», solo en Herramientas
         outer.addWidget(top)
+        QShortcut(QKeySequence("Ctrl+O"), root, self.open_pdf)
         QShortcut(QKeySequence("Ctrl+F"), root, self.find)
+        QShortcut(QKeySequence("Ctrl+G"), root, self.goto_chapter)
         QShortcut(QKeySequence("Ctrl+,"), root, lambda: self.open_options())
+        QShortcut(QKeySequence("F1"), root, self.show_shortcuts)
         # En toda la ventana: tras «Editar texto…» o «Todos» el foco se queda en el botón, no en la lista.
         # Un campo de texto con el foco se queda Ctrl+Z para deshacer lo escrito en él.
         QShortcut(QKeySequence("Ctrl+Z"), root, self.undo)
@@ -2512,8 +2731,7 @@ class App:
         self.data_panel.setWidgetResizable(True)
         self.data_panel.setFrameShape(QFrame.Shape.NoFrame)
         self.data_panel.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.data_panel.hide()
-        body.addWidget(self.data_panel)
+        self.data_panel.hide()  # va en el sitio de las vistas previas (toggle_data): encima, tapaba la lista
         for var in (self.title_var, self.author_var, self.publisher_var, self.lang_var, self.series_var,
                     self.volume_var):
             var.listeners.append(self.update_header)
@@ -2531,19 +2749,28 @@ class App:
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(6)
         self.find_entry = QLineEdit(placeholderText="Buscar en el libro (Intro)")
+        self.find_entry.setClearButtonEnabled(True)
         self.find_count = _label("", "muted")
         self.find_bar = QFrame(objectName="card")
         self.replace_entry = QLineEdit(placeholderText="Reemplazar por")
+        self.replace_entry.setClearButtonEnabled(True)
         self.replace_entry.setMinimumWidth(150)  # en ventana pequeña los botones lo dejaban sin sitio para escribir
+        # «Cerrar» con palabra: un ✕ al lado del ✕ que vacía el campo no decía cuál cierra la barra
+        find_close = _button("Cerrar", self.close_find)
+        find_close.setToolTip("Cerrar la búsqueda (Esc)")
         bar = QVBoxLayout(self.find_bar)
         bar.setContentsMargins(6, 4, 6, 4)
         bar.setSpacing(4)
-        bar.addLayout(_row(self.find_entry, self.find_count, _button("✕", self.close_find)))
+        bar.addLayout(_row(self.find_entry, self.find_count, find_close))
         bar.addLayout(_row(self.replace_entry, _button("Reemplazar", self.replace_found),
-                           _button("Todos", lambda: self.replace_found(every=True)),
+                           _button("Reemplazar todo", lambda: self.replace_found(every=True)),
                            _button("Guardar como regla", self.save_rule)))
         self.find_results = QListWidget()
         self.find_results.setMaximumHeight(160)
+        self.find_results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.find_results.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.find_hits = _FindHits(self.find_results, lambda: theme.colors(self.dark))
+        self.find_results.setItemDelegate(self.find_hits)
         self.find_bar.hide()
         self.find_results.hide()
         column.addWidget(self.find_bar)
@@ -2559,9 +2786,12 @@ class App:
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
         split.setSizes([470, 700])
+        _lock(split)  # la lista tiene su ancho: no se arrastra el divisor
+        self.left_pane = left
+        editor.watch(left, lambda e: e.type() == QEvent.Type.Resize and self.fit_tree_columns() and False)
         views = QVBoxLayout(self.views)
         views.setContentsMargins(6, 0, 0, 0)
-        views.setSpacing(4)
+        views.setSpacing(6)
         self.tabs = QTabBar()
         for name in ("PDF", "EPUB", "Ambos"):
             self.tabs.addTab(name)
@@ -2569,12 +2799,19 @@ class App:
         self.tabs.currentChanged.connect(lambda _: self.show_panes())
         # otro tamaño de página: el EPUB de la vista previa se rehace con sus ilustraciones a la medida
         device = _combo(self.device_var, list(DEVICES), 10, changed=self.update_preview)
-        dark = qtk.Var.check(self.dark_var, QCheckBox("Modo oscuro"))
+        # «Vistas en oscuro», no «Modo oscuro»: el tema oscuro de la ventana es otra cosa (Opciones → Apariencia)
+        dark = qtk.Var.check(self.dark_var, QCheckBox("Vistas en oscuro"))
+        dark.setToolTip("Las vistas previas del PDF y del EPUB con fondo oscuro, como el modo noche de los lectores")
         dark.toggled.connect(lambda _: self.book and (self.draw_pdf(), self.draw_epub()))  # las dos vistas
-        views.addLayout(_row(self.tabs, 1, device, dark, _button("Editar texto…", self.edit_text)))
+        self.dark_var.listeners.append(self.sync_dark_views)  # el panel «Original» del editor sigue este ajuste
+        self.views_head = QWidget()  # se oculta con «Editar datos», que ocupa el sitio de las vistas
+        self.views_head.setLayout(_row(self.tabs, 1, device, dark, _button("Editar texto…", self.edit_text),
+                                       margins=(0, 0, 0, 0)))
+        views.addWidget(self.views_head)
         self.pages = qtk.Box()
         panes = QHBoxLayout(self.pages)
         panes.setContentsMargins(0, 0, 0, 0)
+        panes.setSpacing(theme.SPACE["pad"])
         self.pdf_pane, self.pdf_caption, self.pdf_view = self.preview_pane("PDF", self.pdf_step)
         self.epub_pane, self.epub_caption, self.epub_view = self.preview_pane("EPUB", self.epub_step)
         import webview  # aquí y no arriba: los procesos de trabajo no cargan Chromium
@@ -2584,12 +2821,13 @@ class App:
             self.chromium = webview.EpubView()
             self.chromium.hide()
             self.epub_pane.layout().addWidget(self.chromium)
-        panes.addWidget(self.pdf_pane)
-        panes.addWidget(self.epub_pane)
+        panes.addWidget(self.pdf_pane, 1)
+        panes.addWidget(self.epub_pane, 1)
         views.addWidget(self.pages, 1)
         self.strip = qtk.Strip(THUMB_HEIGHT)
         self.strip.clicked.connect(self.jump)
         views.addWidget(self.strip)
+        views.addWidget(self.data_panel, 1)
         # Mientras se analiza, lista, hojas y tira muestran su esqueleto: se ve que algo está cargando
         self.loading = False
         self.shimmers = (qtk.Shimmer(self.tree.viewport(), _skeleton_rows(self.tree)),
@@ -2598,11 +2836,11 @@ class App:
                          qtk.Shimmer(self.strip.viewport(), _skeleton_strip))
 
         # Barra inferior: opciones del EPUB, estado, avisos y la acción principal
-        bottom = QFrame(objectName="bar")
+        bottom = QFrame(objectName="bottomBar")
         rows = QVBoxLayout(bottom)
         rows.setContentsMargins(10, 6, 10, 6)
         rows.setSpacing(4)
-        self.quality_btn = _button("Calidad", self.quality)
+        self.quality_btn = _button("Calidad…", self.quality)
         self.quality_btn.setEnabled(False)
         self.gen_btn = _button("Generar EPUB…", self.generate, "primary")
         self.pdf_menu = QMenu(root)
@@ -2710,16 +2948,40 @@ class App:
         page = QWidget()
         drop = QFrame(objectName="drop")
         inner = QVBoxLayout(drop)
+        inner.setSpacing(theme.SPACE["pad"])
         inner.addStretch(1)
-        icon = _label("🗎")
+        icon = _label(theme.ICONS["doc"])
         icon.setStyleSheet("font-size: 40pt;")
-        for widget in (icon, _label("Suelta aquí un PDF o EPUB de novela ligera", "big"), _label("o", "muted"),
-                       _button("Abrir PDF o EPUB…", self.open_pdf, "primary"),
-                       _button("¿Muchos tomos? Convertir una carpeta entera", self.convert_folder, "link")):
-            inner.addWidget(widget, 0, Qt.AlignmentFlag.AlignHCenter)
+        link_btn = _button("¿Muchos tomos? Convertir una carpeta entera", self.convert_folder, "link")
+        link_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_btn = _button("Abrir PDF o EPUB…", self.open_pdf, "primary")
+        # Separador con líneas finas a ambos lados de «o» para que no parezca una letra suelta
+        or_row = QWidget()
+        or_row.setFixedWidth(max(open_btn.sizeHint().width() * 2, 240))
+        or_lines = []
+        for _ in range(2):
+            line = QFrame(objectName="sep")
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFrameShadow(QFrame.Shadow.Plain)
+            line.setFixedHeight(1)
+            or_lines.append(line)
+        or_layout = _row(or_lines[0], _label("o", "muted"), or_lines[1], spacing=theme.SPACE["pad"])
+        or_layout.setStretch(0, 1)
+        or_layout.setStretch(2, 1)
+        or_row.setLayout(or_layout)
+        inner.addWidget(icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        inner.addSpacing(theme.SPACE["tight"])
+        inner.addWidget(_label("Suelta aquí un PDF o EPUB de novela ligera", "big"), 0, Qt.AlignmentFlag.AlignHCenter)
+        inner.addWidget(or_row, 0, Qt.AlignmentFlag.AlignHCenter)
+        inner.addWidget(open_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        inner.addSpacing(theme.SPACE["pad"])
+        inner.addWidget(link_btn, 0, Qt.AlignmentFlag.AlignHCenter)
         inner.addStretch(1)
         recent = QFrame(objectName="card")
         column = QVBoxLayout(recent)
+        column.setContentsMargins(theme.SPACE["section"], theme.SPACE["section"],
+                                  theme.SPACE["section"], theme.SPACE["section"])
+        column.setSpacing(theme.SPACE["pad"])
         column.addWidget(_label("Recientes", "title"))
         self.recent_list = QListWidget()
         self.recent_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)  # tarjetas altas
@@ -2746,64 +3008,133 @@ class App:
         return page
 
     def book_data(self):
-        """Panel «Editar datos»: todos los datos del libro, la sinopsis, la portada, los reemplazos y AniList."""
+        """Panel «Editar datos»: todos los datos del libro, la sinopsis, la portada y AniList."""
         panel = QFrame(objectName="card")
         grid = QGridLayout(panel)
         grid.setContentsMargins(10, 8, 10, 8)
         grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(4)
-        fields = ((("Título:", self.title_var), ("Autor:", self.author_var), ("Serie:", self.series_var),
-                   ("Vol.:", self.volume_var)),
-                  (("Grupo:", self.publisher_var), ("Traductor:", self.translator_var),
-                   ("Ilustraciones:", self.illustrator_var)),  # el idioma está en Opciones → Perfil y formato
-                  (("Corrección:", self.proofreader_var), ("Edición:", self.editor_var),
-                   ("Título original:", self.original_title_var), ("Fecha:", self.date_var)))
+        grid.setVerticalSpacing(6)
+        # Dos campos por fila: el panel ocupa el sitio de las vistas previas, no el ancho entero de la ventana
+        fields = ((("Título:", self.title_var), ("Autor:", self.author_var)),
+                  (("Serie:", self.series_var), ("Volumen:", self.volume_var)),
+                  (("Grupo de traducción:", self.publisher_var), ("Traductor:", self.translator_var)),
+                  (("Ilustrador/a:", self.illustrator_var), ("Fecha:", self.date_var)),
+                  (("Corrector/a:", self.proofreader_var), ("Editor/a:", self.editor_var)),
+                  (("Título original:", self.original_title_var),))
         for r, row in enumerate(fields):
             for c, (label, var) in enumerate(row):
                 grid.addWidget(QLabel(label), r, c * 2)
                 widget = var.entry(QLineEdit())
-                if var is self.date_var:
-                    widget.setPlaceholderText("AAAA o AAAA-MM-DD")
-                grid.addWidget(widget, r, c * 2 + 1)
-        grid.addWidget(QLabel("Géneros:"), 3, 0)
+                if var is self.date_var:  # «AAAA o AAAA-MM-DD» no cabía en la columna: el resto, en la ayuda
+                    widget.setPlaceholderText("AAAA-MM-DD")
+                    widget.setToolTip("El año (AAAA) o la fecha entera (AAAA-MM-DD)")
+                    widget.setMinimumWidth(widget.fontMetrics().horizontalAdvance("AAAA-MM-DD") + 24)
+                    self.date_btn = _button("Elegir…", self.pick_date)
+                    self.date_btn.setToolTip("Elegir la fecha en un calendario")
+                    self.date_popup = None
+                    date_row = _row(widget, self.date_btn, spacing=theme.SPACE["tight"])
+                    date_row.setStretch(0, 1)
+                    grid.addLayout(date_row, r, c * 2 + 1)
+                    continue
+                align = Qt.AlignmentFlag(0)
+                if var is self.volume_var:  # un número: tan ancho como el título era otra pista falsa
+                    widget.setMaximumWidth(widget.fontMetrics().horizontalAdvance("0000") + 24)
+                    align = Qt.AlignmentFlag.AlignLeft
+                # Título original ocupa el resto de su fila: la rejilla queda sin agujero
+                grid.addWidget(widget, r, c * 2 + 1, 1, 3 if var is self.original_title_var else 1, align)
+        grid.addWidget(QLabel("Géneros:"), 6, 0)
         subjects = self.subjects_var.entry(QLineEdit(placeholderText="separados por comas"))
-        grid.addWidget(subjects, 3, 1, 1, 7)
-        grid.addWidget(QLabel("Sinopsis:"), 4, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(subjects, 6, 1, 1, 3)
+        grid.addWidget(QLabel("Sinopsis:"), 7, 0, Qt.AlignmentFlag.AlignTop)
         self.synopsis = QPlainTextEdit()
-        self.synopsis.setFixedHeight(62)
+        self.synopsis.setMinimumHeight(62)  # crece con el sitio que dejan las vistas previas
         self.synopsis.textChanged.connect(lambda: setattr(self, "_description", self.synopsis.toPlainText().strip()))
-        grid.addWidget(self.synopsis, 4, 1, 1, 7)
+        grid.addWidget(self.synopsis, 7, 1, 1, 3)
+        grid.setRowStretch(7, 1)
         titles = QMenu(self.root)
         titles.addAction("Mayúsculas al estilo español", self.fix_case)
         titles.addAction("Numeración uniforme (Capítulo 1, 2…)", self.fix_numbers)
         titles.addAction("Apartados sin nombre (Parte 1…) como separador", self.parts_as_breaks)
         self.cover_label = _label("", "muted")
-        grid.addLayout(_row(_button("Portada…", self.choose_cover), self.cover_label,
-                            _button("Reemplazos…", self.edit_replacements),
-                            _button("Glosario…", self.edit_glossary), _menu_button("Títulos", titles),
-                            _button("Más datos…", self.edit_more_data), 1,
-                            _button("Buscar en internet (AniList)…", self.search_online)), 5, 0, 1, 8)
-        for c in (1, 3, 5):
-            grid.setColumnStretch(c, 2)
-        grid.setColumnStretch(7, 1)
+        self.titles_btn = _menu_button("Títulos", titles)
+        # Reemplazos y Glosario son herramientas del libro, no metadatos: viven en el menú Herramientas
+        grid.addLayout(_row(_button("Portada…", self.choose_cover), self.titles_btn,
+                            _button("Más datos…", self.edit_more_data), 1), 8, 0, 1, 4)
+        grid.addLayout(_row(self.cover_label, 1, _button("Buscar en internet (AniList)…", self.search_online)),
+                       9, 0, 1, 4)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
         return panel
 
+    def pick_date(self):
+        """Abre un calendario junto al campo «Fecha» para elegir AAAA-MM-DD sin impedir escribir solo el año."""
+        if self.date_popup is not None and shiboken6.isValid(self.date_popup[0]):
+            self.date_popup[0].deleteLater()
+        pop = QFrame(self.root, Qt.WindowType.Popup)
+        pop.setObjectName("card")
+        column = QVBoxLayout(pop)
+        m = theme.SPACE["pad"]
+        column.setContentsMargins(m, m, m, m)
+        cal = QCalendarWidget(pop)
+        cal.setLocale(QLocale(QLocale.Language.Spanish, QLocale.Country.Spain))
+        cal.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        # Los fines de semana por defecto salen en rojo puro (ilegible en oscuro): usar colores del tema
+        colors = theme.colors(self.dark)
+        weekend = QTextCharFormat()
+        weekend.setForeground(QColor(colors["muted"]))
+        cal.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, weekend)
+        cal.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, weekend)
+        header = QTextCharFormat()
+        header.setBackground(QColor(colors["card"]))
+        header.setForeground(QColor(colors["muted"]))
+        cal.setHeaderTextFormat(header)
+        parsed = QDate.fromString(self.date_var.get().strip(), "yyyy-MM-dd")
+        if parsed.isValid():
+            cal.setSelectedDate(parsed)
+
+        def choose(date):
+            self.date_var.set(date.toString("yyyy-MM-dd"))
+            pop.close()
+
+        cal.clicked.connect(choose)
+        cal.activated.connect(choose)
+        column.addWidget(cal)
+        pop.adjustSize()
+        corner = self.date_btn.mapToGlobal(self.date_btn.rect().bottomRight())
+        area = self.date_btn.screen().availableGeometry()
+        x = max(area.left(), min(corner.x() - pop.width(), area.right() - pop.width()))
+        y = corner.y() + 2
+        if y + pop.height() > area.bottom():
+            y = max(area.top(), self.date_btn.mapToGlobal(self.date_btn.rect().topLeft()).y() - pop.height() - 2)
+        pop.move(x, y)
+        pop.show()
+        cal.setFocus()
+        self.date_popup = pop, cal
+        return pop, cal
+
     def toggle_data(self):
-        shown = not self.data_panel.isVisible()
-        if shown:  # entera si cabe (la lista y las vistas previas se encogen); con barra solo en pantallas muy bajas.
-            # Medida al abrirla: al crear la ventana el tema aún no estaba puesto y salía más baja
-            full = self.data_panel.widget().sizeHint().height() + 12  # holgura: con la barra, el texto se parte más
-            room = self.root.screen().availableGeometry().height() if self.root.screen() else full
-            self.data_panel.setMaximumHeight(full)
-            self.data_panel.setMinimumHeight(min(full, int(room * 0.45)))
+        """Los datos del libro en el sitio de las vistas previas, con la lista entera a la vista: encima de todo
+        (antes) dejaban la lista y las vistas en unas pocas filas. «Ocultar datos» vuelve a las vistas."""
+        shown = self.data_panel.isHidden()
+        for widget in (self.views_head, self.pages, self.strip):
+            widget.setVisible(not shown)
         self.data_panel.setVisible(shown)
         self.data_btn.setText("Ocultar datos" if shown else "Editar datos")
         self.data_btn.setIcon(_fold_icon(self.dark, shown))
+        self.views_size = None
+        qtk.after(0, self.redraw)
+
+    def fit_tree_columns(self):
+        """En ventanas estrechas oculta «Lectura» para que los títulos de capítulos sigan leyéndose."""
+        narrow = self.left_pane.width() > 0 and self.left_pane.width() < 420
+        if self.tree.isColumnHidden(2) != narrow:
+            self.tree.setColumnHidden(2, narrow)
 
     def update_header(self):
         """Tarjeta del libro: título, y autor · grupo · serie y tomo · idioma."""
         title = self.title_var.get().strip() or (self.pdf.stem if self.pdf else "")
         self.book_title.setText(title)
+        self.root.setWindowTitle(f"{self.pdf.name} — {APP_NAME}" if self.pdf else APP_NAME)
         series = self.series_var.get().strip()
         if series and self.volume_var.get().strip():
             series += f" · vol. {self.volume_var.get().strip()}"
@@ -2821,7 +3152,7 @@ class App:
                                                                    Qt.TransformationMode.SmoothTransformation))
 
     def apply_theme(self):
-        """Pone el tema elegido y vuelve a pintar lo que tiene colores propios (lista y vistas previas)."""
+        """Pone el tema elegido y vuelve a pintar lo que tiene colores propios (lista, vistas previas y diálogos)."""
         self.dark = theme.apply(qtk.app(), self.theme_var.get(), self.settings.get("accent", "Azul"),
                                 theme.UI_SIZES.get(self.settings.get("ui_font"), 9))
         colors = theme.kind_colors(self.dark)
@@ -2829,16 +3160,29 @@ class App:
             self.tree.tag_configure(tag, font=self.fonts[tag], foreground=colors[tag])
         self.update_quality()
         self.redraw()
+        self.find_results.viewport().update()
         if self.text_editor:
             self.text_editor.recolor(self.dark)
+        for name in ("quality_window", "spelling_window", "translate_window", "versions_window"):
+            win = getattr(self, name, None)
+            if win and shiboken6.isValid(win) and hasattr(win, "recolor"):
+                win.recolor(self.dark)
         if self.book is None:  # las tarjetas de recientes llevan colores del tema
             self.fill_recent()
         self.data_btn.setIcon(_fold_icon(self.dark, not self.data_panel.isHidden()))
-        # QToolButton#menu en Fusion es ~3 px más alto que QPushButton: igualarlo al alto de «Abrir» y «Convertir»
+        # QToolButton#menu en Fusion es ~1-3 px distinto a QPushButton: igualarlo al alto de los botones vecinos
         bar_h = max(self.open_btn.sizeHint().height(), self.batch_btn.sizeHint().height())
         if bar_h > 0:
-            for btn in (self.recent_btn, self.tools_btn):
+            for btn in (self.recent_btn, self.tools_btn, self.titles_btn):
                 btn.setFixedHeight(bar_h)
+        gen_h = self.gen_btn.sizeHint().height()
+        if gen_h > 0:
+            self.pdf_btn.setFixedHeight(gen_h)
+
+    def sync_dark_views(self):
+        """Sincroniza el panel «Original» del editor abierto con la casilla «Vistas en oscuro» de la ventana."""
+        if self.text_editor:
+            self.text_editor.sync_side_dark(self.dark_var.get())
 
     def show_panes(self):
         mode = self.tabs.currentIndex()  # 0 PDF, 1 EPUB, 2 los dos
@@ -2912,15 +3256,17 @@ class App:
         self.finish(("cancel",))
 
     def update_chrome(self):
-        """Sin libro abierto, solo lo que sirve para empezar: abrir, convertir una carpeta, las herramientas que no
-        piden libro y los recientes de la pantalla de inicio. Las opciones del EPUB, Generar, Calidad, Buscar y el nombre del
-        archivo llegan con el libro; la barra de abajo también sale mientras se trabaja, por el progreso."""
-        has = self.book is not None
-        for widget in (self.options_row, self.quality_btn, self.recent_btn, self.file_label, self.find_btn):
+        """Sin libro abierto, solo lo que sirve para empezar: Herramientas, Opciones y la pantalla de inicio (Abrir y
+        Convertir ya están en el centro). Las opciones del EPUB, Generar, Calidad, Buscar y Recientes llegan con el
+        libro; la barra de progreso y Cancelar solo salen mientras hay un trabajo en curso."""
+        has, busy = self.book is not None, self.done is not None
+        for widget in (self.open_btn, self.batch_btn, self.options_row, self.quality_btn, self.recent_btn, self.find_btn):
             widget.setVisible(has)
-        self.bottom.setVisible(has or self.done is not None)
-        self.cancel_btn.setVisible(self.done is not None)
-        loading = not has and self.done is not None and self.stack.currentIndex() == 1  # analizando un libro
+        # «Opciones…» siempre en el mismo sitio, con libro o sin él: desaparecía al abrir uno y en su sitio salía «Buscar»
+        self.bottom.setVisible(has or busy)
+        self.progress.setVisible(busy)
+        self.cancel_btn.setVisible(busy)
+        loading = not has and busy and self.stack.currentIndex() == 1  # analizando un libro
         if loading != self.loading:
             self.loading = loading
             self.idle_text = "" if loading else "Abre un PDF para ver la vista previa"  # sin aviso bajo las barras
@@ -3054,16 +3400,17 @@ class App:
         return True
 
     def preview_pane(self, name, step):
-        """Columna de una vista previa: leyenda, la hoja y los botones ◀ ▶. Devuelve (columna, leyenda, hoja)."""
-        pane = QWidget()
+        """Tarjeta de una vista previa: leyenda, la hoja y los botones ◀ ▶. Devuelve (tarjeta, leyenda, hoja)."""
+        pane = QFrame(objectName="card")
         column = QVBoxLayout(pane)
-        column.setContentsMargins(4, 0, 4, 0)
-        column.setSpacing(4)
+        column.setContentsMargins(theme.SPACE["pad"], theme.SPACE["gap"], theme.SPACE["pad"], theme.SPACE["pad"])
+        column.setSpacing(theme.SPACE["gap"])
         caption = _label(name, "muted")
         caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
         view = qtk.Preview()
         # ◀ leyenda ▶ en una sola línea: en pantallas bajas, cada píxel de alto es de la hoja
-        back, forward = qtk.ArrowButton(-1, lambda: step(-1)), qtk.ArrowButton(1, lambda: step(1))
+        back = qtk.ArrowButton(-1, lambda: step(-1), "Página anterior")
+        forward = qtk.ArrowButton(1, lambda: step(1), "Página siguiente")
         column.addLayout(_row(back, caption, forward))
         column.addWidget(view, 1)
         return pane, caption, view
@@ -3073,7 +3420,8 @@ class App:
         página: así cambiar de dispositivo o de página no mueve el resto de la ventana."""
         if self.views_size is None:
             shown = 1 if self.tabs.currentIndex() != 2 else 2
-            room_w, room_h = self.pages.width() // shown - 12, self.pages.height() - PREVIEW_CHROME
+            room_w = self.pages.width() // shown - (24 if shown == 2 else 20)
+            room_h = self.pages.height() - PREVIEW_CHROME - 16
             if self.pages.height() < 60:  # aún sin dibujar: tamaño normal
                 return 315, 420
             height = max(90, min(PREVIEW_BOX[1], room_h, int(room_w / 0.75)))
@@ -3295,7 +3643,7 @@ class App:
         marks = []
         if self.highlight and self.highlight[0] == self.pdf_page:  # recuadro sobre la línea tomada como título
             x0, y0, x1, y1 = (v * zoom for v in self.highlight[1])
-            marks.append((QRectF(x0 - 3, y0 - 2, x1 - x0 + 6, y1 - y0 + 4), "red"))
+            marks.append((QRectF(x0 - 3, y0 - 2, x1 - x0 + 6, y1 - y0 + 4), MARK_COLORS["current"]))  # rojo era error
         canvas.show_image(self.box_size(), image, marks)
         self.pdf_caption.setText(f"{self.source_name()} · página {self.pdf_page + 1}")
         self.mark_current()
@@ -3556,8 +3904,10 @@ class App:
                 page = self.pdf_doc[n]
                 zoom = THUMB_HEIGHT / page.rect.height
                 image = qtk.qimage(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)))
-                color = MARK_COLORS["title"] if n + 1 in titles else MARK_COLORS["image"] if n + 1 in images else ""
-                self.strip.add(n, image, color)
+                kind = "title" if n + 1 in titles else "image" if n + 1 in images else ""
+                # el color no va solo: la ayuda dice qué es cada borde
+                self.strip.add(n, image, MARK_COLORS.get(kind, ""),
+                               f"Página {n + 1}" + (f" · {MARK_TIPS[kind]}" if kind else ""))
                 self.thumbs[n] = (image.width(), image.height())
         finally:
             inner.setUpdatesEnabled(True)
@@ -3626,7 +3976,11 @@ class App:
             self.update_quality()
         chapters = [i for i in self.tree.get_children() if self.tree.set(i, "inc") == ON]
         done = sum(bool(self.tree.set(i, "ok")) for i in chapters)
-        self.tree.headerItem().setText(self.tree.columns.index("ok"), f"✓ {done}/{len(chapters)}" if chapters else "✓")
+        column = self.tree.columns.index("ok")
+        self.tree.headerItem().setText(column, f"✓ {done}/{len(chapters)}" if chapters else "✓")
+        # «✓ 0/10» solo no decía qué cuenta; el editor lo llama igual: «Revisado»
+        self.tree.headerItem().setToolTip(column, f"Revisados: {done} de {convert.counted(len(chapters), 'capítulo')} "
+                                                  "(tecla R o «Revisado» en el editor)")
         return done, len(chapters)
 
     def link_rows(self):
@@ -3770,7 +4124,7 @@ class App:
         self.settings["recent"] = [path] + [p for p in self.settings.get("recent", []) if p != path][:max(1, keep) - 1]
         self.fill_recent()
         self.pdf, self.book = Path(path), None
-        self.file_label.setText(self.pdf.name)
+        self.root.setWindowTitle(f"{self.pdf.name} — {APP_NAME}")  # ya mientras se analiza
         self.tabs.setTabText(0, self.source_name())
         self.pdf_caption.setText(self.source_name())
         self.tree.delete(*self.tree.get_children())
@@ -3973,9 +4327,12 @@ class App:
         if column == "#1" and self.tree.identify_row(event.y, pinned=True) == CONTENTS:  # como la casilla «Índice»
             self.contents_var.set(not self.contents_var.get())
         if item and column == "#1" and self.tree.set(item, "inc") in self.cycle(item):
-            self.set_kind(item, self.cycle(item)[self.tree.set(item, "inc")])
+            kind = self.cycle(item)[self.tree.set(item, "inc")]
+            self.set_kind(item, kind)
             self.update_reviewed()
             self.update_preview()
+            if kind == CUT:
+                self.status.setText(f"Quitado: «{self.tree.set(item, 'title')}» · Ctrl+Z para deshacer")
         self.drag_source = item if item and column == "#2" else None  # on_drop decide si se movió
         self.tree.drag_iid = self.drag_source if self.drag_source and not self.is_break(item) else None  # su guía
 
@@ -4000,6 +4357,71 @@ class App:
             self.set_kind(item, kind)
             self.update_reviewed()
             self.update_preview()
+            if kind == CUT:
+                self.status.setText(f"Quitado: «{self.tree.set(item, 'title')}» · Ctrl+Z para deshacer")
+
+    def goto_chapter(self):
+        """Ctrl+G: salta a una fila de la lista filtrando por su título (los atajos de una letra impiden escribir en
+        la lista directamente)."""
+        if not self.book:
+            return
+        self.close_tools(["goto_window"])
+        win, column = self.dialog("Ir al capítulo")
+        win.resize(*theme.DIALOG["s"])
+        entry = QLineEdit(placeholderText="Filtrar capítulos por título…")
+        entry.setClearButtonEnabled(True)
+        listing = QListWidget()
+        listing.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        listing.setTextElideMode(Qt.TextElideMode.ElideRight)
+        rows = [(iid, self.tree.set(iid, "title")) for iid in self.tree.get_children()]
+        folded = [(iid, title, convert._fold(title)) for iid, title in rows]
+
+        def accept():
+            current = listing.currentItem()
+            if current is None:
+                return
+            iid = current.data(Qt.ItemDataRole.UserRole)
+            win.close()
+            if self.tree.exists(iid):
+                self.tree.selection_set(iid)
+                self.tree.see(iid)
+                self.tree.setFocus()
+
+        go_btn = _button("Ir", accept, "primary")
+
+        def refill(query=""):
+            needle = convert._fold(query.strip())
+            listing.clear()
+            for iid, title, key in folded:
+                if not needle or needle in key:
+                    item = QListWidgetItem(title)
+                    item.setData(Qt.ItemDataRole.UserRole, iid)
+                    listing.addItem(item)
+            if listing.count():
+                listing.setCurrentRow(0)
+            go_btn.setEnabled(listing.count() > 0)
+
+        def move_in_list(event):
+            if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up) and listing.count():
+                step = 1 if event.key() == Qt.Key.Key_Down else -1
+                listing.setCurrentRow(max(0, min(listing.count() - 1, listing.currentRow() + step)))
+                return True
+            return False
+
+        editor.watch(entry, move_in_list)
+        entry.textChanged.connect(refill)
+        entry.returnPressed.connect(accept)
+        listing.itemDoubleClicked.connect(lambda _: accept())
+        QShortcut(QKeySequence(Qt.Key.Key_Return), listing, accept, context=Qt.ShortcutContext.WidgetShortcut)
+        QShortcut(QKeySequence(Qt.Key.Key_Enter), listing, accept, context=Qt.ShortcutContext.WidgetShortcut)
+        column.addWidget(entry)
+        column.addWidget(listing, 1)
+        column.addLayout(_row(1, go_btn, _button("Cancelar", win.close)))
+        refill()
+        win.parts = {"entry": entry, "list": listing, "go": accept, "go_btn": go_btn}
+        self.goto_window = win
+        win.show()
+        entry.setFocus()
 
     def edit_title(self, item):
         if self.is_image(item) or self.is_break(item):  # el nombre de una ilustración o un separador no se edita
@@ -4132,13 +4554,20 @@ class App:
         self.progress.setValue(0)  # la barra llena se quedaba tras el aviso de guardado
         self.status.setText(f"Guardado: {Path(out).name}" + (" (con avisos)" if problems else ""))
         if not of_book:
-            self.result_dialog(out, problems)
+            self.result_dialog(out, problems, of_book=False)
             return
         self.last_problems = list(problems)
         self.save_review()  # el panel de serie muestra los avisos del último EPUB
         kind = "PDF" if str(out).lower().endswith(".pdf") else "EPUB"
         self.add_version(f"{kind} generado · {Path(out).name}", auto=True)  # lo publicado, para compararlo luego
         self.result_dialog(out, problems)
+
+    def sync_device(self):
+        """La vista previa en el aparato del perfil (PROFILE_DEVICES), sin tocar los valores del perfil: el usuario
+        pudo cambiarlos. «Personalizado» y los perfiles sin aparato dejan el que había."""
+        device = PROFILE_DEVICES.get(self.profile_var.get())
+        if device and self.device_var.get() != device:
+            self.device_var.set(device)
 
     def dialog(self, title, modal=False, parent=None):
         """Ventana secundaria con su columna; sin modal, la principal sigue usable (como Toplevel). parent: otra
@@ -4148,59 +4577,103 @@ class App:
         win.setModal(modal)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         column = QVBoxLayout(win)
-        column.setContentsMargins(14, 12, 14, 12)
-        column.setSpacing(8)
+        m = theme.SPACE["section"]
+        column.setContentsMargins(m, m, m, m)
+        column.setSpacing(theme.SPACE["pad"])
         return win, column
 
-    def result_dialog(self, out, problems=()):
+    def show_late(self, win, name):
+        """Muestra win, el resultado de un trabajo que tardó, sin quitar el foco a la herramienta que se abrió
+        mientras tanto: Ortografía salía encima de «Página de personajes» y se llevaba lo que se escribía."""
+        busy = QApplication.activeWindow()
+        win.show()
+        if busy is not None and busy is not self.root and busy is not win and busy.isVisible():
+            busy.raise_()
+            busy.activateWindow()
+            self.status.setText(f"{name} lista: está detrás de «{busy.windowTitle()}»")
+
+    def result_dialog(self, out, problems=(), of_book=True):
         """Tras generar: dónde quedó, cuánto pesa, qué avisos dio la revisión y, sin buscarlo, abrirlo, abrir
-        su carpeta, copiarlo al lector o enviarlo al Kindle. Un solo diálogo (antes eran dos seguidos)."""
+        su carpeta, copiarlo al lector o enviarlo al Kindle. Un solo diálogo (antes eran dos seguidos).
+        of_book=False (recopilatorio, carpeta): no es el libro abierto, así que no lleva su informe de calidad."""
         problems = list(problems or ())
         is_pdf = str(out).lower().endswith(".pdf")
-        is_file, kindle = Path(out).is_file(), self.profile_var.get() == "Kindle" and not is_pdf
+        path = Path(out)
+        full = str(path)  # el diálogo de guardar la da con «/»: en Windows, como en el Explorador
+        is_file, kindle = path.is_file(), self.profile_var.get() == "Kindle" and not is_pdf
         win, column = self.dialog("PDF listo" if is_pdf else "EPUB guardado con avisos" if problems else "EPUB listo")
+        win.setMinimumWidth(theme.DIALOG["s"][0])
+        # check_epub solo dice si el EPUB abre bien: «Revisado: sin problemas» se leía como «el libro está bien»
         heading = _label("PDF maquetado." if is_pdf else "La revisión encontró avisos" if problems
-                         else "Revisado: sin problemas.", "warn" if problems else "title")
+                         else "EPUB válido: los lectores lo abrirán." if is_file else "Conversión terminada.",
+                         "warn" if problems else "title")
         column.addWidget(heading)
-        text = str(Path(out))  # el diálogo de guardar la da con «/»: en Windows, como en el Explorador
+        name = path.name or full
+        folder = str(path.parent) if path.name and path.parent != path else ""
+        tail = []
         if is_file:
-            size = Path(out).stat().st_size
-            text += f"\n{_size_text(size)}"
+            size = path.stat().st_size
+            tail.append(_size_text(size))
             if kindle and size > KINDLE_MAIL:
-                text += "\nPasa de 50 MB: por correo no llega al Kindle; usa la web de Send to Kindle (hasta 200 MB)."
-        info = _label(text, "muted")
+                tail.append("Pasa de 50 MB: por correo no llega al Kindle; usa la web de Send to Kindle (hasta 200 MB).")
+        # Nombre arriba y carpeta recortada al ancho del diálogo debajo: la ruta larga no estira la ventana
+        info = _label("\n".join([name] + tail), "muted")
+        info.setToolTip(full)
         info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         column.addWidget(info)
+        if is_file and not is_pdf and not problems and of_book and self.book:
+            # Lo pendiente del libro, con el texto de la barra de abajo y una vía directa al informe
+            quality = _quality_summary([i for i in self.quality_report() if _issue_key(i) not in self.ignored])
+            if quality:
+                column.addLayout(_row(_label(f"Informe de calidad: {quality}", "muted"), 1,
+                                      _button("Ver informe", self.quality)))
         if problems:
             found = QPlainTextEdit("\n".join(problems[:15]) + ("\n…" if len(problems) > 15 else ""))
             found.setReadOnly(True)
             found.setMinimumSize(560, 120)
             column.addWidget(found)
-        buttons = []
+        left, right = [], []
         if is_file:
-            buttons.append(_button("Abrir PDF" if is_pdf else "Abrir EPUB", lambda: self.open_external(out, win),
-                                   "primary"))
-        buttons.append(_button("Abrir carpeta", lambda: self.open_external(out, win, folder=True)))
+            right.append(_button("Abrir PDF" if is_pdf else "Abrir EPUB", lambda: self.open_external(out, win),
+                                 "primary"))
+        left.append(_button("Abrir carpeta", lambda: self.open_external(out, win, folder=True)))
         if is_file:
-            buttons.append(_button("Enviar al móvil", lambda: self.send_to_phone(out)))
-            if _calibre():
-                buttons.append(_button("Añadir a Calibre", lambda: self.add_to_calibre(out)))
+            left.append(_button("Enviar al móvil…", lambda: self.send_to_phone(out)))
             for root, label in _drives():
                 if _reader_kind(root) == "kindle" and not is_pdf:  # el Kindle no lee EPUB por USB: Send to Kindle
                     kindle = True
                     column.addWidget(_label(f"{label} ({root[:2]}) es un Kindle: no lee EPUB por USB. "
                                             "Usa «Enviar a Kindle…».", "muted"))
                     continue
-                buttons.append(_button(f"Copiar a {label} ({root[:2]})", lambda r=root: self.copy_to(out, r, win)))
+                left.append(_button(f"Copiar a {label} ({root[:2]})", lambda r=root: self.copy_to(out, r, win)))
             if kindle:
-                buttons.append(_button("Enviar a Kindle…", lambda: self.send_to_kindle(out, win)))
-        buttons.append(_button("Cerrar", win.close))
-        column.addLayout(_row(*buttons, 1))
-        if is_file and not is_pdf:  # en su propia fila: la de los botones ya llena 1093 px con un lector conectado
-            check = _button("Validar con EPUBCheck", lambda: self.validate_epub(out))
-            check.setToolTip("El validador oficial de EPUB del W3C: lo que aceptan las tiendas y los lectores exigentes")
-            column.addLayout(_row(check, 1))
+                left.append(_button("Enviar a Kindle…", lambda: self.send_to_kindle(out, win)))
+            # Calibre y EPUBCheck en «Más» para no juntar seis botones en una sola fila
+            more_menu = QMenu(win)
+            more_menu.setToolTipsVisible(True)
+            if _calibre():
+                more_menu.addAction("Añadir a Calibre", lambda: self.add_to_calibre(out))
+            if not is_pdf:
+                check = more_menu.addAction("Validar con EPUBCheck", lambda: self.validate_epub(out))
+                check.setToolTip("El validador oficial de EPUB del W3C: lo que aceptan las tiendas y los lectores exigentes")
+            if more_menu.actions():
+                left.append(_menu_button("Más", more_menu))
+        right.append(_button("Cerrar", win.close))
+        column.addLayout(_row(*left, 1, *right))
+
+        def fit_info():
+            metrics = (info if win.isVisible() else self.root).fontMetrics()
+            base_w = win.width() if win.isVisible() else max(theme.DIALOG["s"][0], win.sizeHint().width())
+            room = max(200, base_w - 2 * theme.SPACE["section"])
+            elided = metrics.elidedText(folder, Qt.TextElideMode.ElideMiddle, room) if folder else ""
+            text = "\n".join([name] + ([elided] if elided else []) + tail)
+            if info.text() != text:
+                info.setText(text)
+
+        fit_info()
+        editor.watch(win, lambda e: e.type() in (QEvent.Type.Show, QEvent.Type.Resize) and (fit_info() or False))
         win.show()
+        fit_info()
         self.result_window = win
 
     def validate_epub(self, out):
@@ -4278,7 +4751,7 @@ class App:
         column.addWidget(_label("Escanea el código con el móvil conectado a la misma Wi-Fi, o escribe la dirección\n"
                                 "en su navegador. Si Windows pregunta en el Firewall, permite el acceso.\n"
                                 f"Al cerrar esta ventana, o a los {SEND_MINUTES} minutos, deja de enviarse.", "muted"))
-        column.addLayout(_row(1, _button("Cerrar", win.close)))
+        column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
         win.finished.connect(lambda _: (server.shutdown(), server.server_close(),
                                         server.downloaded and _record_send(out, "Wi-Fi")))
         win.show()
@@ -4338,6 +4811,10 @@ class App:
             defaults = {key: self.settings[key] for key in options.BOOK_KEYS if key in self.settings}
         self.settings["defaults"] = {key: value for key, value in defaults.items()
                                      if key in self.factory and _same_type(value, self.factory[key])}
+        if self.settings["defaults"].get("profile") == "Celular":  # nombre anterior unificado en «Móvil»
+            self.settings["defaults"]["profile"] = "Móvil"
+        if self.settings.get("device") == "Celular":
+            self.settings["device"] = "Móvil"
         if not isinstance(self.settings.get("translate"), dict):
             self.settings["translate"] = {}
         self.apply_state(self.new_book_options())
@@ -4379,11 +4856,10 @@ class App:
         return {level: LEVEL_PLURAL[level] for level in convert.LEVELS}
 
     def open_options(self, category=None, scope=None, on_close=None):
-        """«Opciones»: en category, o en la última vista. Sin libro abierto no se abre."""
-        if not self.book:
-            return None
+        """«Opciones»: en category, o en la última vista. Sin libro abierto abre en «Libros nuevos» y «La aplicación»."""
         self.options_window = options.OptionsDialog(self, self.option_choices(), PROFILES,
-                                                    category or self.settings.get("options_page"), scope, on_close)
+                                                    category or (self.settings.get("options_page") if self.book else None),
+                                                    scope, on_close)
         return self.options_window
 
     def app_values(self):
@@ -4522,14 +4998,14 @@ class App:
         path, colors = Path(path), theme.colors(self.dark)
         found = path.is_file()
         status = _volume_status(path) if found else "No se encuentra"
-        color = {"EPUB generado": colors["ok"], "Sin revisar": colors["muted"], "No se encuentra": colors["warn"]}.get(
+        color = {"EPUB generado": colors["ok"], "Sin empezar": colors["muted"], "No se encuentra": colors["warn"]}.get(
             status, theme.level_colors(self.dark)["Revisar"])
         card = QWidget()
         thumb = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         thumb.setFixedSize(44, 62)
         pixmap = QPixmap(str(_thumb_path(path))) if _thumb_path(path).is_file() else QPixmap()
         if pixmap.isNull():
-            thumb.setText("🗎")
+            thumb.setText(theme.ICONS["doc"])
             thumb.setStyleSheet(f"font-size: 20pt; background: {colors['base']}; border: 1px solid {colors['line']};")
         else:
             thumb.setPixmap(pixmap.scaled(44, 62, Qt.AspectRatioMode.KeepAspectRatio,
@@ -4653,7 +5129,7 @@ class App:
                               + "\n".join(rules))
 
         column.addLayout(_row(_button("Buscar variantes de nombres", variants), _button("Contar coincidencias", count),
-                              1, _button("Aceptar", save, "primary")))
+                              1, _button("Aceptar", save, "primary"), _button("Cancelar", win.close)))
         win.show()
         self.replacements_window = win, text, save
 
@@ -4692,7 +5168,8 @@ class App:
             win.close()
             self.update_quality()
 
-        column.addLayout(_row(_button("Añadir nombres de este tomo", add_names), 1, _button("Aceptar", save, "primary")))
+        column.addLayout(_row(_button("Añadir nombres de este tomo", add_names), 1,
+                              _button("Aceptar", save, "primary"), _button("Cancelar", win.close)))
         win.show()
         self.glossary_window = win, text, save
 
@@ -4736,11 +5213,19 @@ class App:
             elif b.kind == "heading":
                 sub = k
             elif b.kind == "p":
-                plain = convert._plain(b).strip()
-                n += bool(plain) and not convert.SCENE_BREAK.fullmatch(plain)
+                plain = _plain_fast(b).strip()
+                n += bool(plain) and (len(plain) > 24 or not convert.SCENE_BREAK.fullmatch(plain))
             where.append((start, sub, n))
             totals[start] = n
-        title = (lambda j: self.tree.set(str(j), "title") if self.tree.exists(str(j)) else convert._plain(blocks[j]))
+        title_col = self.tree.columns.index("title")
+        titles = {}
+
+        def title(j):
+            if j not in titles:
+                row = self.tree.rows.get(str(j))
+                titles[j] = row.text(title_col) if row is not None else _plain_fast(blocks[j])
+            return titles[j]
+
         places = []
         for issue in issues:
             if issue.block is None or issue.block >= len(blocks):
@@ -4883,7 +5368,7 @@ class App:
                             "en el diccionario")
         self.close_tools(["spelling_window"])  # la búsqueda nueva sustituye a la anterior
         win, column = self.dialog("Ortografía")
-        win.resize(980, 600)
+        win.resize(*theme.DIALOG["l"])
         column.addWidget(_label("Palabras que no están en el diccionario, las más repetidas primero. "
                                 + ("También las que empiezan en mayúscula (Opciones → Ortografía)."
                                    if self.settings.get("spell_caps") else
@@ -4894,6 +5379,7 @@ class App:
         left_col = QVBoxLayout(left)
         left_col.setContentsMargins(0, 0, 0, 0)
         search = QLineEdit(placeholderText="Buscar palabra")
+        search.setClearButtonEnabled(True)
         search.textChanged.connect(lambda: fill())
         table = qtk.RowList(("word", "count"), {"word": "Palabra", "count": "Veces"}, {"count": 60}, stretch="word")
         progress = _label("", "muted")
@@ -4908,6 +5394,7 @@ class App:
         places = QListWidget()
         places.setWordWrap(True)
         places.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        places.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         side.addWidget(places, 1)
         side.addWidget(_label("Cambiar por", "muted"))
         chips_row = QHBoxLayout()
@@ -4921,16 +5408,31 @@ class App:
         side.addWidget(preview)
         one_btn = _button("Cambiar esta", lambda: change(only=True))
         one_btn.setToolTip("Solo en el párrafo elegido en «Dónde sale»")
-        change_btn = _button("Cambiar todas", lambda: change(), "primary")
+        # Sin botón principal: la sugerencia sale de palabras parecidas del libro y a veces es otra palabra
+        # («genocida» -> «reconocida»); cambiar todas no debe ser lo que hace Intro ni un clic sin mirar
+        change_btn = _button("Cambiar todas", lambda: change())
         ignore_btn = _button("Ignorar", lambda: ignore())
         ignore_btn.setToolTip("No la vuelve a enseñar mientras la aplicación siga abierta; no se añade al diccionario")
         add_btn = _button("Añadir al diccionario", lambda: add())
         side.addLayout(_row(one_btn, change_btn, 1, ignore_btn, add_btn))
         panes.addWidget(right)
         panes.setSizes([300, 680])
+        _lock(panes)  # las listas tienen su tamaño
+        column.addLayout(_row(1, _button("Cerrar", win.close)))
         state = {"found": list(found), "places": [], "total": len(found), "shown": []}
-        colors, tags = theme.colors(self.dark), theme.diff_tags(self.dark)
-        mark = tags["old"]
+
+        def fit_places():
+            """Recalcula el alto de cada frase al ancho real de la lista: sin esto la última línea se cortaba."""
+            width = max(200, places.viewport().width() - 20)
+            for n in range(places.count()):
+                item = places.item(n)
+                label = places.itemWidget(item)
+                if label is not None:
+                    label.setFixedWidth(width)
+                    h = label.heightForWidth(width)  # sizeHint es el de otro ancho: la primera fila salía el doble de alta
+                    item.setSizeHint(QSize(0, (h if h > 0 else label.sizeHint().height()) + 8))
+
+        editor.watch(places.viewport(), lambda e: e.type() == QEvent.Type.Resize and fit_places() and False)
 
         def fill(select=0):
             table.delete(*table.get_children())
@@ -4958,12 +5460,15 @@ class App:
             a = max((m.end() for m in re.finditer(r"[.!?…]\s+", plain[:start])), default=0)
             stop = re.search(r"[.!?…](?=\s|$)", plain[end:])
             b = end + stop.end() if stop else len(plain)
+            cut_a, cut_b = start - 120 > a, end + 120 < b  # «…» solo si se corta a media frase: no «palabras....»
             a, b = max(a, start - 120), min(b, end + 120)
-            return ("…" if a > 0 else "") + plain[a:b] + ("…" if b < len(plain) else ""), start - a + (1 if a else 0)
+            return ("…" if cut_a else "") + plain[a:b] + ("…" if cut_b else ""), start - a + (1 if cut_a else 0)
 
         def place_html(page, text, at, word):
-            chip = (f'<span style="background-color: {colors["sel"]}; color: {colors["ink"]};">&nbsp;pág. {page}'
-                    '&nbsp;</span>&nbsp; ')
+            colors, mark = theme.colors(self.dark), theme.diff_tags(self.dark)["old"]
+            # Fondo card con borde edge: la insignia sigue viéndose encima de la fila seleccionada
+            chip = (f'<span style="background-color: {colors["card"]}; color: {colors["muted"]}; '
+                    f'border: 1px solid {colors["edge"]};">&nbsp;pág. {page}&nbsp;</span>&nbsp; ')
             return (chip + html.escape(text[:at]) + f'<span style="background-color: {mark["background"]}; color: '
                     f'{mark["foreground"]}; font-weight: 600;">{html.escape(text[at:at + len(word)])}</span>'
                     + html.escape(text[at + len(word):]))
@@ -5000,12 +5505,11 @@ class App:
                     label = QLabel(place_html(block.page, text, at, m[0]))
                     label.setWordWrap(True)
                     label.setTextFormat(Qt.TextFormat.RichText)
-                    label.setContentsMargins(4, 3, 4, 3)
+                    label.setContentsMargins(6, 4, 6, 4)
                     label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # el clic, a la fila
                     places.addItem(item)
                     places.setItemWidget(item, label)
-                    item.setSizeHint(QSize(0, label.heightForWidth(max(200, places.viewport().width() - 12)) + 6))
-            fix.setText(suggestions[0] if suggestions else "")
+            fit_places()
             if places.count():
                 places.setCurrentRow(0)
             show_preview()
@@ -5017,12 +5521,17 @@ class App:
                 chip = chips_row.itemAt(n).widget()
                 if chip:
                     chip.setChecked(chip.text() == new)
+            word = chosen()[0] if chosen() else ""
+            for btn in (one_btn, change_btn):  # nada elegido aún: un clic no cambia el libro por una sugerencia dudosa
+                btn.setEnabled(bool(new) and new != word)
             if not 0 <= row < len(state["places"]) or not new:
-                preview.setText("")
+                preview.setText("Elige una sugerencia o escribe la palabra correcta para ver el cambio."
+                                if 0 <= row < len(state["places"]) else "")
                 return
             _, page, word, text, at = state["places"][row]
             found = text[at:at + len(word)]
             new = new[:1].upper() + new[1:] if found[:1].isupper() else new  # como replace_text
+            tags = theme.diff_tags(self.dark)
             old_look, new_look = tags["old"], tags["new"]
             # la palabra entera tachada y la nueva al lado: letra a letra, «elf» -> «elfo» solo marcaba la «o»
             preview.setText(f"Así quedaría en la pág. {page}: " + html.escape(text[:at])
@@ -5030,6 +5539,16 @@ class App:
                               f'{old_look["background"]}; text-decoration: line-through;">{html.escape(found)}</span>'
                             + " → " + f'<span style="color: {new_look["foreground"]}; background-color: '
                               f'{new_look["background"]};">{html.escape(new)}</span>' + html.escape(text[at + len(word):]))
+
+        def recolor(_dark):
+            for n, (_, page, word, text, at) in enumerate(state["places"]):
+                label = places.itemWidget(places.item(n))
+                if label is not None:
+                    label.setText(place_html(page, text, at, word))
+            fit_places()
+            show_preview()
+
+        win.recolor = recolor
 
         def done(word, message):
             self.unknown.discard(word)
@@ -5071,7 +5590,7 @@ class App:
                                                       and self.show_match(*state["places"][row][:3]), show_preview()))
         fix.textChanged.connect(lambda _: show_preview())
         fill()
-        win.show()
+        self.show_late(win, "Ortografía")
         win.parts = {"table": table, "places": places, "fix": fix, "change": change_btn, "add": add_btn,
                      "one": one_btn, "ignore": ignore_btn, "search": search, "progress": progress, "preview": preview,
                      "chips": chips_row}
@@ -5095,7 +5614,7 @@ class App:
     def character_page(self):
         """Página «Personajes» con los de la serie en AniList (character_dialog)."""
         if self.book:
-            self.search_online(lambda item: self.character_dialog(item["characters"]))
+            self.search_online(lambda item: self.character_dialog(item["characters"]), purpose="characters")
 
     def character_dialog(self, characters):
         """Personajes de AniList con casilla, nombre y nota editables. Solo los principales vienen marcados: los
@@ -5147,7 +5666,8 @@ class App:
             self.insert_page("Personajes", [f"<b>{name}</b>" + (f": {note}" if note else "") for name, note in chosen])
             win.close()
 
-        column.addLayout(_row(1, _button("Añadir antes del primer capítulo", save, "primary")))
+        column.addLayout(_row(1, _button("Añadir antes del primer capítulo", save, "primary"),
+                              _button("Cancelar", win.close)))
         win.parts = {"rows": rows, "save": save}
         win.show()
 
@@ -5182,7 +5702,8 @@ class App:
                 self.insert_page(name, body.toPlainText().splitlines(), where.get().startswith("Antes"))
 
         where.set(choices[0])
-        column.addLayout(_row(_label("Dónde:"), _combo(where, choices, 22), 1, _button("Añadir", save, "primary")))
+        column.addLayout(_row(_label("Dónde:"), _combo(where, choices, 22), 1,
+                              _button("Añadir", save, "primary"), _button("Cancelar", win.close)))
         win.show()
         win.parts = {"title": title, "body": body, "where": where, "save": save, "choices": choices}
         self.page_window = win
@@ -5239,6 +5760,14 @@ class App:
             return f"Ilustración {n} · pág. {self.book.blocks[k].page} · título de «{chapter}»"
         return f"Ilustración {n} · pág. {self.book.blocks[k].page} · {chapter}" + (" (descartada)" if dropped else "")
 
+    def default_alt(self, k):
+        """Lo que dirá el lector de pantalla de la ilustración k sin descripción (convert.write_epub), con comillas
+        de segundo nivel: «Ilustración de «capítulo»» salía con el nombre del marcador y no con el del capítulo."""
+        start = self.section_bounds(k)[0]
+        if start in self.section_heads() and self.tree.exists(str(start)):
+            return f"«Ilustración de “{self.tree.set(str(start), 'title')}”»"
+        return "«Ilustración»"
+
     def confirm_image(self, k, new, batch=False, parent=None):
         """Antes y después de cambiar la ilustración del bloque k: "replace", "skip" (solo en lote) o None si se
         cancela. Nada cambia hasta pulsar Reemplazar. parent: la ventana desde la que se pide (el editor)."""
@@ -5265,10 +5794,10 @@ class App:
             answer["value"] = value
             win.accept()
 
-        buttons = [1, _button("Cancelar", win.reject)]
+        buttons = [1, _button("Reemplazar", lambda: choose("replace"), "primary")]
         if batch:
             buttons.append(_button("Saltar esta", lambda: choose("skip")))
-        buttons.append(_button("Reemplazar", lambda: choose("replace"), "primary"))
+        buttons.append(_button("Cancelar", win.reject))
         column.addLayout(_row(*buttons))
         self.image_compare = win
         win.exec()
@@ -5321,49 +5850,64 @@ class App:
             messagebox.showinfo("Ilustraciones", "Este libro no tiene ilustraciones.")
             return
         win, column = self.dialog("Ilustraciones")
-        win.resize(980, 600)
+        win.resize(*theme.DIALOG["l"])
         listing = QListWidget()
         # Por píxeles: por filas, al final quedaba el trozo de una fila vacío abajo y arriba no
         listing.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         listing.setIconSize(QSize(*THUMB_BOX))
-        listing.setMinimumWidth(420)
+        listing.setMinimumWidth(400)
         # Filas iguales: el icono de una ilustración apaisada era más bajo y la fila se encogía; un título largo
         # abría una barra horizontal. Se recorta con «…» y se lee entero al pasar el ratón.
         listing.setUniformItemSizes(True)
         listing.setTextElideMode(Qt.TextElideMode.ElideRight)
         listing.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         listing.setSpacing(2)
+        preview_card = QFrame(objectName="card")
+        preview_box = QVBoxLayout(preview_card)
+        preview_box.setContentsMargins(theme.SPACE["pad"], theme.SPACE["pad"], theme.SPACE["pad"], theme.SPACE["pad"])
         preview = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
-        preview.setMinimumSize(360, 440)
+        preview.setMinimumSize(320, 340)
+        preview.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        preview_box.addWidget(preview, 1)
         info = _label("", "muted")
         info.setWordWrap(True)
         described = _label("")  # su descripción, a la vista: antes había que ir a otra herramienta para verla
         described.setWordWrap(True)
         described.setTextFormat(Qt.TextFormat.PlainText)
-        improve_btn = _button("Mejorar esta", lambda: improve([order[listing.currentRow()]]))
-        improve_btn.setToolTip("Agrandarla y quitarle los artefactos del JPEG con IA (Real-ESRGAN), hasta el tamaño de "
-                               "las imágenes del perfil")
-        improve_all = _button("Mejorar las pequeñas…", lambda: improve(order))
         right = QVBoxLayout()
-        right.addWidget(preview, 1)
+        right.addWidget(preview_card, 1)
         right.addWidget(info)
         right.addWidget(described)
-        right.addLayout(_row(improve_btn, improve_all, 1))
-        body = _row(listing, right, spacing=16)
+        body = _row(listing, right, spacing=theme.SPACE["section"])
         body.setStretch(1, 1)
         column.addLayout(body, 1)
         note = _label("", "muted")
+        shown_pixmap = [None]
+
+        def draw_preview():
+            pixmap = shown_pixmap[0]
+            if pixmap is None or pixmap.isNull():
+                return
+            w, h = max(120, preview.width()), max(120, preview.height())
+            preview.setPixmap(pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation))
+
+        editor.watch(preview, lambda e: e.type() == QEvent.Type.Resize and draw_preview() and False)
 
         def fill(row=0):
-            listing.clear()
-            for n, k in enumerate(order, 1):
-                text = f"{self.image_title(n, k)}\n{_image_info(self.book.blocks[k].image)}"
-                item = QListWidgetItem(QIcon(_framed_thumb(self.book.blocks[k].image)), text)
-                item.setToolTip(text)
-                item.setSizeHint(QSize(0, THUMB_BOX[1] + 8))
-                item.setData(Qt.ItemDataRole.UserRole, k)
-                listing.addItem(item)
-            listing.setCurrentRow(min(row, listing.count() - 1))
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                listing.clear()
+                for n, k in enumerate(order, 1):
+                    text = f"{self.image_title(n, k)}\n{_image_info(self.book.blocks[k].image)}"
+                    item = QListWidgetItem(QIcon(_framed_thumb(self.book.blocks[k].image)), text)
+                    item.setToolTip(text)
+                    item.setSizeHint(QSize(0, THUMB_BOX[1] + 8))
+                    item.setData(Qt.ItemDataRole.UserRole, k)
+                    listing.addItem(item)
+                listing.setCurrentRow(min(row, listing.count() - 1))
+            finally:
+                QApplication.restoreOverrideCursor()
 
         def show(row):
             if row < 0:
@@ -5371,13 +5915,13 @@ class App:
             k = order[row]
             pixmap = QPixmap()
             pixmap.loadFromData(self.book.blocks[k].image)
-            preview.setPixmap(pixmap.scaled(360, 440, Qt.AspectRatioMode.KeepAspectRatio,
-                                            Qt.TransformationMode.SmoothTransformation))
+            shown_pixmap[0] = pixmap
+            draw_preview()
             info.setText(f"{self.image_title(row + 1, k)}\n{_image_info(self.book.blocks[k].image)} · "
                          f"se exporta como {self.image_name(row + 1, k)}")
             alt = self.alts.get(convert.image_key(self.book.blocks[k].image), "")
             described.setText(f"Descripción: {alt}" if alt else "Sin descripción: el lector de pantalla dirá "
-                                                               "«Ilustración de «capítulo»»")
+                                                               + self.default_alt(k))
 
         def folder_of_book():
             return str(self.pdf.parent) if self.pdf else self.settings.get("folder")
@@ -5445,13 +5989,28 @@ class App:
 
         listing.currentRowChanged.connect(show)
         column.addWidget(note)
-        column.addLayout(_row(_button("Exportar todas…", export_all), _button("Exportar esta…", export_one), 1,
-                              _button("Describir…", describe_one), _button("Cambiar…", replace_one),
-                              _button("Cambiar desde carpeta…", replace_folder), _button("Cerrar", win.close)))
+        export_menu = QMenu(win)
+        export_menu.addAction("Exportar esta…", export_one)
+        export_menu.addAction("Exportar todas…", export_all)
+        replace_menu = QMenu(win)
+        replace_menu.addAction("Cambiar esta…", replace_one)
+        replace_menu.addAction("Cambiar desde carpeta…", replace_folder)
+        improve_menu = QMenu(win)
+        improve_menu.addAction("Esta ilustración", lambda: improve([order[listing.currentRow()]]))
+        improve_menu.addAction("Las pequeñas…", lambda: improve(order))
+        export_btn = _menu_button("Exportar", export_menu)
+        replace_btn = _menu_button("Cambiar", replace_menu)
+        improve_btn = _menu_button("Mejorar", improve_menu)
+        improve_btn.setToolTip("Agrandar y quitar los artefactos del JPEG con IA (Real-ESRGAN), hasta el tamaño de "
+                               "las imágenes del perfil")
+        close_btn = _button("Cerrar", win.close)  # secundario: hay acciones propias en el diálogo
+        column.addLayout(_row(export_btn, replace_btn, improve_btn, _button("Describir…", describe_one), 1, close_btn))
         fill()
         win.show()
         win.parts = {"list": listing, "note": note, "preview": preview, "described": described,
-                     "describe": describe_one}
+                     "describe": describe_one, "export_all": export_all, "export_one": export_one,
+                     "replace_one": replace_one, "replace_folder": replace_folder,
+                     "improve_btn": improve_btn, "improve_menu": improve_menu}
         self.images_window = win
 
     def upscale_target(self):
@@ -5504,7 +6063,7 @@ class App:
         Devuelve el texto nuevo ("" sin descripción) o None si se canceló."""
         key = convert.image_key(self.book.blocks[k].image)
         text = _ask_line(parent or self.root, "Describir ilustración", "Qué se ve, en una frase: lo lee en voz alta el "
-                         "lector de pantalla de quien no la ve.\nVacío: «Ilustración de «capítulo»».",
+                         f"lector de pantalla de quien no la ve.\nVacío: {self.default_alt(k)}.",
                          self.alts.get(key, ""))
         if text is None:
             return None
@@ -5677,7 +6236,7 @@ class App:
         if not self.book:
             return
         win, column = self.dialog("Más datos del libro")
-        column.addWidget(_label("Salen en la página de título (Opciones → Texto) y en los datos del EPUB que leen "
+        column.addWidget(_label("Salen en la página de título (Opciones → Páginas) y en los datos del EPUB que leen "
                                 "Calibre y los lectores.", "muted"))
         grid = QGridLayout()
         entries = {}
@@ -5737,20 +6296,21 @@ class App:
         column.addLayout(_row(_button(f"Página mostrada del original ({self.pdf_page + 1})",
                                       lambda: (self.cover_from_page(), win.close())),
                               _button("Imagen de un archivo…", lambda: (win.close(), self.cover_from_file())),
-                              _button("Portada con título", lambda: (self.set_cover(("text", "")), win.close())), 1))
+                              _button("Portada con título", lambda: (self.set_cover(("text", "")), win.close())), 1,
+                              _button("Cancelar", win.close)))
         win.show()
         self.cover_window = win, grid
 
-    def search_online(self, then=None):
+    def search_online(self, then=None, purpose=""):
         """Busca la serie en AniList; la elegida va a then (por defecto, apply_online)."""
         series = (self.series_var.get() or self.title_var.get()).strip()
         if not series:
             messagebox.showinfo("Buscar en internet", "Escribe primero la serie o el título del libro.")
             return
-        if self.run(_lookup, (series,), lambda found: self.pick_online(found, series, then), busy="Buscando…"):
+        if self.run(_lookup, (series,), lambda found: self.pick_online(found, series, then, purpose=purpose), busy="Buscando…"):
             self.status.setText(f"Buscando «{series}» en AniList…")
 
-    def pick_online(self, found, series, then=None):
+    def pick_online(self, found, series, then=None, purpose=""):
         """Lista de lo que encontró AniList: doble clic o Aceptar lleva la serie a then (apply_online: rellena
         los campos vacíos)."""
         then = then or self.apply_online
@@ -5760,14 +6320,25 @@ class App:
                                 "Prueba a escribir en Serie el nombre en japonés romanizado o en inglés.")
             return
         self.close_tools(["online_window"])  # la búsqueda nueva sustituye a la anterior
-        win, column = self.dialog("Resultados de AniList")
-        column.addWidget(QLabel(f"«{series}»: elige la serie"))
+        title = "Página de personajes: elige la serie" if purpose == "characters" else "Resultados de AniList"
+        hint = ("Busco los personajes en AniList. ¿Cuál es la serie de este libro?" if purpose == "characters"
+                else f"AniList encontró {convert.counted(len(found), 'serie parecida', 'series parecidas')} "
+                     f"a «{series}». Elige la de este libro: de ella salen los datos.")
+        win, column = self.dialog(title)
+        column.addWidget(_label(hint, "muted"))
+        # La más parecida primero y elegida: AniList ordena por popularidad y ponía delante otra serie del autor
+        found = sorted(found, key=lambda item: -_title_score(series, item))
         box = QListWidget()
+        box.setWordWrap(True)  # los nombres largos en dos líneas, no con barra horizontal
+        box.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        box.setItemDelegate(_OnlineItem(box, lambda: theme.colors(self.dark)))
         for item in found:
-            box.addItem(item["name"])
+            main, sub = _split_online_name(item)
+            box.addItem(f"{main}\n{sub}" if sub else main)
         box.setCurrentRow(0)
         box.setMinimumWidth(620)
         column.addWidget(box, 1)
+        win.recolor = lambda _: box.viewport().update()
 
         def pick():
             if box.currentRow() >= 0:
@@ -5775,14 +6346,14 @@ class App:
                 then(found[box.currentRow()])
 
         box.itemDoubleClicked.connect(lambda _: pick())
-        column.addLayout(_row(1, _button("Aceptar", pick, "primary")))
-        win.show()
+        column.addLayout(_row(1, _button("Aceptar", pick, "primary"), _button("Cancelar", win.close)))
+        self.show_late(win, "La búsqueda en AniList")
         self.online_window = win, box, pick
 
     def apply_online(self, item):
         """Solo rellena lo vacío: lo escrito a mano o leído del PDF no se pisa."""
         fill = [(label, var, item[key]) for key, label, var in (
-            ("author", "Autor", self.author_var), ("illustrator", "Ilustraciones", self.illustrator_var),
+            ("author", "Autor", self.author_var), ("illustrator", "Ilustrador/a", self.illustrator_var),
             ("original_title", "Título original", self.original_title_var), ("subjects", "Géneros", self.subjects_var),
             ("romaji_title", "Título romanizado", self.romaji_title_var),
             ("author_native", "Autor en japonés", self.author_native_var),
@@ -5851,6 +6422,8 @@ class App:
         """El perfil fija las opciones que importan para ese lector (PROFILES)."""
         for name, value in PROFILES.get(self.profile_var.get(), {}).items():
             self.fields()[name].set(value)
+        # La vista previa en el mismo aparato: «Perfil: Móvil» con la página de un e-reader de 6" no cuadraba
+        self.sync_device()
         self.update_preview()
 
     def spell_process(self):
@@ -6046,7 +6619,7 @@ class App:
 
     def word_count(self):
         """Palabras de los párrafos del libro: la nota del informe se mide por cada 10 000."""
-        return convert.text_stats(convert._plain(b) for b in self.book.blocks if b.kind == "p")["words"]
+        return _word_count_fast("\n".join(_plain_fast(b) for b in self.book.blocks if b.kind == "p"))
 
     def export_report(self, report, score, parent):
         """«Exportar…» del informe de calidad: .html para leerlo sin la app o .csv para Excel."""
@@ -6119,7 +6692,7 @@ class App:
         options_btn = _button("Opciones del informe…", lambda: self.open_options(
             "Informe de calidad", on_close=lambda: shiboken6.isValid(win) and fill()))
         export_btn = _button("Exportar…", lambda: self.export_report(state["all"], state["score"], win))
-        export_btn.setToolTip("Guardar el informe como página web (.html) o tabla para Excel (.csv), para otra persona")
+        export_btn.setToolTip("Guardar el informe como página web (HTML) o tabla para Excel (CSV), para otra persona")
         grammar_btn = _button("Revisar gramática", lambda: self.check_grammar(
             win, then=lambda: shiboken6.isValid(win) and fill()))
         grammar_btn.setToolTip("LanguageTool busca tildes, concordancia y queísmo; solo revisa lo nuevo o editado. "
@@ -6149,7 +6722,8 @@ class App:
         middle = _row(kinds_box, actions, spacing=theme.SPACE["section"])
         middle.setStretch(0, 1)
         column.addLayout(middle)
-        strip_label = _label("Capítulos", "muted")
+        strip_label = _label("Capítulos", "muted")  # corto: más largo, el informe no cabía en 1093 px (125 %)
+        strip_label.setToolTip("Avisos de cada capítulo: cuanto más intenso el color, más avisos; un clic deja solo los suyos")
         column.addLayout(_row(strip_label, strip, spacing=theme.SPACE["pad"]))
         # --- lista y detalle; sin nada que enseñar, en su lugar un aviso en el medio (vacíos parecían rotos)
         body = QStackedWidget()
@@ -6173,7 +6747,8 @@ class App:
         # El aviso primero y sin columna de gravedad: la dice el color, y el grupo la nombra (antes cada fila
         # repetía «● Menor» y el grupo ponía «N avisos» bajo «Dónde»: parecía otra fila más)
         table = qtk.RowList(("title", "where", "page"), {"title": "Aviso", "where": "Dónde", "page": "Pág."},
-                            {"where": 150, "page": 48})
+                            {"where": 118, "page": 42})
+        table.setMinimumWidth(300)  # con 380 el informe pedía 1164 px y no cabía en 1093 (125 %)
         for level, color in levels.items():
             table.tag_configure(level, foreground=color)
         bold = QFont(table.font())
@@ -6199,14 +6774,19 @@ class App:
         side.addWidget(place)
         texts = {}
         for name, caption in (("problem", "Problema"), ("solution", "Solución")):
-            side.addWidget(_label(caption, "muted"))
+            side.addWidget(_label(caption, "section"))  # en seminegrita: en gris pesaban menos que el texto
             texts[name] = QLabel()
             texts[name].setWordWrap(True)
             texts[name].setTextFormat(Qt.TextFormat.PlainText)  # un «<i>» de un comentario no es HTML aquí
             side.addWidget(texts[name])
         previews = {}
+        after_label = _label("Arreglo", "section")
+        no_fix = _label("Sin arreglo automático: sigue la solución.", "muted")
+        no_fix.setWordWrap(True)
+        no_fix.setContentsMargins(theme.SPACE["section"], 0, 0, 0)
+        no_fix.hide()
         for name, caption in (("before", "En el texto"), ("after", "Arreglo")):
-            side.addWidget(_label(caption, "muted"))
+            side.addWidget(after_label if name == "after" else _label(caption, "section"))
             box = QTextBrowser()
             box.setOpenLinks(False)
             box.setFixedHeight(80)
@@ -6216,6 +6796,7 @@ class App:
         side.addWidget(legend)
         fix_btn = _button("Arreglar", lambda: apply([chosen_issue()]), "primary")
         all_btn = _button("Arreglar todos", lambda: confirm_all(same_kind(chosen_kind())))
+        all_btn.setToolTip("Arreglar todos los avisos automáticos de este tipo")
         ignore_btn = _button("Ignorar", lambda: ignore(chosen_issue()))
         edit_btn = _button("Abrir en el editor", lambda: open_issue())
         edit_btn.setToolTip("Abre el capítulo con el trozo del aviso elegido (también con doble clic en la lista o la tecla E)")
@@ -6224,11 +6805,15 @@ class App:
         aside_column = QVBoxLayout(aside)
         aside_column.setContentsMargins(0, 0, 0, 0)
         aside_column.addWidget(detail, 1)
+        aside_column.addWidget(no_fix)  # fuera del área con scroll: bajo su borde, el aviso no se veía
         actions_row = _row(fix_btn, all_btn, edit_btn, 1, ignore_btn)
         actions_row.setContentsMargins(theme.SPACE["section"], 0, 0, 0)
         aside_column.addLayout(actions_row)
         panes.addWidget(aside)
-        panes.setSizes([500, 600])
+        panes.setSizes([620, 500])
+        _lock(panes)  # las listas tienen su tamaño
+        column.addSpacing(4)
+        column.addLayout(_row(1, _button("Cerrar", win.close)))
 
         def chosen_issue():
             chosen = table.selection()
@@ -6256,17 +6841,26 @@ class App:
             return found + [(self.tree.set(str(k), "title"), k, end) for k, end in zip(heads, heads[1:])]
 
         def fill(select=None):
+            state["fill_id"] = fill_id = state.get("fill_id", 0) + 1
+            state["pending"] = {}
             everything = self.quality_report()
-            ignored = [i for i in everything if _issue_key(i) in self.ignored]
-            reported = [i for i in everything if _issue_key(i) not in self.ignored]
-            state["all"], state["score"] = reported, convert.quality_score(reported, self.word_count())
+            ignored_set = {tuple(k) for k in self.ignored}
+            ignored, reported = [], []
+            for i in everything:
+                (ignored if tuple(_issue_key(i)) in ignored_set else reported).append(i)
+            parts = sections()
+            # Conteo de palabras por capítulo en una sola pasada (también da el total para la nota)
+            chapter_words = [_word_count_fast("\n".join(_plain_fast(b) for b in self.book.blocks[s:e] if b.kind == "p"))
+                             for _, s, e in parts]
+            total_words = sum(chapter_words) if parts else self.word_count()
+            state["all"], state["score"] = reported, convert.quality_score(reported, total_words)
             ring.set_score(state["score"])
-            summary.setText(f"Nota {state['score']}/100 · " + (_quality_summary(reported)
-                                                               or "No se encontró nada sospechoso.")
+            # Sin «Nota 98/100»: el anillo de al lado ya dice «98 de 100» (salía dos veces)
+            summary.setText((_quality_summary(reported) or "No se encontró nada sospechoso.")
                             + (f" · {convert.counted(len(ignored), 'ignorado')}" if ignored else ""))
+            level_counts = collections.Counter(LEVEL_PLURAL[i.level].capitalize() for i in reported)
             for name, chip in chips.items():
-                count = (len(reported) if name == "Todos" else len(ignored) if name == "Ignorados" else
-                         sum(1 for i in reported if LEVEL_PLURAL[i.level].capitalize() == name))
+                count = len(reported) if name == "Todos" else len(ignored) if name == "Ignorados" else level_counts[name]
                 chip.setText(f"{name} ({count})")
                 chip.setChecked(name == show.get())
             base = ignored if show.get() == "Ignorados" else [
@@ -6276,15 +6870,23 @@ class App:
             first = {i.kind: i for i in reversed(base)}
             bars.set_rows([(kind, kind_title(first[kind]), n, first[kind].level) for kind, n in counts.most_common()],
                           state["kind"])
-            parts = sections()
-            words = [sum(len(convert._plain(b).split()) for b in self.book.blocks[s:e] if b.kind == "p")
-                     for _, s, e in parts]
-            per_chapter = [[i for i in base if i.block is not None and s <= i.block < e] for _, s, e in parts]
-            strip.set_cells([(title, len(found), n, next((lv for lv in convert.LEVELS if any(i.level == lv for i in found)),
-                                                         "")) for (title, _, _), found, n in zip(parts, per_chapter, words)],
+            starts = [s for _, s, _ in parts]
+            per_chapter = [[] for _ in parts]
+            if starts:
+                for i in base:
+                    if i.block is not None:
+                        idx = bisect.bisect_right(starts, i.block) - 1
+                        if 0 <= idx < len(parts) and i.block < parts[idx][2]:
+                            per_chapter[idx].append(i)
+            strip.set_cells([(title, len(found), n,
+                              next((lv for lv in convert.LEVELS if any(i.level == lv for i in found)), ""),
+                              {lv: sum(i.level == lv for i in found) for lv in convert.LEVELS
+                               if any(i.level == lv for i in found)})
+                             for (title, _, _), found, n in zip(parts, per_chapter, chapter_words)],
                             state["chapter"])
+            ch_bounds = (parts[state["chapter"]][1], parts[state["chapter"]][2]) if 0 <= state["chapter"] < len(parts) else None
             shown = [i for i in base if (not state["kind"] or i.kind == state["kind"])
-                     and (state["chapter"] < 0 or state["chapter"] >= len(parts) or i in per_chapter[state["chapter"]])]
+                     and (ch_bounds is None or (i.block is not None and ch_bounds[0] <= i.block < ch_bounds[1]))]
             notes = ([f"tipo «{kind_title(first[state['kind']])}»"] if state["kind"] in first else []) + (
                 [f"«{parts[state['chapter']][0]}»"] if 0 <= state["chapter"] < len(parts) else [])
             filters.setText(("Solo " + " · ".join(notes)) if notes else "")
@@ -6304,33 +6906,84 @@ class App:
                                          ": míralos en «Ignorados»." if ignored else ""))
                 if clean else "Elige «Todos» o quita el filtro para ver los demás avisos.")
             ignore_btn.setText("No ignorar" if show.get() == "Ignorados" else "Ignorar")
-            win.setWindowTitle(f"Informe de calidad · {convert.counted(len(reported), 'aviso')}")
-            table.delete(*table.get_children())
+            win.setWindowTitle("Informe de calidad")
             state["places"] = self.issue_places(shown)
-            order = sorted(collections.Counter(i.kind for i in shown).items(),
-                           key=lambda kv: (convert.LEVELS.index(next(i.level for i in shown if i.kind == kv[0])), -kv[1]))
+            by_kind = collections.defaultdict(list)
+            for k, found in enumerate(shown):
+                by_kind[found.kind].append((k, found))
+            order = sorted(by_kind.items(),
+                           key=lambda kv: (convert.LEVELS.index(kv[1][0][1].level), -len(kv[1])))
             groups = state["groups"] = {}
-            for kind, n in order:
-                issue = next(i for i in shown if i.kind == kind)
-                gid = f"k:{kind}"
-                table.insert("", "end", iid=gid, values=(f"{kind_title(issue)} ({n})", "", ""),
-                             tags=(issue.level, "group"))
-                table.rows[gid].setFirstColumnSpanned(True)  # el grupo, de lado a lado: un encabezado, no una fila
-                table.rows[gid].setToolTip(0, f"{convert.counted(n, 'aviso')} · {LEVEL_NAMES[issue.level][n != 1]}")
-                groups[kind] = []
-                for k, found in enumerate(shown):
-                    if found.kind == kind:
-                        table.insert(gid, "end", iid=str(k), values=(found.title, state["places"][k][0],
-                                                                     found.page), tags=(found.level,))
-                        groups[kind].append(str(k))
-                table.rows[gid].setExpanded(n <= 25 or len(order) == 1)  # los muy numerosos, plegados
-            rows = [iid for kind, _ in order for iid in groups[kind]]
-            if rows:
-                item = rows[min(select, len(rows) - 1)] if isinstance(select, int) else rows[0]
-                table.selection_set(item)
-                table.see(item)
+            all_rows = [str(k) for _, items in order for k, _ in items]
+            target_iid = (all_rows[min(select, len(all_rows) - 1)] if isinstance(select, int)
+                          else all_rows[0]) if all_rows else None
+            # Primer pintado rápido: se insertan las cabeceras y hasta 60 filas de golpe; el resto (grupos
+            # numerosos o plegados) entra por tandas con qtk.after(0, …) para no bloquear la ventana
+            sync_budget = 60
+            pending = state["pending"]
+            state["filling"] = True
+            table.setUpdatesEnabled(False)
+            try:
+                table.delete(*table.get_children())
+                for kind, items in order:
+                    n = len(items)
+                    issue = items[0][1]
+                    gid = f"k:{kind}"
+                    table.insert("", "end", iid=gid, values=(f"{kind_title(issue)} ({n})", "", ""),
+                                 tags=(issue.level, "group"))
+                    table.rows[gid].setFirstColumnSpanned(True)  # el grupo, de lado a lado: un encabezado, no una fila
+                    table.rows[gid].setToolTip(0, f"{convert.counted(n, 'aviso')} · {LEVEL_NAMES[issue.level][n != 1]}")
+                    groups[kind] = [str(k) for k, _ in items]
+                    row_specs = [(str(k), (found.title, state["places"][k][0], found.page), (found.level,))
+                                 for k, found in items]
+                    expanded = n <= 25 or len(order) == 1
+                    has_target = target_iid in groups[kind]
+                    take = min(n, max(sync_budget, groups[kind].index(target_iid) + 1 if has_target else 0)) if (
+                        expanded or has_target) else 0
+                    if take:
+                        table.insert_batch(gid, row_specs[:take])
+                        sync_budget = max(0, sync_budget - take)
+                    if take < n:
+                        pending[gid] = row_specs[take:]
+                    table.rows[gid].setExpanded(expanded)  # los muy numerosos, plegados
+            finally:
+                state["filling"] = False
+                table.setUpdatesEnabled(True)
+            # El aviso que se elige solo al abrir o filtrar no mueve la ventana principal: llevarla a su capítulo
+            # rehacía el EPUB de la vista previa y congelaba 0,7 s. Las vistas siguen al aviso que elige el usuario
+            state["quiet"] = select is None
+            if target_iid:
+                table.selection_set(target_iid)
+                table.see(target_iid)
             else:
                 pick()
+            state["quiet"] = False
+            if pending:
+                def drain():
+                    if fill_id != state.get("fill_id") or not shiboken6.isValid(win):
+                        return
+                    todo = state.get("pending")
+                    if not todo:
+                        return
+                    left = 200
+                    table.setUpdatesEnabled(False)
+                    try:
+                        for gid in list(todo):
+                            if left <= 0:
+                                break
+                            chunk = todo[gid][:left]
+                            del todo[gid][:left]
+                            if not todo[gid]:
+                                del todo[gid]
+                            if table.exists(gid):
+                                table.insert_batch(gid, chunk)
+                            left -= len(chunk)
+                    finally:
+                        table.setUpdatesEnabled(True)
+                    if todo:
+                        qtk.after(0, drain)
+
+                qtk.after(0, drain)
 
         def same_kind(kind):
             return [i for i in state["report"] if i.kind == kind and i.edit]
@@ -6341,7 +6994,8 @@ class App:
             shown = issue or (group[0] if group else None)
             heading.setText(issue.title if issue else (f"{group[0].title.split(' (')[0]} · "
                                                         f"{convert.counted(len(group), 'aviso')}" if group else ""))
-            heading.setStyleSheet(f"color: {levels[shown.level]};" if shown else "")
+            cur_levels = theme.level_colors(self.dark)
+            heading.setStyleSheet(f"color: {cur_levels[shown.level]};" if shown else "")
             place.setText(state["places"][int(table.selection()[0])][1] if issue else
                           ("Elige uno en la lista para verlo en el texto" if group else ""))
             texts["problem"].setText(shown.problem if shown else "")
@@ -6355,6 +7009,10 @@ class App:
                     issue.span[1] - (len(paragraph) - len(paragraph.lstrip()))), self.dark)
                     if paragraph.strip() else html.escape(f"(texto de la página {issue.page} del original: míralo "
                                                           "en la vista previa)"))
+                has_fix = bool(issue.edit)
+                after_label.setVisible(has_fix)
+                previews["after"].setVisible(has_fix)
+                no_fix.setVisible(not has_fix)
                 if issue.edit and issue.after:
                     previews["after"].setHtml(report.diff_html(issue.before, issue.after, self.dark))
                 elif issue.edit:  # el arreglo quita el párrafo entero
@@ -6362,21 +7020,51 @@ class App:
                 else:
                     previews["after"].setHtml(html.escape("Sin arreglo automático: sigue la solución."))
             else:
+                after_label.setVisible(True)
+                previews["after"].setVisible(True)
+                no_fix.setVisible(False)
                 for box in previews.values():
                     box.clear()
             legend.setVisible(bool(issue and "¶" in (issue.before + issue.after)))
-            fix_btn.setEnabled(bool(issue and issue.edit))
+            fixable = bool(issue and issue.edit)
+            fix_btn.setEnabled(fixable)
+            # Desactivado, «Arreglar» no se dibuja como un botón principal gris: pasa a secundario
+            if fix_btn.objectName() != ("primary" if fixable else ""):
+                fix_btn.setObjectName("primary" if fixable else "")
+                fix_btn.style().unpolish(fix_btn)
+                fix_btn.style().polish(fix_btn)
+            lacks_fix = bool(shown and not shown.edit)  # los controles siguen a la vista: el tooltip dice por qué no
+            no_fix_tip = "Este aviso no tiene arreglo automático: corrígelo con «Abrir en el editor»."
+            fix_btn.setToolTip(no_fix_tip if issue and not fixable else "")
             ignore_btn.setEnabled(bool(issue))
             edit_btn.setEnabled(bool(issue))
             count = len(same_kind(kind)) if kind else 0
-            all_btn.setText(f"Arreglar todos los de este tipo ({count})")
+            all_btn.setText(f"Arreglar todos ({count})")
             all_btn.setEnabled(count > 1 or (count == 1 and not issue))
-            if issue:
-                term = " ".join(issue.text.split()[:6])
-                if issue.block is None or not term:
-                    self.show_found(issue.page, term)
-                else:
-                    self.show_match(issue.block, issue.page, term)
+            all_btn.setToolTip(no_fix_tip if lacks_fix and not all_btn.isEnabled()
+                               else "Arreglar todos los avisos automáticos de este tipo")
+            if issue and not state.get("quiet"):  # vistas previas, después: dibujar el PDF y el EPUB congelaba 0,6 s
+                state["move"] = token = state.get("move", 0) + 1
+                qtk.after(0, lambda: token == state["move"] and shiboken6.isValid(win) and move_previews(issue))
+
+        def move_previews(issue):
+            """Lleva las vistas previas de la ventana principal al aviso: solo el último elegido, si se pasó deprisa."""
+            term = " ".join(issue.text.split()[:6])
+            if issue.block is None or not term:
+                self.show_found(issue.page, term)
+            else:
+                self.show_match(issue.block, issue.page, term)
+
+        def recolor(dark):
+            ring.set_dark(dark)
+            bars.set_dark(dark)
+            strip.set_dark(dark)
+            for level, color in theme.level_colors(dark).items():
+                table.tag_configure(level, foreground=color)
+            empty_icon.setStyleSheet(f"font-size: 40pt; color: {theme.colors(dark)['ok']};")
+            pick()
+
+        win.recolor = recolor
 
         def apply(issues):
             # De atrás adelante, y sin pisarse: un arreglo que toca lo que otro ya cambió se deja para luego
@@ -6445,12 +7133,29 @@ class App:
             self.update_quality()
             fill(position())
 
+        def flush_group(item):
+            if state.get("filling"):  # el primer pintado ya dejó las visibles; el resto entra por tandas
+                return
+            gid = item.data(0, qtk.IID)
+            rest = state.get("pending", {}).get(gid)
+            if rest and table.exists(gid):
+                chunk = rest[:200]
+                del rest[:200]
+                if not rest:
+                    state["pending"].pop(gid, None)
+                table.insert_batch(gid, chunk)
+
+        table.itemExpanded.connect(flush_group)
         table.selected.connect(pick)
-        fill()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            fill()
+        finally:
+            QApplication.restoreOverrideCursor()
         win.show()
         win.parts = {"table": table, "summary": summary, "heading": heading, "texts": texts, "previews": previews,
                      "fix": fix_btn, "all": all_btn, "ignore": ignore_btn, "show": show, "fill": fill,
-                     "echoes": options_btn, "place": place, "edit": edit_btn, "ring": ring, "chips": chips,
+                     "echoes": options_btn, "place": place, "edit": edit_btn, "no_fix": no_fix, "ring": ring, "chips": chips,
                      "bars": bars, "strip": strip, "filters": filters, "clear": clear_filter,
                      "empty": empty, "empty_title": empty_title,
                      "rows": lambda: [iid for kind in state["groups"] for iid in state["groups"][kind]],
@@ -6462,10 +7167,15 @@ class App:
         folder = self.pdf.parent if self.pdf else filedialog.askdirectory(initialdir=self.settings.get("folder"))
         if not folder:
             return
-        win, column = self.dialog(f"Serie · {Path(folder).name}")
+        # El nombre de la serie del libro abierto; si no, el de la carpeta («Serie · pdf» no decía nada)
+        series = self.series_var.get().strip() if self.pdf and Path(folder) == Path(self.pdf).parent else ""
+        win, column = self.dialog(f"Serie · {series or Path(folder).name}")
+        # «Avisos del EPUB»: los de check_epub al generar, no los del informe de calidad (decía «Ninguno» con 12)
+        warn_w = max(140, self.root.fontMetrics().horizontalAdvance("Avisos del EPUB") + 28)
         table = qtk.RowList(("pdf", "state", "warn", "sent"),
-                            {"pdf": "Tomo", "state": "Estado", "warn": "Avisos", "sent": "Enviado"},
-                            {"state": 200, "warn": 80, "sent": 130}, stretch="pdf")
+                            {"pdf": "Tomo", "state": "Estado", "warn": "Avisos del EPUB", "sent": "Enviado"},
+                            {"state": 200, "warn": warn_w, "sent": 130}, stretch="pdf")
+        table.setWordWrap(False)
         table.setMinimumSize(800, 420)
         sources = _sources(folder)
         missing = _missing_volumes(sources)
@@ -6474,12 +7184,31 @@ class App:
         for pdf in sources:
             state = _read_review(pdf)
             problems = state.get("problems") if state else None
-            warn = "—" if problems is None else len(problems) or "Ninguno"
+            warn = "—" if problems is None or not _volume_epub(pdf).exists() else len(problems) or "Ninguno"
             table.insert("", "end", iid=str(pdf), values=(pdf.name, _volume_status(pdf), warn,
                                                           _sent_text(_volume_epub(pdf))))
-        table.double_clicked.connect(lambda _: table.selection() and (self.open_path(table.selection()[0]), win.close()))
+        def open_selected():
+            if table.selection():
+                self.open_path(table.selection()[0])
+                win.close()
+
+        open_btn = _button("Abrir", open_selected, "primary")
+        open_btn.setEnabled(False)
+        table.selected.connect(lambda: open_btn.setEnabled(bool(table.selection())))
+        table.double_clicked.connect(lambda _: open_selected())
+        # Al abrir queda elegido el tomo actual (o el primero) para que «Abrir» responda sin un clic previo
+        children = table.get_children()
+        if children:
+            current = (str(self.pdf) if self.pdf and table.exists(str(self.pdf)) else
+                       next((i for i in children if self.pdf
+                             and os.path.normcase(os.path.abspath(i)) == os.path.normcase(os.path.abspath(self.pdf))),
+                            children[0]))
+            table.selection_set(current)
+            table.see(current)
+            open_btn.setEnabled(True)
         column.addWidget(table, 1)
-        column.addWidget(_label("Doble clic: abrir el tomo", "muted"))
+        column.addLayout(_row(_label("Doble clic o «Abrir» para abrir el tomo", "muted"), 1,
+                              open_btn, _button("Cerrar", win.close)))
         win.show()
         self.series_window = win, table
 
@@ -6508,14 +7237,9 @@ class App:
     def show_shortcuts(self):
         """Herramientas → «Atajos de teclado…»: una tabla por grupo, cada tecla dibujada como una tecla."""
         win, column = self.dialog("Atajos de teclado")
-        colors = theme.colors(self.dark)
-        key_style = (f"QLabel#key {{ border: 1px solid {colors['edge']}; border-bottom-width: 2px; border-radius: 4px; "
-                     f"background: {colors['card']}; padding: 1px 6px; font-weight: 600; min-width: 12px; "
-                     f"qproperty-alignment: AlignCenter; }}"
-                     # «,», «.» y «-» a tamaño de letra apenas se veían: más grandes, en la misma tecla
-                     f"QLabel#key[sign=\"true\"] {{ font-size: {theme.UI_SIZES.get(self.settings.get('ui_font'), 9) + 4}pt; "
-                     f"padding: 0px 6px; }}")
-        win.setStyleSheet(key_style)
+        search = QLineEdit(placeholderText="Buscar atajo o acción…")
+        search.setClearButtonEnabled(True)
+        column.addWidget(search)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -6524,10 +7248,12 @@ class App:
         grid.setHorizontalSpacing(18)
         grid.setVerticalSpacing(6)
         row = 0
+        groups_ui = []
         for group, keys in SHORTCUT_GROUPS:
             title = _label(group, "title")
             grid.addWidget(title, row, 0, 1, 2)
             row += 1
+            entries = []
             for combo, action in keys:
                 # En su propio widget: en un layout anidado, la rejilla no se enteraba del alto con el QSS de las
                 # teclas y las dejaba aplastadas, con un hueco al final
@@ -6545,17 +7271,33 @@ class App:
                         cap.setProperty("sign", len(key) == 1 and not key.isalnum())
                         keys_row.addWidget(cap)
                 keys_row.addStretch(1)
+                action_lbl = _label(action)
                 grid.addWidget(keys_box, row, 0)
-                grid.addWidget(_label(action), row, 1)
+                grid.addWidget(action_lbl, row, 1)
+                entries.append((f"{combo} {action}".lower(), keys_box, action_lbl))
                 row += 1
+            groups_ui.append((title, entries))
             grid.setRowMinimumHeight(row, 10)
             row += 1
         grid.setColumnStretch(1, 1)
         grid.setRowStretch(row, 1)
+
+        def filter_keys(text):
+            needle = options.fold(text.strip())
+            for title, entries in groups_ui:
+                any_hit = False
+                for hay, keys_box, action_lbl in entries:
+                    hit = not needle or needle in options.fold(hay)
+                    keys_box.setVisible(hit)
+                    action_lbl.setVisible(hit)
+                    any_hit = any_hit or hit
+                title.setVisible(any_hit)
+
+        search.textChanged.connect(filter_keys)
         scroll.setWidget(inner)
         column.addWidget(scroll, 1)
         column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
-        win.resize(560, 620)
+        win.resize(660, 620)
         win.show()
         self.shortcuts_window = win
 
@@ -6651,7 +7393,7 @@ class App:
         titles.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         headline = f"Hay una versión nueva: {APP_NAME} {release.tag}"
         titles.addWidget(_label(headline, "title"))
-        extra = " · versión de prueba" if release.prerelease else ""
+        extra = " (versión preliminar, para probar)" if release.prerelease else ""  # de la nueva, no de la actual
         titles.addWidget(_label(f"v{updater.APP_VERSION}  →  {release.tag}{extra}", "muted"))
         header.addLayout(titles, 1)
         column.addLayout(header)
@@ -6659,7 +7401,8 @@ class App:
         notes = QTextBrowser()
         notes.setOpenExternalLinks(True)
         notes.document().setDocumentMargin(10)
-        notes.setMarkdown(release.notes or "Consulta los cambios completos en GitHub.")
+        notes.setMarkdown(updater.spanish_notes(release.notes) if release.notes else
+                          "Consulta los cambios completos en GitHub.")
         column.addWidget(notes, 1)
 
         if not can_install:
@@ -6796,10 +7539,10 @@ class App:
         if can_install:
             web_btn = _button("Ver en GitHub", lambda: webbrowser.open(release.html_url))
             action_btn = _button("Actualizar ahora", start_download, "primary")
-            buttons = _row(skip_btn, web_btn, 1, later_btn, action_btn)
+            buttons = _row(skip_btn, web_btn, 1, action_btn, later_btn)
         else:
             action_btn = _button("Abrir página de descarga", open_release, "primary")
-            buttons = _row(skip_btn, 1, later_btn, action_btn)
+            buttons = _row(skip_btn, 1, action_btn, later_btn)
         column.addLayout(buttons)
         win.resize(520, 420)
         win.parts = {"release": release, "logo": logo, "action": action_btn, "skip": skip_btn, "later": later_btn,
@@ -6923,6 +7666,8 @@ class App:
                     var.set(state[name])
                 except (ValueError, TypeError):
                     pass  # valor mal escrito a mano en el .json
+        if self.profile_var.get() == "Celular":  # nombre anterior unificado en «Móvil»
+            self.profile_var.set("Móvil")
         if self.style_var.get() not in convert.STYLES and self.style_var.get() != convert.ORIGINAL:  # .json a mano
             self.style_var.set("Clásico")
         self.separator_var.set(convert.separator_choice(self.separator_var.get()))  # «Original del PDF» de antes
@@ -6974,6 +7719,8 @@ class App:
                 self.tree.set(item, "ok", done[0] if done else "")
         self.update_reviewed()
         self.apply_state(state)
+        if "profile" in state:  # el aparato va en los ajustes de la app, no en la revisión: sin esto quedaba el de antes
+            self.sync_device()
         self.description = state.get("description", "")
         self.last_problems = state.get("problems")
         self.ignored = state["ignored"] if isinstance(state.get("ignored"), list) else []
@@ -7173,9 +7920,9 @@ class App:
         engine_box = QWidget()
         engine_box.setLayout(_row(engine, model_label, model, models_btn, base_label, base, key_label, api_key))
         engine_box.hide()
-        inside.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, summary, engine_btn, 1, QLabel("Traducir:"),
-                              scope))
-        inside.addLayout(_row(engine_box, 1, glossary_btn))
+        inside.addLayout(_row(QLabel("De:"), src, QLabel("A:"), dst, summary, engine_btn, 1, QLabel("Alcance:"),
+                              scope, glossary_btn))
+        inside.addLayout(_row(engine_box, 1))
         hint = _label("", "muted")
         hint.setWordWrap(True)
         inside.addWidget(hint)
@@ -7193,9 +7940,9 @@ class App:
             chips[key] = chip
         chips["all"].setChecked(True)
         search = QLineEdit()
-        search.setPlaceholderText("Buscar en el original o en la traducción")
+        search.setPlaceholderText("Buscar en original y traducción")
         search.setClearButtonEnabled(True)
-        search.setMinimumWidth(224)
+        search.setMinimumWidth(220)
         search.textChanged.connect(lambda _: show_rows())
         lang_filter = QComboBox()
         lang_filter.setMinimumContentsLength(20)
@@ -7203,7 +7950,8 @@ class App:
         lang_filter.setToolTip("Solo los párrafos traducidos de un idioma a otro: para encontrar los que se tradujeron "
                                "a un idioma por error y volver a traducirlos")
         lang_filter.activated.connect(lambda _: show_rows())
-        column.addLayout(_row(*chips.values(), 1, search))  # el filtro de idiomas va abajo: con ocho filtros no cabe
+        inside.addLayout(_row(search, 1, _label("Idioma:"), lang_filter))
+        column.addLayout(_row(*chips.values(), 1))
         panes = QSplitter(Qt.Orientation.Vertical)
         column.addWidget(panes, 1)
         table = qtk.RowList(("orig", "trans", "state"), {"orig": "Original", "trans": "Traducción", "state": "Estado"},
@@ -7227,7 +7975,7 @@ class App:
             pane.setFont(font)
         original_box.setReadOnly(True)
         original_box.setPlaceholderText("Elige un párrafo de la lista")
-        translation_box.setPlaceholderText("Su traducción: se corrige aquí, a mano")
+        translation_box.setPlaceholderText("La traducción: corrígela aquí, a mano")
         # Faltas subrayadas como en «Editar texto…», con destino español
         look = editor.Look(translation_box.document())
         look.set_tags(theme.editor_tags(self.dark))
@@ -7240,9 +7988,15 @@ class App:
         translation_box.textChanged.connect(typing.start)
         doubt = _label("", "warn")
         doubt.setWordWrap(True)
-        prev_btn, next_btn = _button("◀ Anterior", lambda: step(-1)), _button("Siguiente ▶", lambda: step(1))
-        lower.addWidget(_label("ORIGINAL", "muted"), 0, 0)
-        lower.addWidget(_label("TRADUCCIÓN · SE CORRIGE AQUÍ", "muted"), 0, 1)
+        prev_btn = qtk.ArrowButton(-1, lambda: step(-1), "Párrafo anterior")
+        next_btn = qtk.ArrowButton(1, lambda: step(1), "Párrafo siguiente")
+        orig_lbl, trans_lbl = _label("Original", "muted"), _label("Traducción (se corrige aquí)", "muted")
+        for lbl in (orig_lbl, trans_lbl):
+            f = QFont(lbl.font())
+            f.setWeight(QFont.Weight.DemiBold)
+            lbl.setFont(f)
+        lower.addWidget(orig_lbl, 0, 0)
+        lower.addWidget(trans_lbl, 0, 1)
         lower.addWidget(original_box, 1, 0)
         # La corrección que propone la IA revisora, bajo la traducción: en su caja, una larga se lee entera
         fix_box = QPlainTextEdit()
@@ -7257,7 +8011,7 @@ class App:
         right.addWidget(fix_box)
         lower.addLayout(right, 1, 1)
         # Lo que propone la IA revisora para el párrafo elegido: se acepta o se da por bueno lo que hay
-        accept_btn = _button("Aceptar corrección", lambda: settle(True), "primary")
+        accept_btn = _button("Aceptar corrección", lambda: settle(True), "accent")
         discard_btn = _button("Descartar", lambda: settle(False))
         discard_btn.setToolTip("La traducción se queda como está y cuenta como revisada")
         accept_all_btn = _button("Aceptar todas", lambda: settle_all())
@@ -7265,10 +8019,11 @@ class App:
         accept_btn.hide()
         discard_btn.hide()
         accept_all_btn.hide()
-        lower.addLayout(_row(prev_btn, next_btn, 1, lang_filter), 2, 0)
+        lower.addLayout(_row(prev_btn, next_btn, 1), 2, 0)
         fixes = _row(doubt, accept_btn, accept_all_btn, discard_btn)
         fixes.setStretch(0, 1)
         lower.addLayout(fixes, 2, 1)
+        win.recolor = lambda dark: (look.set_tags(theme.editor_tags(dark)), table.viewport().update())
         # Un párrafo pendiente que se parece a uno ya traducido en otro tomo de la serie
         similar_label, similar_btn = _label("", "muted"), _button("Usar esta", lambda: use_similar())
         similar_label.setWordWrap(True)
@@ -7280,13 +8035,14 @@ class App:
         panes.addWidget(bottom)
         panes.setSizes([470, 200])
         panes.setStretchFactor(0, 3)  # al encoger la ventana (zoom de Windows), la lista conserva más alto
+        _lock(panes)  # las listas tienen su tamaño
         progress = QProgressBar()
         progress.setTextVisible(False)
         progress.hide()
         column.addWidget(progress)
         status = StatusLabel()
         column.addWidget(status)
-        run_btn = _button("Traducir", lambda: run(), "primary")
+        run_btn = _button("Traducir", lambda: run(), "primary")  # abajo a la derecha, junto a «Cerrar» (guía)
         again_btn = _button("Retraducir selección", lambda: run(again=True))
         apply_btn = _button("Aplicar al libro", lambda: apply())
         coherence_btn = _button("Coherencia…", lambda: coherence())
@@ -7295,7 +8051,7 @@ class App:
         review_btn.setToolTip("La IA compara cada traducción con su original y marca las que cambian el sentido, se "
                               "dejan algo o no suenan naturales, con una corrección. Revisa los párrafos elegidos "
                               "(dos o más) o, si no, todo lo traducido que aún no miró.")
-        column.addLayout(_row(run_btn, again_btn, review_btn, coherence_btn, 1, apply_btn,
+        column.addLayout(_row(again_btn, review_btn, coherence_btn, 1, apply_btn, run_btn,
                               _button("Cerrar", lambda: close())))
         # only: claves que se dejan a la vista (las de «Coherencia…»), hasta que se pulsa un filtro
         work = {"thread": None, "stop": None, "queue": None, "shown": None, "again": set(), "engine": "", "count": 0,
@@ -7425,10 +8181,10 @@ class App:
             apply_btn.setEnabled(bool(done) and work["thread"] is None)
             states = collections.Counter(item.text(2) for item in table.rows.values())
             for key, chip in chips.items():
-                label = chip.text().rsplit(" ", 1)[0] if chip.text()[-1:].isdigit() else chip.text()
+                label = re.sub(r" \(\d+\)$", "", chip.text())
                 many = (len(rows) if key == "all" else sum(states[s] for s in DONE_STATES) if key == "done"
                         else sum(1 for i in rows if rows[i][0] in warnings) if key == "warn" else states[key])
-                chip.setText(f"{label} {many}")
+                chip.setText(f"{label} ({many})")  # como los del informe: «Todos (12)»
             pairs = collections.Counter(langs(rows[i][0]) for i in rows if rows[i][0] in done)
             chosen = lang_filter.currentData()
             lang_filter.clear()
@@ -8352,7 +9108,7 @@ class App:
 
             suggest_btn = _button("Proponer con la IA", suggest)
             inner.addLayout(_row(_button("Añadir nombres de este tomo", add_names), suggest_btn, 1,
-                                 _button("Aceptar", accept, "primary")))
+                                 _button("Aceptar", accept, "primary"), _button("Cancelar", box.close)))
             box.show()
             win.glossary_box = {"box": box, "terms": terms, "people": people, "general": general, "tabs": tabs,
                                 "variant": variant, "honorifics": honorifics, "chapter": chapter, "suggest": suggest,
@@ -8407,13 +9163,27 @@ class App:
         if not (self.book and self.pdf) or self.raise_tool("versions_window"):
             return
         win, column = self.dialog("Versiones")
-        win.resize(940, 620)
+        win.resize(*theme.DIALOG["l"])
         name = QLineEdit()
         name.setPlaceholderText("Nombre de la versión, p. ej. «Antes de corregir»")
         save_btn = _button("Guardar versión", lambda: save(), "primary")
         column.addLayout(_row(QLabel("Nombre:"), name, save_btn))
+        body = QStackedWidget()
+        column.addWidget(body, 1)
         panes = QSplitter(Qt.Orientation.Vertical)
-        column.addWidget(panes, 1)
+        body.addWidget(panes)
+        empty = QFrame(objectName="card")
+        empty_col = QVBoxLayout(empty)
+        empty_col.addStretch(1)
+        empty_title = _label("Aún no hay versiones guardadas", "title")
+        empty_hint = _label("«Guardar versión» guarda una copia de todo lo revisado hasta ahora; cada EPUB que generas "
+                            "también se guarda automáticamente.", "muted")
+        empty_hint.setWordWrap(True)
+        empty_hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        empty_col.addWidget(empty_title, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty_col.addWidget(empty_hint)
+        empty_col.addStretch(1)
+        body.addWidget(empty)
         table = qtk.RowList(("name", "date", "changes"), {"name": "Versión", "date": "Fecha", "changes": "Cambios"},
                             {"date": 130, "changes": 300}, stretch="name")
         table.setSelectionMode(table.SelectionMode.ExtendedSelection)  # dos con Ctrl+clic: se comparan entre sí
@@ -8431,9 +9201,10 @@ class App:
         lower.addWidget(box, 1)
         panes.addWidget(bottom)
         panes.setSizes([220, 400])
+        _lock(panes)  # las listas tienen su tamaño
         restore_btn = _button("Restaurar", lambda: restore())
-        rename_btn = _button("Renombrar", lambda: rename())
-        delete_btn = _button("Borrar", lambda: delete())
+        rename_btn = _button("Renombrar…", lambda: rename())
+        delete_btn = _button("Borrar", lambda: delete(), "warn")
         column.addLayout(_row(restore_btn, rename_btn, delete_btn, 1, _button("Cerrar", win.close)))
         state = {"versions": []}
 
@@ -8447,13 +9218,14 @@ class App:
                 messagebox.showwarning("Versiones", f"El archivo de versiones estaba dañado. Se apartó como {backup.name} "
                                                     "y se empieza uno nuevo.", parent=win)
             state["versions"] = versions
+            body.setCurrentWidget(panes if versions else empty)
             table.delete(*table.get_children())
             for n in reversed(range(len(versions))):  # la más nueva arriba, como git log
                 v = versions[n]
                 table.insert("", "end", iid=str(n), values=(
                     v["name"] + (" (automática)" if v.get("auto") else ""), _date_text(v.get("date")),
                     _version_changes(versions[n - 1]["state"] if n else None, v["state"])))
-            win.setWindowTitle(f"Versiones · {convert.counted(len(versions), 'versión', 'versiones')}")
+            win.setWindowTitle("Versiones")
             if versions:
                 table.selection_set(str(len(versions) - 1 if select is None else min(select, len(versions) - 1)))
             pick()
@@ -8478,7 +9250,6 @@ class App:
             old = versions[picked[0]]
             if len(picked) == 1:
                 heading.setText(f"De «{old['name']}» a lo de ahora")
-                name.setText(old["name"])
                 segments = self.compare(old["state"])
             else:
                 new = versions[picked[-1]]
@@ -8506,11 +9277,22 @@ class App:
             except OSError as e:
                 messagebox.showerror("Versiones", f"No se pudieron guardar las versiones: {e.strerror or e}", parent=win)
 
-        def rename():
+        def rename(new_name=None):
             picked = chosen()
-            if name.text().strip():
-                change(lambda versions: versions[picked[0]].update(name=name.text().strip()))
+            if len(picked) != 1:
+                return
+            if new_name is None:
+                new_name = _ask_line(win, "Renombrar versión", "Nuevo nombre:", state["versions"][picked[0]]["name"])
+            if new_name and new_name.strip():
+                change(lambda versions: versions[picked[0]].update(name=new_name.strip()))
                 fill(picked[0])
+
+        def recolor(dark):
+            for tag, look in theme.diff_tags(dark).items():
+                box.tag_configure(tag, **look)
+            pick()
+
+        win.recolor = recolor
 
         def delete():
             picked = chosen()
@@ -8538,19 +9320,24 @@ class App:
         self.find_results.clear()
         self.matches = []
         if len(term) < 2:
+            self.find_hits.term = ""
             self.find_count.setText("Escribe al menos dos letras")
             self.find_results.hide()
             return
+        self.find_hits.term = term
+        total = 0  # párrafos con el término: se cuentan todos aunque la lista enseñe solo los 500 primeros
         for k, block in enumerate(self.book.blocks):
             if block.kind not in ("p", "heading"):
                 continue
             plain = html.unescape(convert.TAGS.sub("", block.html))
             pos = plain.lower().find(term.lower())
-            if pos >= 0 and len(self.matches) < 500:
+            if pos < 0:
+                continue
+            total += 1
+            if len(self.matches) < 500:
                 self.matches.append((k, block.page, term))
-                self.find_results.addItem(f"pág. {block.page} · …{plain[max(0, pos - 40):pos + 60]}…")
-        self.find_count.setText(convert.counted(len(self.matches), "resultado")
-                                + (" (se muestran los 500 primeros)" if len(self.matches) == 500 else ""))
+                self.find_results.addItem(f"pág. {block.page} · {_snippet(plain, pos, len(term))}")
+        self.find_count.setText(convert.counted(total, "párrafo") + (" · se ven los 500 primeros" if total > 500 else ""))
         self.find_results.setVisible(bool(self.matches))
 
     def pick_found(self, row):
@@ -8561,6 +9348,16 @@ class App:
         self.find_bar.hide()
         self.find_results.hide()
         self.tree.setFocus()
+
+
+def _snippet(plain, pos, size, before=40, after=60):
+    """El trozo de plain alrededor de lo encontrado, cortado entre palabras: «…r de los cazadores» no se leía."""
+    a, b = max(0, pos - before), min(len(plain), pos + size + after)
+    if a > 0 and " " in plain[a:pos]:
+        a = plain.index(" ", a) + 1
+    if b < len(plain) and " " in plain[pos + size:b]:
+        b = plain.rindex(" ", pos + size, b)
+    return ("…" if a > 0 else "") + plain[a:b] + ("…" if b < len(plain) else "")
 
 
 class Dialog(QDialog):
@@ -8733,6 +9530,31 @@ def undo_versions(doc, dumped, limit=HISTORY_STEPS):
     return out, at
 
 
+def _zoom_bar(target, low, high, step, value, on_change, width=140, min_width=None):
+    """Control común de zoom «− [deslizador] + N %» para la hoja y el panel derecho del editor."""
+    box = QWidget()
+    slider = QSlider(Qt.Orientation.Horizontal)
+    slider.setMinimumWidth(width if min_width is None else min_width)
+    slider.setMaximumWidth(width)
+    slider.setRange(low, high)
+    slider.setSingleStep(step)
+    slider.setPageStep(step)
+    slider.setValue(value)
+    slider.setToolTip(f"Zoom {target}")
+    out_btn = _button("−", lambda: slider.setValue(slider.value() - step))
+    in_btn = _button("+", lambda: slider.setValue(slider.value() + step))
+    out_btn.setToolTip(f"Reducir zoom {target}")
+    in_btn.setToolTip(f"Aumentar zoom {target}")
+    label = _label(f"{slider.value()} %", "muted")
+    # Del ancho de «300 %»: al pasar de 100 % a 90 % la barra no cambia de ancho ni mueve los botones
+    label.setMinimumWidth(label.fontMetrics().horizontalAdvance("300 %") + 4)
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    slider.valueChanged.connect(on_change)
+    box.setLayout(_row(out_btn, slider, in_btn, label, spacing=theme.SPACE["gap"]))
+    box.out_btn, box.slider, box.in_btn, box.label = out_btn, slider, in_btn, label
+    return box
+
+
 class TextEditor:
     """Editor del texto como Word, capítulo a capítulo: la cinta dice en qué capítulo se está y lleva a los
     demás (menú y ◀ ▶); la hoja (editor.Sheet) muestra cursiva, negrita, títulos, enlaces, ilustraciones y
@@ -8822,7 +9644,6 @@ class TextEditor:
         self.code.textChanged.connect(lambda: self.code.isVisible()
                                       and self.later("codeval", 180, self.validate_code))
         self.applying_code = False  # la hoja cambia por el código: el código no se vuelve a escribir
-        self.code.setFont(QFont("Segoe UI", 9))  # la de la ventana, como el visor del explorador de archivos
         self.shells = {}  # (inicio, fin) -> cabecera editada en «Código HTML» sin guardar aún
         self.code_shell, self.code_frame = None, ([], [])  # la cabecera que enseña el código y sus líneas
         self.code.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
@@ -8843,7 +9664,8 @@ class TextEditor:
         import webview
         if webview.available():
             self.web = webview.WebSheet()
-            self.web.dark = bool(app.settings.get("editor_dark", False))  # Vista → Modo oscuro, al cargar
+            # Vista → Vistas en oscuro, el ajuste de la ventana o el tema oscuro: la hoja web es una hoja
+            self.web.dark = bool(app.dark_var.get() or app.settings.get("editor_dark", False)) or app.dark
             self.web.hide()
             self.web_poll = QTimer(win)  # la cinta sigue al cursor de la hoja web (negrita, estilo, alineación)
             self.web_poll.timeout.connect(self.poll_web)
@@ -8900,10 +9722,9 @@ class TextEditor:
         # Del ancho del texto más largo: al pasar de una ilustración a una página, los botones no se movían de sitio
         self.page_label.setMinimumWidth(max(self.page_label.fontMetrics().horizontalAdvance(text) for text in
                                             ("Página 8888 de 8888", "Ilustración · pág. 8888")) + 8)
-        self.zoom_label = _label("100 %", "muted")
         side = self.side = QWidget()
         side_column = QVBoxLayout(side)
-        side_column.setContentsMargins(8, 8, 8, 0)
+        side_column.setContentsMargins(8, 8, 8, 8)  # con 0 abajo, « ‹ Página n de m › » y − + tocaban la barra de estado
         # «Original»: la página de la que sale el párrafo; «EPUB»: el capítulo como saldrá, con lo que se va escribiendo
         self.side_tabs = QTabBar()
         self.side_tabs.addTab("Original")
@@ -8945,16 +9766,19 @@ class TextEditor:
             self.web_box.hide()
             side_column.addWidget(self.web_box, 1)
             self.web.moved.connect(lambda: self.web_tab() and self.show_web_page(self.web))
-        self.epub_zoom, self.web_zoom = 100, 100  # − y + del panel, cada pestaña el suyo
+        self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
+        self.epub_zoom, self.web_zoom = 100, 100  # zoom del panel, cada pestaña el suyo
         # Fuera, de capítulo en capítulo (hojear página a página era lento para cruzar el libro); dentro, de página
         # ◀◀ y no los de saltar pista: Windows los dibuja como emoji azules
         prev_btn = qtk.ArrowButton(-1, lambda: self.step_section(-1), "Capítulo anterior", double=True)
         next_btn = qtk.ArrowButton(1, lambda: self.step_section(1), "Capítulo siguiente", double=True)
         self.prev_page = qtk.ArrowButton(-1, lambda: self.step_page(-1), "Página anterior")
         self.next_page = qtk.ArrowButton(1, lambda: self.step_page(1), "Página siguiente")
+        self.side_zoom_bar = _zoom_bar("del panel", 50, 300, 25, round(self.pdf_zoom * 100), self.set_side_zoom,
+                                       width=100, min_width=56)
+        self.side_zoom, self.zoom_label = self.side_zoom_bar.slider, self.side_zoom_bar.label
         side_column.addLayout(_row(prev_btn, self.prev_page, self.page_label, self.next_page, next_btn,
-                                   self.source_note, 1, _button("−", lambda: self.zoom(-25)), self.zoom_label,
-                                   _button("+", lambda: self.zoom(25))))
+                                   self.source_note, 1, self.side_zoom_bar))
         # Sobre la hoja, como «Original | EPUB» del panel: una sola vista a la vez, la hoja o su código HTML
         self.view_tabs = QTabBar()
         self.view_tabs.addTab("Hoja")
@@ -8999,31 +9823,23 @@ class TextEditor:
         self.note = StatusLabel(objectName="muted")  # resultado de la última herramienta («Tipografía corregida…»)
         for label in (self.status, self.note):
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.text_zoom = QSlider(Qt.Orientation.Horizontal)
-        self.text_zoom.setRange(50, 200)
-        self.text_zoom.setValue(self.option("editor_zoom"))
-        self.text_zoom.setFixedWidth(140)
-        self.text_zoom_label = _label("100 %", "muted")
-        # Del ancho de «200 %»: al pasar de 100 % a 90 % la barra cambiaba de ancho y los botones se movían
-        for label in (self.text_zoom_label, self.zoom_label):
-            label.setMinimumWidth(label.fontMetrics().horizontalAdvance("300 %") + 4)
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.text_zoom.valueChanged.connect(self.set_text_zoom)
-        status_row = self.status_row = _row(self.status, self.note,
-                          _button("−", lambda: self.text_zoom.setValue(self.text_zoom.value() - 10)),
-                          self.text_zoom, _button("+", lambda: self.text_zoom.setValue(self.text_zoom.value() + 10)),
+        self.text_zoom_bar = _zoom_bar("de la hoja", 50, 200, 10, self.option("editor_zoom"), self.set_text_zoom)
+        self.text_zoom, self.text_zoom_label = self.text_zoom_bar.slider, self.text_zoom_bar.label
+        status_bar = self.status_bar = QFrame(objectName="bottomBar")
+        status_row = self.status_row = _row(self.status, self.note, _label("Hoja:", "muted"),
+                          self.text_zoom_bar,
                           # En pantalla completa, Aceptar y Cancelar vuelven al editor: no lo cierran
-                          self.text_zoom_label,
                           _button("Aceptar", lambda: self.toggle_focus() if self.focused else self.save(), "primary"),
                           _button("Cancelar", lambda: self.toggle_focus() if self.focused else self.cancel()),
-                          margins=(12, 8, 12, 0))
+                          margins=(12, 6, 12, 6))
         # lo más largo que suele decir: con un EPUB, «del original» no cabía en 260 px
         self.status.setMinimumWidth(self.status.fontMetrics().horizontalAdvance(
             "Página 13 del original · 573 párrafos · 9.551 palabras") + 8)
         status_row.setStretchFactor(self.status, 1)
         status_row.setStretchFactor(self.note, 1)
-        column.addLayout(status_row)
-        self.shown, self.box, self.page, self.pdf_zoom = None, None, 0, 1.0
+        status_bar.setLayout(status_row)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.addWidget(status_bar)
         self.more, self.below = None, None  # trozo del párrafo en la página siguiente y dónde va esa página
         self.drawn = None  # source_key() del dibujo actual del panel
         self.page_cache, self.file_starts = {}, None  # source_page: página de cada bloque de un EPUB
@@ -9133,7 +9949,7 @@ class TextEditor:
         def big(button, icon):
             """Botón grande de Word: glifo arriba y nombre debajo."""
             self.glyphs.append((button, theme.ICONS[icon], GLYPH))
-            button.setIcon(_glyph_icon(theme.ICONS[icon], ink))
+            button.setIcon(_glyph_icon(theme.ICONS[icon], self.glyph_color(theme.ICONS[icon])))
             button.setIconSize(QSize(GLYPH, GLYPH))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
 
@@ -9149,7 +9965,7 @@ class TextEditor:
                 big(button, icon)
             if glyph:
                 self.glyphs.append((button, theme.ICONS[glyph], SMALL_GLYPH))
-                button.setIcon(_glyph_icon(theme.ICONS[glyph], ink, SMALL_GLYPH))
+                button.setIcon(_glyph_icon(theme.ICONS[glyph], self.glyph_color(theme.ICONS[glyph]), SMALL_GLYPH))
                 button.setIconSize(QSize(SMALL_GLYPH, SMALL_GLYPH))
                 button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if text
                                           else Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -9160,11 +9976,13 @@ class TextEditor:
             return button
 
         def menu_tool(text, tip, items, icon=None):
-            """Botón con menú («Símbolos ▾»): items [(texto, acción)] y None para una línea separadora."""
+            """Botón con menú («Símbolos»): items [(texto, acción)] y None para una línea separadora.
+            Lleva el chevron vectorial del tema en lugar del triángulo «▾» de texto."""
             button = QToolButton(objectName="tool")
-            button.setText(text)
+            button.setText(text.removesuffix(" ▾"))
             button.setToolTip(tip)
             button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            button.setProperty("drop", "big" if icon else "inline")
             if icon:
                 big(button, icon)
             menu = QMenu(button)
@@ -9199,7 +10017,19 @@ class TextEditor:
             box.setSpacing(2)
             box.addStretch(1)
             for widgets in rows:  # centradas en el grupo, como en Word: alineadas a la izquierda parecía desordenado
-                box.addLayout(_row(1, *widgets, 1, spacing=2))
+                line_box = QHBoxLayout()
+                line_box.setContentsMargins(0, 0, 0, 0)
+                line_box.setSpacing(2)
+                line_box.addStretch(1)
+                has_big = any(isinstance(w, QToolButton) and w.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+                              for w in widgets)
+                for w in widgets:
+                    if isinstance(w, QWidget):
+                        line_box.addWidget(w, 0, Qt.AlignmentFlag.AlignTop if has_big else Qt.AlignmentFlag(0))
+                    else:
+                        line_box.addLayout(w)
+                line_box.addStretch(1)
+                box.addLayout(line_box)
             box.addStretch(1)
             label = _label(caption, "muted")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -9219,7 +10049,19 @@ class TextEditor:
         self.redo_btn = tool("Rehacer", "Rehacer (Ctrl+Y)", lambda: self.do("redo"), glyph="redo")
         self.undo_btn.setEnabled(False)
         self.redo_btn.setEnabled(False)
-        self.undo_group = group("Deshacer", [self.undo_btn], [self.redo_btn])
+        for button in (self.undo_btn, self.redo_btn):
+            button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        undo_col = QVBoxLayout()
+        undo_col.setContentsMargins(0, 0, 0, 0)
+        undo_col.setSpacing(2)
+        undo_col.addStretch(1)
+        undo_col.addWidget(self.undo_btn)
+        undo_col.addWidget(self.redo_btn)
+        undo_col.addStretch(1)
+        self.find_btn = tool("Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
+                             lambda: self.show_find_bar(False), icon="search")
+        # Un único grupo «Edición» reúne Deshacer/Rehacer y Buscar sin repetir el nombre del botón Deshacer
+        self.edit_group = group("Edición", [undo_col, self.find_btn])
         self.bold_btn = tool("N", "Negrita (Ctrl+N)", lambda: self.do("toggle_bold"), True, bold_font)
         self.italic_btn = tool("K", "Cursiva (Ctrl+K)", lambda: self.do("toggle_italic"), True, italic_font)
         self.case_btn = tool("Aa Mayúsculas", "Mayúsculas y minúsculas (Mayús+F3)", lambda: self.do("change_case"), short="Aa",
@@ -9230,8 +10072,16 @@ class TextEditor:
         self.underline_btn = tool("S", "Subrayado (Ctrl+S)", lambda: self.do("toggle_underline"), True, underline_font)
         self.strike_btn = tool("abc", "Tachado", lambda: self.do("toggle_strike"), True, strike_font)
         self.sub_btn = tool("x₂", "Subíndice: H₂O (Ctrl+=)", lambda: self.do("toggle_sub"), True)
-        group("Fuente", [self.bold_btn, self.italic_btn, self.underline_btn, self.strike_btn, self.sup_btn, self.sub_btn],
-              [self.case_btn, self.caps_btn])
+        # Misma rejilla para las dos filas de «Fuente»: la fila 2 arranca bajo «N» y con el mismo hueco entre botones
+        font_grid = QGridLayout()
+        font_grid.setContentsMargins(0, 0, 0, 0)
+        font_grid.setHorizontalSpacing(2)
+        font_grid.setVerticalSpacing(2)
+        for col, button in enumerate((self.bold_btn, self.italic_btn, self.underline_btn,
+                                      self.strike_btn, self.sup_btn, self.sub_btn)):
+            font_grid.addWidget(button, 0, col)
+        font_grid.addLayout(_row(self.case_btn, self.caps_btn, 1, spacing=2), 1, 0, 1, 6)
+        group("Fuente", [font_grid])
         # Letra, tamaño y color: como en Word, sobre lo elegido; salen en el libro como <span style>. En su pestaña:
         # en Inicio no cabían en 1366 px con el nombre de cada botón
         self.family_box = QComboBox()
@@ -9250,7 +10100,7 @@ class TextEditor:
         self.style = QComboBox()
         self.style.addItems(STYLES)
         self.style.setToolTip("Estilo del párrafo: capítulo, subtítulo, título 3 y 4 o cita (Ctrl+T: capítulo o normal)")
-        self.style.setMinimumWidth(110)
+        self.style.setMinimumWidth(92)
         self.style.activated.connect(lambda n: (self.do("set_paragraph_style", STYLES[n]), sheet.setFocus(),
                                                 self.update_tools()))
         # Las tres alineaciones, también dentro de un recuadro; sin texto: son tres y la cinta no da para más
@@ -9285,14 +10135,12 @@ class TextEditor:
               [self.frame_btn, self.list_btn,
                tool("Unir", "Une el párrafo con el siguiente: arregla uno partido por un salto de página (Ctrl+J)",
                     lambda: self.do("join_next"), level=2, glyph="join")])
-        group("Edición", [tool("Buscar", "Buscar y reemplazar en todos los capítulos (Ctrl+F, Ctrl+H)",
-                               lambda: self.show_find_bar(False), icon="search")])
 
         page("Formato")
         group("Letra", *letter)
         group("Limpiar", [tool("Borrar\nformato", "Quita cursiva, negrita, subrayado, tamaño y color de lo elegido; los "
                                "enlaces y el furigana se quedan", lambda: self.do("clear_format"), icon="clear")])
-        group("Párrafo", [indent, tool("Salto de\nlínea", "Nueva línea dentro del mismo párrafo, como en una carta o "
+        group("Sangría y saltos", [indent, tool("Salto de\nlínea", "Nueva línea dentro del mismo párrafo, como en una carta o "
                                        "un poema (Mayús+Intro)", lambda: self.do("insert_line_break"), icon="newline")])
         group("Japonés", [tool("Furigana", "Lectura pequeña encima de un nombre o una palabra japonesa (<ruby>): "
                                            "elige el texto y escribe su lectura", self.add_ruby, icon="ruby")])
@@ -9306,34 +10154,33 @@ class TextEditor:
             group("Original", [classes])
 
         page("Insertar")
-        self.symbols_btn, _ = menu_tool("Símbolos ▾", "Raya, comillas, signos de apertura y tipografía española", [
-            ("— Raya   (Ctrl+Alt+-)", lambda: self.do("insert_symbol", "—")),
-            ("… Puntos suspensivos   (Ctrl+Alt+.)", lambda: self.do("insert_symbol", "…")),
-            ("« » Comillas   (Ctrl+Alt+Q)", lambda: self.do("wrap", "«", "»")),
+        self.symbols_btn, _ = menu_tool("Símbolos", "Raya, comillas, signos de apertura y tipografía española", [
+            ("— Raya\tCtrl+Alt+-", lambda: self.do("insert_symbol", "—")),
+            ("… Puntos suspensivos\tCtrl+Alt+.", lambda: self.do("insert_symbol", "…")),
+            ("« » Comillas\tCtrl+Alt+Q", lambda: self.do("wrap", "«", "»")),
             ("¿ ? Pregunta", lambda: self.do("wrap", "¿", "?")), ("¡ ! Exclamación", lambda: self.do("wrap", "¡", "!")), None,
             ("Corregir tipografía del capítulo", lambda: self.on_sheet(self.fix_typography))], icon="symbols")
-        group("Símbolos", [self.symbols_btn])
-        self.break_btn, _ = menu_tool("Separador ▾", "Separador de escena tras el párrafo, o los del libro hechos "
+        self.break_btn, _ = menu_tool("Separador", "Separador de escena tras el párrafo, o los del libro hechos "
                                       "icono (una silueta del color del texto)", [
             ("Separador de escena", lambda: self.do("insert_break")), None,
             ("Separadores del libro como icono", self.icon_separators),
             ("Icono propio desde una imagen…", self.own_icon_separator)], icon="scene")
-        group("Texto", [self.break_btn,
-                        tool("Nota…", "Nota al pie: se escribe en un cuadro; en el EPUB sale al tocar su llamada. Con "
-                             "el cursor en una nota, la edita", self.note_dialog,
-                             icon="note")])
+        # «Enlace» con el texto: en «Estructura» (con los capítulos) no se buscaba ahí
+        group("Texto y símbolos", [self.symbols_btn, self.break_btn,
+                                   tool("Nota…", "Nota al pie: se escribe en un cuadro; en el EPUB sale al tocar su llamada. Con "
+                                        "el cursor en una nota, la edita", self.note_dialog, icon="note"),
+                                   tool("Enlace", "Enlace en el texto elegido: a una página web o a otro capítulo del libro "
+                                        "(Ctrl+Alt+K)", self.show_link_bar, icon="link")])
         # Un botón con menú: dos botones grandes ensanchaban «Insertar» más que la pantalla de 1366 px
-        self.picture_btn, _ = menu_tool("Imagen ▾", "Imagen tras el párrafo del cursor; también se pega una copiada "
+        self.picture_btn, _ = menu_tool("Imagen", "Imagen tras el párrafo del cursor; también se pega una copiada "
                                         "(Ctrl+V)", [
             ("Desde un archivo…", lambda: self.on_sheet(self.insert_image)),
             ("Página del original que se ve a la derecha", lambda: self.on_sheet(self.page_as_image))], icon="image")
-        group("Ilustraciones", [self.picture_btn])
-        group("Vínculos", [tool("Enlace", "Enlace en el texto elegido: a una página web o a otro capítulo del libro "
-                                "(Ctrl+Alt+K)", self.show_link_bar, icon="link")])
-        group("Tabla", [tool("Tabla…", "Editor visual de tablas (pantallas de estado, fichas, listas de objetos): "
-                             "crea una tabla nueva o edita la del cursor", self.table_dialog, icon="table")])
+        group("Ilustraciones y tabla", [self.picture_btn,
+                                        tool("Tabla…", "Editor visual de tablas (pantallas de estado, fichas, listas de objetos): "
+                                             "crea una tabla nueva o edita la del cursor", self.table_dialog, icon="table")])
         # un botón con menú: dos grandes ensanchaban «Insertar» más que la pantalla
-        chapter_tools, _ = menu_tool("Capítulo ▾", "Una página nueva, dividir el capítulo en el cursor, o un "
+        chapter_tools, _ = menu_tool("Capítulo", "Una página nueva, dividir el capítulo en el cursor, o un "
                                      "capítulo nuevo con el título oculto (en el índice, no en la página)", [
             ("Página nueva…   (créditos, nota del traductor: un capítulo propio)", self.new_page),
             ("Dividir el capítulo aquí", self.show_split_bar),
@@ -9342,13 +10189,13 @@ class TextEditor:
         group("Estructura", [chapter_tools])
 
         page("Revisar")
-        self.changes_btn, self.changes_menu = menu_tool("Cambios ▾", "Párrafos que editaste en este capítulo", [
-            ("Cambio siguiente   (F7)", self.next_change),
+        self.changes_btn, self.changes_menu = menu_tool("Cambios", "Párrafos que editaste en este capítulo", [
+            ("Cambio siguiente\tF7", self.next_change),
             ("Ver todos los cambios…", self.show_all_changes),
             ("Volver al original", lambda: self.on_sheet(self.restore_current))],
             icon="changes")
-        self.issues_btn, self.issues_menu = menu_tool("Avisos ▾", "Avisos del informe de calidad en este capítulo", [
-            ("Aviso siguiente   (F8)", self.next_issue)], icon="warn")
+        self.issues_btn, self.issues_menu = menu_tool("Avisos", "Avisos del informe de calidad en este capítulo", [
+            ("Aviso siguiente\tF8", self.next_issue)], icon="warn")
         for menu in (self.changes_menu, self.issues_menu):  # primera línea: el recuento, que no se pulsa
             info = QAction("", menu)
             info.setEnabled(False)
@@ -9359,7 +10206,7 @@ class TextEditor:
         self.show_changes_action.setCheckable(True)
         self.show_changes_action.toggled.connect(self.set_show_changes)
         group("Revisión", [self.changes_btn, self.issues_btn])
-        group("Corrección", [tool("Cifras", "Cifras: palabras, párrafos, minutos de lectura y diálogo del capítulo y "
+        group("Estadísticas", [tool("Estadísticas…", "Palabras, párrafos, minutos de lectura y diálogo del capítulo y "
                                   "del libro", lambda: self.flush_web(self.show_stats) if self.web_on else self.show_stats(),
                                   icon="stats")])
         self.read_btn = tool("Leer", "Leer en voz alta desde el párrafo del cursor, para corregir de oído "
@@ -9371,19 +10218,26 @@ class TextEditor:
                             self.toggle_nav, True, icon="nav")
         self.files_btn = tool("Archivos", "Explorador de archivos del EPUB, como el de Calibre: texto, estilos, imágenes, "
                               "tipos de letra y lo demás", self.toggle_files, True, icon="files")
-        # Casilla como las de «Mostrar» de Word; va a la par que «Mostrar cambios» del menú Cambios
+        # Casillas apiladas en dos filas, como «Mostrar» en Word; van a la par con los menús y se recuerdan
         self.show_changes_box = QCheckBox("Mostrar cambios")
         self.show_changes_box.setToolTip("Marca en la hoja los párrafos que editaste")
         self.show_changes_box.toggled.connect(self.show_changes_action.setChecked)
         self.show_changes_action.toggled.connect(self.show_changes_box.setChecked)
-        # Original, EPUB y hoja web con fondo oscuro y letra clara (las ilustraciones, tal cual); se recuerda
-        self.side_dark = bool(self.app.settings.get("editor_dark", False))
-        self.dark_box = QCheckBox("Modo oscuro")
+        # Original, EPUB y hoja web con fondo oscuro y letra clara (las ilustraciones, tal cual): sigue «Vistas en oscuro»
+        self.side_dark = bool(self.app.dark_var.get() or self.app.settings.get("editor_dark", False))
+        self.dark_box = QCheckBox("Vistas en oscuro")
         self.dark_box.setToolTip("Original, EPUB y hoja web con fondo oscuro y letra clara, como el modo noche de los "
-                                 "lectores; las ilustraciones no cambian")
+                                 "lectores; las ilustraciones no cambian. Con el tema oscuro, la hoja web ya lo está")
         self.dark_box.setChecked(self.side_dark)
         self.dark_box.toggled.connect(self.set_side_dark)
-        group("Mostrar", [self.nav_btn, self.files_btn, self.show_changes_box, self.dark_box])
+        checks = QVBoxLayout()
+        checks.setContentsMargins(theme.SPACE["gap"], 0, 0, 0)
+        checks.setSpacing(theme.SPACE["gap"])
+        checks.addStretch(1)
+        checks.addWidget(self.show_changes_box)
+        checks.addWidget(self.dark_box)
+        checks.addStretch(1)
+        group("Mostrar", [self.nav_btn, self.files_btn, checks])
         for row in self.ribbon_rows:
             row.addStretch(1)
 
@@ -9402,15 +10256,35 @@ class TextEditor:
         return bar
 
     def recolor(self, dark):
-        """Tema cambiado con el editor abierto: los iconos de la cinta, dibujados con el color del texto, se
-        quedaban con el del tema anterior (apenas se veían)."""
+        """Tema cambiado con el editor abierto: iconos de la cinta, colores de la hoja, código y panel de archivos."""
         self.colors = theme.colors(dark)
+        editor.LINK_COLOR = self.colors["acc"]
+        self.sheet.tags = theme.editor_tags(dark)
+        seen = set()
+        for page in self.pages.values():
+            seen.add(id(page["look"]))
+            page["look"].set_tags(self.sheet.tags)
+        if id(self.sheet.look) not in seen:
+            self.sheet.look.set_tags(self.sheet.tags)
+        self.sheet.viewport().update()
         self.code.set_colors(theme.code_colors(dark))
         if self.show_changes_action.isChecked():  # lo puesto y lo quitado, con los colores del tema
             self.set_show_changes(True)
+        for n in range(self.files.topLevelItemCount()):
+            group_item = self.files.topLevelItem(n)
+            for m in range(group_item.childCount()):
+                group_item.child(m).setForeground(1, QColor(self.colors["muted"]))
+        if self.shown_issue is not None:
+            self.issue_title.setStyleSheet(f"color: {theme.level_colors(dark)[self.shown_issue.level]};")
         for button, glyph, size in self.glyphs:
             if shiboken6.isValid(button):
-                button.setIcon(_glyph_icon(glyph, self.colors["ink"], size))
+                button.setIcon(_glyph_icon(glyph, self.glyph_color(glyph), size))
+        if self.web is not None and self.web.dark != (self.side_dark or dark):
+            self.web.set_dark(self.side_dark or dark)  # la hoja web sigue al tema, como la hoja de la izquierda
+
+    def glyph_color(self, glyph):
+        """Color del glifo de un botón de la cinta: ▲ en el rojo de aviso, como en el resto de la app; lo demás, tinta."""
+        return self.colors["warn"] if glyph == theme.ICONS["warn"] else self.colors["ink"]
 
     def pin_ribbon(self, on):
         """Fija la cinta (on) o la deja en solo la fila de pestañas."""
@@ -9555,23 +10429,21 @@ class TextEditor:
         bar = self.find_frame = QFrame(objectName="ribbon")
         self.find_entry, self.replace_entry = QLineEdit(), QLineEdit()
         self.find_entry.setPlaceholderText("Buscar en el libro")
+        self.find_entry.setClearButtonEnabled(True)
         self.replace_entry.setPlaceholderText("Reemplazar por")
+        self.replace_entry.setClearButtonEnabled(True)
         self.find_entry.returnPressed.connect(lambda: self.find(1))
         self.find_info = _label("", "muted")
         self.whole_box, self.case_box = QCheckBox("Palabra completa"), QCheckBox("Mayúsculas")
         self.case_box.setToolTip("Distinguir mayúsculas y minúsculas")
-        self.regex_box = QCheckBox(".*")
-        font = self.regex_box.font()  # dos signos finos: en negrita y algo mayores se leen (contraste 1,4:1 si no)
-        font.setBold(True)
-        font.setPointSizeF(font.pointSizeF() + 2)
-        self.regex_box.setFont(font)
+        self.regex_box = QPushButton("Regex", objectName="chip", checkable=True)
         self.regex_box.setToolTip(r"Expresión regular: \d+ cifras, (\w+) una palabra… En el reemplazo, \1 es lo "
                                   "del primer paréntesis")
         for widget in (self.find_entry, self.regex_box):  # la expresión se revisa al escribirla
             (widget.textChanged if widget is self.find_entry else widget.toggled).connect(lambda _: self.regex_error())
         close = _button("✕", lambda: (bar.hide(), self.focus_page()))
         close.setToolTip("Cerrar (Esc)")
-        all_btn = _button("Todos", self.show_all_matches)
+        all_btn = _button("Ver todos", self.show_all_matches)
         all_btn.setToolTip("Lista de todos los resultados del libro")
         bar.setLayout(_row(self.find_entry, qtk.ArrowButton(-1, lambda: self.find(-1), "Anterior"),
                            qtk.ArrowButton(1, lambda: self.find(1), "Siguiente"),
@@ -9588,6 +10460,7 @@ class TextEditor:
         bar = self.link_frame = QFrame(objectName="ribbon")
         self.link_entry = QLineEdit()
         self.link_entry.setPlaceholderText("Dirección del enlace: https://…")
+        self.link_entry.setClearButtonEnabled(True)
         self.link_entry.returnPressed.connect(self.apply_link)
         self.link_info = _label("", "muted")
         # o a otro capítulo del libro: se guarda por su título y el EPUB lleva a su archivo
@@ -9596,10 +10469,12 @@ class TextEditor:
         self.link_chapter.setMinimumContentsLength(18)
         self.link_chapter.activated.connect(lambda n: self.apply_link(
             "lnc:cap:" + urllib.parse.quote(self.link_chapter.itemText(n))))
+        close = _button("✕", lambda: (bar.hide(), self.focus_page()))
+        close.setToolTip("Cerrar (Esc)")
         bar.setLayout(_row(_label("Enlace:"), self.link_entry, self.link_chapter,
-                           _button("Aplicar", self.apply_link, "primary"),
+                           _button("Aplicar", self.apply_link, "accent"),
                            _button("Quitar enlace", lambda: self.apply_link("")), self.link_info, 1,
-                           _button("✕", lambda: (bar.hide(), self.focus_page())), margins=(10, 6, 10, 6)))
+                           close, margins=(10, 6, 10, 6)))
         self.escape_closes(bar, self.link_entry)
         bar.hide()
         return bar
@@ -9776,9 +10651,10 @@ class TextEditor:
         quiere ir ahí."""
         bar = self.resume_frame = QFrame(objectName="ribbon")
         self.resume_label = _label("")
-        self.resume_go = _button("Ir allí", self.resume, "primary")
-        bar.setLayout(_row(self.resume_label, self.resume_go, 1,
-                           _button("✕", lambda: (bar.hide(), self.focus_page())), margins=(10, 6, 10, 6)))
+        self.resume_go = _button("Ir allí", self.resume, "accent")
+        close = _button("✕", lambda: (bar.hide(), self.focus_page()))
+        close.setToolTip("Cerrar")
+        bar.setLayout(_row(self.resume_label, self.resume_go, 1, close, margins=(10, 6, 10, 6)))
         self.resume_at = None
         bar.hide()
         return bar
@@ -9972,9 +10848,11 @@ class TextEditor:
         self.split_entry.setPlaceholderText("Título del capítulo nuevo")
         self.split_entry.returnPressed.connect(self.apply_split)
         self.split_info = _label("", "muted")
+        close = _button("✕", lambda: (bar.hide(), self.focus_page()))
+        close.setToolTip("Cerrar (Esc)")
         bar.setLayout(_row(_label("Capítulo nuevo desde el cursor:"), self.split_entry,
-                           _button("Dividir", self.apply_split, "primary"), self.split_info, 1,
-                           _button("✕", lambda: (bar.hide(), self.focus_page())), margins=(10, 6, 10, 6)))
+                           _button("Dividir", self.apply_split, "accent"), self.split_info, 1,
+                           close, margins=(10, 6, 10, 6)))
         self.escape_closes(bar, self.split_entry)
         bar.hide()
         return bar
@@ -10008,11 +10886,12 @@ class TextEditor:
         self.issue_title = _label("", "title")
         self.issue_text = QLabel()
         self.issue_text.setWordWrap(True)
-        self.issue_fix = _button("Arreglar", self.fix_issue, "primary")
+        self.issue_fix = _button("Arreglar", self.fix_issue, "accent")
+        close = _button("✕", lambda: (bar.hide(), self.focus_page()))
+        close.setToolTip("Cerrar")
         column = QVBoxLayout(bar)
         column.setContentsMargins(10, 6, 10, 6)
-        column.addLayout(_row(self.issue_title, 1, self.issue_fix, _button("Siguiente (F8)", self.next_issue),
-                              _button("✕", lambda: (bar.hide(), self.focus_page()))))
+        column.addLayout(_row(self.issue_title, 1, self.issue_fix, _button("Siguiente (F8)", self.next_issue), close))
         column.addWidget(self.issue_text)
         bar.hide()
         return bar
@@ -10141,8 +11020,11 @@ class TextEditor:
     def fill_nav(self):
         """Cuatro grupos con su cuenta; cada entrada, el párrafo recortado. Los vacíos salen sin desplegar."""
         self.nav.clear()
+        bold = QFont(self.nav.font())
+        bold.setWeight(QFont.Weight.DemiBold)
         for name, entries in self.nav_entries.items():
             group = QTreeWidgetItem(self.nav, [f"{name} ({len(entries)})"])
+            group.setFont(0, bold)
             for block, text in entries:
                 text = " ".join(text.replace("￼", "").split())
                 item = QTreeWidgetItem(group, [text[:60] + ("…" if len(text) > 60 else "")])
@@ -10285,7 +11167,7 @@ class TextEditor:
         def show_alt():
             alt = self.app.alts.get(convert.image_key(self.app.book.blocks[k].image), "")
             described.setText(f"Descripción: {alt}" if alt else "Sin descripción: el lector de pantalla dirá "
-                                                               "«Ilustración de «capítulo»»")
+                                                               + self.app.default_alt(k))
 
         def describe():
             if self.app.describe(k, win) is not None:
@@ -10370,6 +11252,7 @@ class TextEditor:
         size = _file_size(len(data))
         low = path.lower()
         picture = QPixmap()
+        has_actions = False
         if low.endswith(faithful.FILE_GROUPS[2][1]) and not low.endswith(".svg") and picture.loadFromData(data):
             label = QLabel()
             label.setPixmap(picture.scaled(800, 480, Qt.AspectRatioMode.KeepAspectRatio,  # con sus botones cabe en 768
@@ -10380,6 +11263,7 @@ class TextEditor:
             column.addWidget(_label(f"{picture.width()} × {picture.height()} px · {size}", "muted"))
             if k is not None:
                 self.image_actions(win, column, path, k, data)
+                has_actions = True
         elif low.endswith(faithful.FILE_GROUPS[3][1]):
             font_id = QFontDatabase.addApplicationFontFromData(data)
             families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
@@ -10487,7 +11371,7 @@ class TextEditor:
             cancel_btn = _button("Cancelar", win.close)
             column.addLayout(_row(status_btn, 1, fmt_btn, reset_btn))
             column.addWidget(_label(f"{path} · {size}", "muted"))
-            column.addLayout(_row(1, cancel_btn, save_btn))
+            column.addLayout(_row(1, save_btn, cancel_btn))
             check_css()
             win.resize(900, 650)
             win.parts = {"code": code, "status": status_btn, "format": fmt_btn, "reset": reset_btn,
@@ -10514,7 +11398,7 @@ class TextEditor:
                 win.parts = {"code": code, "status": status_btn}
             column.addWidget(_label(f"{path} · {size} · solo lectura", "muted"))
             win.resize(900, 650)
-        column.addLayout(_row(1, _button("Cerrar", win.close, "primary")))
+        column.addLayout(_row(1, _button("Cerrar", win.close, None if has_actions else "primary")))
         win.show()
         self.file_view = win
 
@@ -10523,8 +11407,8 @@ class TextEditor:
         changed, issues = getattr(self, "counts", (0, 0))
         self.changes_menu.actions()[0].setText(convert.counted(changed, "párrafo cambiado", "párrafos cambiados"))
         self.issues_menu.actions()[0].setText(convert.counted(issues, "aviso", "avisos") + " en este capítulo")
-        self.changes_btn.setText(f"Cambios ({changed}) ▾" if changed else "Cambios ▾")
-        self.issues_btn.setText(f"Avisos ({issues}) ▾" if issues else "Avisos ▾")
+        self.changes_btn.setText(f"Cambios ({changed})" if changed else "Cambios")
+        self.issues_btn.setText(f"Avisos ({issues})" if issues else "Avisos")
 
     def goto_block(self, block):
         cursor = self.sheet.textCursor()
@@ -10745,7 +11629,7 @@ class TextEditor:
         selected = self.sheet.textCursor().selectedText().replace(" ", " ")
         number = lambda n: f"{n:,}".replace(",", ".")
         win = Dialog(self.win)
-        win.setWindowTitle("Cifras")
+        win.setWindowTitle("Estadísticas")
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         column = QVBoxLayout(win)
         grid = QGridLayout()
@@ -11166,7 +12050,7 @@ class TextEditor:
                                lambda i=issue: self.fix_issue(i, go_next=False))
             menu.addAction("Quitar comentario" if issue.kind == "comment" else "Ignorar este aviso",
                            lambda i=issue: self.ignore_issue(i))
-            menu.addAction("Aviso siguiente   (F8)", self.next_issue)
+            menu.addAction("Aviso siguiente\tF8", self.next_issue)
             menu.addSeparator()
         k = editor.source_of(block)  # solo párrafos de texto del libro: un subtítulo («Parte 1») no lleva comentario
         if k is not None and editor._is_text(block) and self.app.book.blocks[k].kind == "p":
@@ -11715,7 +12599,7 @@ class TextEditor:
                                    lambda i=issue: self.on_sheet(lambda: self.fix_issue(i, go_next=False)))
                 menu.addAction("Quitar comentario" if issue.kind == "comment" else "Ignorar este aviso",
                                lambda i=issue: (self.ignore_issue(i), self.web_marks()))
-                menu.addAction("Aviso siguiente   (F8)", self.next_issue)
+                menu.addAction("Aviso siguiente\tF8", self.next_issue)
                 menu.addSeparator()
             self.web_menu_more(menu, info, word)
             page = self.web.page()
@@ -12143,7 +13027,7 @@ class TextEditor:
         """La cinta, solo con lo que vale: con el código a la vista, Vista y Deshacer (el deshacer del código: con la
         pestaña entera apagada se quedaba gris aunque hubiera qué deshacer); si se escribe en la hoja web, toda."""
         on = not self.code.isVisible() or self.web_on
-        keep = (self.undo_btn, self.redo_btn, self.undo_group)
+        keep = (self.undo_btn, self.redo_btn, self.edit_group)
         for n in range(self.ribbon_pages.count() - 1):
             page = self.ribbon_pages.widget(n)
             page.setEnabled(True)
@@ -12386,10 +13270,10 @@ class TextEditor:
         column.addWidget(tip)
         if found:
             drop_btn = _button("Quitar tabla", remove_table, "warn")
-            column.addLayout(_row(drop_btn, 1, cancel, ok))
+            column.addLayout(_row(drop_btn, 1, ok, cancel))
         else:
             drop_btn = None
-            column.addLayout(_row(1, cancel, ok))
+            column.addLayout(_row(1, ok, cancel))
         win.parts = {"table": grid, "columns": columns, "rows": rows, "head": head, "template": template,
                      "add_row": add_row, "del_row": del_row, "add_col": add_col, "del_col": del_col,
                      "move_up": lambda: move_row(-1), "move_down": lambda: move_row(1), "read": read_grid,
@@ -12430,7 +13314,7 @@ class TextEditor:
     def add_ruby(self):
         """Furigana: la lectura encima del texto elegido (o de lo que se escriba), en la hoja a la vista."""
         if self.web_on:
-            base = self.web.page().selectedText().strip()  # noqa: lo elegido en la hoja web
+            base = self.web.page().selectedText().strip()  # lo elegido en la hoja web
         else:
             cursor = self.sheet.textCursor()
             base = cursor.selectedText().strip() if cursor.hasSelection() else ""
@@ -12776,6 +13660,9 @@ class TextEditor:
         if self.side_web is not None:
             self.epub_box.setVisible(web)
         zoom = self.web_zoom if sheet_web else self.epub_zoom if web else round(self.pdf_zoom * 100)
+        self.side_zoom.blockSignals(True)
+        self.side_zoom.setValue(zoom)
+        self.side_zoom.blockSignals(False)
         self.zoom_label.setText(f"{zoom} %")
         if sheet_web:
             self.page_label.setText("")
@@ -13144,8 +14031,8 @@ class TextEditor:
         self.sheet.set_zoom(percent)
         share = self.page_share if self.focused else 1.0  # más ancha solo en pantalla completa
         self.sheet.setMaximumWidth(int(self.page_width(percent) * share))
-        font = QFont("Segoe UI")
-        font.setPointSizeF(max(6.0, 9 * percent / 100))  # el código, a la par
+        font = QFont(self.code.font())
+        font.setPointSizeF(max(6.0, 9 * percent / 100))  # el código, a la par, conservando monoespaciada
         self.code.setFont(font)
         self.text_zoom_label.setText(f"{percent} %")
 
@@ -13287,35 +14174,50 @@ class TextEditor:
             self.later("panel", 80, self.redraw)
         return False
 
-    def zoom(self, delta):
-        """− y + del panel: el zoom de la pestaña a la vista (original, EPUB u hoja web)."""
+    def set_side_zoom(self, percent):
+        """Aplica el porcentaje del deslizador del panel a la pestaña activa (original, EPUB u hoja web)."""
+        self.zoom_label.setText(f"{percent} %")
         if self.web_tab():
-            self.web_zoom = min(300, max(50, self.web_zoom + delta))
-            self.web.scale = self.web_zoom / 100
+            self.web_zoom = percent
+            self.web.scale = percent / 100
             self.web.fit()
-            self.zoom_label.setText(f"{self.web_zoom} %")
             return
         if self.web_shown():
-            self.epub_zoom = min(300, max(50, self.epub_zoom + delta))
-            self.side_web.scale = self.epub_zoom / 100
+            self.epub_zoom = percent
+            self.side_web.scale = percent / 100
             self.side_web.fit()
-            self.zoom_label.setText(f"{self.epub_zoom} %")
             return
-        self.pdf_zoom = min(3.0, max(0.5, self.pdf_zoom + delta / 100))
-        self.zoom_label.setText(f"{round(self.pdf_zoom * 100)} %")
+        self.pdf_zoom = percent / 100
         self.redraw()
 
-    def set_side_dark(self, on):
+    def zoom(self, delta):
+        """−, + y Ctrl+rueda del panel: el zoom de la pestaña a la vista (original, EPUB u hoja web)."""
+        now = self.web_zoom if self.web_tab() else self.epub_zoom if self.web_shown() else round(self.pdf_zoom * 100)
+        target = min(300, max(50, now + delta))
+        if self.side_zoom.value() != target:
+            self.side_zoom.setValue(target)
+        else:
+            self.set_side_zoom(target)
+
+    def sync_side_dark(self, on):
+        """Aplica el ajuste «Vistas en oscuro» de la ventana principal al panel sin sobreescribir editor_dark."""
+        self.dark_box.blockSignals(True)
+        self.dark_box.setChecked(on)
+        self.dark_box.blockSignals(False)
+        self.set_side_dark(on, save=False)
+
+    def set_side_dark(self, on, save=True):
         """Modo oscuro de las vistas del panel: se vuelven a dibujar el original y el EPUB, y la hoja web lo pone."""
         self.side_dark = on
-        self.app.settings["editor_dark"] = on
-        self.app.save_settings()
+        if save:
+            self.app.settings["editor_dark"] = on
+            self.app.save_settings()
         self.drawn = None
         self.redraw()
         if self.web_shown():
             self.draw_web()
         if self.web is not None:
-            self.web.set_dark(on)
+            self.web.set_dark(on or self.app.dark)  # con el tema oscuro, la hoja web nunca en blanco
             if self.web.loaded:
                 self.web_marks()  # lo quitado con ilustraciones es una imagen: con la letra del modo nuevo
 
@@ -13490,7 +14392,8 @@ class TextEditor:
         if self.box:  # el párrafo a la vista aunque la página no quepa
             self.scroll.ensureVisible(int(self.box.x0 * zoom), int((self.box.y0 + self.box.y1) / 2 * zoom), 40,
                                       self.scroll.viewport().height() // 3)
-        self.page_label.setText(f"Página {index + 1} de {self.app.pdf_doc.page_count}")
+        if not self.scroll.isHidden():  # con la pestaña EPUB u hoja web a la vista, la etiqueta es la suya
+            self.page_label.setText(f"Página {index + 1} de {self.app.pdf_doc.page_count}")
 
     def put(self, pix, marks=()):
         """Dibuja el pixmap en el panel, a su tamaño (con scroll si no cabe)."""

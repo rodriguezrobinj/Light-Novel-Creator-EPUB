@@ -269,13 +269,16 @@ class RowList(QTreeWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         header = self.header()
         header.setStretchLastSection(False)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header.setTextElideMode(Qt.TextElideMode.ElideRight)  # una sola línea: sin partir títulos al estrechar
         for n, col in enumerate(columns):
             header.setSectionResizeMode(n, QHeaderView.ResizeMode.Stretch if col == stretch
                                         else QHeaderView.ResizeMode.Interactive)
             self.setColumnWidth(n, widths.get(col, 80))
-            self.headerItem().setTextAlignment(n, Qt.AlignmentFlag.AlignLeft if col == stretch
-                                               else Qt.AlignmentFlag.AlignCenter)
+            self.headerItem().setTextAlignment(n, (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                                               if col == stretch else Qt.AlignmentFlag.AlignCenter)
         self.stretch = stretch
+        self._center_cols = tuple(n for n, col in enumerate(columns) if col != stretch)
         self.keys = {}  # (tecla, modificadores) -> función, antes que la búsqueda por teclado de Qt
         self.itemSelectionChanged.connect(self.selected)
         # Arrastre de una fila (la ventana pone drag_iid al pulsar en su título): sin guía no se veía hacia
@@ -294,15 +297,20 @@ class RowList(QTreeWidget):
         item = self.itemFromIndex(index) if index.isValid() else None
         if item is None:
             return None
-        text, col = item.text(index.column()), index.column()
-        room = self.visualRect(index).width() - 8  # márgenes de la celda
-        return text if QFontMetrics(item.font(col)).horizontalAdvance(text) > room else None
+        col = index.column()
+        text = item.text(col)
+        if not text:
+            return None
+        font = item.data(col, Qt.ItemDataRole.FontRole) or self.font()
+        pad = _Branches.PAD if isinstance(self.itemDelegateForColumn(col), _Branches) else 0
+        room = self.visualRect(index).width() - pad - 8  # márgenes de la celda (y flecha si la hay)
+        return text if QFontMetrics(font).horizontalAdvance(text) > room else None
 
     def viewportEvent(self, event):
         if event.type() == QEvent.Type.ToolTip:  # con la ventana estrecha, el título cortado se lee entero
             text = self.full_text_at(event.pos())
             if text:
-                QToolTip.showText(event.globalPos(), text, self.viewport())
+                QToolTip.showText(event.globalPos(), text, self.viewport(), self.visualRect(self.indexAt(event.pos())))
                 return True
         return super().viewportEvent(event)
 
@@ -411,13 +419,19 @@ class RowList(QTreeWidget):
         painter.drawText(box, Qt.AlignmentFlag.AlignCenter, title)
         painter.end()
 
-    def insert(self, parent, index, iid, values=(), tags=()):
-        """Fila nueva; con parent, hija de esa fila (como Treeview: el informe agrupa sus avisos por tipo)."""
+    def _make_item(self, iid, values, tags):
+        """Crea un ítem con sus alineaciones y tags antes de meterlo al árbol (evita señales dataChanged al insertar)."""
         item = QTreeWidgetItem([str(v) for v in values])
         item.setData(0, IID, iid)
-        for n, col in enumerate(self.columns):
-            if col != self.stretch:
-                item.setTextAlignment(n, Qt.AlignmentFlag.AlignCenter)
+        for n in self._center_cols:
+            item.setTextAlignment(n, Qt.AlignmentFlag.AlignCenter)
+        if tags:
+            self._look(item, tags, fresh=True)
+        return item
+
+    def insert(self, parent, index, iid, values=(), tags=()):
+        """Fila nueva; con parent, hija de esa fila (como Treeview: el informe agrupa sus avisos por tipo)."""
+        item = self._make_item(iid, values, tags)
         if parent:
             self.setRootIsDecorated(True)  # la flecha para plegar el grupo
             if index == "end":
@@ -429,8 +443,23 @@ class RowList(QTreeWidget):
         else:
             self.insertTopLevelItem(index, item)
         self.rows[iid] = item
-        self._look(item, tags)
         return iid
+
+    def insert_batch(self, parent, rows):
+        """Inserta de golpe una tanda de filas [(iid, values, tags)] bajo parent: evita notificar a Qt fila a fila."""
+        if not rows:
+            return
+        if parent:
+            self.setRootIsDecorated(True)
+        items = []
+        for iid, values, tags in rows:
+            item = self._make_item(iid, values, tags)
+            self.rows[iid] = item
+            items.append(item)
+        if parent:
+            self.rows[parent].addChildren(items)
+        else:
+            self.addTopLevelItems(items)
 
     def delete(self, *iids):
         # Qt avisa del cambio de selección a mitad del borrado, con la fila a medio quitar: se avisa al final
@@ -494,13 +523,14 @@ class RowList(QTreeWidget):
         return {"tags": self.rows[iid].data(0, TAGS) or ()}
 
     def tag_configure(self, tag, font=None, foreground=None):
-        self.looks[tag] = (font, foreground)
+        self.looks[tag] = (font, QColor(foreground) if foreground else None)
         for item in self.rows.values():
             if tag in (item.data(0, TAGS) or ()):
                 self._look(item, item.data(0, TAGS))
 
-    def _look(self, item, tags):
-        tags, old = tuple(tags), item.data(0, TAGS) or ()
+    def _look(self, item, tags, fresh=False):
+        tags = tuple(tags)
+        old = () if fresh else (item.data(0, TAGS) or ())
         item.setData(0, TAGS, tags)
         if not any(t in self.looks for t in tags + tuple(old)):
             return  # sin aspecto antes ni ahora: poner letra y color a cada celda era la mitad de llenar «Traducir…»
@@ -508,8 +538,12 @@ class RowList(QTreeWidget):
         looks = [self.looks[t] for t in tags if t in self.looks]
         font, color = next((f for f, _ in looks if f), None), next((c for _, c in looks if c), None)
         for n in range(len(self.columns)):
-            item.setFont(n, font or self.font())
-            item.setData(n, Qt.ItemDataRole.ForegroundRole, QColor(color) if color else None)
+            if font is not None:
+                item.setFont(n, font)
+            elif not fresh:
+                item.setFont(n, self.font())
+            if color is not None or not fresh:
+                item.setData(n, Qt.ItemDataRole.ForegroundRole, color)
 
     def selection(self):
         return tuple(item.data(0, IID) for item in self.selectedItems() if item.data(0, IID) not in self.pinned)
@@ -797,13 +831,13 @@ class Strip(QScrollArea):
         self.row.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
         self.row.addStretch(1)
         self.setWidget(inner)
-        self.labels, self.colors, self.current, self.shown, self.blanks = {}, {}, None, None, []
+        self.labels, self.colors, self.tips, self.current, self.shown, self.blanks = {}, {}, {}, None, None, []
 
     def clear(self):
         for label in list(self.labels.values()) + self.blanks:
             label.hide()  # deleteLater espera al bucle de eventos: mientras, se veían las del libro anterior
             label.deleteLater()
-        self.labels, self.colors, self.current, self.shown, self.blanks = {}, {}, None, None, []
+        self.labels, self.colors, self.tips, self.current, self.shown, self.blanks = {}, {}, {}, None, None, []
 
     def placeholders(self, count, width, color):
         """Rectángulos tenues mientras no hay miniaturas: la tira no queda como un hueco."""
@@ -816,7 +850,7 @@ class Strip(QScrollArea):
             self.row.insertWidget(self.row.count() - 1, label)
             self.blanks.append(label)
 
-    def add(self, n, image, color):
+    def add(self, n, image, color, tip=""):
         for label in self.blanks:
             label.hide()  # ocultar ya: deleteLater los dejaba un fotograma junto a las miniaturas nuevas
             label.deleteLater()
@@ -828,12 +862,16 @@ class Strip(QScrollArea):
         label.mousePressEvent = lambda _, n=n: self.clicked.emit(n)
         label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.row.insertWidget(self.row.count() - 1, label)
-        self.labels[n], self.colors[n] = label, color
+        self.labels[n], self.colors[n], self.tips[n] = label, color, tip
         self._border(n)
 
     def _border(self, n):
-        color = "#f08c00" if n == self.current else self.colors[n]
+        current = n == self.current
+        color = "#f08c00" if current else self.colors[n]
         self.labels[n].setStyleSheet(f"border: 3px solid {color or 'transparent'}; border-radius: 3px;")
+        # El color no va solo: la ayuda siempre indica el número de página y si es la visible ahora
+        base = self.tips.get(n) or f"Página {n + 1}"
+        self.labels[n].setToolTip(f"{base} · Página que se ve ahora" if current else base)
 
     def mark(self, n):
         """Destaca la miniatura de la página que muestra la vista previa."""
@@ -1153,8 +1191,10 @@ class Caption(QWidget):
                                        margins.right(), margins.bottom())
                 self.setVisible(not full)
             maximized = obj.isMaximized()
+            action = "Restaurar" if maximized else "Maximizar"
             self.buttons["max"].setText("" if maximized else "")
-            self.buttons["max"].setToolTip("Restaurar" if maximized else "Maximizar")
+            self.buttons["max"].setToolTip(action)
+            self.buttons["max"].setAccessibleName(action)
         elif kind == QEvent.Type.ActivationChange:  # inactiva, el título en gris, como Windows
             self.title.setEnabled(obj.isActiveWindow())
         return False

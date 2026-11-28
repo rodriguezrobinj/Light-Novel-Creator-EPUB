@@ -4,11 +4,17 @@ qué filtrar lo decide la ventana (App.quality)."""
 import difflib
 import html
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
+import convert
 import theme
+
+# Nombres de gravedad en español: el color de las barras y la franja no va solo
+LEVEL_LABELS = {"Grave": "Grave", "Revisar": "Por revisar", "Menor": "Menor"}
+LEVEL_COUNTS = {"Grave": ("grave", "graves"), "Revisar": ("por revisar", "por revisar"),
+                "Menor": ("menor", "menores")}
 
 
 def score_color(score, dark):
@@ -31,6 +37,10 @@ class ScoreRing(QWidget):
                         "según lo largo del libro")
         self.update()
 
+    def set_dark(self, dark):
+        self.dark = bool(dark)
+        self.update()
+
     def paintEvent(self, event):
         colors = theme.colors(self.dark)
         painter = QPainter(self)
@@ -41,14 +51,15 @@ class ScoreRing(QWidget):
         painter.setPen(QPen(QColor(score_color(self.score, self.dark)), 7, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap))
         painter.drawArc(box, 90 * 16, -round(self.score / 100 * 360 * 16))  # desde arriba, en el sentido del reloj
+        base = self.font().pointSizeF() or theme.FONT["body"]
         font = QFont(self.font())
-        font.setPointSizeF(theme.FONT["big"] + 3)
+        font.setPointSizeF(base + 7)
         font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(font)
         painter.setPen(QColor(colors["ink"]))
         painter.drawText(box.adjusted(0, -6, 0, -6), Qt.AlignmentFlag.AlignCenter, str(self.score))
         small = QFont(self.font())
-        small.setPointSizeF(theme.FONT["body"] - 1)
+        small.setPointSizeF(max(7.5, base - 1))
         painter.setFont(small)
         painter.setPen(QColor(colors["muted"]))
         painter.drawText(box.adjusted(0, 26, 0, 0), Qt.AlignmentFlag.AlignCenter, "de 100")
@@ -67,6 +78,10 @@ class KindBars(QWidget):
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
+    def set_dark(self, dark):
+        self.dark = bool(dark)
+        self.update()
+
     def set_rows(self, rows, chosen=""):
         """rows: [(kind, título, cuenta, nivel)], de más a menos."""
         self.rows, self.chosen = rows[:self.top], chosen
@@ -77,18 +92,37 @@ class KindBars(QWidget):
         n = int(y // self.ROW)
         return self.rows[n] if 0 <= n < len(self.rows) else None
 
+    def row_tip(self, n):
+        """Ayuda emergente de la fila n con el nivel en texto y la cuenta (el color no va solo)."""
+        if not 0 <= n < len(self.rows):
+            return ""
+        kind, title, count, level = self.rows[n]
+        level_text = LEVEL_LABELS.get(level, level)
+        action = "clic para verlos todos otra vez" if kind == self.chosen else "clic para ver solo estos"
+        parts = [title] + ([level_text] if level_text else []) + [convert.counted(count, "aviso"), action]
+        return " · ".join(parts)
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            tip = self.row_tip(int(event.pos().y() // self.ROW))
+            if tip:
+                QToolTip.showText(event.globalPos(), tip, self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(event)
+
     def mousePressEvent(self, event):
         row = self.row_at(event.position().y())
         if row:
             self.picked.emit("" if row[0] == self.chosen else row[0])
 
     def mouseMoveEvent(self, event):
-        row = self.row_at(event.position().y())
-        self.setCursor(Qt.CursorShape.PointingHandCursor if row else Qt.CursorShape.ArrowCursor)
-        if row:
-            QToolTip.showText(event.globalPosition().toPoint(),
-                              f"{row[1]}: {row[2]} · clic para ver solo estos" if row[0] != self.chosen
-                              else "Clic para verlos todos otra vez", self)
+        n = int(event.position().y() // self.ROW)
+        tip = self.row_tip(n)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if tip else Qt.CursorShape.ArrowCursor)
+        if tip:
+            QToolTip.showText(event.globalPosition().toPoint(), tip, self)
 
     def paintEvent(self, event):
         if not self.rows:
@@ -99,7 +133,11 @@ class KindBars(QWidget):
         most = max(count for _, _, count, _ in self.rows)
         metrics = painter.fontMetrics()
         label_w = min(self.width() // 2, 190)
-        count_w = metrics.horizontalAdvance("8888") + 6
+        suffixes = [f"{count} · {LEVEL_LABELS.get(level, level)}" if level else str(count)
+                    for _, _, count, level in self.rows]
+        wide_count = max(metrics.horizontalAdvance(s) for s in suffixes) + 8
+        use_level = self.width() >= label_w + wide_count + 40
+        count_w = wide_count if use_level else metrics.horizontalAdvance("8888") + 6
         for n, (kind, title, count, level) in enumerate(self.rows):
             y = n * self.ROW
             bold = QFont(self.font())
@@ -116,7 +154,8 @@ class KindBars(QWidget):
             painter.setBrush(QColor(levels.get(level, colors["acc"])))
             painter.drawRoundedRect(QRectF(track.x(), track.y(), max(6, room * count / most), track.height()), 4, 4)
             painter.setPen(QColor(colors["muted"]))
-            painter.drawText(QRectF(label_w + room + 6, y, count_w, self.ROW), Qt.AlignmentFlag.AlignVCenter, str(count))
+            painter.drawText(QRectF(label_w + room + 6, y, count_w, self.ROW), Qt.AlignmentFlag.AlignVCenter,
+                             suffixes[n] if use_level else str(count))
         painter.end()
 
 
@@ -131,8 +170,12 @@ class ChapterStrip(QWidget):
         self.setFixedHeight(22)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
+    def set_dark(self, dark):
+        self.dark = bool(dark)
+        self.update()
+
     def set_cells(self, cells, chosen=-1):
-        """cells: [(título, avisos, palabras, nivel más grave o "")]."""
+        """cells: [(título, avisos, palabras, nivel más grave o ""[, {nivel: cuenta}])]."""
         self.cells, self.chosen = cells, chosen
         self.update()
 
@@ -143,6 +186,30 @@ class ChapterStrip(QWidget):
         n = int(x // self.cell_width()) if self.cells else -1
         return n if 0 <= n < len(self.cells) else -1
 
+    def cell_tip(self, n):
+        """Ayuda emergente de la celda n: nombre del capítulo y avisos por nivel (el color no va solo)."""
+        if not 0 <= n < len(self.cells):
+            return ""
+        cell = self.cells[n]
+        title, count, words, level = cell[:4]
+        by_level = cell[4] if len(cell) > 4 else ({level: count} if count and level else {})
+        words_text = f"{words:,}".replace(",", ".") + (" palabra" if words == 1 else " palabras")
+        detail = " · ".join(f"{by_level[lv]} {LEVEL_COUNTS[lv][by_level[lv] != 1]}"
+                            for lv in convert.LEVELS if by_level.get(lv))
+        summary = f"{convert.counted(count, 'aviso')} ({detail})" if detail else convert.counted(count, "aviso")
+        action = "Clic para verlos todos otra vez" if n == self.chosen else "Clic para ver solo estos"
+        return f"{title}\n{summary} · {words_text}\n{action}"
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            tip = self.cell_tip(self.cell_at(event.pos().x()))
+            if tip:
+                QToolTip.showText(event.globalPos(), tip, self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(event)
+
     def mousePressEvent(self, event):
         n = self.cell_at(event.position().x())
         if n >= 0:
@@ -150,13 +217,10 @@ class ChapterStrip(QWidget):
 
     def mouseMoveEvent(self, event):
         n = self.cell_at(event.position().x())
-        self.setCursor(Qt.CursorShape.PointingHandCursor if n >= 0 else Qt.CursorShape.ArrowCursor)
-        if n >= 0:
-            title, count, words, _ = self.cells[n]
-            QToolTip.showText(event.globalPosition().toPoint(),
-                              f"{title}\n{count} aviso{'' if count == 1 else 's'} · {words:,} palabras".replace(",", ".")
-                              + ("\nClic para verlos todos otra vez" if n == self.chosen else "\nClic para ver solo estos"),
-                              self)
+        tip = self.cell_tip(n)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if tip else Qt.CursorShape.ArrowCursor)
+        if tip:
+            QToolTip.showText(event.globalPosition().toPoint(), tip, self)
 
     def paintEvent(self, event):
         if not self.cells:
@@ -164,10 +228,11 @@ class ChapterStrip(QWidget):
         colors, levels = theme.colors(self.dark), theme.level_colors(self.dark)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        densities = [count / max(words, 200) for _, count, words, _ in self.cells]
+        densities = [cell[1] / max(cell[2], 200) for cell in self.cells]
         top = max(densities) or 1
         width = self.cell_width()
-        for n, ((title, count, words, level), density) in enumerate(zip(self.cells, densities)):
+        for n, (cell, density) in enumerate(zip(self.cells, densities)):
+            title, count, words, level = cell[:4]
             box = QRectF(n * width + 1, 2, max(2.0, width - 2), self.height() - 4)
             color = QColor(levels.get(level) or colors["line"])
             color.setAlphaF(0.15 + 0.85 * density / top if count else 1.0)
