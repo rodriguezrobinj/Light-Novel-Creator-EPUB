@@ -1,0 +1,32 @@
+# Configuración de análisis estático (Ruff) para Light Novel Creator EPUB.
+# Enfocado en errores reales en tiempo de ejecución (nombres indefinidos,
+# definiciones duplicadas, argumentos mutables por defecto, excepciones rotas)
+# sin bloquear por estilo cosmético ni añadir dependencias a la app.
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+exclude = [
+    ".venv",
+    ".claude",
+    ".superpowers",
+    "build",
+    "dist",
+    "Novelas PDF",
+    "Novelas EPUB",
+]
+
+[tool.ruff.lint]
+# E9: errores de sintaxis/IO; F: Pyflakes (bugs reales); B: flake8-bugbear.
+select = ["E9", "F", "B"]
+# Se omiten de momento avisos cosméticos o patrones heredados para mantener
+# señal alta y cero falsos positivos en CI; pueden activarse gradualmente.
+ignore = [
+    "F401",  # imports sin usar (muchos tests y wrappers opcionales)
+    "F541",  # f-strings sin llaves
+    "F841",  # variables locales sin usar
+    "B007",  # variable de bucle sin usar
+    "B011",  # assert False
+    "B023",  # cierre sobre variable de bucle (patrón heredado en callbacks Qt)
+    "B905",  # zip() sin strict=
+]
